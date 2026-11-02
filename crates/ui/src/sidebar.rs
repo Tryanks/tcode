@@ -71,6 +71,9 @@ fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static,
     })
 }
 
+/// The gap between the parts of a desktop row (`selectable_row`'s).
+const ROW_GAP: gpui::Pixels = px(6.);
+
 /// Each flat slot: the desktop two-line row and the 2pt gap reserved below it.
 const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(false) + 2.;
 
@@ -268,28 +271,6 @@ fn project_view_timestamp(meta: &SessionMeta) -> u64 {
     } else {
         meta.updated_at
     }
-}
-
-fn animate_flat_thread_position(
-    row: gpui::Div,
-    session_id: &str,
-    target_top: f32,
-    window: &mut Window,
-    cx: &mut App,
-) -> gpui::Div {
-    let top = gpui_base::motion::spring(
-        SharedString::from(format!("flat-thread-position-{session_id}")),
-        px(target_top),
-        crate::motion::FOLLOW,
-        window,
-        cx,
-    );
-    // `list` positions each item root explicitly during prepaint, which
-    // overrides relative offsets applied to that root. Keep an unmoved outer
-    // item for the list to position and move the row inside it instead.
-    div()
-        .w_full()
-        .child(row.relative().top(top - px(target_top)))
 }
 
 // Thread-row context-menu actions (each carries the target session id, so a
@@ -511,7 +492,7 @@ impl CompactListRow {
 }
 
 enum FlatListRow {
-    Thread(Box<SessionMeta>, f32),
+    Thread(Box<SessionMeta>),
     /// The start of Pinned or Active, drawn only while dragging; whether the
     /// section is empty.
     Boundary(ThreadSection, bool),
@@ -523,7 +504,7 @@ enum FlatListRow {
 impl FlatListRow {
     fn key(&self) -> (&'static str, &str) {
         match self {
-            Self::Thread(meta, _) => ("thread", &meta.id),
+            Self::Thread(meta) => ("thread", &meta.id),
             Self::Boundary(ThreadSection::Pinned, _) => ("pinned", ""),
             Self::Boundary(_, _) => ("active", ""),
             Self::Settled => ("settled", ""),
@@ -598,6 +579,7 @@ pub struct SessionsSidebar {
     arrange_settled_fold: f32,
     arrange_list_state: ListState,
     arrange_row_keys: Vec<String>,
+    arrange_flip: crate::motion::ListFlip,
     last_selected: Option<String>,
     /// Optional project id filter for the session-local flat list.
     project_filter: Option<String>,
@@ -606,17 +588,21 @@ pub struct SessionsSidebar {
     renaming: Option<RenameState>,
     /// The row or project header under the pointer, by its hover group; its
     /// hover controls fade in from this one value rather than a state per row.
-    hovered_row: Option<SharedString>,
+    hover: crate::motion::ListHover,
     /// How far open each disclosure of the list on screen is this frame, by
     /// [`fold_key`]: a closing one keeps its rows until it has shut.
     folds: HashMap<String, f32>,
     flat_list_state: ListState,
     /// The row keys `flat_list_state` was last spliced for.
     flat_row_keys: Vec<(&'static str, String)>,
+    flat_flip: crate::motion::ListFlip,
+    flat_scroll: crate::motion::ListScroll,
     grouped_list_state: ListState,
     /// The row keys `grouped_list_state` was last spliced for.
     grouped_row_keys: Vec<(&'static str, String)>,
+    grouped_flip: crate::motion::ListFlip,
     compact_list_state: ListState,
+    compact_scroll: crate::motion::ListScroll,
     compact_model: Option<Rc<CompactListModel>>,
     compact_model_dirty: bool,
     /// Returning from a thread scrolls its row into the upper part of the
@@ -836,17 +822,7 @@ impl SessionsSidebar {
 
     /// How far `group`'s hover controls have faded in.
     fn hover_progress(&self, group: &str, window: &mut Window, cx: &mut App) -> f32 {
-        transition(
-            (SharedString::from(group.to_owned()), "hover"),
-            if self.hovered_row.as_deref() == Some(group) {
-                1.
-            } else {
-                0.
-            },
-            settle(),
-            window,
-            cx,
-        )
+        self.hover.reveal(group, window, cx)
     }
 
     /// Whether `key`'s rows are in the list: open, or still shutting.
@@ -1008,21 +984,11 @@ impl SessionsSidebar {
 
     /// Track the pointer over `group`'s row for [`Self::hover_progress`].
     fn track_hover(
+        &self,
         row: gpui::Stateful<gpui::Div>,
         group: &str,
-        cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let group = SharedString::from(group.to_owned());
-        row.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-            let was = this.hovered_row.as_ref() == Some(&group);
-            if *hovered && !was {
-                this.hovered_row = Some(group.clone());
-                cx.notify();
-            } else if !*hovered && was {
-                this.hovered_row = None;
-                cx.notify();
-            }
-        }))
+        row.on_hover(self.hover.on_hover(group.to_owned()))
     }
     pub fn new(
         store: Entity<WorkspaceStore>,
@@ -1071,17 +1037,22 @@ impl SessionsSidebar {
             arrange_settled_fold: 0.,
             arrange_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             arrange_row_keys: Vec::new(),
+            arrange_flip: Default::default(),
             last_selected: None,
             project_filter: None,
             settled_scope: None,
             renaming: None,
-            hovered_row: None,
+            hover: crate::motion::ListHover::new(),
             folds: HashMap::new(),
             flat_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             flat_row_keys: Vec::new(),
+            flat_flip: Default::default(),
+            flat_scroll: Default::default(),
             grouped_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             grouped_row_keys: Vec::new(),
+            grouped_flip: Default::default(),
             compact_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            compact_scroll: Default::default(),
             compact_model: None,
             compact_model_dirty: true,
             compact_reveal_active: false,
@@ -1597,10 +1568,16 @@ impl SessionsSidebar {
     /// `row` is where the list shows the thread pinned from its menu, and
     /// whether it shows there in Pinned yet: the host's change arrives after
     /// the menu closes. A list that does not show it forgets it.
-    fn reveal_pinned_row(&mut self, list: &ListState, row: Option<(usize, bool)>) {
+    fn reveal_pinned_row(
+        &mut self,
+        list: &ListState,
+        scroll: &crate::motion::ListScroll,
+        row: Option<(usize, bool)>,
+        cx: &App,
+    ) {
         match row {
             Some((index, true)) => {
-                list.scroll_to_reveal_item(index);
+                scroll.reveal(list, index, cx);
                 self.reveal_pinned = None;
             }
             Some((_, false)) => {}
@@ -2507,7 +2484,7 @@ impl SessionsSidebar {
                         .update(cx, |state, cx| state.open_thread(cx));
                 })),
         );
-        let header = Self::track_hover(header, &group_key, cx);
+        let header = self.track_hover(header, &group_key);
         if quick_chat {
             return header.into_any_element();
         }
@@ -2790,7 +2767,7 @@ impl SessionsSidebar {
                 cx.notify();
             }),
         );
-        let row = Self::track_hover(row, &state.row_key, cx);
+        let row = self.track_hover(row, &state.row_key);
         let row = match self
             .dragged_thread(meta, state, cx)
             .filter(|_| !self.compact(cx))
@@ -2874,14 +2851,32 @@ impl SessionsSidebar {
 
     /// A pinned row's pin; on row hover it becomes the Unpin button.
     /// A thread on Follow-up: attention the user asked for, not activity.
-    fn follow_up_glyph(meta: &SessionMeta, cx: &App) -> Option<gpui::Stateful<gpui::Div>> {
-        meta.follow_up.as_ref()?;
+    /// It widens into the row as it is set, and narrows away as it is
+    /// cleared, so the title beside it gives way gradually.
+    fn follow_up_glyph(
+        meta: &SessionMeta,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<gpui::AnyElement> {
+        let shown = crate::motion::shown(
+            SharedString::from(format!("follow-up-shown-{}", meta.id)),
+            meta.follow_up.is_some().then_some(()),
+            window,
+            cx,
+        )?;
         Some(
-            div()
-                .id(SharedString::from(format!("follow-up-{}", meta.id)))
-                .flex_none()
-                .child(Icon::new(IconName::Bell).text_color(cx.theme().muted_foreground))
-                .with_tooltip(|_, _| Tooltip::new(crate::tr!("control.follow_up.marker"))),
+            shown.fold_across_gap(
+                ROW_GAP,
+                div()
+                    .id(SharedString::from(format!("follow-up-{}", meta.id)))
+                    .debug_selector({
+                        let id = meta.id.clone();
+                        move || format!("follow-up-{id}")
+                    })
+                    .flex_none()
+                    .child(Icon::new(IconName::Bell).text_color(cx.theme().muted_foreground))
+                    .with_tooltip(|_, _| Tooltip::new(crate::tr!("control.follow_up.marker"))),
+            ),
         )
     }
 
@@ -3280,7 +3275,7 @@ impl SessionsSidebar {
                     )
                 })
                 .child(self.thread_title_or_input(meta, &state, false, window, cx))
-                .children(Self::follow_up_glyph(meta, cx))
+                .children(Self::follow_up_glyph(meta, window, cx))
                 .children(self.pin_glyph(meta, &row_key, window, cx))
                 .when_some(
                     (state.renaming.is_none())
@@ -3295,16 +3290,27 @@ impl SessionsSidebar {
                         .flatten(),
                     |row, badge| row.child(badge),
                 )
-                .when(!working, |row| {
-                    row.child(self.render_flat_thread_right_slot(
-                        meta,
-                        &row_key,
-                        project_view_timestamp(meta),
-                        true,
+                // The time narrows away while the thread works, giving the
+                // title its width gradually, and widens back after.
+                .when_some(
+                    crate::motion::shown(
+                        SharedString::from(format!("thread-time-{session_id}")),
+                        (!working).then_some(()),
                         window,
                         cx,
-                    ))
-                })
+                    ),
+                    |row, shown| {
+                        let slot = self.render_flat_thread_right_slot(
+                            meta,
+                            &row_key,
+                            project_view_timestamp(meta),
+                            true,
+                            window,
+                            cx,
+                        );
+                        row.child(shown.fold_across_gap(ROW_GAP, slot))
+                    },
+                )
         };
 
         self.thread_context_menu(row, meta, &state, working, false, cx)
@@ -3463,7 +3469,7 @@ impl SessionsSidebar {
                 .children(dot)
                 .child(title_or_input)
                 .when(!renaming, |line| {
-                    line.children(Self::follow_up_glyph(meta, cx))
+                    line.children(Self::follow_up_glyph(meta, window, cx))
                         .children(self.pin_glyph(meta, &row_key, window, cx))
                         .child(self.render_flat_thread_right_slot(
                             meta,
@@ -3732,8 +3738,29 @@ fn replace_list_rows<K: PartialEq>(
     previous_key: impl Fn(usize) -> Option<K>,
     keys: impl ExactSizeIterator<Item = K>,
 ) {
-    let mut anchor = state.logical_scroll_top();
+    replace_rows(state, previous_key, keys.collect());
+}
+
+/// [`replace_list_rows`] for a list whose rows glide from where they were
+/// drawn to their new places.
+fn replace_gliding_rows<K: PartialEq>(
+    state: &ListState,
+    flip: &crate::motion::ListFlip,
+    previous_key: impl Fn(usize) -> Option<K>,
+    keys: impl ExactSizeIterator<Item = K>,
+    window: &mut Window,
+) {
     let keys: Vec<K> = keys.collect();
+    flip.replace(state, &previous_key, &keys, window);
+    replace_rows(state, previous_key, keys);
+}
+
+fn replace_rows<K: PartialEq>(
+    state: &ListState,
+    previous_key: impl Fn(usize) -> Option<K>,
+    keys: Vec<K>,
+) {
+    let mut anchor = state.logical_scroll_top();
     let count = keys.len();
     let at_top = anchor.item_ix == 0 && anchor.offset_in_item <= px(0.);
     let position = |key: &K| keys.iter().position(|other| other == key);
@@ -3977,7 +4004,12 @@ impl SessionsSidebar {
                             index > 0 && matches!(rows[index - 1], CompactListRow::Caption { .. });
                         (index - usize::from(caption), pinned)
                     });
-                self.reveal_pinned_row(&self.compact_list_state.clone(), pinned);
+                self.reveal_pinned_row(
+                    &self.compact_list_state.clone(),
+                    &self.compact_scroll.clone(),
+                    pinned,
+                    cx,
+                );
             }
             self.compact_model = Some(Rc::new(CompactListModel {
                 rows,
@@ -4125,6 +4157,7 @@ impl SessionsSidebar {
                         })
                         .flatten();
                     let reveal_model = model.clone();
+                    this.compact_scroll.step(&this.compact_list_state, window, cx);
                     let compact_width = this.compact_list_state.viewport_bounds().size.width;
                     div()
                         .id("compact-thread-list")
@@ -4646,6 +4679,341 @@ fn compact_status_line(
     }
 }
 
+impl SessionsSidebar {
+    /// The Grouped layout's header and list.
+    fn render_grouped_layout(
+        &mut self,
+        groups: Vec<ProjectGroup>,
+        flags: HashMap<String, ThreadFlags>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (gpui::AnyElement, gpui::AnyElement) {
+        let thread_list = if groups.is_empty() {
+            div()
+                .id("sidebar-project-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .child(
+                    div()
+                        .size_full()
+                        .child(v_flex().w_full().px_2().pb_2().child(empty_row(
+                            if self.store.read(cx).scope().is_full() {
+                                crate::tr!("sidebar.empty")
+                            } else {
+                                crate::tr!("member.empty_description")
+                            },
+                            cx,
+                        ))),
+                )
+                .into_any_element()
+        } else {
+            let rows = self.grouped_rows(&groups, self.store.read(cx));
+            let keys = rows.iter().map(|(row, _)| row.key(&groups));
+            if !keys.clone().eq(self
+                .grouped_row_keys
+                .iter()
+                .map(|(kind, id)| (*kind, id.as_str())))
+            {
+                replace_gliding_rows(
+                    &self.grouped_list_state,
+                    &self.grouped_flip,
+                    |index| {
+                        self.grouped_row_keys
+                            .get(index)
+                            .map(|(kind, id)| (*kind, id.as_str()))
+                    },
+                    keys.clone(),
+                    window,
+                );
+                self.grouped_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
+            }
+            let grouped_width = self.grouped_list_state.viewport_bounds().size.width;
+            let flip = self.grouped_flip.clone();
+            let thread_list = list(
+                self.grouped_list_state.clone(),
+                cx.processor(move |this, index: usize, window, cx| {
+                    let (row, factor) = &rows[index];
+                    let (kind, id) = row.key(&groups);
+                    let folded =
+                        this.fold_row(*factor, grouped_width, window, cx, |this, window, cx| {
+                            this.render_grouped_row(index, row, &groups, &flags, window, cx)
+                        });
+                    flip.row(
+                        index,
+                        SharedString::from(format!("grouped-{kind}-{id}")),
+                        folded,
+                    )
+                }),
+            )
+            .flex_1()
+            .min_h_0()
+            .pb_2();
+            v_flex()
+                .id("grouped-thread-list")
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(crate::scroll::page_viewport(
+                    "grouped-thread-bounce",
+                    &self.grouped_list_state,
+                    thread_list,
+                ))
+                .when(!window.is_inspector_picking(cx), |list| {
+                    list.child(thread_list_scrollbar(
+                        "grouped-thread-scrollbar",
+                        &self.grouped_list_state,
+                        crate::material::selectable_row_height(false),
+                    ))
+                })
+                .into_any_element()
+        };
+        (
+            self.render_projects_header(cx).into_any_element(),
+            thread_list,
+        )
+    }
+
+    /// The Flat layout's header and list.
+    fn render_flat_layout(
+        &mut self,
+        groups: &[ProjectGroup],
+        flat_sessions: &[SessionMeta],
+        flags: HashMap<String, ThreadFlags>,
+        active_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (gpui::AnyElement, gpui::AnyElement) {
+        let scope = self.project_filter.clone();
+        let ThreadRows {
+            pinned,
+            active,
+            settled: settled_visible,
+            settled_count,
+            settled_hidden_count,
+        } = self.thread_rows(flat_sessions, scope.as_deref(), "recent");
+        if pinned.is_empty() && active.is_empty() && settled_count == 0 {
+            // An active project filter can empty the list while threads
+            // exist; that state gets its own hint, not the no-projects one.
+            let hint = if !self.store.read(cx).scope().is_full() && flat_sessions.is_empty() {
+                if self.store.read(cx).projects().is_empty() {
+                    crate::tr!("member.empty_description")
+                } else {
+                    crate::tr!("member.threads_empty")
+                }
+            } else if flat_sessions.is_empty() {
+                crate::tr!("sidebar.empty")
+            } else {
+                crate::tr!("sidebar.filter_empty")
+            };
+            let list_content = v_flex().w_full().px_2().pb_2().child(empty_row(hint, cx));
+            let thread_list = div()
+                .id("sidebar-project-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .child(div().size_full().child(list_content))
+                .into_any_element();
+            (self.render_flat_header(cx).into_any_element(), thread_list)
+        } else {
+            let mut visible = Vec::new();
+            for (section, rows) in [
+                (ThreadSection::Pinned, &pinned),
+                (ThreadSection::Active, &active),
+            ] {
+                visible.push(FlatListRow::Boundary(section, rows.is_empty()));
+                for meta in rows.iter() {
+                    visible.push(FlatListRow::Thread(Box::new((*meta).clone())));
+                }
+            }
+            let more = self.settled_more_count("recent", settled_hidden_count);
+            let (shelf, more_factor) =
+                self.shelf_factors("recent", &settled_visible, more.is_some());
+            let mut folds = vec![1.; visible.len()];
+            if settled_count > 0 {
+                if pinned.is_empty() && active.is_empty() {
+                    visible.push(FlatListRow::Empty);
+                }
+                visible.push(FlatListRow::Settled);
+                folds.resize(visible.len(), 1.);
+                for (meta, factor) in settled_visible.into_iter().zip(shelf) {
+                    visible.push(FlatListRow::Thread(Box::new(meta.clone())));
+                    folds.push(factor);
+                }
+            }
+            if let Some(count) = more {
+                visible.push(FlatListRow::More(count));
+                folds.push(more_factor);
+            }
+            let mut kept = folds.iter().map(|factor| *factor >= 0.);
+            visible.retain(|_| kept.next().unwrap_or(true));
+            folds.retain(|factor| *factor >= 0.);
+            let keys = visible.iter().map(FlatListRow::key);
+            if !keys.clone().eq(self
+                .flat_row_keys
+                .iter()
+                .map(|(kind, id)| (*kind, id.as_str())))
+            {
+                replace_gliding_rows(
+                    &self.flat_list_state,
+                    &self.flat_flip,
+                    |index| {
+                        self.flat_row_keys
+                            .get(index)
+                            .map(|(kind, id)| (*kind, id.as_str()))
+                    },
+                    keys.clone(),
+                    window,
+                );
+                self.flat_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
+            }
+            let pinned_row = |id: &str| {
+                let index = visible
+                    .iter()
+                    .position(|row| matches!(row, FlatListRow::Thread(meta) if meta.id == id))?;
+                Some((index, pinned.iter().any(|meta| meta.id == id)))
+            };
+            if let Some(id) = self.reveal_pinned.clone() {
+                self.reveal_pinned_row(
+                    &self.flat_list_state.clone(),
+                    &self.flat_scroll.clone(),
+                    pinned_row(&id),
+                    cx,
+                );
+            }
+            let project_names = groups
+                .iter()
+                .map(|group| {
+                    (
+                        group.project.id.clone(),
+                        crate::project_icon::label(&group.project),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            let active_id = active_id.clone();
+            let flat_width = self.flat_list_state.viewport_bounds().size.width;
+            let flip = self.flat_flip.clone();
+            self.flat_scroll.step(&self.flat_list_state, window, cx);
+            let thread_list = list(
+                self.flat_list_state.clone(),
+                cx.processor(move |this, index: usize, window, cx| {
+                    let factor = folds.get(index).copied().unwrap_or(1.);
+                    let folded =
+                        this.fold_row(factor, flat_width, window, cx, |this, window, cx| {
+                            let Some(row) = visible.get(index) else {
+                                return div().into_any_element();
+                            };
+                            let meta = match row {
+                                FlatListRow::Thread(meta) => meta,
+                                FlatListRow::Boundary(section, empty) => {
+                                    return div()
+                                        .w_full()
+                                        .px_2()
+                                        .child(this.render_drag_boundary(
+                                            *section,
+                                            *empty,
+                                            scope.clone(),
+                                            window,
+                                            cx,
+                                        ))
+                                        .into_any_element();
+                                }
+                                FlatListRow::Settled => {
+                                    let header = this.render_settled_header(
+                                        "recent",
+                                        settled_count,
+                                        scope.as_deref(),
+                                        window,
+                                        cx,
+                                    );
+                                    return this
+                                        .drop_zone(
+                                            div().w_full().child(header),
+                                            DropZone::Settled,
+                                            scope.clone(),
+                                            cx,
+                                        )
+                                        .into_any_element();
+                                }
+                                FlatListRow::More(count) => {
+                                    return this.render_settled_more("recent", *count, cx);
+                                }
+                                FlatListRow::Empty => return this.render_active_empty(cx),
+                            };
+                            // While carried, the row keeps its place, hidden
+                            // under its ghost.
+                            let project_name = meta
+                                .project_id
+                                .as_ref()
+                                .and_then(|project_id| project_names.get(project_id))
+                                .cloned();
+                            let is_active = active_id.as_deref() == Some(meta.id.as_str());
+                            let thread = this.render_flat_thread(
+                                meta,
+                                &flags,
+                                project_name,
+                                is_active,
+                                window,
+                                cx,
+                            );
+                            let row = div().w_full().px_2().pb(px(2.)).child(drag_ghost::slot(
+                                arrange::thread_slot(&meta.id),
+                                thread,
+                                window,
+                                cx,
+                            ));
+                            let zone = DropZone::Row {
+                                id: meta.id.clone(),
+                                section: tcode_core::thread_sort::thread_section(meta),
+                            };
+                            this.drop_zone(row, zone, scope.clone(), cx)
+                                .into_any_element()
+                        });
+                    let key = visible.get(index).map_or(("", ""), FlatListRow::key);
+                    flip.row(
+                        index,
+                        SharedString::from(format!("flat-{}-{}", key.0, key.1)),
+                        folded,
+                    )
+                }),
+            )
+            .flex_1()
+            .min_h_0()
+            .into_any_element();
+            (
+                self.render_flat_header(cx).into_any_element(),
+                v_flex()
+                    .id("flat-thread-list")
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .on_drop(
+                        cx.listener(|this, _: &AnyDrag, window, cx| this.drop_thread(window, cx)),
+                    )
+                    .on_drag_move(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<AnyDrag>, _, cx| {
+                            this.drag_left_list(event, cx);
+                            this.drag_auto_scroll(event, cx)
+                        },
+                    ))
+                    .child(crate::scroll::page_viewport(
+                        "flat-thread-bounce",
+                        &self.flat_list_state,
+                        thread_list,
+                    ))
+                    .when(!window.is_inspector_picking(cx), |list| {
+                        list.child(thread_list_scrollbar(
+                            "flat-thread-scrollbar",
+                            &self.flat_list_state,
+                            FLAT_ROW_HEIGHT,
+                        ))
+                    })
+                    .into_any_element(),
+            )
+        }
+    }
+}
+
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scope = (
@@ -4679,325 +5047,43 @@ impl Render for SessionsSidebar {
                 flags,
             )
         };
-        let (header, thread_list) = match layout {
-            SidebarLayout::Grouped => {
-                let thread_list = if groups.is_empty() {
-                    div()
-                        .id("sidebar-project-list")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scrollbar()
-                        .child(
-                            div()
-                                .size_full()
-                                .child(v_flex().w_full().px_2().pb_2().child(empty_row(
-                                    if self.store.read(cx).scope().is_full() {
-                                        crate::tr!("sidebar.empty")
-                                    } else {
-                                        crate::tr!("member.empty_description")
-                                    },
-                                    cx,
-                                ))),
-                        )
-                        .into_any_element()
-                } else {
-                    let rows = self.grouped_rows(&groups, self.store.read(cx));
-                    let keys = rows.iter().map(|(row, _)| row.key(&groups));
-                    if !keys.clone().eq(self
-                        .grouped_row_keys
-                        .iter()
-                        .map(|(kind, id)| (*kind, id.as_str())))
-                    {
-                        replace_list_rows(
-                            &self.grouped_list_state,
-                            |index| {
-                                self.grouped_row_keys
-                                    .get(index)
-                                    .map(|(kind, id)| (*kind, id.as_str()))
-                            },
-                            keys.clone(),
-                        );
-                        self.grouped_row_keys =
-                            keys.map(|(kind, id)| (kind, id.to_owned())).collect();
-                    }
-                    let grouped_width = self.grouped_list_state.viewport_bounds().size.width;
-                    let thread_list = list(
-                        self.grouped_list_state.clone(),
-                        cx.processor(move |this, index: usize, window, cx| {
-                            let (row, factor) = &rows[index];
-                            this.fold_row(*factor, grouped_width, window, cx, |this, window, cx| {
-                                this.render_grouped_row(index, row, &groups, &flags, window, cx)
-                            })
-                        }),
-                    )
-                    .flex_1()
-                    .min_h_0()
-                    .pb_2();
-                    v_flex()
-                        .id("grouped-thread-list")
-                        .flex_1()
-                        .min_h_0()
-                        .relative()
-                        .child(crate::scroll::page_viewport(
-                            "grouped-thread-bounce",
-                            &self.grouped_list_state,
-                            thread_list,
-                        ))
-                        .when(!window.is_inspector_picking(cx), |list| {
-                            list.child(thread_list_scrollbar(
-                                "grouped-thread-scrollbar",
-                                &self.grouped_list_state,
-                                crate::material::selectable_row_height(false),
-                            ))
-                        })
-                        .into_any_element()
-                };
-                (
-                    self.render_projects_header(cx).into_any_element(),
-                    thread_list,
-                )
-            }
-            SidebarLayout::Flat => {
-                let scope = self.project_filter.clone();
-                let ThreadRows {
-                    pinned,
-                    active,
-                    settled: settled_visible,
-                    settled_count,
-                    settled_hidden_count,
-                } = self.thread_rows(&flat_sessions, scope.as_deref(), "recent");
-                if pinned.is_empty() && active.is_empty() && settled_count == 0 {
-                    // An active project filter can empty the list while threads
-                    // exist; that state gets its own hint, not the no-projects one.
-                    let hint = if !self.store.read(cx).scope().is_full() && flat_sessions.is_empty()
-                    {
-                        if self.store.read(cx).projects().is_empty() {
-                            crate::tr!("member.empty_description")
-                        } else {
-                            crate::tr!("member.threads_empty")
-                        }
-                    } else if flat_sessions.is_empty() {
-                        crate::tr!("sidebar.empty")
-                    } else {
-                        crate::tr!("sidebar.filter_empty")
-                    };
-                    let list_content = v_flex().w_full().px_2().pb_2().child(empty_row(hint, cx));
-                    let thread_list = div()
-                        .id("sidebar-project-list")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scrollbar()
-                        .child(div().size_full().child(list_content))
-                        .into_any_element();
-                    (self.render_flat_header(cx).into_any_element(), thread_list)
-                } else {
-                    // Each row's resting top, so a row moved by a drag or a
-                    // section change springs from where it was.
-                    let mut top = 0.;
-                    let mut visible = Vec::new();
-                    for (section, rows) in [
-                        (ThreadSection::Pinned, &pinned),
-                        (ThreadSection::Active, &active),
-                    ] {
-                        let empty = rows.is_empty();
-                        visible.push(FlatListRow::Boundary(section, empty));
-                        top += self.drag_boundary_height(empty, scope.as_deref());
-                        for meta in rows.iter() {
-                            visible.push(FlatListRow::Thread(Box::new((*meta).clone()), top));
-                            top += FLAT_ROW_HEIGHT;
-                        }
-                    }
-                    let more = self.settled_more_count("recent", settled_hidden_count);
-                    let (shelf, more_factor) =
-                        self.shelf_factors("recent", &settled_visible, more.is_some());
-                    let mut folds = vec![1.; visible.len()];
-                    if settled_count > 0 {
-                        if pinned.is_empty() && active.is_empty() {
-                            visible.push(FlatListRow::Empty);
-                        }
-                        visible.push(FlatListRow::Settled);
-                        top += bar_height(Bar::Section, false);
-                        folds.resize(visible.len(), 1.);
-                        for (meta, factor) in settled_visible.into_iter().zip(shelf) {
-                            visible.push(FlatListRow::Thread(Box::new(meta.clone()), top));
-                            folds.push(factor);
-                            top += FLAT_ROW_HEIGHT;
-                        }
-                    }
-                    if let Some(count) = more {
-                        visible.push(FlatListRow::More(count));
-                        folds.push(more_factor);
-                    }
-                    let mut kept = folds.iter().map(|factor| *factor >= 0.);
-                    visible.retain(|_| kept.next().unwrap_or(true));
-                    folds.retain(|factor| *factor >= 0.);
-                    let keys = visible.iter().map(FlatListRow::key);
-                    if !keys.clone().eq(self
-                        .flat_row_keys
-                        .iter()
-                        .map(|(kind, id)| (*kind, id.as_str())))
-                    {
-                        replace_list_rows(
-                            &self.flat_list_state,
-                            |index| {
-                                self.flat_row_keys
-                                    .get(index)
-                                    .map(|(kind, id)| (*kind, id.as_str()))
-                            },
-                            keys.clone(),
-                        );
-                        self.flat_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
-                    }
-                    let pinned_row = |id: &str| {
-                        let index = visible.iter().position(
-                            |row| matches!(row, FlatListRow::Thread(meta, _) if meta.id == id),
-                        )?;
-                        Some((index, pinned.iter().any(|meta| meta.id == id)))
-                    };
-                    if let Some(id) = self.reveal_pinned.clone() {
-                        self.reveal_pinned_row(&self.flat_list_state.clone(), pinned_row(&id));
-                    }
-                    let project_names = groups
-                        .iter()
-                        .map(|group| {
-                            (
-                                group.project.id.clone(),
-                                crate::project_icon::label(&group.project),
-                            )
-                        })
-                        .collect::<HashMap<_, _>>();
-                    let active_id = active_id.clone();
-                    let flat_width = self.flat_list_state.viewport_bounds().size.width;
-                    let thread_list = list(
-                        self.flat_list_state.clone(),
-                        cx.processor(move |this, index: usize, window, cx| {
-                            let factor = folds.get(index).copied().unwrap_or(1.);
-                            this.fold_row(factor, flat_width, window, cx, |this, window, cx| {
-                                let Some(row) = visible.get(index) else {
-                                    return div().into_any_element();
-                                };
-                                let (meta, target_top) = match row {
-                                    FlatListRow::Thread(meta, top) => (meta, top),
-                                    FlatListRow::Boundary(section, empty) => {
-                                        return div()
-                                            .w_full()
-                                            .px_2()
-                                            .child(this.render_drag_boundary(
-                                                *section,
-                                                *empty,
-                                                scope.clone(),
-                                                window,
-                                                cx,
-                                            ))
-                                            .into_any_element();
-                                    }
-                                    FlatListRow::Settled => {
-                                        let header = this.render_settled_header(
-                                            "recent",
-                                            settled_count,
-                                            scope.as_deref(),
-                                            window,
-                                            cx,
-                                        );
-                                        return this
-                                            .drop_zone(
-                                                div().w_full().child(header),
-                                                DropZone::Settled,
-                                                scope.clone(),
-                                                cx,
-                                            )
-                                            .into_any_element();
-                                    }
-                                    FlatListRow::More(count) => {
-                                        return this.render_settled_more("recent", *count, cx);
-                                    }
-                                    FlatListRow::Empty => return this.render_active_empty(cx),
-                                };
-                                let target_top = *target_top;
-                                let row = div().w_full().px_2().pb(px(2.));
-                                let slot = arrange::thread_slot(&meta.id);
-                                let row = if this
-                                    .drag
-                                    .as_ref()
-                                    .is_some_and(|drag| drag.session_id == meta.id)
-                                {
-                                    row.child(drag_ghost::slot(
-                                        slot,
-                                        Self::render_drag_gap(
-                                            crate::material::selectable_row_two_line_height(false),
-                                        ),
-                                        window,
-                                        cx,
-                                    ))
-                                } else {
-                                    let project_name = meta
-                                        .project_id
-                                        .as_ref()
-                                        .and_then(|project_id| project_names.get(project_id))
-                                        .cloned();
-                                    let is_active = active_id.as_deref() == Some(meta.id.as_str());
-                                    let thread = this.render_flat_thread(
-                                        meta,
-                                        &flags,
-                                        project_name,
-                                        is_active,
-                                        window,
-                                        cx,
-                                    );
-                                    row.child(drag_ghost::slot(slot, thread, window, cx))
-                                };
-                                let zone = DropZone::Row {
-                                    id: meta.id.clone(),
-                                    section: tcode_core::thread_sort::thread_section(meta),
-                                };
-                                this.drop_zone(
-                                    animate_flat_thread_position(
-                                        row, &meta.id, target_top, window, cx,
-                                    ),
-                                    zone,
-                                    scope.clone(),
-                                    cx,
-                                )
-                                .into_any_element()
-                            })
-                        }),
-                    )
-                    .flex_1()
-                    .min_h_0()
-                    .into_any_element();
-                    (
-                        self.render_flat_header(cx).into_any_element(),
-                        v_flex()
-                            .id("flat-thread-list")
-                            .flex_1()
-                            .min_h_0()
-                            .relative()
-                            .on_drop(cx.listener(|this, _: &AnyDrag, window, cx| {
-                                this.drop_thread(window, cx)
-                            }))
-                            .on_drag_move(cx.listener(
-                                |this, event: &gpui::DragMoveEvent<AnyDrag>, _, cx| {
-                                    this.drag_left_list(event, cx);
-                                    this.drag_auto_scroll(event, cx)
-                                },
-                            ))
-                            .child(crate::scroll::page_viewport(
-                                "flat-thread-bounce",
-                                &self.flat_list_state,
-                                thread_list,
-                            ))
-                            .when(!window.is_inspector_picking(cx), |list| {
-                                list.child(thread_list_scrollbar(
-                                    "flat-thread-scrollbar",
-                                    &self.flat_list_state,
-                                    FLAT_ROW_HEIGHT,
-                                ))
-                            })
-                            .into_any_element(),
-                    )
-                }
+        // Flat and Grouped are each their own list; switching cross-fades
+        // them, the one left keeping its scroll while it fades. Until the
+        // settings and threads load, the layout is only adopted.
+        let current = usize::from(layout == SidebarLayout::Flat);
+        let loading = self.store.read(cx).threads_loading();
+        let layout_fade = |id: &'static str, window: &mut Window, cx: &mut App| {
+            if loading {
+                let rest = (0..2).map(|layer| f32::from(u8::from(layer == current)));
+                crate::motion::CrossFade::sampled(id, current, rest.collect())
+            } else {
+                crate::motion::CrossFade::new(id, current, 2, window, cx)
             }
         };
+        let fade = layout_fade("sidebar-layout", window, cx);
+        let (mut headers, mut lists) = (Vec::new(), Vec::new());
+        if fade.shows(0) {
+            let (header, list) =
+                self.render_grouped_layout(groups.clone(), flags.clone(), window, cx);
+            headers.push((0, header));
+            lists.push((0, v_flex().size_full().child(list).into_any_element()));
+        }
+        if fade.shows(1) {
+            let (header, list) =
+                self.render_flat_layout(&groups, &flat_sessions, flags, active_id, window, cx);
+            headers.push((1, header));
+            lists.push((1, v_flex().size_full().child(list).into_any_element()));
+        }
+        let header = layout_fade("sidebar-layout-header", window, cx)
+            .span()
+            .render(headers)
+            .into_any_element();
+        let thread_list = fade
+            .fill()
+            .render(lists)
+            .flex_1()
+            .min_h_0()
+            .into_any_element();
 
         v_flex()
             .size_full()
@@ -5068,37 +5154,6 @@ mod tests {
     use tcode_services::store::SessionStore;
 
     struct WorkingThreadRowProbe;
-
-    struct FlatReorderAnimationProbe {
-        reversed: bool,
-        list_state: ListState,
-    }
-
-    impl Render for FlatReorderAnimationProbe {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let order = if self.reversed {
-                ["second", "first"]
-            } else {
-                ["first", "second"]
-            };
-
-            list(self.list_state.clone(), move |index, window, cx| {
-                let id = order[index];
-                let target_top = index as f32 * FLAT_ROW_HEIGHT;
-                animate_flat_thread_position(
-                    div()
-                        .h(px(FLAT_ROW_HEIGHT))
-                        .debug_selector(move || format!("flat-reorder-row-{id}")),
-                    id,
-                    target_top,
-                    window,
-                    cx,
-                )
-                .into_any_element()
-            })
-            .size_full()
-        }
-    }
 
     impl Render for WorkingThreadRowProbe {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5297,38 +5352,247 @@ mod tests {
         }
     }
 
+    /// A local host holding `threads` (newest first) in one project, and a
+    /// desktop sidebar over it in a window, with motion on.
+    fn sidebar_over_host(
+        cx: &mut TestAppContext,
+        name: &str,
+        threads: &[&str],
+    ) -> (
+        Entity<SessionsSidebar>,
+        Entity<WorkspaceStore>,
+        Entity<WindowState>,
+        crate::store::tests::LocalHostDriver,
+        tcode_runtime::pipe::SpawnedHost,
+        PathBuf,
+    ) {
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root(name);
+        let session_store = SessionStore::open_at(root.clone()).unwrap();
+        let project = Project::from_root(root.clone());
+        let sessions: Vec<SessionMeta> = threads
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+                meta.project_id = Some(project.id.clone());
+                meta.id = (*id).into();
+                meta.title = (*id).into();
+                meta.created_at = 1_000 - index as u64;
+                meta.updated_at = meta.created_at;
+                meta
+            })
+            .collect();
+        let host =
+            spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = vec![project];
+            state.sessions = sessions.into();
+        }))
+        .expect("seed sidebar host");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let sidebar = cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        (sidebar, store, window_state, driver, host, root)
+    }
+
+    /// A thread that moves in the list (pinned here) is drawn where it was,
+    /// then glides to its new place; a Follow-up bell widens into its row,
+    /// moving over gradually; and switching to Grouped cross-fades the two
+    /// lists, the one left fading out rather than vanishing.
     #[gpui::test]
-    fn flat_rows_start_reordering_from_their_previous_positions(cx: &mut TestAppContext) {
-        let (probe, cx) = cx.add_window_view(|_, _| FlatReorderAnimationProbe {
-            reversed: false,
-            list_state: ListState::new(2, ListAlignment::Top, px(0.)),
+    fn sidebar_rows_glide_to_where_they_move_and_the_layouts_cross_fade(cx: &mut TestAppContext) {
+        let (sidebar, store, _, mut driver, host, root) =
+            sidebar_over_host(cx, "sidebar-glide-test", &["newest", "middle", "oldest"]);
+        let (_, cx) =
+            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_resize(size(px(320.), px(800.)));
+        crate::test_frames::draw_settled(cx);
+        let top = |id: &str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("sidebar-thread-{id}").leak())
+                .unwrap_or_else(|| panic!("{id} is drawn"))
+                .top()
+        };
+        let (first, last) = (top("newest", cx), top("oldest", cx));
+        assert!(first < last);
+
+        cx.update(|window, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.on_pin(&ThreadPin("oldest".into()), window, cx)
+            })
+        });
+        driver.wait_until(cx, &store, "the pin", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .thread_meta("oldest")
+                    .is_some_and(|meta| meta.pinned_at.is_some())
+            })
+        });
+        draw(cx);
+        assert_eq!(top("oldest", cx), last, "it starts from where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        draw(cx);
+        let gliding = top("oldest", cx);
+        assert!(gliding < last && gliding > first, "it is on its way up");
+        crate::test_frames::draw_settled(cx);
+        assert!(top("oldest", cx) < top("newest", cx), "Pinned leads");
+
+        let time_left = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("follow-up-middle").map(|bell| bell.left())
+        };
+        assert_eq!(time_left(cx), None);
+        cx.update(|window, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.on_follow_up(&ThreadFollowUp("middle".into(), true), window, cx)
+            })
+        });
+        driver.wait_until(cx, &store, "the follow-up", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .thread_meta("middle")
+                    .is_some_and(|meta| meta.follow_up.is_some())
+            })
+        });
+        draw(cx);
+        let start = time_left(cx).expect("the bell is drawn from the start");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        draw(cx);
+        let widening = time_left(cx).unwrap();
+        crate::test_frames::draw_settled(cx);
+        let rest = time_left(cx).unwrap();
+        assert!(
+            rest < widening && widening < start,
+            "the bell widens in, from {start:?} through {widening:?} to {rest:?}"
+        );
+
+        let header = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| store.projects()[0].id.clone())
+        };
+        let header: &'static str = format!("project-header-{}", header(cx)).leak();
+        assert!(
+            cx.debug_bounds(header).is_none(),
+            "Flat shows no project headers"
+        );
+        // What the header's layout toggle does.
+        let mut switch = |layout, cx: &mut VisualTestContext| {
+            store.update(cx, |store, _| store.set_sidebar_layout(layout));
+            driver.wait_until(cx, &store, "the layout", |cx| {
+                store.read_with(cx, |store, _| store.sidebar_layout() == layout)
+            });
+            draw(cx);
+        };
+        switch(SidebarLayout::Grouped, cx);
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds(header).is_some(),
+            "Grouped shows its projects"
+        );
+        switch(SidebarLayout::Flat, cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        draw(cx);
+        assert!(
+            cx.debug_bounds(header).is_some(),
+            "Grouped fades out rather than vanishing"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds(header).is_none(), "and is gone once it has");
+
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// On the phone's Arrange page, a thread unpinned leaves Pinned for
+    /// Active by gliding there from its place, and the empty-Pinned row
+    /// folds in behind it.
+    #[gpui::test]
+    fn an_arranged_thread_glides_between_sections(cx: &mut TestAppContext) {
+        struct Arrange(Entity<SessionsSidebar>);
+        impl Render for Arrange {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let page = self
+                    .0
+                    .update(cx, |sidebar, cx| sidebar.render_arrange(window, cx));
+                div().size_full().child(page)
+            }
+        }
+        let (sidebar, store, window_state, mut driver, host, root) =
+            sidebar_over_host(cx, "sidebar-arrange-glide-test", &["first", "second"]);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let page = cx.new(|_| Arrange(sidebar.clone()));
+            gpui_base::Root::new(page, window, cx)
         });
         let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(200.), px(200.)));
-        draw(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        window_state.update(cx, |state, cx| {
+            state.set_compact(true, cx);
+            state.go(crate::window_state::Destination::ArrangeThreads, cx);
+        });
+        cx.update(|window, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.on_pin(&ThreadPin("second".into()), window, cx)
+            })
+        });
+        driver.wait_until(cx, &store, "the pin", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .thread_meta("second")
+                    .is_some_and(|meta| meta.pinned_at.is_some())
+            })
+        });
+        crate::test_frames::draw_settled(cx);
+        let top = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("arrange-row-second")
+                .expect("the row is drawn")
+                .top()
+        };
+        let pinned = top(cx);
+        assert!(cx.debug_bounds("arrange-pinned-empty").is_none());
 
-        let first_start = cx.debug_bounds("flat-reorder-row-first").unwrap().top();
-        let second_start = cx.debug_bounds("flat-reorder-row-second").unwrap().top();
-        assert_eq!(second_start - first_start, px(FLAT_ROW_HEIGHT));
-
-        probe.update(cx, |probe, cx| {
-            probe.reversed = true;
-            cx.notify();
+        cx.update(|window, cx| {
+            sidebar.update(cx, |sidebar, cx| sidebar.unpin_thread("second", window, cx))
+        });
+        driver.wait_until(cx, &store, "the unpin", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .thread_meta("second")
+                    .is_some_and(|meta| meta.pinned_at.is_none())
+            })
         });
         draw(cx);
-        assert_eq!(
-            cx.debug_bounds("flat-reorder-row-first").unwrap().top(),
-            first_start,
-            "first row snapped to its destination instead of starting at its old position"
+        assert_eq!(top(cx), pinned, "it starts from where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        draw(cx);
+        let gliding = top(cx);
+        crate::test_frames::draw_settled(cx);
+        let active = top(cx);
+        assert!(
+            pinned < gliding && gliding < active,
+            "it glides down into Active: {pinned:?}, {gliding:?}, {active:?}"
         );
-        assert_eq!(
-            cx.debug_bounds("flat-reorder-row-second").unwrap().top(),
-            second_start,
-            "second row snapped to its destination instead of starting at its old position"
-        );
+        assert!(cx.debug_bounds("arrange-pinned-empty").is_some());
 
-        let callbacks = cx.update(|window, cx| window.simulate_next_frame(cx));
-        assert!(callbacks > 0, "spring did not request an animation frame");
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
