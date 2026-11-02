@@ -1,16 +1,15 @@
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::copy::copy_button;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Context, Div,
-    Entity, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -81,6 +80,9 @@ pub(crate) fn copy_message_items(text: Arc<str>) -> MenuExtension {
     })
 }
 
+/// Between a message's text, its summary note and its action row.
+const MESSAGE_GAP: f32 = 2.;
+
 /// An assistant message: rendered markdown plus a hover-revealed Copy action.
 pub(crate) fn assistant(
     data: AssistantData<'_>,
@@ -113,7 +115,7 @@ pub(crate) fn assistant(
     let message = v_flex()
         .w_full()
         .items_start()
-        .gap(px(2.))
+        .gap(px(MESSAGE_GAP))
         .child(
             div()
                 .w_full()
@@ -132,27 +134,38 @@ pub(crate) fn assistant(
         menu_items(menu, window, cx)
     };
 
-    if !show_actions {
-        return message.context_menu(margin_menu).into_any_element();
-    }
-
+    // The action row folds in when the turn settles on this message, and out
+    // when it moves on.
     let group_key = SharedString::from(format!("assistant-{id}"));
-    let actions = h_flex().gap(px(2.)).items_center().child(copy_button(
-        &format!("assistant:{id}"),
-        copied,
-        compact,
-        on_copy,
-        cx,
-    ));
-    message
-        .group(group_key.clone())
-        .child(
-            reserve_action_row(actions, group_key, pinned, compact).with_animation(
-                SharedString::from(format!("assistant-actions-{id}")),
-                Animation::new(Duration::from_millis(400)),
-                |element, delta| element.opacity(delta),
-            ),
-        )
+    let fold_id = SharedString::from(format!("assistant-actions-{id}"));
+    let key = format!("assistant:{id}");
+    let group = group_key.clone();
+    v_flex()
+        .w_full()
+        .items_start()
+        .group(group_key)
+        .child(message)
+        .child(crate::motion::Sampled::new(
+            move |window, cx| match crate::motion::shown(
+                fold_id,
+                show_actions.then_some(()),
+                window,
+                cx,
+            ) {
+                Some(fold) => {
+                    let actions = h_flex()
+                        .gap(px(2.))
+                        .items_center()
+                        .child(copy_button(&key, copied, compact, on_copy, cx));
+                    fold.fold(
+                        div()
+                            .pt(px(MESSAGE_GAP))
+                            .child(reserve_action_row(actions, group, pinned, compact)),
+                    )
+                }
+                None => div().into_any_element(),
+            },
+        ))
         .context_menu(margin_menu)
         .into_any_element()
 }
