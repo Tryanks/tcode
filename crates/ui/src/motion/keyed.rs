@@ -244,6 +244,7 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
                 value: (),
                 progress,
                 leaving: !here,
+                measure: None,
             };
             Some(
                 FlipRow {

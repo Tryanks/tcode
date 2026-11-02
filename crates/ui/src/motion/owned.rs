@@ -105,6 +105,52 @@ impl Owned {
         CrossFade::sampled(key, current, opacity)
     }
 
+    /// [`super::shown`] with its clock, the last value it had and its fold's
+    /// measurement kept here: something a page shows only some of the time,
+    /// drawn through [`Shown::fold`](super::Shown::fold) and its kin, that
+    /// carries on coming or going when the view is drawn under a new parent.
+    /// `key` is also its element id.
+    pub(crate) fn shown<T: Clone + PartialEq + 'static>(
+        &self,
+        key: &'static str,
+        value: Option<T>,
+        window: &mut Window,
+        cx: &App,
+    ) -> Option<super::Shown<T>> {
+        let target = if value.is_some() { 1f32 } else { 0. };
+        let progress = self.sample((key, 0), target, &Curve::settle(), window, cx);
+        let mut values = self.0.borrow_mut();
+        let measure = values
+            .entry((key, 2))
+            .or_insert_with(|| Box::new(super::Measure::default()))
+            .downcast_ref::<super::Measure>()
+            .expect("a fold's measurement")
+            .clone();
+        let kept = values
+            .entry((key, 1))
+            .or_insert_with(|| Box::new(None::<T>))
+            .downcast_mut::<Option<T>>()
+            .expect("a shown value of one type");
+        let (value, leaving) = match value {
+            Some(value) => {
+                *kept = Some(value.clone());
+                (value, false)
+            }
+            None if progress > 0. => (kept.clone()?, true),
+            None => {
+                *kept = None;
+                return None;
+            }
+        };
+        Some(super::Shown {
+            id: key.into(),
+            value,
+            progress,
+            leaving,
+            measure: Some(measure),
+        })
+    }
+
     fn sample<T>(&self, key: Key, target: T, curve: &Curve, window: &mut Window, cx: &App) -> T
     where
         T: Interpolate + PartialEq + 'static,
