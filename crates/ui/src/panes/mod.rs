@@ -223,6 +223,13 @@ pub(crate) struct ThreadPanel {
     colour: Option<usize>,
     /// Leaving the column: still drawn while its slot glides shut, inert.
     closing: bool,
+    /// The thread whose timeline the pane holds in the store for its chat,
+    /// so a thread that closes while the pane still draws it (gliding out,
+    /// or fading under the waiting hint) shows itself, not nothing.
+    lease: Option<String>,
+    /// The pane's thread closed beside others: its chat stays bound to it
+    /// while it fades out under the waiting hint.
+    fading_out: bool,
     /// How the content is drawn while its split glides.
     held: Held,
     /// The pane's fades: its outline and the waiting hint's cross-fade with
@@ -231,6 +238,7 @@ pub(crate) struct ThreadPanel {
     motion: crate::motion::owned::Owned,
     _focus: Subscription,
     _focus_in: Subscription,
+    _release: Subscription,
 }
 
 impl ThreadPanel {
@@ -256,8 +264,12 @@ impl ThreadPanel {
             let (pane, on_focus_in) = (cx.entity(), on_focus_in.clone());
             window.defer(cx, move |window, cx| on_focus_in(pane, window, cx));
         });
-        Self {
-            session_id: chat.read(cx).session_id().map(str::to_owned),
+        let session_id = chat.read(cx).session_id().map(str::to_owned);
+        // A pane taken down mid-fade, or with its glide never landing,
+        // lets its lease go with it.
+        let release = cx.on_release(|panel: &mut Self, cx| panel.hold(None, cx));
+        let mut panel = Self {
+            session_id: None,
             chat,
             focus_handle,
             group: None,
@@ -267,11 +279,35 @@ impl ThreadPanel {
             zoom: PaneZoom::default(),
             colour: None,
             closing: false,
+            lease: None,
+            fading_out: false,
             held: Held::default(),
             motion: Default::default(),
             _focus: focus,
             _focus_in: focus_in,
+            _release: release,
+        };
+        panel.hold(session_id.as_deref(), cx);
+        panel.session_id = session_id;
+        panel
+    }
+
+    /// Hold `session_id`'s timeline in the store, letting go of the one held
+    /// before.
+    fn hold(&mut self, session_id: Option<&str>, cx: &mut App) {
+        if self.lease.as_deref() == session_id {
+            return;
         }
+        let store = self.chat.read(cx).workspace_store().clone();
+        let released = std::mem::replace(&mut self.lease, session_id.map(str::to_owned));
+        store.update(cx, |store, cx| {
+            if let Some(session_id) = session_id {
+                store.lease_timeline(session_id);
+            }
+            if let Some(released) = released {
+                store.release_timeline(&released, cx);
+            }
+        });
     }
 
     pub(crate) fn chat(&self) -> Entity<ChatView> {
@@ -289,15 +325,29 @@ impl ThreadPanel {
         chat: Entity<ChatView>,
         cx: &mut Context<Self>,
     ) -> Entity<ChatView> {
-        self.session_id = chat.read(cx).session_id().map(str::to_owned);
+        let session_id = chat.read(cx).session_id().map(str::to_owned);
+        self.fading_out = false;
+        let replaced = std::mem::replace(&mut self.chat, chat);
+        self.hold(session_id.as_deref(), cx);
+        self.session_id = session_id;
         cx.notify();
-        std::mem::replace(&mut self.chat, chat)
+        replaced
     }
 
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        // Beside others, a pane whose thread closes fades its chat out
+        // under the waiting hint: the chat stays bound to the thread, which
+        // the pane's lease keeps drawn, until the fade has played.
+        let fading_out = session_id.is_none()
+            && self.among_others
+            && (self.session_id.is_some() || self.fading_out);
         self.session_id = session_id.clone();
-        self.chat
-            .update(cx, |chat, cx| chat.set_session(session_id, cx));
+        self.fading_out = fading_out;
+        if !fading_out {
+            self.hold(session_id.as_deref(), cx);
+            self.chat
+                .update(cx, |chat, cx| chat.set_session(session_id, cx));
+        }
         cx.notify();
     }
 
@@ -389,12 +439,7 @@ impl Render for ThreadPanel {
         let bounds = self.bounds.clone();
         let held = self.held;
         // A pane beside others waits for a thread rather than offering the
-        // empty workspace's way to start one. A pane whose thread closes is
-        // rebound before the fade, so the leaving layer is this chat already
-        // showing the empty workspace: GPUI cannot draw an element tree from
-        // an earlier frame, and the store frees a closed thread's timeline in
-        // `close_thread` before the shell hears of it, so a chat kept bound
-        // to it would draw its loading skeleton instead.
+        // empty workspace's way to start one.
         let waiting = self.among_others && self.session_id.is_none();
         let content = self
             .motion
@@ -439,6 +484,15 @@ impl Render for ThreadPanel {
         }
         if content.shows(CHAT) {
             layers.push((CHAT, self.chat.clone().into_any_element()));
+        } else if self.fading_out {
+            // The closed thread has faded out: the chat lets it go.
+            self.fading_out = false;
+            cx.defer_in(window, |panel, _, cx| {
+                if panel.session_id.is_none() && !panel.fading_out {
+                    panel.hold(None, cx);
+                    panel.chat.update(cx, |chat, cx| chat.set_session(None, cx));
+                }
+            });
         }
         // A slot gliding below the dock's slot floor runs past its split's
         // end, where the split's frame clips it: the pane's bounds are the

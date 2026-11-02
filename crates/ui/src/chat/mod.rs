@@ -427,6 +427,10 @@ impl ChatView {
         self.session_id.as_deref()
     }
 
+    pub(crate) fn workspace_store(&self) -> &Entity<WorkspaceStore> {
+        &self.workspace_store
+    }
+
     /// The jumped-to turn's mark goes; its colour transition fades it out.
     fn dismiss_highlight(&mut self, cx: &mut Context<Self>) {
         if self.highlighted_turn.take().is_some() {

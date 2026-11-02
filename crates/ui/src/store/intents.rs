@@ -506,7 +506,9 @@ impl WorkspaceStore {
             thread.generation = thread.generation.wrapping_add(1);
             thread.left_at = self.selection_generation;
             thread.reset_paging();
-            thread.timeline = None;
+            if !self.timeline_leases.contains_key(session_id) {
+                thread.timeline = None;
+            }
             thread.read_acknowledged = None;
             thread.destination = None;
             // The thread reopens at its tail.
@@ -538,13 +540,43 @@ impl WorkspaceStore {
         self.sync_terminal_topics();
     }
 
+    /// Hold `session_id`'s timeline for a surface that draws it, so if the
+    /// thread closes while it is drawn (a pane fading out), it still shows
+    /// the thread rather than nothing. Each lease is released once.
+    pub(crate) fn lease_timeline(&mut self, session_id: &str) {
+        *self
+            .timeline_leases
+            .entry(session_id.to_owned())
+            .or_default() += 1;
+    }
+
+    /// Let go of a lease from [`Self::lease_timeline`]: a closed thread no
+    /// surface holds any more drops its timeline, as closing it would have.
+    pub(crate) fn release_timeline(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(count) = self.timeline_leases.get_mut(session_id) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        self.timeline_leases.remove(session_id);
+        if let Some(thread) = self.threads.get_mut(session_id)
+            && !thread.open
+        {
+            thread.timeline = None;
+            self.release_left_threads();
+            cx.notify();
+        }
+    }
+
     /// Keep the replicas of the [`KEPT_THREADS`] threads left most recently,
     /// besides the open ones.
     fn release_left_threads(&mut self) {
         let mut left: Vec<(u64, String)> = self
             .threads
             .iter()
-            .filter(|(_, thread)| !thread.open)
+            .filter(|(id, thread)| !thread.open && !self.timeline_leases.contains_key(*id))
             .map(|(id, thread)| (thread.left_at, id.clone()))
             .collect();
         if left.len() <= KEPT_THREADS {
