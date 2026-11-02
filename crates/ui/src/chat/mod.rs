@@ -532,12 +532,23 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::on_show_agent_tools))
             .on_action(cx.listener(Self::on_toggle_panel));
 
-        if self
+        // The skeleton, the empty workspace and the thread cross-fade. A
+        // thread that leaves cannot be drawn again (the view is bound to what
+        // replaced it), so what comes after it fades in over nothing.
+        let loading = self
             .workspace_store
             .read(cx)
-            .chat_loading_for(self.session_id.as_deref())
-        {
-            return root.child(
+            .chat_loading_for(self.session_id.as_deref());
+        let surface = match (&active, loading) {
+            (_, true) => 0,
+            (None, false) => 1,
+            (Some(_), false) => 2,
+        };
+        let fade = crate::motion::CrossFade::new("chat-surface", surface, 3, window, cx).fill();
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((
+                0,
                 v_flex()
                     .size_full()
                     .when_some(
@@ -547,18 +558,43 @@ impl Render for ChatView {
                             .map(str::to_owned),
                         |container, error| container.child(div().px_4().child(error)),
                     )
-                    .child(crate::material::loading_skeleton(cx)),
-            );
+                    .child(crate::material::loading_skeleton(cx))
+                    .into_any_element(),
+            ));
         }
+        if fade.shows(1) {
+            layers.push((
+                1,
+                v_flex()
+                    .size_full()
+                    .when(!compact, |el| {
+                        el.child(self.render_header(None, false, None, None, cx))
+                    })
+                    .child(self.render_empty_state(window, cx))
+                    .into_any_element(),
+            ));
+        }
+        if let Some(active) = active.filter(|_| !loading) {
+            layers.push((
+                2,
+                self.render_thread(active, show_jump_to_latest, window, cx),
+            ));
+        }
+        root.child(fade.render(layers).size_full())
+    }
+}
 
-        let Some((title, cwd, is_draft)) = active else {
-            return root
-                .when(!self.window_state.read(cx).compact, |el| {
-                    el.child(self.render_header(None, false, None, None, cx))
-                })
-                .child(self.render_empty_state(window, cx));
-        };
-
+impl ChatView {
+    /// The open thread: its header over the timeline, its deliveries and its
+    /// composer, with the terminal drawer below when it is open.
+    fn render_thread(
+        &mut self,
+        (title, cwd, is_draft): (String, std::path::PathBuf, bool),
+        show_jump_to_latest: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
         let title = if is_draft { None } else { Some(title) };
         let agents = {
             let store = self.workspace_store.read(cx);
@@ -628,20 +664,102 @@ impl Render for ChatView {
             .read(cx)
             .connection_state()
             .is_connected();
-        let delivery_rows = deliveries
-            .into_iter()
-            .map(|(key, text, failure, acknowledged)| {
-                let retry_key = key.clone();
-                let discard_key = key.clone();
-                let retry_store = self.workspace_store.clone();
-                let discard_store = self.workspace_store.clone();
+        let mut delivery_rows = Vec::new();
+        for (key, text, failure, acknowledged) in deliveries {
+            let retry_key = key.clone();
+            let discard_key = key.clone();
+            let retry_store = self.workspace_store.clone();
+            let discard_store = self.workspace_store.clone();
+            // The text brightens once the host has it; the line under it
+            // says how the send stands, and folds away once it is through.
+            let text_color = gpui_base::motion::transition(
+                SharedString::from(format!("delivery-text-{key}")),
+                if acknowledged {
+                    cx.theme().foreground
+                } else {
+                    cx.theme().muted_foreground
+                },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            let status = (failure.is_some() || !acknowledged).then(|| {
+                let line = failure.clone().unwrap_or_else(|| {
+                    crate::tr!(if waiting {
+                        "chat.waiting_connection"
+                    } else {
+                        "chat.sending"
+                    })
+                    .into_owned()
+                });
+                (line, failure.is_some())
+            });
+            let status = crate::motion::shown(
+                SharedString::from(format!("delivery-status-{key}")),
+                status,
+                window,
+                cx,
+            )
+            .map(|status| {
+                let (danger, muted) = (cx.theme().danger, cx.theme().muted_foreground);
+                let line = crate::motion::cross_fade(
+                    SharedString::from(format!("delivery-status-line-{key}")),
+                    status.value.clone(),
+                    window,
+                    cx,
+                    move |(line, failed), _, cx| {
+                        div()
+                            .text_secondary(false, cx)
+                            .text_color(if *failed { danger } else { muted })
+                            .child(line.clone())
+                            .into_any_element()
+                    },
+                );
+                status.fold(h_flex().pt_1().justify_end().child(line))
+            });
+            let actions = crate::motion::shown(
+                SharedString::from(format!("delivery-actions-{key}")),
+                failure.is_some().then_some(()),
+                window,
+                cx,
+            )
+            .map(|actions| {
+                actions.fold(
+                    h_flex()
+                        .pt_1()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new(SharedString::from(format!("retry-{key}")))
+                                .ghost()
+                                .small()
+                                .debug_selector(|| "retry-delivery".into())
+                                .label(crate::tr!("chat.retry_delivery"))
+                                .on_click(move |_, _, cx| {
+                                    retry_store
+                                        .update(cx, |store, _| store.retry_delivery(&retry_key))
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("discard-{key}")))
+                                .ghost()
+                                .small()
+                                .debug_selector(|| "discard-delivery".into())
+                                .label(crate::tr!("chat.discard_delivery"))
+                                .on_click(move |_, _, cx| {
+                                    discard_store
+                                        .update(cx, |store, _| store.discard_delivery(&discard_key))
+                                }),
+                        ),
+                )
+            });
+            delivery_rows.push(
                 v_flex()
                     .id(SharedString::from(format!("delivery-{key}")))
                     .debug_selector(|| "pending-delivery-bubble".into())
                     .w_full()
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .items_end()
-                    .gap_1()
                     .child(
                         div()
                             .max_w_3_4()
@@ -650,64 +768,13 @@ impl Render for ChatView {
                             .text_token(&cx.theme().tokens.typography.md)
                             .rounded(crate::material::radius_composer(cx))
                             .bg(cx.theme().foreground.opacity(0.08))
-                            .text_color(if acknowledged {
-                                cx.theme().foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            })
+                            .text_color(text_color)
                             .child(text),
                     )
-                    .when(failure.is_some() || !acknowledged, |row| {
-                        row.child(
-                            div()
-                                .text_secondary(false, cx)
-                                .text_color(if failure.is_some() {
-                                    cx.theme().danger
-                                } else {
-                                    cx.theme().muted_foreground
-                                })
-                                .child(failure.clone().unwrap_or_else(|| {
-                                    crate::tr!(if waiting {
-                                        "chat.waiting_connection"
-                                    } else {
-                                        "chat.sending"
-                                    })
-                                    .into_owned()
-                                })),
-                        )
-                    })
-                    .when(failure.is_some(), |row| {
-                        row.child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new(SharedString::from(format!("retry-{key}")))
-                                        .ghost()
-                                        .small()
-                                        .debug_selector(|| "retry-delivery".into())
-                                        .label(crate::tr!("chat.retry_delivery"))
-                                        .on_click(move |_, _, cx| {
-                                            retry_store.update(cx, |store, _| {
-                                                store.retry_delivery(&retry_key)
-                                            })
-                                        }),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("discard-{key}")))
-                                        .ghost()
-                                        .small()
-                                        .debug_selector(|| "discard-delivery".into())
-                                        .label(crate::tr!("chat.discard_delivery"))
-                                        .on_click(move |_, _, cx| {
-                                            discard_store.update(cx, |store, _| {
-                                                store.discard_delivery(&discard_key)
-                                            })
-                                        }),
-                                ),
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
+                    .children(status)
+                    .children(actions),
+            );
+        }
 
         let main = v_flex()
             .size_full()
@@ -821,8 +888,11 @@ impl Render for ChatView {
         } else {
             main.into_any_element()
         };
-        root.when(!self.window_state.read(cx).compact, |el| el.child(header))
+        v_flex()
+            .size_full()
+            .when(!self.window_state.read(cx).compact, |el| el.child(header))
             .child(body)
+            .into_any_element()
     }
 }
 
