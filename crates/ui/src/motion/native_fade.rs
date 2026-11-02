@@ -43,26 +43,35 @@ pub(crate) trait NativeView: 'static {
 /// frame, anywhere in the window, for as long as the owner has views.
 ///
 /// The owner shows a view (`shown()` true) when it wants it on screen and
-/// lists it here as present; it fades in from transparent. Listed as absent
-/// while still shown, it fades out, covered so it takes no input, and is
-/// hidden once the fade lands. Every view is listed every frame, so its
-/// presence is kept between frames.
+/// lists it as present; it fades in from transparent. Listed as absent while
+/// still shown, it fades out, covered so it takes no input, and is hidden
+/// once the fade lands. An owner may also hide a view itself, with no fade;
+/// shown again, it fades in from transparent. Every view is listed every
+/// frame, so its presence is kept between frames.
+///
+/// The list is read when the frame is prepainted, not when this is built:
+/// the owner may show a view while its own element renders later in the
+/// same frame, and a list read earlier would call that view absent.
 pub(crate) struct NativeFade<V> {
     id: ElementId,
-    views: Vec<(SharedString, V, bool)>,
+    views: ListViews<V>,
 }
 
+/// One view of a [`NativeFade`]: its key, the view, and whether it is
+/// present.
+pub(crate) type NativeEntry<V> = (SharedString, V, bool);
+
+type ListViews<V> = Box<dyn FnOnce(&App) -> Vec<NativeEntry<V>>>;
+
 impl<V: NativeView> NativeFade<V> {
-    pub(crate) fn new(id: impl Into<ElementId>) -> Self {
+    pub(crate) fn new(
+        id: impl Into<ElementId>,
+        views: impl FnOnce(&App) -> Vec<NativeEntry<V>> + 'static,
+    ) -> Self {
         Self {
             id: id.into(),
-            views: Vec::new(),
+            views: Box::new(views),
         }
-    }
-
-    pub(crate) fn view(mut self, key: impl Into<SharedString>, view: V, present: bool) -> Self {
-        self.views.push((key.into(), view, present));
-        self
     }
 }
 
@@ -77,14 +86,22 @@ impl<V: NativeView> IntoElement for NativeFade<V> {
             canvas(
                 move |_, window, cx| {
                     let mut covers = Vec::new();
-                    for (key, view, present) in views {
+                    for (key, view, present) in views(cx) {
                         let shown = view.shown(cx);
                         let present = present && shown;
                         let sample = Presence::new(
                             ElementId::NamedChild(std::sync::Arc::new(id.clone()), key),
                             present,
                         )
-                        .transition(Transition::new(if present { ENTER } else { LEAVE }))
+                        // An owner that hid its view has already ended the
+                        // exit: none is left to play when it shows again.
+                        .transition(Transition::new(if !shown {
+                            Duration::ZERO
+                        } else if present {
+                            ENTER
+                        } else {
+                            LEAVE
+                        }))
                         .sample(window, cx);
                         if !shown {
                             continue;
@@ -116,9 +133,9 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{
-        App, Bounds, Context, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-        Render, StatefulInteractiveElement as _, Styled as _, TestAppContext, Window, div, point,
-        px, size,
+        App, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement,
+        ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _,
+        TestAppContext, Window, div, point, px, size,
     };
 
     use super::{ENTER, LEAVE, NativeFade, NativeView};
@@ -170,7 +187,10 @@ mod tests {
                         .size(px(140.))
                         .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
                 )
-                .child(NativeFade::new("pages").view("page", self.page.clone(), self.wanted))
+                .child({
+                    let (page, wanted) = (self.page.clone(), self.wanted);
+                    NativeFade::new("pages", move |_| vec![("page".into(), page, wanted)])
+                })
         }
     }
 
@@ -222,6 +242,100 @@ mod tests {
         assert!(!page.shown.get(), "hidden once it has faded out");
         cx.simulate_click(over_page, Default::default());
         assert_eq!(clicks.get(), 1, "uncovered once hidden");
+    }
+
+    /// A page its owner hid at once, shown again before an exit would have
+    /// played, fades in from transparent rather than from partway.
+    #[gpui::test]
+    fn a_native_view_its_owner_hid_fades_in_from_transparent(cx: &mut TestAppContext) {
+        let page = Page::default();
+        page.shown.set(true);
+        let (owner, cx) = cx.add_window_view(|_, _| Owner {
+            page: page.clone(),
+            wanted: true,
+            clicks: Rc::default(),
+        });
+        draw(cx);
+        cx.executor().advance_clock(ENTER);
+        draw(cx);
+        assert_eq!(page.alpha.get(), 1.);
+
+        page.shown.set(false);
+        owner.update(cx, |owner, cx| {
+            owner.wanted = false;
+            cx.notify();
+        });
+        draw(cx);
+        cx.executor().advance_clock(LEAVE / 4);
+        draw(cx);
+
+        page.shown.set(true);
+        owner.update(cx, |owner, cx| {
+            owner.wanted = true;
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(page.alpha.get(), 0.);
+    }
+
+    /// A panel drawn after the fade that shows its page as it renders.
+    struct Panel {
+        page: Page,
+        wanted: Rc<Cell<bool>>,
+    }
+
+    impl Render for Panel {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            if !self.wanted.get() {
+                self.page.shown.set(true);
+                self.wanted.set(true);
+            }
+            div()
+        }
+    }
+
+    struct Shell {
+        page: Page,
+        wanted: Rc<Cell<bool>>,
+        panel: Option<gpui::Entity<Panel>>,
+    }
+
+    impl Render for Shell {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let (page, wanted) = (self.page.clone(), self.wanted.clone());
+            div()
+                .size_full()
+                .child(NativeFade::new("pages", move |_| {
+                    vec![("page".into(), page, wanted.get())]
+                }))
+                .children(self.panel.clone())
+        }
+    }
+
+    /// A page its panel shows while rendering after the fade, in the same
+    /// frame, is present that frame: it fades in instead of being hidden.
+    #[gpui::test]
+    fn a_page_shown_later_in_the_frame_fades_in(cx: &mut TestAppContext) {
+        let page = Page::default();
+        let wanted = Rc::new(Cell::new(false));
+        let (window, cx) = cx.add_window_view(|_, _| Shell {
+            page: page.clone(),
+            wanted: wanted.clone(),
+            panel: None,
+        });
+        draw(cx);
+        window.update(cx, |window, cx| {
+            window.panel = Some(cx.new(|_| Panel {
+                page: page.clone(),
+                wanted: wanted.clone(),
+            }));
+            cx.notify();
+        });
+        draw(cx);
+        assert!(page.shown.get(), "not hidden as absent");
+        cx.executor().advance_clock(ENTER);
+        draw(cx);
+        assert_eq!(page.alpha.get(), 1.);
     }
 
     /// With motion reduced, an unwanted page hides on the frame it is let go.
