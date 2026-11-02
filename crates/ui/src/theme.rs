@@ -8,6 +8,9 @@ use gpui_base::{
 use serde::Deserialize;
 
 pub use crate::highlight::HighlightTheme;
+pub use glide::glide_mode;
+
+mod glide;
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 
@@ -59,6 +62,10 @@ pub struct Theme {
     pub list_active: Hsla,
     pub list_hover: Hsla,
     pub mode: ThemeMode,
+    /// How far this palette is from the light theme toward the dark one: 0
+    /// or 1 at rest, in between while the theme glides from one mode to the
+    /// other. See [`Theme::by_mode`].
+    pub darkness: f32,
     pub mono_font_family: SharedString,
     pub muted: Hsla,
     pub muted_foreground: Hsla,
@@ -111,6 +118,13 @@ impl Theme {
 
     pub fn theme_name(&self) -> &SharedString {
         &self.theme_name
+    }
+
+    /// A colour the code picks by mode rather than reading from a token:
+    /// `light` in the light theme, `dark` in the dark one, and the mix the
+    /// palette has reached while the theme glides between them.
+    pub(crate) fn by_mode(&self, light: Hsla, dark: Hsla) -> Hsla {
+        glide::mix(light, dark, self.darkness)
     }
 }
 
@@ -280,6 +294,7 @@ impl TryFrom<ThemeConfig> for Theme {
             list_active: color("list.active.background")?,
             list_hover: color("list.hover.background")?,
             mode,
+            darkness: if mode.is_dark() { 1. } else { 0. },
             mono_font_family: mono,
             muted,
             muted_foreground,
@@ -326,14 +341,31 @@ pub fn init_with_json(theme_json: &str, cx: &mut App) {
     change_mode(ThemeMode::Light, None, cx);
 }
 
+/// Switch to `mode` at once. A glide under way stops where it is replaced.
 pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
-    let theme = match mode {
+    glide::stop(cx);
+    install(themes(mode, cx), cx);
+    #[cfg(target_os = "macos")]
+    crate::macos_backdrop::sync_appearance(mode, cx);
+    if let Some(window) = window {
+        window.refresh();
+    }
+}
+
+/// The parsed theme for `mode`.
+fn themes(mode: ThemeMode, cx: &App) -> Theme {
+    match mode {
         ThemeMode::Light => cx.global::<Themes>().light.clone(),
         ThemeMode::Dark => cx.global::<Themes>().dark.clone(),
-    };
+    }
+}
+
+/// Make `theme` the one every view reads: Tcode's own and gpui-base's, built
+/// from it.
+fn install(theme: Theme, cx: &mut App) {
     let radius = theme.tokens.radius;
     let base_theme = gpui_base::Theme {
-        appearance: match mode {
+        appearance: match theme.mode {
             ThemeMode::Light => ThemeAppearance::Light,
             ThemeMode::Dark => ThemeAppearance::Dark,
         },
@@ -366,11 +398,6 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     };
     cx.set_global(base_theme);
     cx.set_global(theme);
-    #[cfg(target_os = "macos")]
-    crate::macos_backdrop::sync_appearance(mode, cx);
-    if let Some(window) = window {
-        window.refresh();
-    }
 }
 
 pub fn sync_system_appearance(window: Option<&mut Window>, cx: &mut App) {

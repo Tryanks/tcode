@@ -73,11 +73,8 @@ pub fn opaque_canvas(cx: &App) -> Hsla {
 /// full-page routes paint over the vibrancy canvas. Warm paper in light mode,
 /// blue-carbon in dark.
 pub fn content_surface(cx: &App) -> Hsla {
-    if cx.theme().mode.is_dark() {
-        rgba(0x1B, 0x1E, 0x24, 0xF0)
-    } else {
-        rgba(0xFD, 0xFD, 0xFB, 0xF2)
-    }
+    cx.theme()
+        .by_mode(rgba(0xFD, 0xFD, 0xFB, 0xF2), rgba(0x1B, 0x1E, 0x24, 0xF0))
 }
 
 /// Popovers, menus, dialogs, toasts: the theme's large-element radius.
@@ -541,11 +538,10 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
 /// `foreground` through in dark mode would *lighten* the page behind the overlay
 /// instead of pushing it back, so the dark scrim is black.
 pub fn scrim(progress: f32, cx: &App) -> Hsla {
-    if cx.theme().mode.is_dark() {
-        gpui::black().opacity(0.5 * progress)
-    } else {
-        cx.theme().foreground.opacity(0.32 * progress)
-    }
+    cx.theme().by_mode(
+        cx.theme().foreground.opacity(0.32 * progress),
+        gpui::black().opacity(0.5 * progress),
+    )
 }
 
 /// Drag handle above a compact sheet's title row.
@@ -725,11 +721,8 @@ pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement>(
 /// Inset: GPUI paints a drop shadow's whole rectangle beneath its element
 /// rather than only outside it, so an outset ring fills a transparent control.
 pub(crate) fn focus_ring(cx: &App) -> BoxShadow {
-    let ring = cx.theme().ring.opacity(if cx.theme().mode.is_dark() {
-        0.72
-    } else {
-        0.58
-    });
+    let theme = cx.theme();
+    let ring = theme.by_mode(theme.ring.opacity(0.58), theme.ring.opacity(0.72));
     BoxShadow::new(px(0.), px(0.), ring)
         .spread_radius(px(2.))
         .inset()
