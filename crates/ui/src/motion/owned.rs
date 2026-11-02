@@ -74,6 +74,17 @@ const KEPT: usize = usize::MAX;
 /// The channel of a key [`Owned::cross_fade_value`] keeps its values under.
 const CHANGED: usize = usize::MAX - 1;
 
+/// The channel of a key [`Owned::follow`] keeps its spring under.
+const FOLLOWED: usize = usize::MAX - 2;
+
+/// A spring [`Owned::follow`] keeps: where it is, how fast it moves, where
+/// it was heading over the frame that last advanced it, and when that was.
+struct Follow {
+    state: gpui::SpringState,
+    target: f32,
+    updated_at: Instant,
+}
+
 struct Glide<T> {
     from: T,
     target: T,
@@ -437,6 +448,59 @@ impl Owned {
             current,
             axes: super::GlideAxes::Height,
         }
+    }
+
+    /// gpui-base's `spring` on [`super::FOLLOW`] with its state kept here:
+    /// the value now of a position springing toward `target`, which a new
+    /// target redirects with the velocity it has. The first target is taken
+    /// at once; reduced motion takes every target at once. gpui-base keeps a
+    /// spring's state by element path and builds its physics privately, so
+    /// this steps GPUI's spring with the parameters `FOLLOW` names (its
+    /// response, critically damped, its tolerance), as gpui-base steps it.
+    pub(crate) fn follow(
+        &self,
+        key: impl Into<SharedString>,
+        target: f32,
+        window: &mut Window,
+        cx: &App,
+    ) -> f32 {
+        let now = cx.background_executor().now();
+        let mut values = self.values.borrow_mut();
+        let at_rest = |target: f32| Follow {
+            state: gpui::SpringState {
+                position: target,
+                velocity: 0.,
+            },
+            target,
+            updated_at: now,
+        };
+        let entry = Self::entry(&mut values, (self.key(key), FOLLOWED), || at_rest(target));
+        if !entry.is::<Follow>() {
+            *entry = Box::new(at_rest(target));
+        }
+        let follow = entry.downcast_mut::<Follow>().expect("checked above");
+        let resting = follow.state.position == target && follow.state.velocity == 0.;
+        if resting || cx.reduce_motion() {
+            *follow = at_rest(target);
+            return target;
+        }
+        let frequency = std::f32::consts::TAU / crate::edge_back::SETTLE.as_secs_f32();
+        let config = gpui::SpringConfig::new(frequency * frequency, 2. * frequency, 1.);
+        let elapsed = now
+            .saturating_duration_since(follow.updated_at)
+            .as_secs_f32();
+        let stepped = config.step(follow.state, follow.target, elapsed);
+        if config.is_settled(stepped, target, super::FOLLOW.epsilon()) {
+            *follow = at_rest(target);
+            return target;
+        }
+        *follow = Follow {
+            state: stepped,
+            target,
+            updated_at: now,
+        };
+        window.request_animation_frame();
+        stepped.position
     }
 
     /// The value under `key`, made by `init` the first time, marked seen.

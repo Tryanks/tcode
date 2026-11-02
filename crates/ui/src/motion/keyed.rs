@@ -89,8 +89,7 @@ pub(crate) fn flip_offset(
     Point::new(x + jumps.x, y + jumps.y)
 }
 
-/// [`flip_offset`] on a clock `motion` keeps: the jumps add up as there,
-/// and the offset still to travel eases back to nothing over [`settle`].
+/// [`flip_offset`] with its jumps and springs kept by `motion`.
 fn owned_flip_offset(
     motion: &super::owned::Owned,
     jump: Point<Pixels>,
@@ -102,8 +101,9 @@ fn owned_flip_offset(
         jumps.set(jumps.get() + jump);
     }
     let jumps = jumps.get();
-    let back = motion.transition("flip", -jumps, &super::owned::Curve::settle(), window, cx);
-    back + jumps
+    let x = motion.follow("flip-x", f32::from(-jumps.x), window, cx);
+    let y = motion.follow("flip-y", f32::from(-jumps.y), window, cx);
+    Point::new(px(x) + jumps.x, px(y) + jumps.y)
 }
 
 struct ListState<T> {
@@ -202,9 +202,7 @@ pub(crate) fn keyed_in<T: Clone + 'static, C: BorrowMut<App>>(
 /// [`keyed_in`] with every row's clock, value, fold and glide kept by
 /// `motion` under `key` rather than in element state, so rows coming,
 /// going or changing places carry on when the view is drawn under a new
-/// parent. `key` is also the list's element id. A row that changes places
-/// glides back over [`settle`] where an element-keyed one springs, since
-/// [`Owned`](super::owned::Owned) keeps no spring.
+/// parent. `key` is also the list's element id.
 pub(crate) fn keyed_owned<T: Clone + 'static, C: BorrowMut<App>>(
     motion: &super::owned::Owned,
     key: impl Into<SharedString>,
