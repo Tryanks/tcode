@@ -131,6 +131,11 @@ pub struct ChatView {
     /// pane shares the column: the pane's focus handle, faded in and out by
     /// the shell, which samples it above the dock.
     pane_close: Option<crate::motion::Shown<gpui::FocusHandle>>,
+    /// The header's scroll, kept by the view rather than by the header's
+    /// element: the dock draws a pane's chat under a new parent whenever the
+    /// panes' layout changes (see `panes::ThreadPanes`), which would scroll
+    /// an element-keyed header back to its start.
+    header_scroll: gpui::ScrollHandle,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -341,6 +346,7 @@ impl ChatView {
             session_id,
             edges: WindowEdges::BOTH,
             pane_close: None,
+            header_scroll: gpui::ScrollHandle::default(),
             window_state,
             composer,
             terminal_drawer,
