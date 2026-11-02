@@ -365,10 +365,19 @@ pub struct TerminalDrawer {
     focus_handle: FocusHandle,
     key_bar: Entity<TerminalKeyBar>,
     grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
-    /// Last-known panel sizes of the active split (from its resize handle),
-    /// used to apportion the drawer body between the two panes when resizing
-    /// their PTYs. Empty means "no drag yet": assume an even split.
-    split_sizes: Rc<RefCell<Vec<f32>>>,
+    /// The body's panes, one group whether or not the active terminal is
+    /// split, so its pane keeps its place as the second opens beside or
+    /// under it and closes again: one state for each way a split lies.
+    split_states: [Entity<gpui_base::ResizableState>; 2],
+    /// Glides the second pane open and shut.
+    split_glide: crate::motion::resize_glide::ResizeGlide,
+    /// The split last shown, which a closing pane is drawn from and lies
+    /// along.
+    last_split: Option<tcode_protocol::TerminalSplitStatus>,
+    /// Whether the body was last drawn split.
+    split_shown: bool,
+    /// The body's size when last laid out, which a new split halves.
+    body_size: Rc<std::cell::Cell<gpui::Size<Pixels>>>,
     row_layout_cache: RefCell<HashMap<u64, TerminalGridCache>>,
     cell_width: f32,
     cell_height: f32,
@@ -483,7 +492,17 @@ impl TerminalDrawer {
             focus_handle,
             key_bar,
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
-            split_sizes: Rc::new(RefCell::new(Vec::new())),
+            split_states: [
+                cx.new(|_| gpui_base::ResizableState::default()),
+                cx.new(|_| gpui_base::ResizableState::default()),
+            ],
+            split_glide: crate::motion::resize_glide::ResizeGlide::new(
+                "terminal-split-glide",
+                gpui::Axis::Horizontal,
+            ),
+            last_split: None,
+            split_shown: false,
+            body_size: Rc::default(),
             row_layout_cache: RefCell::new(HashMap::new()),
             cell_width: TERMINAL_CELL_WIDTH,
             cell_height: TERMINAL_CELL_HEIGHT,
@@ -508,6 +527,9 @@ impl TerminalDrawer {
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
         if self.session_id != session_id {
             self.session_id = session_id;
+            // Another thread's terminals land as they are.
+            self.split_glide.reset();
+            self.last_split = None;
             cx.notify();
         }
     }
@@ -1424,27 +1446,40 @@ impl TerminalDrawer {
                 this.paste_to_terminal(terminal_id, &format!(" {quoted} "), cx);
             }))
             .child(grid)
-            .when(has_selection, |this| {
-                this.child(
-                    Button::new(("terminal-add-context", terminal_id))
-                        .absolute()
-                        .block_mouse_except_scroll()
-                        .right(px(PANE_PADDING))
-                        .top(px(PANE_PADDING))
-                        .small()
-                        .label(crate::tr!("terminal.add_context"))
-                        .tooltip(format!("{} · {}", label, crate::tr!("terminal.selection")))
-                        // The terminal must keep the selection this action captures.
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace_store.update(cx, |store, _cx| {
-                                store.capture_terminal_selection_for(
-                                    this.session_id.clone().unwrap_or_default(),
-                                    terminal_id,
-                                )
-                            });
-                        })),
-                )
+            // The action on a selection fades in over the grid's corner as
+            // the selection is made, and out as it is cleared.
+            .child({
+                let button = Button::new(("terminal-add-context", terminal_id))
+                    .small()
+                    .label(crate::tr!("terminal.add_context"))
+                    .tooltip(format!("{} · {}", label, crate::tr!("terminal.selection")))
+                    // The terminal must keep the selection this action captures.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.workspace_store.update(cx, |store, _cx| {
+                            store.capture_terminal_selection_for(
+                                this.session_id.clone().unwrap_or_default(),
+                                terminal_id,
+                            )
+                        });
+                    }));
+                crate::motion::Sampled::new(move |window, cx| {
+                    match crate::motion::shown(
+                        ("terminal-add-context-shown", terminal_id),
+                        has_selection.then_some(()),
+                        window,
+                        cx,
+                    ) {
+                        Some(shown) => div()
+                            .absolute()
+                            .block_mouse_except_scroll()
+                            .right(px(PANE_PADDING))
+                            .top(px(PANE_PADDING))
+                            .child(shown.fade(button))
+                            .into_any_element(),
+                        None => gpui::Empty.into_any_element(),
+                    }
+                })
             })
             .context_menu({
                 let workspace_store = self.workspace_store.clone();
@@ -1579,15 +1614,25 @@ impl Render for TerminalDrawer {
                     }))
                     .trailing(
                         h_flex()
-                            .gap(cx.theme().tokens.spacing.xxs)
-                            .when(*bell, |this| {
-                                this.child(
-                                    div()
-                                        .text_token(&cx.theme().tokens.typography.xs)
-                                        .text_color(cx.theme().warning)
-                                        .child("●"),
+                            // A bell's dot folds in before the close button,
+                            // and away once the terminal is answered.
+                            .children(
+                                crate::motion::shown(
+                                    ("terminal-bell", id),
+                                    bell.then_some(()),
+                                    window,
+                                    cx,
                                 )
-                            })
+                                .map(|shown| {
+                                    shown.fold_across(
+                                        div()
+                                            .pr(cx.theme().tokens.spacing.xxs)
+                                            .text_token(&cx.theme().tokens.typography.xs)
+                                            .text_color(cx.theme().warning)
+                                            .child("●"),
+                                    )
+                                }),
+                            )
                             .child(
                                 Button::new(("terminal-tab-close", close_id))
                                     .ghost()
@@ -1716,21 +1761,31 @@ impl Render for TerminalDrawer {
                     }),
                 );
         } else {
+            let gap = cx.theme().tokens.spacing.xs;
+            let restart = crate::motion::shown(
+                "terminal-restart-shown",
+                active_exited.then_some(()),
+                window,
+                cx,
+            );
             header = header
-                .when(active_exited, |this| {
+                .when_some(restart, |this, shown| {
                     this.child(
-                        Button::new("terminal-restart")
-                            .flex_none()
-                            .ghost()
-                            .small()
-                            .label(crate::tr!("terminal.restart"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.workspace_store.update(cx, |store, _cx| {
-                                    store.restart_terminal_for(
-                                        this.session_id.clone().unwrap_or_default(),
-                                    )
-                                });
-                            })),
+                        shown.fold_across_gap(
+                            gap,
+                            Button::new("terminal-restart")
+                                .flex_none()
+                                .ghost()
+                                .small()
+                                .label(crate::tr!("terminal.restart"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.workspace_store.update(cx, |store, _cx| {
+                                        store.restart_terminal_for(
+                                            this.session_id.clone().unwrap_or_default(),
+                                        )
+                                    });
+                                })),
+                        ),
                     )
                 })
                 .child(
@@ -1803,57 +1858,111 @@ impl Render for TerminalDrawer {
                 );
         }
 
-        if active_split.is_none() {
-            self.split_sizes.borrow_mut().clear();
+        // Splitting opens the second pane out of nothing beside or under the
+        // first, which gives way; closing the split shrinks it away again.
+        if active_split.is_some() {
+            self.last_split = active_split;
         }
-        let body: AnyElement = match (active_id, active_split) {
-            (_, Some(split)) => {
-                let split_sizes = self.split_sizes.clone();
-                let on_resize = move |state: &gpui::Entity<gpui_base::ResizableState>,
-                                      _: &mut Window,
-                                      cx: &mut App| {
-                    *split_sizes.borrow_mut() = state
-                        .read(cx)
-                        .sizes()
-                        .iter()
-                        .map(|size| f32::from(*size))
-                        .collect();
-                };
-                match split.direction {
-                    TerminalSplitDirection::Horizontal => {
-                        let first = resizable_panel()
-                            .pr(px(2.))
-                            .child(self.render_terminal(split.first, cx));
-                        let second = resizable_panel()
-                            .pl(px(2.))
-                            .child(self.render_terminal(split.second, cx));
-                        h_resizable(("terminal-split-h", split.first))
-                            .on_resize(on_resize)
-                            .child(first)
-                            .child(second)
-                            .into_any_element()
+        let direction = active_split
+            .or(self.last_split)
+            .map_or(TerminalSplitDirection::Horizontal, |split| split.direction);
+        let axis = match direction {
+            TerminalSplitDirection::Horizontal => gpui::Axis::Horizontal,
+            TerminalSplitDirection::Vertical => gpui::Axis::Vertical,
+        };
+        self.split_glide.turn(axis);
+        let axis_ix = usize::from(axis == gpui::Axis::Vertical);
+        let reduced = cx.reduce_motion();
+        if reduced && self.split_shown != active_split.is_some() {
+            // Nothing glides it there: the group lays its panes out afresh,
+            // splitting the body evenly.
+            self.split_states[axis_ix] = cx.new(|_| gpui_base::ResizableState::default());
+        }
+        self.split_shown = active_split.is_some();
+        let state = self.split_states[axis_ix].clone();
+        let body_size = self.body_size.get();
+        let extent = match axis {
+            gpui::Axis::Horizontal => body_size.width,
+            gpui::Axis::Vertical => body_size.height,
+        };
+        // Both panes are sized, so the glide lands each where it was headed
+        // (the 1px handle between them).
+        let half = ((extent - px(1.)) / 2.).max(px(0.));
+        let rest = if active_split.is_some() {
+            (extent - px(1.) - half).max(px(0.))
+        } else {
+            extent
+        };
+        let frame = self.split_glide.sample(
+            &[
+                crate::motion::resize_glide::Panel::sized(rest, true),
+                crate::motion::resize_glide::Panel::sized(half, active_split.is_some()),
+            ],
+            !reduced,
+            &state,
+            window,
+            cx,
+        );
+        let (first, second) = match (active_split, self.last_split) {
+            (Some(split), _) => (Some(split.first), Some(split.second)),
+            (None, Some(last)) => (
+                active_id,
+                Some(if active_id == Some(last.first) {
+                    last.second
+                } else {
+                    last.first
+                }),
+            ),
+            (None, None) => (active_id, None),
+        };
+        let paired = frame.mounted(1);
+        // Each pane of a pair carries a 2px gutter toward the handle.
+        let gutter = |pane: AnyElement, leading: bool| {
+            div()
+                .debug_selector(move || {
+                    if leading {
+                        "terminal-pane-first".into()
+                    } else {
+                        "terminal-pane-second".into()
                     }
-                    TerminalSplitDirection::Vertical => {
-                        let first = resizable_panel()
-                            .pb(px(2.))
-                            .child(self.render_terminal(split.first, cx));
-                        let second = resizable_panel()
-                            .pt(px(2.))
-                            .child(self.render_terminal(split.second, cx));
-                        v_resizable(("terminal-split-v", split.first))
-                            .on_resize(on_resize)
-                            .child(first)
-                            .child(second)
-                            .into_any_element()
-                    }
-                }
-            }
-            (Some(id), None) => self.render_terminal(id, cx),
-            _ => div()
+                })
+                .size_full()
+                .when(paired, |pane| match (axis, leading) {
+                    (gpui::Axis::Horizontal, true) => pane.pr(px(2.)),
+                    (gpui::Axis::Horizontal, false) => pane.pl(px(2.)),
+                    (gpui::Axis::Vertical, true) => pane.pb(px(2.)),
+                    (gpui::Axis::Vertical, false) => pane.pt(px(2.)),
+                })
+                .child(pane)
+                .into_any_element()
+        };
+        let first = match first {
+            Some(id) => self.render_terminal(id, cx),
+            None => div()
                 .p(cx.theme().tokens.spacing.md)
                 .child(crate::tr!("terminal.starting"))
                 .into_any_element(),
         };
+        let first = resizable_panel()
+            .size_range(frame.range(0, gpui_base::PANEL_MIN_SIZE..Pixels::MAX))
+            .child(frame.hold(0, gutter(first, true)));
+        let second = second.filter(|_| paired).map(|id| {
+            let pane = self.render_terminal(id, cx);
+            // No size of its own: at rest the group splits the body evenly
+            // until a drag, as the glide lands it.
+            resizable_panel()
+                .size_range(frame.range(1, gpui_base::PANEL_MIN_SIZE..Pixels::MAX))
+                .child(frame.hold(1, gutter(pane, false)))
+        });
+        let body: AnyElement = match axis {
+            gpui::Axis::Horizontal => h_resizable("terminal-split-h"),
+            gpui::Axis::Vertical => v_resizable("terminal-split-v"),
+        }
+        .with_state(&state)
+        .child(first)
+        // Not `children`: the group's replaces the panels added before.
+        .when_some(second, |group, second| group.child(second))
+        .into_any_element();
 
         v_flex()
             .size_full()
@@ -1893,9 +2002,11 @@ impl Render for TerminalDrawer {
                 .on_prepaint({
                     let workspace_store = self.workspace_store.clone();
                     let (cell_width, cell_height) = (self.cell_width, self.cell_height);
-                    let split_sizes = self.split_sizes.clone();
+                    let split_state = state.clone();
+                    let body_size = self.body_size.clone();
                     let session_id = self.session_id.clone();
                     move |bounds, window, cx| {
+                        body_size.set(bounds.size);
                         let width = f32::from(bounds.size.width);
                         let height = f32::from(bounds.size.height);
                         let scale_factor = window.scale_factor();
@@ -1936,13 +2047,13 @@ impl Render for TerminalDrawer {
                                 // drag the group splits the axis evenly (1px
                                 // handle). Each pane also carries a 2px gutter
                                 // (`pr`/`pl`/`pb`/`pt`) toward the handle.
-                                let sizes = split_sizes.borrow();
+                                let sizes = split_state.read(cx).sizes();
                                 let axis = match split.direction {
                                     TerminalSplitDirection::Horizontal => width,
                                     TerminalSplitDirection::Vertical => height,
                                 };
                                 let (first, second) = match sizes.as_slice() {
-                                    [first, second] => (*first, *second),
+                                    [first, second] => (f32::from(*first), f32::from(*second)),
                                     _ => ((axis - 1.) / 2., (axis - 1.) / 2.),
                                 };
                                 match split.direction {
@@ -1961,9 +2072,16 @@ impl Render for TerminalDrawer {
                 })
                 .child(body),
             )
-            .when(
-                should_show_terminal_key_bar(self.terminal_focused, cx),
-                |drawer| drawer.child(self.key_bar.clone()),
+            // The key bar rises with the keyboard as the terminal takes focus
+            // and folds away with it.
+            .children(
+                crate::motion::shown(
+                    "terminal-key-bar-shown",
+                    should_show_terminal_key_bar(self.terminal_focused, cx).then_some(()),
+                    window,
+                    cx,
+                )
+                .map(|shown| shown.fold(self.key_bar.clone())),
             )
     }
 }
@@ -3040,5 +3158,133 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    /// Splitting the active terminal opens the second pane out of nothing
+    /// beside the first, which gives way, and closing the split shrinks it
+    /// away again; with motion reduced both happen at once.
+    #[gpui::test]
+    fn a_split_opens_and_closes_its_second_pane_gradually(cx: &mut gpui::TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        use gpui::AppContext as _;
+        use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root("terminal-split-glide");
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let mut status = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("terminal".into(), std::env::temp_dir(), cx);
+            state.session_status_snapshot(&id).unwrap()
+        }))
+        .unwrap();
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        status.terminals = [7, 8]
+            .into_iter()
+            .map(|id| tcode_protocol::TerminalStatus {
+                id,
+                title: "shell".into(),
+                exited: false,
+            })
+            .collect();
+        status.active_terminal_id = Some(7);
+        status.terminal_open = true;
+        let session_id = status.session_id.clone();
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            crate::store::WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        let (_drawer, cx) =
+            cx.add_window_view(|window, cx| TerminalDrawer::new(store.clone(), window, cx));
+        let publish = |status: &tcode_protocol::SessionStatus, cx: &mut gpui::VisualTestContext| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic: Topic::SessionStatus {
+                            session_id: session_id.clone(),
+                        },
+                        event: ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+        };
+        cx.simulate_resize(gpui::size(px(800.), px(400.)));
+        publish(&status, cx);
+        draw_settled(cx);
+        // A pane gliding is laid out at its widest and clipped to the room
+        // it has, so where the second one starts is how much room it has.
+        let width = |pane: &'static str, cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds(pane).map(|bounds| bounds.size.width)
+        };
+        let start = |cx: &mut gpui::VisualTestContext| {
+            cx.debug_bounds("terminal-pane-second")
+                .map(|bounds| bounds.left())
+        };
+        let whole = width("terminal-pane-first", cx).expect("the active terminal's pane");
+        assert_eq!(start(cx), None);
+
+        let split = |split: bool, status: &mut tcode_protocol::SessionStatus| {
+            status.terminal_splits = split
+                .then_some(tcode_protocol::TerminalSplitStatus {
+                    first: 7,
+                    second: 8,
+                    direction: TerminalSplitDirection::Horizontal,
+                })
+                .into_iter()
+                .collect();
+        };
+        split(true, &mut status);
+        publish(&status, cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let opening = start(cx).expect("the second pane opens");
+        assert!(
+            opening > whole / 2. + px(4.) && opening < whole,
+            "the second pane is on its way open, from {opening:?} of {whole:?}"
+        );
+        draw_settled(cx);
+        let half = start(cx).unwrap();
+        assert!((half - whole / 2.).abs() < px(4.), "{half:?} of {whole:?}");
+
+        split(false, &mut status);
+        publish(&status, cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let closing = start(cx).expect("the second pane closes");
+        assert!(closing > half + px(4.) && closing < whole, "{closing:?}");
+        draw_settled(cx);
+        assert_eq!(start(cx), None);
+        assert_eq!(width("terminal-pane-first", cx), Some(whole));
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        split(true, &mut status);
+        publish(&status, cx);
+        let at_once = start(cx).unwrap();
+        assert!((at_once - whole / 2.).abs() < px(4.), "{at_once:?}");
     }
 }
