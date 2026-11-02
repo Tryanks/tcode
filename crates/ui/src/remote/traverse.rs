@@ -530,9 +530,9 @@ fn status_chip(
                 .into_any_element()
         },
     );
-    if status.is_none() {
-        return chip;
-    }
+    // Once a status arrives the chip becomes a disclosure: its chevron
+    // widens in beside it.
+    let disclosure = status.is_some();
     let turned = gpui_base::motion::transition(
         SharedString::from(format!("remote-traverse-chevron-{key}")),
         if expanded { 1. } else { 0. },
@@ -540,29 +540,39 @@ fn status_chip(
         window,
         cx,
     );
-    crate::material::accessible_clickable(
-        h_flex(),
-        SharedString::from(format!("remote-traverse-status-{index}")),
-        gpui::Role::Button,
-        label,
+    let chevron = crate::motion::shown(
+        SharedString::from(format!("remote-traverse-chevron-shown-{key}")),
+        disclosure.then_some(()),
+        window,
         cx,
     )
-    .aria_expanded(expanded)
-    .debug_selector(move || format!("remote-traverse-status-{index}"))
-    .flex_none()
-    .gap_1()
-    .items_center()
-    .cursor_pointer()
-    .text_color(cx.theme().muted_foreground)
-    .child(chip)
-    .child(Icon::new(IconName::ChevronDown).rotate(gpui::radians(std::f32::consts::PI * turned)))
-    .on_click(cx.listener(move |this, _, _, cx| {
-        // The official source's row is its switch; expanding the status
-        // must not also flip it.
-        cx.stop_propagation();
-        this.toggle_detail(index, cx);
-    }))
-    .into_any_element()
+    .map(|shown| {
+        shown.fold_across_gap(
+            px(4.),
+            Icon::new(IconName::ChevronDown).rotate(gpui::radians(std::f32::consts::PI * turned)),
+        )
+    });
+    let id = SharedString::from(format!("remote-traverse-status-{index}"));
+    let row = if disclosure {
+        crate::material::accessible_clickable(h_flex(), id, gpui::Role::Button, label, cx)
+            .aria_expanded(expanded)
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // The official source's row is its switch; expanding the
+                // status must not also flip it.
+                cx.stop_propagation();
+                this.toggle_detail(index, cx);
+            }))
+    } else {
+        h_flex().id(id)
+    };
+    row.debug_selector(move || format!("remote-traverse-status-{index}"))
+        .flex_none()
+        .items_center()
+        .text_color(cx.theme().muted_foreground)
+        .child(chip)
+        .children(chevron)
+        .into_any_element()
 }
 
 /// The region the manifest gives a relay, else what tells its URL apart.
