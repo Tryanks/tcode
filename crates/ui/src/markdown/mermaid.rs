@@ -879,13 +879,25 @@ pub(super) fn block(
                 .group_hover(group.clone(), |style| style.opacity(1.))
                 .hover(|style| style.opacity(1.))
         });
+    // The surface takes the glided height, so what a swap clips is clipped
+    // at its edge rather than painted past it.
     let card = div()
         .w_full()
         .relative()
         .rounded(crate::material::radius_card(cx))
         .bg(cx.theme().tokens.colors.muted)
-        .child(faces)
+        .child(GlideHeight::new(
+            progress,
+            swap.and_then(|swap| swap.from),
+            glide,
+            faces,
+        ))
         .child(actions);
+    #[cfg(test)]
+    let card = {
+        let path = path.to_string();
+        card.debug_selector(move || format!("markdown-mermaid-card-{path}"))
+    };
     let context_view = view.clone();
     let block = div()
         .id(SharedString::from(path.to_string()))
@@ -900,12 +912,7 @@ pub(super) fn block(
                 )
             });
         })
-        .child(GlideHeight::new(
-            progress,
-            swap.and_then(|swap| swap.from),
-            glide,
-            card,
-        ));
+        .child(card);
     #[cfg(test)]
     let block = {
         let path = path.to_string();
@@ -939,6 +946,11 @@ fn picture(
         cx.stop_propagation();
         crate::image_viewer::open(viewer.clone(), viewer_label.to_string(), window, cx);
     });
+    #[cfg(test)]
+    let image = {
+        let path = path.to_string();
+        image.debug_selector(move || format!("markdown-mermaid-picture-{path}-{place}"))
+    };
     Fitted {
         intrinsic: picture.size(),
         blend,
@@ -950,7 +962,9 @@ fn picture(
 /// A picture of known size, fitted to the width it is given. While one
 /// picture replaces another, both are drawn at one scale gliding from the
 /// old picture's fitted scale to the new one's, so the diagram's text keeps
-/// its size and a picture that must shrink to fit shrinks smoothly.
+/// its size and a picture that must shrink to fit shrinks smoothly; neither
+/// is ever drawn larger than it fits, so a wider picture comes in at its own
+/// fitted scale, whole, while the one it replaces shrinks to meet it.
 struct Fitted<E> {
     intrinsic: gpui::Size<Pixels>,
     /// The intrinsic sizes of the picture replaced and the new one, and how
@@ -967,9 +981,12 @@ impl<E> Fitted<E> {
             }
             fit(of, width).width / of.width
         };
+        let fitted = scale(self.intrinsic);
         let scale = match self.blend {
-            Some((from, to, progress)) => scale(from) + (scale(to) - scale(from)) * progress,
-            None => scale(self.intrinsic),
+            Some((from, to, progress)) => {
+                (scale(from) + (scale(to) - scale(from)) * progress).min(fitted)
+            }
+            None => fitted,
         };
         size(self.intrinsic.width * scale, self.intrinsic.height * scale)
     }
@@ -1153,6 +1170,13 @@ mod tests {
             .expect("the fence is painted")
             .size
             .height
+    }
+
+    fn block_width(cx: &mut VisualTestContext) -> Pixels {
+        cx.debug_bounds("markdown-mermaid-block-root-0")
+            .expect("the fence is painted")
+            .size
+            .width
     }
 
     fn diagram_shown(cx: &mut VisualTestContext) -> bool {
@@ -1374,8 +1398,17 @@ mod tests {
         push(&markdown, "```mermaid\nflowchart TD\n    A --> B\n", cx);
         frames(30, cx);
         let before = block_height(cx);
-        push(&markdown, "    B --> C\n    C --> D\n", cx);
+        // Wider than the row: the new picture must shrink to fit it.
+        let siblings = (0..8)
+            .map(|ix| format!("    A --> W{ix}[a sibling wide enough to widen the row]\n"))
+            .collect::<String>();
+        push(
+            &markdown,
+            &format!("    B --> C\n    C --> D\n{siblings}"),
+            cx,
+        );
         let mut heights = vec![before];
+        let mut widest = Pixels::ZERO;
         for _ in 0..30 {
             frame(cx);
             let block = cx.debug_bounds("markdown-mermaid-block-root-0").unwrap();
@@ -1386,17 +1419,44 @@ mod tests {
                 "what is below moves with the block"
             );
             heights.push(block.size.height);
+            assert_eq!(
+                cx.debug_bounds("markdown-mermaid-card-root-0"),
+                Some(block),
+                "the block's surface covers the block as it glides"
+            );
+            for picture in [
+                cx.debug_bounds("markdown-mermaid-picture-root-0-0"),
+                cx.debug_bounds("markdown-mermaid-picture-root-0-1"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(
+                    picture.left() >= block.left() && picture.right() <= block.right(),
+                    "a picture is cut off at the block's side: {picture:?} in {block:?}"
+                );
+                widest = widest.max(picture.size.width);
+            }
         }
-        let after = *heights.last().unwrap();
-        assert!(after > before, "{heights:?}");
         assert!(
-            heights.windows(2).all(|pair| pair[1] >= pair[0]),
-            "the block grows without stepping back: {heights:?}"
+            widest > block_width(cx) * 0.9,
+            "the new picture fills the row: {widest:?}"
+        );
+        let after = *heights.last().unwrap();
+        assert_ne!(after, before, "{heights:?}");
+        let grows = after > before;
+        assert!(
+            heights.windows(2).all(|pair| if grows {
+                pair[1] >= pair[0]
+            } else {
+                pair[1] <= pair[0]
+            }),
+            "the block moves one way, without stepping back: {heights:?}"
         );
         assert!(
             heights
                 .iter()
-                .filter(|height| **height > before && **height < after)
+                .filter(|height| **height != before && **height != after)
                 .count()
                 >= 3,
             "the block glides rather than jumps: {heights:?}"
