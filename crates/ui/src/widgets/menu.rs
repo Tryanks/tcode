@@ -1058,8 +1058,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let trigger = cx.debug_bounds("filter-trigger").unwrap().center();
         cx.simulate_click(trigger, Default::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        crate::test_frames::draw_settled(cx);
         let menu = cx.debug_bounds("tcode-popup-menu").unwrap();
         assert!(
             menu.top() >= px(0.) && menu.bottom() <= px(852.),
@@ -1067,9 +1066,17 @@ mod tests {
         );
         assert!(cx.debug_bounds("menu-item-59").unwrap().top() > menu.bottom());
 
-        // Up from no selection wraps to the last item.
+        // Up from no selection wraps to the last item, which glides into view.
         cx.simulate_keystrokes("up");
         cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        crate::test_frames::draw(cx);
+        let gliding = cx.debug_bounds("menu-item-59").unwrap();
+        assert!(
+            gliding.bottom() > menu.bottom(),
+            "the menu jumped to {gliding:?}"
+        );
+        crate::test_frames::draw_settled(cx);
         let last = cx.debug_bounds("menu-item-59").unwrap();
         assert!(
             last.top() >= menu.top() && last.bottom() <= menu.bottom(),

@@ -1953,6 +1953,7 @@ fn render_overflow_pane(
 }
 
 /// Context usage, model capacity and provider rate-limit windows.
+#[allow(clippy::too_many_arguments)]
 fn render_context_meter_pane(
     usage: Option<TokenUsage>,
     account_usage: Option<tcode_core::usage::ProviderUsage>,
