@@ -138,6 +138,25 @@ impl PreviewPanel {
         self.sync_visibility(cx);
     }
 
+    /// The pages' fades, which the window draws every frame whether or not
+    /// this panel is mounted: a page outlives the panel and leaves where it
+    /// was.
+    pub(crate) fn native_fade(&self, cx: &App) -> Option<AnyElement> {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        return Some(
+            self.backend
+                .lifecycle
+                .read(cx)
+                .native_fade()
+                .into_any_element(),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            let _ = cx;
+            None
+        }
+    }
+
     fn lifecycle_entity(&self) -> gpui::Entity<BrowserLifecycle> {
         self.backend.lifecycle.clone()
     }
@@ -233,8 +252,9 @@ impl PreviewPanel {
                 // view under the pointer (`send_window_event` hit-tests
                 // whenever no native view owns the press) and GPUI's own view
                 // then drops the event, so a resize handle stops following
-                // the pointer over the page. A hidden view is not hit-tested;
-                // it hides and returns without motion (`yield_to_resize_handles`).
+                // the pointer over the page. The page steps aside: covered at
+                // once and fading out, then hidden, which is not hit-tested
+                // (`yield_to_resize_handles`).
                 && !self.backend.seam_pressed
                 && !resize_drag_active(cx)
                 && (!window_state.compact
@@ -253,14 +273,11 @@ impl PreviewPanel {
     }
 
     /// Keep the page out of the pointer's way while a resize handle is held:
-    /// hide it when a handle beside it is pressed or a resize drag is seen,
+    /// let it go when a handle beside it is pressed or a resize drag is seen,
     /// and show it again, at the size the drag left, when the button is
     /// released. Window listeners, so this holds whether or not anything
-    /// re-renders this panel in between.
-    ///
-    /// The page goes and comes back at once, with no fade: gpui-webview 0.8
-    /// draws a native view, which offers only `set_visible` and bounds, no
-    /// opacity, so neither an exit nor an entry can be animated here.
+    /// re-renders this panel in between. The page fades out and back in
+    /// where the platform allows it ([`BrowserLifecycle::set_visible`]).
     #[cfg(not(target_os = "android"))]
     pub(super) fn yield_to_resize_handles(
         &self,
