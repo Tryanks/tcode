@@ -279,4 +279,77 @@ mod tests {
             "a reveal kept asking for frames"
         );
     }
+
+    /// The rows of a virtual list, which reveal at the list's hover.
+    struct ListRows {
+        hover: ListHover,
+        list: gpui::ListState,
+        drawn: Rc<RefCell<HashMap<usize, Vec<f32>>>>,
+    }
+
+    impl Render for ListRows {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                gpui::list(
+                    self.list.clone(),
+                    cx.processor(|this, row: usize, window, cx| {
+                        let key = SharedString::from(format!("row-{row}"));
+                        let reveal = this.hover.reveal(&key, window, cx);
+                        this.drawn.borrow_mut().entry(row).or_default().push(reveal);
+                        div()
+                            .id(key.clone())
+                            .w(px(200.))
+                            .h(px(40.))
+                            .on_hover(this.hover.on_hover(key))
+                            .child(div().size(px(20.)).opacity(reveal))
+                            .into_any_element()
+                    }),
+                )
+                .size_full(),
+            )
+        }
+    }
+
+    /// In a virtual list drawn as the app draws its frames, with GPUI's
+    /// scroll layers holding the rows it painted, the reveal of the row the
+    /// pointer enters is drawn again each frame of its fade rather than once.
+    #[gpui::test]
+    fn a_virtual_lists_retained_rows_redraw_their_reveal(cx: &mut TestAppContext) {
+        let drawn = Rc::new(RefCell::new(HashMap::new()));
+        let (_, cx) = cx.add_window_view({
+            let drawn = drawn.clone();
+            |_, _| ListRows {
+                hover: ListHover::new(),
+                list: gpui::ListState::new(30, gpui::ListAlignment::Top, px(200.)),
+                drawn,
+            }
+        });
+        cx.simulate_mouse_move(point(px(300.), px(500.)), None, Modifiers::none());
+        draw_settled(cx);
+        // Frames as the display delivers them: drawn without being refreshed.
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                let _ = window.draw(cx);
+            });
+        };
+        for _ in 0..4 {
+            frame(cx);
+        }
+        let since = drawn.borrow()[&2].len();
+        cx.simulate_mouse_move(point(px(50.), px(100.)), None, Modifiers::none());
+        for _ in 0..20 {
+            frame(cx);
+        }
+        let row = reveals(&drawn, 2, since);
+        assert!(
+            row.iter()
+                .filter(|value| **value > 0. && **value < 1.)
+                .count()
+                >= 6,
+            "the hovered row's reveal was drawn {row:?}"
+        );
+        assert_eq!(row.last(), Some(&1.));
+    }
 }
