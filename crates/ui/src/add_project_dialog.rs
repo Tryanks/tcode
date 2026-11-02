@@ -20,8 +20,8 @@ use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::progress::Progress;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -372,16 +372,33 @@ impl AddProjectDialog {
                 // Keep the viewport and the flex column separate. Putting the
                 // max height on the column itself lets flexbox shrink every row
                 // until there is no overflow left for the wheel to scroll.
-                let mut rows = v_flex().w_full().gap_1();
-                for (index, recent) in recent.iter().take(RECENT_LIMIT).enumerate() {
-                    let selected = recent.clone();
-                    let name = directory_name(&recent.path);
-                    let accessible_name =
-                        crate::tr!("sidebar.open_recent", name = name.clone()).into_owned();
-                    let path = recent.path.display().to_string();
-                    let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
-                    let counts = tool_counts(&recent.threads);
-                    rows = rows.child(
+                // A directory that arrives or goes folds in or out where it
+                // is, the others gliding to their places.
+                let items = recent
+                    .iter()
+                    .take(RECENT_LIMIT)
+                    .enumerate()
+                    .map(|(index, recent)| {
+                        (
+                            SharedString::from(recent.path.display().to_string()),
+                            (index, recent.clone()),
+                        )
+                    });
+                let rows = crate::motion::keyed(
+                    "recent-directory-rows",
+                    items,
+                    window,
+                    cx,
+                    |_, (index, recent), _, cx| {
+                        let index = *index;
+                        let selected = recent.clone();
+                        let name = directory_name(&recent.path);
+                        let accessible_name =
+                            crate::tr!("sidebar.open_recent", name = name.clone()).into_owned();
+                        let path = recent.path.display().to_string();
+                        let ago =
+                            humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
+                        let counts = tool_counts(&recent.threads);
                         crate::material::panel_row(
                             format!("recent-directory-{index}"),
                             accessible_name.into(),
@@ -422,13 +439,22 @@ impl AddProjectDialog {
                                         .child(crate::widgets::fade_text(path)),
                                 )
                                 .child(div().text_secondary(false, cx).child(counts)),
-                        ),
-                    );
-                }
+                        )
+                        .into_any_element()
+                    },
+                )
+                .render(v_flex().w_full().gap_1());
                 let visible_rows = recent.len().min(RECENT_LIMIT) as f32;
-                let viewport_height = fit_viewport(
-                    (visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT),
-                    window.viewport_size().height - px(RECENT_VIEWPORT_CHROME),
+                // The viewport grows and shrinks to its rows, gliding.
+                let viewport_height = gpui_base::motion::transition(
+                    "recent-directory-viewport",
+                    fit_viewport(
+                        (visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT),
+                        window.viewport_size().height - px(RECENT_VIEWPORT_CHROME),
+                    ),
+                    crate::motion::settle(),
+                    window,
+                    cx,
                 );
                 div()
                     .id("recent-directory-list")
