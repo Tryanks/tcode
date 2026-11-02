@@ -39,6 +39,12 @@ impl MdState {
         }
     }
 
+    /// Whether the entry's text is still arriving.
+    pub(crate) fn set_streaming(&self, streaming: bool, cx: &mut App) {
+        self.state
+            .update(cx, |state, cx| state.set_streaming(streaming, cx));
+    }
+
     pub(crate) fn sync(&mut self, text: String, cx: &mut App) {
         match md_sync(&self.synced, &text) {
             MdSync::Noop => {}

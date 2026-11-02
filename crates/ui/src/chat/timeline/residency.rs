@@ -167,13 +167,16 @@ impl ChatView {
                     resident_ids: &resident_ids,
                 });
                 let mut texts = Vec::new();
+                let last = timeline.entries.len().checked_sub(1);
                 for (index, entry) in timeline.entries.iter().enumerate() {
                     if !decisions.build.contains(&entry.id) {
                         continue;
                     }
                     let row = row_of_entry(&self.rows, index, entry.turn);
+                    // A running turn's text arrives into its last entry.
+                    let streaming = running && Some(index) == last;
                     if let Some(text) = entry_markdown(entry) {
-                        texts.push((row, entry.id.clone(), text));
+                        texts.push((row, entry.id.clone(), text, streaming));
                     }
                 }
                 (texts, decisions)
@@ -184,9 +187,12 @@ impl ChatView {
             .retain(|id, _| decisions.build.contains(id) && !decisions.evict.contains(id));
 
         let mut rebuilt_rows = HashSet::new();
-        for (row, id, text) in texts {
+        for (row, id, text, streaming) in texts {
             match self.md_states.get_mut(&id) {
-                Some(md) => md.sync(text, cx),
+                Some(md) => {
+                    md.sync(text, cx);
+                    md.set_streaming(streaming, cx);
+                }
                 None if self.pending_md_builds.contains_key(&id) => {
                     let pending = self
                         .pending_md_builds
@@ -198,7 +204,9 @@ impl ChatView {
                     self.spawn_markdown_build(id, text, cx);
                 }
                 None => {
-                    self.md_states.insert(id, MdState::new(&text, cx));
+                    let md = MdState::new(&text, cx);
+                    md.set_streaming(streaming, cx);
+                    self.md_states.insert(id, md);
                     rebuilt_rows.extend(row);
                 }
             }
