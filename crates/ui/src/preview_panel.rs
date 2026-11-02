@@ -50,12 +50,13 @@ use gpui::{
     IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _,
 };
-use gpui_base::v_flex;
+use gpui_base::{h_flex, v_flex};
 use tcode_protocol::PreviewResponse;
 
 use crate::icon::IconName;
 use crate::material;
 use crate::store::WorkspaceStore;
+use crate::theme::ActiveTheme as _;
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::menu::DropdownMenu as _;
 use crate::window_caption;
@@ -162,6 +163,9 @@ pub struct PreviewPanel {
     /// actual page URL or conversation changes.
     mirrored_url: Option<String>,
     compact_overflow_open: bool,
+    /// The panel's motion, kept here: the window draws the panel under
+    /// another parent as it turns compact or wide.
+    motion: crate::motion::owned::Owned,
     #[cfg(preview_backend)]
     /// Discovered localhost dev-server ports (populated by the "Ports" button).
     dev_ports: Vec<u16>,
@@ -216,6 +220,7 @@ impl PreviewPanel {
             mirrored: None,
             mirrored_url: None,
             compact_overflow_open: false,
+            motion: Default::default(),
             #[cfg(preview_backend)]
             dev_ports: Vec::new(),
             #[cfg(preview_backend)]
@@ -317,7 +322,99 @@ impl PreviewPanel {
         cx.notify();
     }
 
-    fn render_chrome(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The wide chrome's actions on the page, each its own button.
+    fn render_inline_actions(&self, offer_ports: bool, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .gap(cx.theme().tokens.spacing.xs)
+            .items_center()
+            .when(offer_ports, |chrome| {
+                chrome.child(
+                    material::toolbar_icon_button(
+                        "preview-ports",
+                        IconName::Globe,
+                        crate::tr!("preview.scan_ports"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
+                )
+            })
+            .child(
+                material::toolbar_icon_button(
+                    "preview-copy-url",
+                    IconName::Copy,
+                    crate::tr!("preview.copy_url"),
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.copy_url(cx))),
+            )
+            .child(
+                material::toolbar_icon_button(
+                    "preview-open-external",
+                    IconName::ExternalLink,
+                    crate::tr!("preview.open_external"),
+                    false,
+                )
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.open_in_system_browser(window, cx)),
+                ),
+            )
+            .child(
+                material::toolbar_icon_button(
+                    "preview-close",
+                    IconName::Close,
+                    crate::tr!("preview.close"),
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
+            )
+            .into_any_element()
+    }
+
+    /// The compact chrome's one menu of the actions on the page.
+    fn render_overflow_actions(&self, offer_ports: bool, cx: &mut Context<Self>) -> AnyElement {
+        let panel = cx.entity().downgrade();
+        material::toolbar_icon_button(
+            "preview-overflow",
+            IconName::Ellipsis,
+            crate::tr!("mobile.more_actions"),
+            true,
+        )
+        .dropdown_menu(move |menu, _, cx| {
+            let _ = panel.update(cx, |panel, cx| {
+                panel.compact_overflow_open = true;
+                panel.sync_visibility(cx);
+                cx.notify();
+            });
+            let panel = panel.clone();
+            cx.on_release(move |_, cx| {
+                let _ = panel.update(cx, |panel, cx| {
+                    panel.compact_overflow_open = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+            menu.menu(
+                crate::tr!("preview.close_compact").into_owned(),
+                Box::new(PreviewAction::Close),
+            )
+            .menu(
+                crate::tr!("preview.copy_url").into_owned(),
+                Box::new(PreviewAction::CopyUrl),
+            )
+            .menu(
+                crate::tr!("preview.open_external").into_owned(),
+                Box::new(PreviewAction::OpenExternal),
+            )
+            .menu_with_enable(
+                crate::tr!("preview.scan_ports").into_owned(),
+                Box::new(PreviewAction::ScanPorts),
+                offer_ports,
+            )
+        })
+        .into_any_element()
+    }
+
+    fn render_chrome(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Windows: an open Preview tab is the rightmost column, so its
         // chrome row is a top strip hosting the caption buttons, which reach
         // the window's true top-right corner.
@@ -356,94 +453,22 @@ impl PreviewPanel {
             ))
             // Compact: the address field is the row. Everything that acts *on*
             // the current URL goes into one overflow menu rather than squeezing
-            // the field down to a word.
-            .when(compact, |chrome| {
-                let panel = cx.entity().downgrade();
-                chrome.child(
-                    material::toolbar_icon_button(
-                        "preview-overflow",
-                        IconName::Ellipsis,
-                        crate::tr!("mobile.more_actions"),
-                        true,
-                    )
-                    .dropdown_menu(move |menu, _, cx| {
-                        let _ = panel.update(cx, |panel, cx| {
-                            panel.compact_overflow_open = true;
-                            panel.sync_visibility(cx);
-                            cx.notify();
-                        });
-                        let panel = panel.clone();
-                        cx.on_release(move |_, cx| {
-                            let _ = panel.update(cx, |panel, cx| {
-                                panel.compact_overflow_open = false;
-                                cx.notify();
-                            });
-                        })
-                        .detach();
-                        menu.menu(
-                            crate::tr!("preview.close_compact").into_owned(),
-                            Box::new(PreviewAction::Close),
-                        )
-                        .menu(
-                            crate::tr!("preview.copy_url").into_owned(),
-                            Box::new(PreviewAction::CopyUrl),
-                        )
-                        .menu(
-                            crate::tr!("preview.open_external").into_owned(),
-                            Box::new(PreviewAction::OpenExternal),
-                        )
-                        .menu_with_enable(
-                            crate::tr!("preview.scan_ports").into_owned(),
-                            Box::new(PreviewAction::ScanPorts),
-                            offer_ports,
-                        )
-                    }),
-                )
-            })
-            .when(!compact && offer_ports, |chrome| {
-                chrome.child(
-                    material::toolbar_icon_button(
-                        "preview-ports",
-                        IconName::Globe,
-                        crate::tr!("preview.scan_ports"),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
-                )
-            })
-            .when(!compact, |chrome| {
-                chrome
-                    .child(
-                        material::toolbar_icon_button(
-                            "preview-copy-url",
-                            IconName::Copy,
-                            crate::tr!("preview.copy_url"),
-                            false,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.copy_url(cx))),
-                    )
-                    .child(
-                        material::toolbar_icon_button(
-                            "preview-open-external",
-                            IconName::ExternalLink,
-                            crate::tr!("preview.open_external"),
-                            false,
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_in_system_browser(window, cx)
-                        })),
-                    )
-            })
-            .when(!compact, |chrome| {
-                chrome.child(
-                    material::toolbar_icon_button(
-                        "preview-close",
-                        IconName::Close,
-                        crate::tr!("preview.close"),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
-                )
+            // the field down to a word. Turning compact or wide cross-fades the
+            // buttons and the menu while their room glides, on the panel's
+            // clock, since the window draws the panel under another parent then.
+            .child({
+                let swap = self
+                    .motion
+                    .swap("actions", usize::from(compact), 2, window, cx)
+                    .across();
+                let mut layers = Vec::new();
+                if swap.shows(0) {
+                    layers.push((0, self.render_inline_actions(offer_ports, cx)));
+                }
+                if swap.shows(1) {
+                    layers.push((1, self.render_overflow_actions(offer_ports, cx)));
+                }
+                swap.render(layers)
             })
             .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
     }

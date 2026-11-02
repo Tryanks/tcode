@@ -207,6 +207,9 @@ pub struct DiffPanel {
     /// The panel's size-class motion: the window draws the panel as a wide
     /// tab or a compact page, under different parents.
     motion: crate::motion::owned::Owned,
+    /// Whether the tab strip last measured too narrow for its labels; only
+    /// its layout knows, and its prepaint writes it here.
+    tab_icons: Rc<std::cell::Cell<Option<bool>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -250,6 +253,7 @@ impl DiffPanel {
             comment_input: None,
             observed_review_comments: Vec::new(),
             motion: Default::default(),
+            tab_icons: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -742,29 +746,76 @@ impl DiffPanel {
         };
         // Measure the labelled bar even when icons are shown, so growing the
         // panel can restore labels without alternating between the two widths.
+        // The labels dropping or coming back cross-fades the two bars: the
+        // width that decides it is measured as the strip lays out, so the
+        // frame after it changes starts the fade, on the panel's clock.
+        let measured = self.tab_icons.get();
+        let icons = measured.map(|icons| {
+            self.motion.transition(
+                "tab-icons",
+                if icons { 1f32 } else { 0. },
+                &crate::motion::owned::Curve::settle(),
+                window,
+                cx,
+            )
+        });
+        let tab_icons = self.tab_icons.clone();
+        let panel = cx.entity_id();
         let tabs = canvas(
             move |bounds, window, cx| {
-                let mut tabs = build_tabs(false).into_any_element();
-                let labelled = tabs.layout_as_root(
+                let labelled = build_tabs(false).into_any_element().layout_as_root(
                     size(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
                     window,
                     cx,
                 );
-                if labelled.width > bounds.size.width {
-                    tabs = build_tabs(true).into_any_element();
+                let narrow = labelled.width > bounds.size.width;
+                if tab_icons.replace(Some(narrow)) != Some(narrow) {
+                    window.on_next_frame(move |_, cx| cx.notify(panel));
                 }
-                tabs.layout_as_root(
-                    size(
-                        AvailableSpace::Definite(bounds.size.width),
-                        AvailableSpace::Definite(bounds.size.height),
-                    ),
-                    window,
-                    cx,
-                );
-                tabs.prepaint_at(bounds.origin, window, cx);
-                tabs
+                let shown = measured.unwrap_or(narrow);
+                // The bar leaving is drawn first, under the one coming in,
+                // and takes no clicks.
+                let layers = match icons {
+                    Some(icons) if shown => vec![(false, 1. - icons), (true, icons)],
+                    Some(icons) => vec![(true, icons), (false, 1. - icons)],
+                    None => vec![(shown, 1.)],
+                };
+                layers
+                    .into_iter()
+                    .filter(|(_, opacity)| *opacity > 0.)
+                    .map(|(icon_only, opacity)| {
+                        let mut tabs = div()
+                            .id(if icon_only {
+                                "tabs-icons"
+                            } else {
+                                "tabs-labelled"
+                            })
+                            .relative()
+                            .size_full()
+                            .opacity(opacity)
+                            .child(build_tabs(icon_only))
+                            .when(icon_only != shown, |tabs| {
+                                tabs.child(crate::motion::shield())
+                            })
+                            .into_any_element();
+                        tabs.layout_as_root(
+                            size(
+                                AvailableSpace::Definite(bounds.size.width),
+                                AvailableSpace::Definite(bounds.size.height),
+                            ),
+                            window,
+                            cx,
+                        );
+                        tabs.prepaint_at(bounds.origin, window, cx);
+                        tabs
+                    })
+                    .collect::<Vec<_>>()
             },
-            |_, mut tabs, window, cx| tabs.paint(window, cx),
+            |_, layers, window, cx| {
+                for mut tabs in layers {
+                    tabs.paint(window, cx);
+                }
+            },
         )
         .flex_1()
         .min_w_0()
