@@ -553,7 +553,9 @@ fn status_chip(
         )
     });
     let id = SharedString::from(format!("remote-traverse-status-{index}"));
-    let row = if disclosure {
+    let muted = cx.theme().muted_foreground;
+    let selector = move || format!("remote-traverse-status-{index}");
+    if disclosure {
         crate::material::accessible_clickable(h_flex(), id, gpui::Role::Button, label, cx)
             .aria_expanded(expanded)
             .cursor_pointer()
@@ -563,16 +565,24 @@ fn status_chip(
                 cx.stop_propagation();
                 this.toggle_detail(index, cx);
             }))
+            .debug_selector(selector)
+            .flex_none()
+            .items_center()
+            .text_color(muted)
+            .child(chip)
+            .children(chevron)
+            .into_any_element()
     } else {
-        h_flex().id(id)
-    };
-    row.debug_selector(move || format!("remote-traverse-status-{index}"))
-        .flex_none()
-        .items_center()
-        .text_color(cx.theme().muted_foreground)
-        .child(chip)
-        .children(chevron)
-        .into_any_element()
+        h_flex()
+            .id(id)
+            .debug_selector(selector)
+            .flex_none()
+            .items_center()
+            .text_color(muted)
+            .child(chip)
+            .children(chevron)
+            .into_any_element()
+    }
 }
 
 /// The region the manifest gives a relay, else what tells its URL apart.

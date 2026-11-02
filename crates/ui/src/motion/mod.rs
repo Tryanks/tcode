@@ -13,6 +13,8 @@ pub(crate) use scene::Scene;
 mod scene;
 pub(crate) mod shared;
 
+pub(crate) mod focus_ring;
+
 pub(crate) mod drag_ghost;
 mod image_fade;
 pub(crate) mod keyed;

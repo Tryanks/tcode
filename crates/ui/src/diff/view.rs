@@ -1538,7 +1538,7 @@ fn menu_row(
     selected: bool,
     compact: bool,
     cx: &App,
-) -> gpui::Stateful<gpui::Div> {
+) -> material::Clickable<gpui::Div> {
     material::accessible_clickable(
         material::menu_item_frame(
             compact,
