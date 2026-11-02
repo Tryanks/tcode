@@ -544,9 +544,15 @@ impl Owned {
         let sample = Timing::new(glide.duration)
             .ease(curve.easing.clone())
             .sample(now.saturating_duration_since(glide.started_at));
-        let value = glide
-            .from
-            .interpolate(&glide.target, sample.directed_progress);
+        // A finished glide is at its target exactly, as gpui-base's is, not
+        // wherever interpolating all the way rounds to.
+        let value = if sample.finished {
+            glide.target.clone()
+        } else {
+            glide
+                .from
+                .interpolate(&glide.target, sample.directed_progress)
+        };
         if glide.target != target {
             let share = if target == glide.from {
                 (sample.directed_progress * glide.share + (1. - glide.share)).clamp(0., 1.)

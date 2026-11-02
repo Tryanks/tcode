@@ -212,6 +212,7 @@ impl Composer {
             .collect();
 
         let trigger = Button::new("model-picker")
+            .motion(&self.button_motion())
             .debug_selector(|| "model-picker".into())
             // The model name truncates so the row's other chips and its
             // actions keep room.
@@ -232,22 +233,15 @@ impl Composer {
                     .child(tinted_provider_glyph(provider, store))
                     .child({
                         // A new model's name cross-fades over the last one's.
-                        let id = self.motion_id("model-label");
+                        let (motion, key) = (self.motion.clone(), self.motion_key("model-label"));
                         let display = display.clone();
                         div()
                             .min_w_0()
                             .overflow_hidden()
                             .child(crate::motion::Sampled::new(move |window, cx| {
-                                crate::motion::cross_fade_part(
-                                    id,
-                                    display,
-                                    window,
-                                    cx,
-                                    |display, _, _| {
-                                        crate::widgets::fade_text(display.clone())
-                                            .into_any_element()
-                                    },
-                                )
+                                motion.cross_fade_part(key, display, window, cx, |display, _, _| {
+                                    crate::widgets::fade_text(display.clone()).into_any_element()
+                                })
                             }))
                     })
                     .child(
@@ -355,6 +349,7 @@ impl Composer {
             return Some((
                 label.clone(),
                 Button::new("traits-chip")
+                    .motion(&self.button_motion())
                     .debug_selector(|| "traits-chip".into())
                     .ghost()
                     .chip()
@@ -392,6 +387,7 @@ impl Composer {
         let pending_restart = composer.options_pending_restart;
 
         let trigger = Button::new("traits-chip")
+            .motion(&self.button_motion())
             .debug_selector(|| "traits-chip".into())
             .ghost()
             .chip()
@@ -404,8 +400,7 @@ impl Composer {
                     .text_chip(cx)
                     .text_color(muted)
                     .child(glided_label(
-                        self.motion_id("traits-label"),
-                        self.motion_id("traits-label-glide"),
+                        self.motion.scope(self.motion_key("traits-label")),
                         label.clone(),
                     ))
                     .child(Icon::new(IconName::ChevronDown)),
@@ -462,6 +457,7 @@ impl Composer {
         track.a = 0.35;
 
         let trigger = Button::new("context-meter")
+            .motion(&self.button_motion())
             .debug_selector(|| "context-meter".into())
             .aria_label(crate::tr!("composer.context_window_title").into_owned())
             .ghost()
@@ -472,22 +468,11 @@ impl Composer {
             // The ring sweeps to a new reading and its colour glides as it
             // crosses into overload.
             .child(div().size(px(16.)).child({
-                let id = self.motion_id("context-ring");
+                let motion = self.motion.scope(self.motion_key("context-ring"));
                 crate::motion::Sampled::new(move |window, cx| {
-                    let pct = gpui_base::motion::transition(
-                        (id.clone(), "pct"),
-                        pct.unwrap_or(0.0),
-                        crate::motion::settle(),
-                        window,
-                        cx,
-                    );
-                    let color = gpui_base::motion::transition(
-                        (id, "color"),
-                        ring_color,
-                        crate::motion::settle(),
-                        window,
-                        cx,
-                    );
+                    let curve = crate::motion::owned::Curve::settle();
+                    let pct = motion.transition("pct", pct.unwrap_or(0.0), &curve, window, cx);
+                    let color = motion.transition("color", ring_color, &curve, window, cx);
                     crate::widgets::ring::ring_canvas(pct, color, track).into_any_element()
                 })
             }));
@@ -2276,8 +2261,7 @@ fn folding_suffix(
 /// A chip's label that cross-fades to a new text while the chip's width
 /// glides to fit it, so what is beside the chip moves over rather than jumps.
 fn glided_label(
-    id: gpui::ElementId,
-    glide: gpui::ElementId,
+    motion: crate::motion::owned::Owned,
     label: gpui::SharedString,
 ) -> impl IntoElement {
     crate::motion::Sampled::new(move |window, cx| {
@@ -2287,8 +2271,8 @@ fn glided_label(
             label.hash(&mut hasher);
             hasher.finish()
         };
-        let glide = crate::motion::GlideState::keyed(glide, window, cx);
-        let text = crate::motion::cross_fade_part(id, label, window, cx, |label, _, _| {
+        let glide = motion.glide_state("glide");
+        let text = motion.cross_fade_part("text", label, window, cx, |label, _, _| {
             div()
                 .whitespace_nowrap()
                 .child(label.clone())

@@ -172,13 +172,10 @@ pub struct Composer {
     /// fit, which folds them into the "⋯" overflow menu. Only layout knows
     /// the width, so its prepaint callback writes it here.
     control_row_narrow: Rc<Cell<bool>>,
-    /// Whether the desktop control row was last rendered folded, so the
-    /// frame that folds or unfolds it glides its controls to their places.
-    control_row_folded: Option<bool>,
-    /// The composer's motion that must carry on when the window draws it
-    /// under another parent: the chat moves between the phone's thread page
-    /// and a pane as the window turns compact or wide, and that turn is what
-    /// brings in or takes away the parts only one layout has.
+    /// The composer's motion, kept here so it carries on when the window
+    /// draws the composer under another parent: the chat moves between the
+    /// phone's thread page and a pane as the window turns compact or wide,
+    /// and a zoom lifts its pane over the column.
     motion: crate::motion::owned::Owned,
     /// The inline trigger (`@`/`/`/`$`) active at the cursor, recomputed on every
     /// input change. Drives the trigger menu.
@@ -396,7 +393,6 @@ impl Composer {
             ui_expanded: false,
             model_picker_token: 0,
             control_row_narrow: Rc::default(),
-            control_row_folded: None,
             motion: Default::default(),
             active_trigger: None,
             menu_highlight: 0,
@@ -944,8 +940,9 @@ impl Composer {
             CompactAction::Arrow
         };
         let touch = px(crate::material::TOUCH_TARGET);
-        let button = crate::motion::cross_fade(
-            self.motion_id("compact-action"),
+        let buttons = self.button_motion();
+        let button = self.motion.cross_fade_value(
+            self.motion_key("compact-action"),
             mode,
             window,
             cx,
@@ -968,6 +965,7 @@ impl Composer {
                 };
                 let stop = *mode == CompactAction::Stop;
                 Button::new(id)
+                    .motion(&buttons)
                     .debug_selector(move || id.into())
                     .with_size(touch)
                     .rounded(touch / 2.)
@@ -1005,50 +1003,52 @@ impl Composer {
             mode != CompactAction::Preparing && (steerable || self.steer_gesture.is_some()),
             |el| el.child(self.render_steer_gesture(cx)),
         );
-        let caption = crate::motion::shown(
-            self.motion_id("compact-action-caption"),
-            (mode == CompactAction::Arrow && turn_running && has_text).then_some(()),
-            window,
-            cx,
-        )
-        .map(|shown| {
-            let color = gpui_base::motion::transition(
-                self.motion_id("compact-action-caption-color"),
-                if armed {
-                    cx.theme().primary
-                } else {
-                    cx.theme().muted_foreground
-                },
-                crate::motion::settle(),
+        let caption = self
+            .motion
+            .shown(
+                self.motion_key("compact-action-caption"),
+                (mode == CompactAction::Arrow && turn_running && has_text).then_some(()),
                 window,
                 cx,
-            );
-            let text = crate::motion::cross_fade_part(
-                self.motion_id("compact-action-caption-text"),
-                armed,
-                window,
-                cx,
-                |armed, _, _| {
-                    div()
-                        .whitespace_nowrap()
-                        .child(crate::tr!(if *armed {
-                            "mobile.steer"
-                        } else {
-                            "mobile.queue"
-                        }))
-                        .into_any_element()
-                },
-            );
-            shown.fold(
-                div()
-                    .flex()
-                    .justify_center()
-                    .pt(cx.theme().tokens.spacing.xxs)
-                    .text_secondary(false, cx)
-                    .text_color(color)
-                    .child(text),
             )
-        });
+            .map(|shown| {
+                let color = self.motion.transition(
+                    self.motion_key("compact-action-caption-color"),
+                    if armed {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().muted_foreground
+                    },
+                    &crate::motion::owned::Curve::settle(),
+                    window,
+                    cx,
+                );
+                let text = self.motion.cross_fade_part(
+                    self.motion_key("compact-action-caption-text"),
+                    armed,
+                    window,
+                    cx,
+                    |armed, _, _| {
+                        div()
+                            .whitespace_nowrap()
+                            .child(crate::tr!(if *armed {
+                                "mobile.steer"
+                            } else {
+                                "mobile.queue"
+                            }))
+                            .into_any_element()
+                    },
+                );
+                shown.fold(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .pt(cx.theme().tokens.spacing.xxs)
+                        .text_secondary(false, cx)
+                        .text_color(color)
+                        .child(text),
+                )
+            });
         v_flex()
             .flex_none()
             .items_center()
@@ -1062,6 +1062,7 @@ impl Composer {
         // A filled stop square; the icon set's square is an outline. A child is
         // not an icon, so the button's width is set too.
         Button::new("stop-turn")
+            .motion(&self.button_motion())
             .debug_selector(|| "stop-turn".into())
             .danger()
             .with_size(size)
@@ -1123,8 +1124,10 @@ impl Composer {
         } else {
             &[DesktopAction::Send]
         };
-        crate::motion::keyed_across(
-            self.motion_id("send-or-stop"),
+        crate::motion::keyed::keyed_owned(
+            &self.motion,
+            self.motion_key("send-or-stop"),
+            crate::motion::keyed::Fold::Across(px(0.)),
             parts
                 .iter()
                 .map(|part| (gpui::SharedString::from(part.key()), *part)),
@@ -1142,6 +1145,7 @@ impl Composer {
                         )
                         .into_owned();
                         Button::new("steer-turn")
+                            .motion(&self.button_motion())
                             .debug_selector(|| "steer-turn".into())
                             .primary()
                             .with_size(px(SEND_SIZE))
@@ -1162,6 +1166,7 @@ impl Composer {
                         .child(crate::tr!("composer.preparing_worktree"))
                         .into_any_element(),
                     DesktopAction::Send => Button::new("send-message")
+                        .motion(&self.button_motion())
                         .debug_selector(|| "send-message".into())
                         .primary()
                         .with_size(px(SEND_SIZE))
@@ -1198,6 +1203,7 @@ impl Composer {
             .conversation_read_only
         {
             return Button::new("send-message")
+                .motion(&self.button_motion())
                 .debug_selector(|| "send-message".into())
                 .ghost()
                 .disabled(true)
@@ -1269,6 +1275,12 @@ impl Composer {
         .into()
     }
 
+    /// The motion of the composer's buttons ([`Button::motion`]), for the
+    /// thread it is showing.
+    fn button_motion(&self) -> crate::motion::owned::Owned {
+        self.motion.scope(self.motion_key("buttons"))
+    }
+
     /// The chip rows above the field: terminal contexts, review comments and
     /// thread references. A chip that goes narrows away and the ones after
     /// it move over; a row folds in with its first chip and away with its
@@ -1297,16 +1309,20 @@ impl Composer {
             ));
         }
         let chip = |button: AnyElement| div().pr_1().pb_1().child(button).into_any_element();
-        crate::motion::keyed(
-            self.motion_id("chip-rows"),
+        crate::motion::keyed::keyed_owned(
+            &self.motion,
+            self.motion_key("chip-rows"),
+            crate::motion::keyed::Fold::Down,
             rows,
             window,
             cx,
             |key, row, window, cx| {
-                let id = self.motion_id(format_args!("chips-{key}"));
+                let id = self.motion_key(format_args!("chips-{key}"));
                 let chips = match row {
-                    ChipRow::Terminal(contexts) => crate::motion::keyed_across(
-                        id,
+                    ChipRow::Terminal(contexts) => crate::motion::keyed::keyed_owned(
+                        &self.motion,
+                        id.clone(),
+                        crate::motion::keyed::Fold::Across(px(0.)),
                         contexts
                             .iter()
                             .map(|context| (context.id.to_string().into(), context.clone())),
@@ -1331,8 +1347,10 @@ impl Composer {
                             *nth += 1;
                             (format!("{key}#{nth}").into(), (index, comment.clone()))
                         });
-                        crate::motion::keyed_across(
-                            id,
+                        crate::motion::keyed::keyed_owned(
+                            &self.motion,
+                            id.clone(),
+                            crate::motion::keyed::Fold::Across(px(0.)),
                             items.collect::<Vec<_>>(),
                             window,
                             cx,
@@ -1341,20 +1359,24 @@ impl Composer {
                             },
                         )
                     }
-                    ChipRow::References(session_id, references) => crate::motion::keyed_across(
-                        id,
-                        references.iter().map(|reference| {
-                            (reference.thread_id.clone().into(), reference.clone())
-                        }),
-                        window,
-                        cx,
-                        |_, reference, _, cx| {
-                            chip(
-                                self.reference_chip(session_id, reference, cx)
-                                    .into_any_element(),
-                            )
-                        },
-                    ),
+                    ChipRow::References(session_id, references) => {
+                        crate::motion::keyed::keyed_owned(
+                            &self.motion,
+                            id.clone(),
+                            crate::motion::keyed::Fold::Across(px(0.)),
+                            references.iter().map(|reference| {
+                                (reference.thread_id.clone().into(), reference.clone())
+                            }),
+                            window,
+                            cx,
+                            |_, reference, _, cx| {
+                                chip(
+                                    self.reference_chip(session_id, reference, cx)
+                                        .into_any_element(),
+                                )
+                            },
+                        )
+                    }
                 };
                 chips.render(h_flex().w_full().flex_wrap().pb_0p5())
             },
@@ -1375,6 +1397,7 @@ impl Composer {
         };
         let text = context.text.clone();
         Button::new(("terminal-context-chip", id))
+            .motion(&self.button_motion())
             .ghost()
             .small()
             .chip()
@@ -1422,6 +1445,7 @@ impl Composer {
             std::sync::Arc::new("review-comment-chip".into()),
             key.clone(),
         ))
+        .motion(&self.button_motion())
         .ghost()
         .small()
         .chip()
@@ -1513,6 +1537,7 @@ impl Render for Composer {
         // with the name they last had.
         let leaving_chip = |id: &'static str, label: &gpui::SharedString, cx: &App| {
             Button::new(id)
+                .motion(&self.button_motion())
                 .ghost()
                 .chip()
                 .touch(self.compact)
@@ -1522,18 +1547,18 @@ impl Render for Composer {
         };
         let mut model_picker = self.render_model_picker(cx);
         let model_label = model_picker.as_ref().map(|(label, _)| label.clone());
-        let model_picker =
-            crate::motion::shown(self.motion_id("model-picker"), model_label, window, cx).map(
-                |shown| {
-                    let picker = match model_picker.take() {
-                        Some((_, picker)) if !shown.leaving() => picker,
-                        _ => leaving_chip("model-picker-leaving", &shown.value, cx),
-                    };
-                    // The name truncates to make room, down to one
-                    // control's width so the picker can still be opened.
-                    shown.fold_across_min(px(SEND_SIZE), div().min_w(px(SEND_SIZE)).child(picker))
-                },
-            );
+        let model_picker = self
+            .motion
+            .shown(self.motion_key("model-picker"), model_label, window, cx)
+            .map(|shown| {
+                let picker = match model_picker.take() {
+                    Some((_, picker)) if !shown.leaving() => picker,
+                    _ => leaving_chip("model-picker-leaving", &shown.value, cx),
+                };
+                // The name truncates to make room, down to one
+                // control's width so the picker can still be opened.
+                shown.fold_across_min(px(SEND_SIZE), div().min_w(px(SEND_SIZE)).child(picker))
+            });
         let mut traits_picker = self.render_traits_picker(cx);
         // The chips give way to the send/stop control: Stop must stay
         // reachable however long the chips' labels run.
@@ -1556,19 +1581,20 @@ impl Render for Composer {
                         .children(attach_menu)
                         .children(model_picker)
                         .children(
-                            crate::motion::shown(
-                                self.motion_id("control-row-traits"),
-                                traits_picker.as_ref().map(|(label, _)| label.clone()),
-                                window,
-                                cx,
-                            )
-                            .map(|shown| {
-                                let picker = match traits_picker.take() {
-                                    Some((_, picker)) if !shown.leaving() => picker,
-                                    _ => leaving_chip("traits-chip-leaving", &shown.value, cx),
-                                };
-                                shown.fold_across_gap(px(4.), picker)
-                            }),
+                            self.motion
+                                .shown(
+                                    self.motion_key("control-row-traits"),
+                                    traits_picker.as_ref().map(|(label, _)| label.clone()),
+                                    window,
+                                    cx,
+                                )
+                                .map(|shown| {
+                                    let picker = match traits_picker.take() {
+                                        Some((_, picker)) if !shown.leaving() => picker,
+                                        _ => leaving_chip("traits-chip-leaving", &shown.value, cx),
+                                    };
+                                    shown.fold_across_gap(px(4.), picker)
+                                }),
                         )
                         .child(div().flex_1())
                         .children(mic),
@@ -1581,42 +1607,45 @@ impl Render for Composer {
             // after the model carries the gap before it, so a gap goes with
             // its part.
             let folded = compact;
-            let reflowed = self
-                .control_row_folded
-                .replace(folded)
-                .is_some_and(|last| last != folded);
-            let reflow =
-                crate::motion::reflow(self.motion_id("control-row"), window, cx).reflowed(reflowed);
+            let reflow = self.motion.reflow_in(
+                self.motion_key("control-row"),
+                u64::from(folded),
+                window,
+                cx,
+            );
             let gapped = |part: AnyElement| div().flex_none().pl_1().child(part);
             let fold = |part: &'static str,
                         shown: bool,
                         build: &mut dyn FnMut(&mut Context<Self>) -> AnyElement,
                         window: &mut Window,
                         cx: &mut Context<Self>| {
-                crate::motion::shown(
-                    self.motion_id(format_args!("control-row-{part}")),
-                    shown.then_some(()),
+                self.motion
+                    .shown(
+                        self.motion_key(format_args!("control-row-{part}")),
+                        shown.then_some(()),
+                        window,
+                        cx,
+                    )
+                    .map(|shown| shown.fold_across(gapped(build(cx))))
+            };
+            let traits = self
+                .motion
+                .shown(
+                    self.motion_key("control-row-traits"),
+                    traits_picker
+                        .as_ref()
+                        .filter(|_| !folded)
+                        .map(|(label, _)| label.clone()),
                     window,
                     cx,
                 )
-                .map(|shown| shown.fold_across(gapped(build(cx))))
-            };
-            let traits = crate::motion::shown(
-                self.motion_id("control-row-traits"),
-                traits_picker
-                    .as_ref()
-                    .filter(|_| !folded)
-                    .map(|(label, _)| label.clone()),
-                window,
-                cx,
-            )
-            .map(|shown| {
-                let picker = match traits_picker.take() {
-                    Some((_, picker)) if !shown.leaving() => picker,
-                    _ => leaving_chip("traits-chip-leaving", &shown.value, cx),
-                };
-                shown.fold_across(gapped(picker))
-            });
+                .map(|shown| {
+                    let picker = match traits_picker.take() {
+                        Some((_, picker)) if !shown.leaving() => picker,
+                        _ => leaving_chip("traits-chip-leaving", &shown.value, cx),
+                    };
+                    shown.fold_across(gapped(picker))
+                });
             let divider = fold(
                 "divider",
                 !folded,
@@ -1714,21 +1743,20 @@ impl Render for Composer {
             self.input.read(cx).value().hash(&mut hasher);
             hasher.finish()
         };
-        let draft_glide =
-            crate::motion::GlideState::keyed(self.motion_id("draft-glide"), window, cx);
+        let draft_glide = self.motion.glide_state(self.motion_key("draft-glide"));
 
         // The keyboard turns the hairline primary, gliding there and back.
         // Geometry stays fixed: focus never changes border width, radius, or
         // layout.
         let composer_focused = self.has_keyboard(window, cx);
-        let hairline = gpui_base::motion::transition(
-            self.motion_id("hairline"),
+        let hairline = self.motion.transition(
+            self.motion_key("hairline"),
             if composer_focused {
                 cx.theme().primary
             } else {
                 cx.theme().border
             },
-            crate::motion::settle(),
+            &crate::motion::owned::Curve::settle(),
             window,
             cx,
         );
@@ -1831,8 +1859,8 @@ impl Render for Composer {
         // The panels above the card, each folding in as it comes and away,
         // drawn as it was, as it goes.
         let mut panels = Vec::new();
-        if let Some(shown) = crate::motion::shown(
-            self.motion_id("approval"),
+        if let Some(shown) = self.motion.shown(
+            self.motion_key("approval"),
             approval.map(|request| (request, approval_count)),
             window,
             cx,
@@ -1841,8 +1869,8 @@ impl Render for Composer {
             let panel = self.render_approval_panel(request, *count, window, cx);
             panels.push(column_fold(&shown, panel));
         }
-        if let Some(shown) = crate::motion::shown(
-            self.motion_id("control-request"),
+        if let Some(shown) = self.motion.shown(
+            self.motion_key("control-request"),
             self.control_request(cx),
             window,
             cx,
@@ -1851,19 +1879,21 @@ impl Render for Composer {
             panels.push(column_fold(&shown, panel));
         }
         if let Some(shown) =
-            crate::motion::shown(self.motion_id("user-input"), user_input, window, cx)
+            self.motion
+                .shown(self.motion_key("user-input"), user_input, window, cx)
         {
             let panel = self.render_user_input_panel(&shown.value, window, cx);
             panels.push(column_fold(&shown, panel));
         }
         if let Some(shown) =
-            crate::motion::shown(self.motion_id("fallback"), fallback_block, window, cx)
+            self.motion
+                .shown(self.motion_key("fallback"), fallback_block, window, cx)
         {
             let panel = self.render_fallback_panel(&shown.value, window, cx);
             panels.push(column_fold(&shown, panel));
         }
-        if let Some(shown) = crate::motion::shown(
-            self.motion_id("fallback-review"),
+        if let Some(shown) = self.motion.shown(
+            self.motion_key("fallback-review"),
             fallback_review,
             window,
             cx,
@@ -1871,8 +1901,8 @@ impl Render for Composer {
             let panel = self.render_fallback_review_panel(&shown.value, cx);
             panels.push(column_fold(&shown, panel));
         }
-        if let Some(shown) = crate::motion::shown(
-            self.motion_id("trigger-menu"),
+        if let Some(shown) = self.motion.shown(
+            self.motion_key("trigger-menu"),
             self.trigger_menu(cx),
             window,
             cx,
@@ -1883,7 +1913,8 @@ impl Render for Composer {
             self.menu_rows_seen.borrow_mut().clear();
         }
         if let Some(shown) =
-            crate::motion::shown(self.motion_id("goal"), composer_state.goal, window, cx)
+            self.motion
+                .shown(self.motion_key("goal"), composer_state.goal, window, cx)
         {
             let panel = self.render_goal_strip(&shown.value, window, cx);
             panels.push(column_fold(&shown, panel));

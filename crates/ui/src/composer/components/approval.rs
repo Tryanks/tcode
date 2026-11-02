@@ -15,8 +15,8 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        crate::motion::cross_fade(
-            self.motion_id("approval-request"),
+        self.motion.cross_fade_value(
+            self.motion_key("approval-request"),
             request.clone(),
             window,
             cx,
@@ -167,30 +167,32 @@ impl Composer {
             .read(cx)
             .connection_state()
             .is_connected();
-        let delivery = crate::motion::shown(
-            self.motion_id(format_args!("approval-delivery-{}", request.id)),
-            pending.then_some(connected),
-            window,
-            cx,
-        )
-        .map(|shown| {
-            let line = crate::motion::cross_fade_part(
-                self.motion_id(format_args!("approval-delivery-text-{}", request.id)),
-                shown.value,
+        let delivery = self
+            .motion
+            .shown(
+                self.motion_key(format_args!("approval-delivery-{}", request.id)),
+                pending.then_some(connected),
                 window,
                 cx,
-                |connected, _, _| {
-                    div()
-                        .child(crate::tr!(if *connected {
-                            "chat.sending"
-                        } else {
-                            "chat.waiting_connection"
-                        }))
-                        .into_any_element()
-                },
-            );
-            shown.fold(div().pb(gap).text_secondary(self.compact, cx).child(line))
-        });
+            )
+            .map(|shown| {
+                let line = self.motion.cross_fade_part(
+                    self.motion_key(format_args!("approval-delivery-text-{}", request.id)),
+                    shown.value,
+                    window,
+                    cx,
+                    |connected, _, _| {
+                        div()
+                            .child(crate::tr!(if *connected {
+                                "chat.sending"
+                            } else {
+                                "chat.waiting_connection"
+                            }))
+                            .into_any_element()
+                    },
+                );
+                shown.fold(div().pb(gap).text_secondary(self.compact, cx).child(line))
+            });
         let offline = self
             .motion
             .shown(
@@ -257,6 +259,7 @@ impl Composer {
                         self.motion_id(format_args!("approval-chevron-{}", request.id)),
                         expanded,
                     )
+                    .owned(&self.motion)
                     .text_color(muted),
                 ),
             )

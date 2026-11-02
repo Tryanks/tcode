@@ -236,8 +236,8 @@ impl Composer {
             // exists and it stops as soon as the last scheduled row disappears.
             self.scheduled_countdown_tick = None;
         }
-        let shown = crate::motion::shown(
-            self.motion_id("queue-strip"),
+        let shown = self.motion.shown(
+            self.motion_key("queue-strip"),
             (!queued.is_empty()).then_some(()),
             window,
             cx,
@@ -259,8 +259,10 @@ impl Composer {
             .into_iter()
             .enumerate()
             .map(|(index, message)| (queued_slot(message.id), (index, message)));
-        let strip = crate::motion::keyed(
-            this.motion_id("queue-rows"),
+        let strip = crate::motion::keyed::keyed_owned(
+            &this.motion,
+            this.motion_key("queue-rows"),
+            crate::motion::keyed::Fold::Down,
             rows.collect::<Vec<_>>(),
             window,
             cx,
@@ -405,6 +407,7 @@ impl Composer {
                 })
                 .child(
                     Button::new(("queue-steer", id as usize))
+                        .motion(&self.button_motion())
                         .debug_selector(move || format!("queue-steer-{id}"))
                         .ghost()
                         .xsmall()
@@ -426,6 +429,7 @@ impl Composer {
                 )
                 .child(
                     Button::new(("queue-drop", id as usize))
+                        .motion(&self.button_motion())
                         .debug_selector(move || format!("queue-drop-{id}"))
                         .ghost()
                         .xsmall()

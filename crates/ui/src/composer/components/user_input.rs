@@ -63,8 +63,10 @@ impl Composer {
         // so a way back remains while the sidebar still asks for an answer.
         let hidden = !pending.delivery.is_blocking()
             && self.ui_dismissed_request_id.as_ref() == Some(&pending.request_id);
-        crate::motion::keyed(
-            self.motion_id(format_args!("user-input-{}", pending.request_id)),
+        crate::motion::keyed::keyed_owned(
+            &self.motion,
+            self.motion_key(format_args!("user-input-{}", pending.request_id)),
+            crate::motion::keyed::Fold::Down,
             [(
                 gpui::SharedString::from(if hidden { "pill" } else { "card" }),
                 hidden,
@@ -87,6 +89,7 @@ impl Composer {
             .w_full()
             .child(
                 Button::new("ui-reveal")
+                    .motion(&self.button_motion())
                     .debug_selector(|| "ui-reveal".into())
                     .ghost()
                     .xsmall()
@@ -126,6 +129,7 @@ impl Composer {
         let multi = question.multi_select;
 
         let toggle = Button::new("ui-toggle")
+            .motion(&self.button_motion())
             .debug_selector(|| "ui-toggle".into())
             .ghost()
             .xsmall()
@@ -133,10 +137,10 @@ impl Composer {
             .icon({
                 // Up while shut, turning to point down as the answer area
                 // opens.
-                let turn = gpui_base::motion::transition(
-                    self.motion_id(format_args!("ui-toggle-{request_id}")),
+                let turn = self.motion.transition(
+                    self.motion_key(format_args!("ui-toggle-{request_id}")),
                     if expanded { 1f32 } else { 0. },
-                    crate::motion::settle(),
+                    &crate::motion::owned::Curve::settle(),
                     window,
                     cx,
                 );
@@ -180,10 +184,10 @@ impl Composer {
         // The question, previewed beside the title while the answer area is
         // shut, fades as it opens; its room stays the strip's spacer.
         .child({
-            let preview = gpui_base::motion::transition(
-                self.motion_id(format_args!("ui-preview-{request_id}")),
+            let preview = self.motion.transition(
+                self.motion_key(format_args!("ui-preview-{request_id}")),
                 if expanded { 0f32 } else { 1. },
-                crate::motion::settle(),
+                &crate::motion::owned::Curve::settle(),
                 window,
                 cx,
             );
@@ -204,6 +208,7 @@ impl Composer {
             strip
                 .child(
                     Button::new("ui-prev")
+                        .motion(&self.button_motion())
                         .debug_selector(|| "ui-prev".into())
                         .ghost()
                         .xsmall()
@@ -229,6 +234,7 @@ impl Composer {
                 )
                 .child(
                     Button::new("ui-next")
+                        .motion(&self.button_motion())
                         .debug_selector(|| "ui-next".into())
                         .ghost()
                         .xsmall()
@@ -248,6 +254,7 @@ impl Composer {
             let request_dismiss = request_id.clone();
             strip = strip.child(
                 Button::new("ui-dismiss")
+                    .motion(&self.button_motion())
                     .debug_selector(|| "ui-dismiss".into())
                     .ghost()
                     .xsmall()
@@ -270,8 +277,8 @@ impl Composer {
             .w_full()
             .gap_0()
             .child(strip);
-        let body = crate::motion::cross_fade(
-            self.motion_id(format_args!("ui-question-{request_id}")),
+        let body = self.motion.cross_fade_value(
+            self.motion_key(format_args!("ui-question-{request_id}")),
             index,
             window,
             cx,
@@ -281,28 +288,31 @@ impl Composer {
             },
         );
         let multi_done = multi && user_input_all_answered(&questions, &self.ui_selections);
-        let done = crate::motion::shown(
-            self.motion_id(format_args!("ui-done-{request_id}")),
-            multi_done.then_some(()),
-            window,
-            cx,
-        )
-        .map(|shown| {
-            let questions_submit = questions.clone();
-            let request_id = request_id.clone();
-            shown.fold_across(
-                div().pl_2().child(
-                    Button::new("ui-done")
-                        .primary()
-                        .chip()
-                        .touch(self.compact)
-                        .label(crate::tr!("userinput.done"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.ui_submit(&questions_submit, request_id.clone(), window, cx);
-                        })),
-                ),
+        let done = self
+            .motion
+            .shown(
+                self.motion_key(format_args!("ui-done-{request_id}")),
+                multi_done.then_some(()),
+                window,
+                cx,
             )
-        });
+            .map(|shown| {
+                let questions_submit = questions.clone();
+                let request_id = request_id.clone();
+                shown.fold_across(
+                    div().pl_2().child(
+                        Button::new("ui-done")
+                            .motion(&self.button_motion())
+                            .primary()
+                            .chip()
+                            .touch(self.compact)
+                            .label(crate::tr!("userinput.done"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ui_submit(&questions_submit, request_id.clone(), window, cx);
+                            })),
+                    ),
+                )
+            });
         let custom_input = self.user_input_custom.clone();
         let custom_has_text = !custom_input.read(cx).value().trim().is_empty();
         let custom_answer = h_flex()
@@ -323,6 +333,7 @@ impl Composer {
             )
             .child(
                 Button::new("ui-custom-submit")
+                    .motion(&self.button_motion())
                     .ghost()
                     .xsmall()
                     .touch(self.compact)
@@ -414,13 +425,13 @@ impl Composer {
             let request_for_click = request_id.clone();
             // The mark fills and its dot comes in as the option is chosen, so
             // the choice registers before the card moves on.
-            let chosen = gpui_base::motion::transition(
-                self.motion_id(format_args!(
+            let chosen = self.motion.transition(
+                self.motion_key(format_args!(
                     "ui-opt-{request_id}-{}-{opt_index}",
                     question.id
                 )),
                 if is_selected { 1f32 } else { 0. },
-                crate::motion::settle(),
+                &crate::motion::owned::Curve::settle(),
                 window,
                 cx,
             );
@@ -435,13 +446,13 @@ impl Composer {
                     crate::material::radius_input(cx)
                 })
                 .border_1()
-                .border_color(gpui_base::motion::transition(
-                    self.motion_id(format_args!(
+                .border_color(self.motion.transition(
+                    self.motion_key(format_args!(
                         "ui-opt-border-{request_id}-{}-{opt_index}",
                         question.id
                     )),
                     if is_selected { primary } else { muted },
-                    crate::motion::settle(),
+                    &crate::motion::owned::Curve::settle(),
                     window,
                     cx,
                 ))
