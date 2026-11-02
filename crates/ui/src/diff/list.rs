@@ -502,6 +502,44 @@ pub(crate) fn render_list<H: DiffListHost>(
     window: &mut Window,
     cx: &mut Context<H>,
 ) -> AnyElement {
+    // The unified and the split list each keep their layer (and their own
+    // list), so switching the layout cross-fades one into the other; the
+    // list left takes no keyboard or scroll while it fades.
+    let fade = crate::motion::CrossFade::new(
+        gpui::SharedString::from(format!("{id}-layout")),
+        usize::from(split),
+        2,
+        window,
+        cx,
+    );
+    let layers: Vec<(usize, AnyElement)> = [false, true]
+        .into_iter()
+        .filter(|shown| fade.shows(usize::from(*shown)))
+        .map(|shown| {
+            let list = render_layout(host, id, shown, wrap, shown != split, window, cx);
+            (
+                usize::from(shown),
+                v_flex().size_full().child(list).into_any_element(),
+            )
+        })
+        .collect();
+    fade.fill()
+        .render(layers)
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .into_any_element()
+}
+
+fn render_layout<H: DiffListHost>(
+    host: &H,
+    id: &'static str,
+    split: bool,
+    wrap: bool,
+    leaving: bool,
+    window: &mut Window,
+    cx: &mut Context<H>,
+) -> AnyElement {
     let Some(diff) = host.diff_list() else {
         return div().into_any_element();
     };
@@ -544,7 +582,7 @@ pub(crate) fn render_list<H: DiffListHost>(
         .font_family(cx.theme().mono_font_family.clone())
         .debug_selector(move || id.into())
         .key_context("TcodeDiff")
-        .track_focus(&diff.focus)
+        .when(!leaving, |list| list.track_focus(&diff.focus))
         .on_action(cx.listener(|host, _: &gpui_base::input::Copy, _, cx| {
             if let Some(list) = host.diff_list()
                 && list.selection.is_some()
@@ -557,7 +595,7 @@ pub(crate) fn render_list<H: DiffListHost>(
         .flex_1()
         .min_h_0()
         .overflow_x_scroll()
-        .track_scroll(&diff.horizontal)
+        .when(!leaving, |list| list.track_scroll(&diff.horizontal))
         .lock_scroll_axis()
         .child(crate::scroll::page_viewport(
             "diff-body-bounce",
