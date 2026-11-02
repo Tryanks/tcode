@@ -189,6 +189,7 @@ impl ChatView {
                             pinned: pinned.1 == Some(entry.id.as_str()),
                             show_actions: !turn.running && row.last_assistant,
                             copied,
+                            hover: self.hover.clone(),
                         },
                         cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));
@@ -605,6 +606,7 @@ impl ChatView {
                 markdown,
                 rewind,
                 rewind_menu,
+                hover: self.hover.clone(),
             },
             components::bubble::BubbleHandlers {
                 copy: Box::new(cx.listener(move |this, _, _, cx| {

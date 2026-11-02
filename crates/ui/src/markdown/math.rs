@@ -16,7 +16,8 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, Entity, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
-    SharedString, Styled as _, Window, div, prelude::FluentBuilder as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _,
 };
 use gpui_base::h_flex;
 use latex_rust::{MathBox, MathFont, MathStyle, layout, parse};
@@ -81,7 +82,7 @@ pub(super) fn block(
     code: AnyElement,
     path: &str,
     view: &Entity<MarkdownState>,
-    window: &Window,
+    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let tree = formula(source, true);
@@ -89,7 +90,9 @@ pub(super) fn block(
     let show_source = view.read(cx).math_sources.contains(path);
     let compact = crate::window_seam::window_is_compact(window, cx);
     let latex = source.strip_suffix('\n').unwrap_or(source).to_string();
-    let group = SharedString::from(format!("math-block-{path}"));
+    let hover = view.read(cx).hover.clone();
+    let hover_key = SharedString::from(format!("math-block-{path}"));
+    let reveal = hover.reveal(&hover_key, window, cx);
 
     let toggle = tree.is_some().then(|| {
         let (view, path) = (view.clone(), path.to_string());
@@ -129,11 +132,13 @@ pub(super) fn block(
     };
     // Revealed on hover like the message actions, and pinned where there is
     // no hover or while the source shows. Faded rather than hidden: over its
-    // own mouse-blocking hitbox the block no longer counts as hovered, so its
-    // own hover must keep it shown. Pinned beside a rendered formula on a
-    // narrow screen, so it never covers the formula's end.
+    // own mouse-blocking hitbox the block no longer counts as hovered, so the
+    // actions are a part of the block's hover. Pinned beside a rendered
+    // formula on a narrow screen, so it never covers the formula's end.
     let beside = compact && tree.is_some() && !show_source;
     let actions = h_flex()
+        .id(SharedString::from(format!("math-actions-{path}")))
+        .on_hover(hover.on_hover(hover_key.clone()))
         .when(!beside, |actions| actions.absolute().top_1().right_1())
         .when(beside, |actions| actions.flex_none().mt_1())
         .items_center()
@@ -150,10 +155,7 @@ pub(super) fn block(
         .children(toggle)
         .child(copy)
         .when(tree.is_some() && !show_source && !compact, |actions| {
-            actions
-                .opacity(0.)
-                .group_hover(group.clone(), |style| style.opacity(1.))
-                .hover(|style| style.opacity(1.))
+            actions.opacity(reveal)
         });
 
     // The actions sit on the box that shows: the formula, or its source.
@@ -187,7 +189,8 @@ pub(super) fn block(
     let body = crate::motion::SizeGlide::new(&view.read(cx).glide(path), body)
         .on_change(show_source as u64);
     let block = div()
-        .group(group)
+        .id(hover_key.clone())
+        .on_hover(hover.on_hover(hover_key))
         .w_full()
         .on_mouse_down(
             MouseButton::Right,

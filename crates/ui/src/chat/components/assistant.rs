@@ -8,8 +8,8 @@ use crate::widgets::copy::copy_button;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -72,6 +72,8 @@ pub(crate) struct AssistantData<'a> {
     pub(crate) compact: bool,
     pub(crate) show_actions: bool,
     pub(crate) copied: bool,
+    /// The timeline's hover, which reveals the message's actions.
+    pub(crate) hover: crate::motion::ListHover,
 }
 
 /// The message's own context-menu item: the whole text, as the hover Copy
@@ -105,6 +107,7 @@ pub(crate) fn assistant(
         compact,
         show_actions,
         copied,
+        hover,
     } = data;
     let menu_items = copy_message_items(Arc::from(text));
     let content = markdown.map_or_else(
@@ -142,14 +145,15 @@ pub(crate) fn assistant(
 
     // The action row folds in when the turn settles on this message, and out
     // when it moves on.
-    let group_key = SharedString::from(format!("assistant-{id}"));
+    let hover_key = SharedString::from(format!("assistant-{id}"));
     let fold_id = SharedString::from(format!("assistant-actions-{id}"));
     let key = format!("assistant:{id}");
-    let group = group_key.clone();
+    let on_hover = hover.on_hover(hover_key.clone());
     v_flex()
+        .id(hover_key.clone())
         .w_full()
         .items_start()
-        .group(group_key)
+        .on_hover(on_hover)
         .child(message)
         .child(crate::motion::Sampled::new(
             move |window, cx| match crate::motion::shown(
@@ -159,6 +163,7 @@ pub(crate) fn assistant(
                 cx,
             ) {
                 Some(fold) => {
+                    let reveal = hover.reveal(&hover_key, window, cx);
                     let actions = h_flex()
                         .gap(px(2.))
                         .items_center()
@@ -166,7 +171,7 @@ pub(crate) fn assistant(
                     fold.fold(
                         div()
                             .pt(px(MESSAGE_GAP))
-                            .child(reserve_action_row(actions, group, pinned, compact)),
+                            .child(reserve_action_row(actions, reveal, pinned, compact)),
                     )
                 }
                 None => div().into_any_element(),
@@ -177,9 +182,12 @@ pub(crate) fn assistant(
 }
 
 /// Reserve action-row height so hover visibility never shifts the timeline.
+/// Unpinned on a pointer, the row is drawn at `reveal`, the message's hover
+/// reveal from the timeline's [`crate::motion::ListHover`], and takes no
+/// input while it is out.
 pub(crate) fn reserve_action_row(
     actions: impl IntoElement,
-    group_key: SharedString,
+    reveal: f32,
     pinned: bool,
     compact: bool,
 ) -> Div {
@@ -192,8 +200,8 @@ pub(crate) fn reserve_action_row(
         .flex()
         .items_center()
         .when(!pinned && !compact, |this| {
-            this.invisible()
-                .group_hover(group_key, |style| style.visible())
+            this.opacity(reveal)
+                .when(reveal <= 0., |this| this.invisible())
         })
         .child(actions)
 }

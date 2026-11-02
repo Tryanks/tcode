@@ -73,6 +73,9 @@ pub struct MarkdownState {
     pub(super) base_dir: Option<PathBuf>,
     pub(super) image_resolver: Option<ImageResolver>,
     link_targets: LinkTargetCache,
+    /// The block the pointer is over, whose actions (a formula's, a
+    /// diagram's) fade in.
+    pub(super) hover: crate::motion::ListHover,
     pub(super) pending_context: Option<PendingContextTarget>,
     /// Keyed by the copied code block's root path.
     pub(super) copied: CopiedMark,
@@ -150,6 +153,7 @@ impl MarkdownState {
             base_dir: None,
             image_resolver: None,
             link_targets: LinkTargetCache::default(),
+            hover: crate::motion::ListHover::new(cx.entity_id()),
             pending_context: None,
             copied: CopiedMark::default(),
             math_sources: Default::default(),
