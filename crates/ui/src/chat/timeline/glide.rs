@@ -86,7 +86,7 @@ impl ChatView {
     /// activities stay on screen in the run's own row.
     pub(super) fn rows_leaving(&self, old: &[TimelineRow], cx: &App) -> Leaving {
         let keys = |rows: &[TimelineRow]| rows.iter().map(|row| row.identity).collect::<Vec<_>>();
-        let (_, left) = crate::motion::list_rows::changes(&keys(old), &keys(&self.rows));
+        let left = crate::motion::list_rows::changes(&keys(old), &keys(&self.rows)).left;
         if left.is_empty() {
             return Leaving::default();
         }

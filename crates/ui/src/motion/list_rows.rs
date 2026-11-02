@@ -280,11 +280,20 @@ pub(crate) fn arrived_rows(
     arrived
 }
 
+/// What replacing a list's rows brought and took away.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Changes {
+    /// Each new row whose key is new, by its index among the new rows, with
+    /// how it came in.
+    pub(crate) arrived: Vec<(usize, Arrival)>,
+    /// Each old row whose key went, by its index among the old rows, with
+    /// the surviving row it folds against.
+    pub(crate) left: Vec<(usize, Attach)>,
+}
+
 /// What replacing the rows keyed `old` with the rows keyed `new` brought
-/// and took away: each new row whose key is new, by its index in `new`, with
-/// how it came in; and each old row whose key went, by its index in `old`,
-/// with the surviving row it folds against.
-pub(crate) fn changes(old: &[u64], new: &[u64]) -> (Vec<(usize, Arrival)>, Vec<(usize, Attach)>) {
+/// and took away.
+pub(crate) fn changes(old: &[u64], new: &[u64]) -> Changes {
     let before: std::collections::HashSet<u64> = old.iter().copied().collect();
     let after: std::collections::HashSet<u64> = new.iter().copied().collect();
     let last_kept = new.iter().rposition(|key| before.contains(key));
@@ -317,7 +326,7 @@ pub(crate) fn changes(old: &[u64], new: &[u64]) -> (Vec<(usize, Arrival)>, Vec<(
             Some((index, attach))
         })
         .collect();
-    (arrived, left)
+    Changes { arrived, left }
 }
 
 /// What a [`RowGlide`] does this frame.
@@ -590,10 +599,18 @@ mod tests {
     /// row when none was above it. Kept rows, moved or not, are neither.
     #[test]
     fn a_replacement_tells_what_came_and_what_went() {
-        let (arrived, left) = changes(&[1, 2, 3, 4], &[3, 5, 1, 6]);
-        assert_eq!(arrived, [(1, Arrival::Inserted), (3, Arrival::Appended)]);
-        assert_eq!(left, [(1, Attach::Below(1)), (3, Attach::Below(3))]);
-        let (_, left) = changes(&[1, 2, 3], &[3]);
-        assert_eq!(left, [(0, Attach::Above(3)), (1, Attach::Above(3))]);
+        let replaced = changes(&[1, 2, 3, 4], &[3, 5, 1, 6]);
+        assert_eq!(
+            replaced.arrived,
+            [(1, Arrival::Inserted), (3, Arrival::Appended)]
+        );
+        assert_eq!(
+            replaced.left,
+            [(1, Attach::Below(1)), (3, Attach::Below(3))]
+        );
+        assert_eq!(
+            changes(&[1, 2, 3], &[3]).left,
+            [(0, Attach::Above(3)), (1, Attach::Above(3))]
+        );
     }
 }
