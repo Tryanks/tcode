@@ -11523,11 +11523,14 @@ mod tests {
             cx.debug_bounds("hosts-pair-error").is_some(),
             "the paste page flags what is not an invitation"
         );
+        // Back widens in with the pairing page; it is pressed once there.
+        crate::test_frames::draw_settled(cx);
         let back = cx
             .debug_bounds("hosts-back")
             .expect("the pairing page offers Back");
         cx.simulate_click(back.center(), gpui::Modifiers::default());
-        draw(cx);
+        // The pairing page fades out over Machines, drawn as it was.
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.destination(cx)),
             Destination::Hosts
