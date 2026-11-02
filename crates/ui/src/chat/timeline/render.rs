@@ -937,18 +937,15 @@ impl ChatView {
                 return components::work_log::work_log_body(rows).into_any_element();
             }
             RowPart::WorkLogLive => {
-                return v_flex()
-                    .w_full()
-                    .gap_1()
-                    .children(self.compose_work_log_rows(
-                        activities,
-                        cwd,
-                        live_reasoning_id,
-                        running,
-                        window,
-                        cx,
-                    ))
-                    .into_any_element();
+                return self.compose_live_window(
+                    (index, segment_id),
+                    (activities, activities),
+                    cwd,
+                    live_reasoning_id,
+                    running,
+                    window,
+                    cx,
+                );
             }
             RowPart::Segment | RowPart::WorkLogHeader { .. } => {}
         }
@@ -997,19 +994,15 @@ impl ChatView {
             if !folded.is_empty() {
                 flow = flow.children(std::mem::take(&mut self.row_folds));
             }
-            flow = flow.child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .children(self.compose_work_log_rows(
-                        visible,
-                        cwd,
-                        live_reasoning_id,
-                        running,
-                        window,
-                        cx,
-                    )),
-            );
+            flow = flow.child(self.compose_live_window(
+                (index, segment_id),
+                (activities, visible),
+                cwd,
+                live_reasoning_id,
+                running,
+                window,
+                cx,
+            ));
         }
 
         flow.into_any_element()
@@ -1026,46 +1019,109 @@ impl ChatView {
     ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
         for range in tools::run::windows(activities) {
-            if tools::run::is_run(activities, &range) {
-                rows.push(self.compose_computer_run(
-                    &activities[range],
-                    cwd,
-                    live_reasoning_id,
-                    window,
-                    cx,
-                ));
-                continue;
-            }
-            let (activity_index, entry) = (range.start, activities[range.start]);
-            let recency = AutoActivityRecency::from_newer_activity_count(
-                activities.len() - activity_index - 1,
-            );
-            if let Some(edit) = tools::diff::edit(entry, cwd) {
-                rows.extend(self.compose_edit_rows(
-                    entry,
-                    cwd,
-                    &edit,
-                    auto_expand,
-                    recency,
-                    window,
-                    cx,
-                ));
-            } else {
-                rows.push(self.compose_activity_row(
-                    (entry, cwd),
-                    ActivityRow {
-                        compact: false,
-                        live_reasoning: live_reasoning_id == Some(entry.id.as_str()),
-                        auto_expand,
-                        recency,
-                        images_inline: true,
-                    },
-                    window,
-                    cx,
-                ));
-            }
+            let newer = activities.len() - range.start - 1;
+            rows.extend(self.compose_activity_window(
+                &activities[range],
+                newer,
+                cwd,
+                (live_reasoning_id, auto_expand),
+                window,
+                cx,
+            ));
         }
         rows
+    }
+
+    /// A live run's newest activities, one window each. As the run moves
+    /// on, the oldest folds away into the Work Log's header, rebuilt from
+    /// the run (`run`, which holds it still) while it goes, and a new one
+    /// folds in.
+    #[allow(clippy::too_many_arguments)]
+    fn compose_live_window(
+        &mut self,
+        (index, segment_id): (usize, &str),
+        (run, visible): (&[&TimelineEntry], &[&TimelineEntry]),
+        cwd: &Path,
+        live_reasoning_id: Option<&str>,
+        auto_expand: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let items = tools::run::windows(visible).into_iter().map(|range| {
+            let newer = visible.len() - range.start - 1;
+            let ids: Vec<String> = visible[range]
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
+            (SharedString::from(ids[0].clone()), (ids, newer))
+        });
+        let gap = gpui::rems(0.25).to_pixels(window.rem_size());
+        crate::motion::keyed(
+            SharedString::from(format!("live-window-{index}-{segment_id}")),
+            items,
+            window,
+            cx,
+            |_, (ids, newer), window, cx| {
+                let entries: Vec<&TimelineEntry> = ids
+                    .iter()
+                    .filter_map(|id| run.iter().find(|entry| entry.id == *id).copied())
+                    .collect();
+                if entries.is_empty() {
+                    // It left the run: only its place folds away.
+                    return div().into_any_element();
+                }
+                let rows = self.compose_activity_window(
+                    &entries,
+                    *newer,
+                    cwd,
+                    (live_reasoning_id, auto_expand),
+                    window,
+                    cx,
+                );
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .pb(gap)
+                    .children(rows)
+                    .into_any_element()
+            },
+        )
+        // Each window brings its gap below it; the last one's is not the
+        // list's.
+        .render(v_flex().w_full().mb(-gap))
+    }
+
+    /// One window of a Work Log: a computer run, an edit's file windows, or
+    /// one activity, with `newer` windows after it in its list.
+    fn compose_activity_window(
+        &mut self,
+        activities: &[&TimelineEntry],
+        newer: usize,
+        cwd: &Path,
+        (live_reasoning_id, auto_expand): (Option<&str>, bool),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        if tools::run::is_run(activities, &(0..activities.len())) {
+            return vec![self.compose_computer_run(activities, cwd, live_reasoning_id, window, cx)];
+        }
+        let entry = activities[0];
+        let recency = AutoActivityRecency::from_newer_activity_count(newer);
+        if let Some(edit) = tools::diff::edit(entry, cwd) {
+            return self.compose_edit_rows(entry, cwd, &edit, auto_expand, recency, window, cx);
+        }
+        vec![self.compose_activity_row(
+            (entry, cwd),
+            ActivityRow {
+                compact: false,
+                live_reasoning: live_reasoning_id == Some(entry.id.as_str()),
+                auto_expand,
+                recency,
+                images_inline: true,
+            },
+            window,
+            cx,
+        )]
     }
 
     /// An edit's windows, one per file it touched. A harness's own diff
