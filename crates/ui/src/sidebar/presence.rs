@@ -32,9 +32,6 @@ pub(super) struct RowPresence<V> {
     factors: HashMap<u64, f32>,
     /// The keys of the rows the list holds.
     keys: Vec<u64>,
-    /// What the list shows (a layout, a project filter): a list whose scope
-    /// changes is replaced, not changed under the reader's eyes.
-    scope: u64,
 }
 
 impl<V> Default for RowPresence<V> {
@@ -43,7 +40,6 @@ impl<V> Default for RowPresence<V> {
             rows: ListRows::default(),
             factors: HashMap::new(),
             keys: Vec::new(),
-            scope: 0,
         }
     }
 }
@@ -51,17 +47,17 @@ impl<V> Default for RowPresence<V> {
 impl<V: Clone> RowPresence<V> {
     /// The list's rows are now `rows`, each a key with its fold factor (a
     /// negative one is a row a moving disclosure leaves out, which the list
-    /// does not hold), showing `scope`. Called before `list` is spliced,
-    /// while it still lays out the rows it drew: a row that came in where
-    /// the view was arrives, and one that went while in view folds away,
-    /// drawn from what `left` gives for its old index. The rows a list opens
-    /// with, or shows for a new scope, are in place at once, as are rows that
-    /// came in out of view. While a disclosure moves (`folding`), what comes
-    /// and goes is its rows, which it folds.
+    /// does not hold). Called before `list` is spliced, while it still lays
+    /// out the rows it drew: a row that came in where the view was arrives,
+    /// and one that went while in view folds away, drawn from what `left`
+    /// gives for its old index. A list replaced whole (another project
+    /// filter, another layout) is the same change of many rows at once. The
+    /// rows a list opens with are in place at once, as are rows that came in
+    /// out of view. While a disclosure moves (`folding`), what comes and goes
+    /// is its rows, which it folds.
     pub(super) fn update(
         &mut self,
         rows: &[(u64, f32)],
-        scope: impl Hash,
         folding: bool,
         list: &ListState,
         mut left: impl FnMut(usize) -> V,
@@ -72,10 +68,7 @@ impl<V: Clone> RowPresence<V> {
             .filter(|(_, factor)| *factor >= 0.)
             .map(|(key, _)| *key)
             .collect();
-        let scope = row_key(scope);
-        if scope != self.scope {
-            self.rows.clear();
-        } else if keys != self.keys && !folding {
+        if !self.factors.is_empty() && keys != self.keys && !folding {
             let top = list.logical_scroll_top();
             let at_top = top.item_ix == 0 && top.offset_in_item <= px(0.);
             let viewport = list.viewport_bounds();
@@ -116,7 +109,6 @@ impl<V: Clone> RowPresence<V> {
         }
         self.factors = rows.iter().copied().collect();
         self.keys = keys;
-        self.scope = scope;
     }
 
     /// Row `key`'s arrival and the rows folding away against it, this frame.

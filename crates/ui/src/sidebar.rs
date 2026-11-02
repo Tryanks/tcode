@@ -624,6 +624,8 @@ pub struct SessionsSidebar {
     folds: HashMap<String, f32>,
     /// Whether a disclosure moved this frame, bringing or taking its rows.
     folding: bool,
+    /// The scope the disclosures were last sampled in.
+    fold_scope: Option<String>,
     flat_list_state: ListState,
     /// The row keys `flat_list_state` was last spliced for.
     flat_row_keys: Vec<(&'static str, String)>,
@@ -643,6 +645,7 @@ pub struct SessionsSidebar {
     compact_scroll: crate::motion::ListScroll,
     compact_model: Option<Rc<CompactListModel>>,
     compact_presence: presence::RowPresence<(Rc<CompactListModel>, usize)>,
+    compact_flip: crate::motion::ListFlip,
     compact_model_dirty: bool,
     /// Returning from a thread scrolls its row into the upper part of the
     /// list; the row's next paint performs the scroll and clears this.
@@ -795,7 +798,7 @@ impl SessionsSidebar {
     fn navigation_threads(&mut self, cx: &mut Context<Self>) -> Vec<String> {
         if self.compact(cx) {
             return self
-                .compact_model(cx)
+                .compact_model(None, cx)
                 .rows
                 .iter()
                 .filter_map(|row| match row {
@@ -933,7 +936,12 @@ impl SessionsSidebar {
             folds.insert(key, progress);
         }
         self.folds = folds;
-        self.folding = moving;
+        // A new scope puts its disclosures where they rest at once: the list
+        // it brings is replaced as a whole, its rows coming and going as the
+        // list's own (`RowPresence`), not as a disclosure's.
+        let rescoped = self.fold_scope.as_deref() != Some(scope.as_str());
+        self.folding = moving && !rescoped;
+        self.fold_scope = Some(scope);
         if moving {
             self.compact_model_dirty = true;
         }
@@ -1096,6 +1104,7 @@ impl SessionsSidebar {
             hover: crate::motion::ListHover::new(),
             folds: HashMap::new(),
             folding: false,
+            fold_scope: None,
             flat_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             flat_row_keys: Vec::new(),
             flat_flip: Default::default(),
@@ -1109,6 +1118,7 @@ impl SessionsSidebar {
             grouped_drawn: Rc::default(),
             compact_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             compact_presence: Default::default(),
+            compact_flip: Default::default(),
             compact_scroll: Default::default(),
             compact_model: None,
             compact_model_dirty: true,
@@ -3849,7 +3859,13 @@ impl SessionsSidebar {
     /// Store changes and local disclosures invalidate the model. Scroll and
     /// navigation-animation frames only clone the shared snapshot; ListState
     /// measures the visible rows, including project captions of different height.
-    fn compact_model(&mut self, cx: &mut Context<Self>) -> Rc<CompactListModel> {
+    /// With the `window` the list is drawn in, rows that move glide there
+    /// from where they were.
+    fn compact_model(
+        &mut self,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) -> Rc<CompactListModel> {
         let now = now_secs();
         let locale = rust_i18n::locale();
         if self.compact_model_dirty
@@ -4042,12 +4058,27 @@ impl SessionsSidebar {
             let drawn = self.compact_model.clone().unwrap_or_default();
             self.compact_presence.update(
                 &all,
-                format!("{layout:?}"),
                 self.folding,
                 &self.compact_list_state,
                 |index| (drawn.clone(), index),
                 cx,
             );
+            let previous = |index: usize| {
+                self.compact_model
+                    .as_ref()
+                    .and_then(|model| model.rows.get(index))
+                    .map(CompactListRow::key)
+            };
+            if let Some(window) = window
+                && !rows
+                    .iter()
+                    .map(CompactListRow::key)
+                    .eq((0..self.compact_list_state.item_count()).filter_map(previous))
+            {
+                let keys: Vec<&str> = rows.iter().map(CompactListRow::key).collect();
+                self.compact_flip
+                    .replace(&self.compact_list_state, previous, &keys, window);
+            }
             replace_list_rows(
                 &self.compact_list_state,
                 |index| {
@@ -4206,7 +4237,7 @@ impl SessionsSidebar {
     fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         #[cfg(test)]
         self.compact_rows_rendered.set(0);
-        let model = self.compact_model(cx);
+        let model = self.compact_model(Some(window), cx);
         let layout = self.store.read(cx).sidebar_layout();
         let body = self.loading_body(
             move |this, window, cx| {
@@ -4309,7 +4340,14 @@ impl SessionsSidebar {
                                     let folded = this.fold_row(factor, compact_width, window, cx, |this, window, cx| {
                                         this.render_compact_row(&model.rows[index], window, cx)
                                     });
-                                    let key = presence::row_key(model.rows[index].key());
+                                    let name = model.rows[index].key();
+                                    let key = presence::row_key(name);
+                                    // The row's content glides to its new place; what folds away against it stays with its layout.
+                                    let folded = this.compact_flip.row(
+                                        index,
+                                        SharedString::from(format!("compact-{name}")),
+                                        folded,
+                                    );
                                     this.compact_presence.around(key, cx).draw(
                                         "compact-row",
                                         key,
@@ -4814,7 +4852,6 @@ impl SessionsSidebar {
             let drawn = self.grouped_drawn.clone();
             self.grouped_presence.update(
                 &all,
-                (),
                 self.folding,
                 &self.grouped_list_state,
                 |index| (drawn.clone(), index),
@@ -4857,7 +4894,13 @@ impl SessionsSidebar {
                         this.render_grouped_row(index, row, &frame.groups, &frame.flags, window, cx)
                     });
                 let key = presence::row_key(name);
-                let row = this.grouped_presence.around(key, cx).draw(
+                // The row's content glides to its new place; what folds away against it stays with its layout.
+                let folded = flip.row(
+                    index,
+                    SharedString::from(format!("grouped-{}-{}", name.0, name.1)),
+                    folded,
+                );
+                this.grouped_presence.around(key, cx).draw(
                     "grouped-row",
                     key,
                     Glide::Rest,
@@ -4876,11 +4919,6 @@ impl SessionsSidebar {
                         )
                     },
                     window,
-                );
-                flip.row(
-                    index,
-                    SharedString::from(format!("grouped-{}-{}", name.0, name.1)),
-                    row,
                 )
             }),
         )
@@ -4991,7 +5029,6 @@ impl SessionsSidebar {
             let drawn = self.flat_drawn.clone();
             self.flat_presence.update(
                 &all,
-                &scope,
                 self.folding,
                 &self.flat_list_state,
                 |index| (drawn.clone(), index),
@@ -5056,7 +5093,13 @@ impl SessionsSidebar {
                 });
                 let name = frame.rows.get(index).map_or(("", ""), FlatListRow::key);
                 let key = presence::row_key(name);
-                let row = this.flat_presence.around(key, cx).draw(
+                // The row's content glides to its new place; what folds away against it stays with its layout.
+                let folded = flip.row(
+                    index,
+                    SharedString::from(format!("flat-{}-{}", name.0, name.1)),
+                    folded,
+                );
+                this.flat_presence.around(key, cx).draw(
                     "flat-row",
                     key,
                     Glide::Rest,
@@ -5065,11 +5108,6 @@ impl SessionsSidebar {
                         this.render_flat_row(frame, *index, window, cx)
                     },
                     window,
-                );
-                flip.row(
-                    index,
-                    SharedString::from(format!("flat-{}-{}", name.0, name.1)),
-                    row,
                 )
             }),
         )
@@ -5675,6 +5713,74 @@ mod tests {
         );
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds(header).is_none(), "and is gone once it has");
+
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// On the phone, pinning a thread is one change that brings the Pinned
+    /// and Active captions and moves rows past each other: each thread
+    /// starts from where it was and glides to its new place, one way and
+    /// never in a jump.
+    #[gpui::test]
+    fn a_phone_list_change_that_inserts_and_reorders_moves_every_row_gradually(
+        cx: &mut TestAppContext,
+    ) {
+        let (sidebar, store, window_state, mut driver, host, root) =
+            sidebar_over_host(cx, "sidebar-phone-reorder", &["newest", "middle", "oldest"]);
+        cx.update(|cx| window_state.update(cx, |state, cx| state.set_compact(true, cx)));
+        let (_, cx) =
+            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        crate::test_frames::draw_settled(cx);
+        let top = |id: &str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("compact-row-{id}").leak())
+                .unwrap_or_else(|| panic!("{id} is drawn"))
+                .top()
+        };
+        let before = [top("newest", cx), top("oldest", cx)];
+
+        cx.update(|window, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.on_pin(&ThreadPin("oldest".into()), window, cx)
+            })
+        });
+        driver.wait_until(cx, &store, "the pin", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .thread_meta("oldest")
+                    .is_some_and(|meta| meta.pinned_at.is_some())
+            })
+        });
+        draw(cx);
+        let mut tops = vec![[top("newest", cx), top("oldest", cx)]];
+        for _ in 0..20 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+            tops.push([top("newest", cx), top("oldest", cx)]);
+        }
+        crate::test_frames::draw_settled(cx);
+        let after = [top("newest", cx), top("oldest", cx)];
+        assert!(after[1] < after[0], "Pinned leads: {after:?}");
+        assert_eq!(tops[0], before, "every row starts from where it was");
+        assert_eq!(*tops.last().unwrap(), after, "{tops:?}");
+        for row in 0..2 {
+            let path: Vec<_> = tops.iter().map(|tops| tops[row]).collect();
+            let distance = (after[row] - before[row]).abs();
+            assert!(distance > px(0.), "row {row} moved: {path:?}");
+            assert!(
+                path.windows(2).all(|pair| {
+                    let step = f32::from(pair[1] - pair[0]);
+                    step.abs() < f32::from(distance) / 2.
+                        && step * f32::from(after[row] - before[row]) >= 0.
+                }),
+                "row {row} jumped or went back: {path:?}"
+            );
+        }
 
         driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
@@ -6486,6 +6592,9 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        // The list the new layout brings folds its rows in; the reader
+        // presses a header once it is there.
+        draw_settled(cx);
         let headers = cx.debug_bounds("compact-group-header").is_some();
         if quick_chat {
             assert!(store.read_with(cx, |store, _| {
@@ -7695,7 +7804,7 @@ mod tests {
             let shelves = sidebar.update(cx, |sidebar, cx| {
                 if compact {
                     sidebar
-                        .compact_model(cx)
+                        .compact_model(None, cx)
                         .rows
                         .iter()
                         .filter_map(|row| match row {
@@ -7773,7 +7882,7 @@ mod tests {
                 // A shelf row shows when it settled, an active row its last update.
                 let shown_times = sidebar.update(cx, |sidebar, cx| {
                     sidebar
-                        .compact_model(cx)
+                        .compact_model(None, cx)
                         .rows
                         .iter()
                         .filter_map(|row| match row {
@@ -7962,7 +8071,7 @@ mod tests {
             let target = if compact {
                 sidebar.update(cx, |sidebar, cx| {
                     sidebar
-                        .compact_model(cx)
+                        .compact_model(None, cx)
                         .rows
                         .iter()
                         .position(
