@@ -1401,8 +1401,16 @@ impl PullRequestsPanel {
                     }),
             ),
         });
-        // The pointer over the row fades the menu button in over the trailing signal.
-        let menu_shown = (!compact).then(|| self.hover.reveal(&row_id, window, cx));
+        // The pointer over the row, or focus on the menu button, fades the button in over
+        // the trailing signal.
+        let menu_id = gpui::ElementId::from(SharedString::from(format!(
+            "pr-menu-{}-{}-{}",
+            key.host, key.repository, key.number
+        )));
+        let (menu_focus, menu_focused) =
+            crate::motion::focus_ring::focus_reveal(&menu_id, false, window, cx);
+        let menu_shown =
+            (!compact).then(|| self.hover.reveal(&row_id, window, cx).max(menu_focused));
         let trailing = trailing.map(|trailing| {
             crate::motion::cross_fade(
                 (row_key.clone(), "trailing"),
@@ -1532,41 +1540,34 @@ impl PullRequestsPanel {
                             .child(trailing)
                     }))
                     .child(
-                        Button::new(SharedString::from(format!(
-                            "pr-menu-{}-{}-{}",
-                            key.host, key.repository, key.number
-                        )))
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::Ellipsis)
-                        .aria_label(
-                            crate::tr!(
-                                "pull_requests.actions_for",
-                                number = key.number.to_string()
+                        Button::new(menu_id)
+                            .track_focus(&menu_focus)
+                            .ghost()
+                            .small()
+                            .compact()
+                            .icon(IconName::Ellipsis)
+                            .aria_label(
+                                crate::tr!(
+                                    "pull_requests.actions_for",
+                                    number = key.number.to_string()
+                                )
+                                .into_owned(),
                             )
-                            .into_owned(),
-                        )
-                        .tooltip(
-                            crate::tr!(
-                                "pull_requests.actions_for",
-                                number = key.number.to_string()
+                            .tooltip(
+                                crate::tr!(
+                                    "pull_requests.actions_for",
+                                    number = key.number.to_string()
+                                )
+                                .into_owned(),
                             )
-                            .into_owned(),
-                        )
-                        .when_some(menu_shown, |button, shown| {
-                            button
-                                .absolute()
-                                .right_0()
-                                .top_0()
-                                .opacity(shown)
-                                .focus(|button| button.opacity(1.))
-                        })
-                        .dropdown_menu({
-                            let menu = menu.clone();
-                            move |state, window, cx| (menu)(state, window, cx)
-                        })
-                        .touch(compact),
+                            .when_some(menu_shown, |button, shown| {
+                                button.absolute().right_0().top_0().opacity(shown)
+                            })
+                            .dropdown_menu({
+                                let menu = menu.clone();
+                                move |state, window, cx| (menu)(state, window, cx)
+                            })
+                            .touch(compact),
                     ),
             );
 
