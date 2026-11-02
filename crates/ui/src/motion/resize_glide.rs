@@ -4,8 +4,8 @@
 use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, App, Axis, ElementId, Entity, IntoElement, ParentElement as _, Pixels, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Axis, ElementId, Entity, IntoElement, ParentElement as _, Pixels, Size,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{
     ElementExt as _, ResizableState,
@@ -96,9 +96,10 @@ pub(crate) struct ResizeGlide {
 #[derive(Default)]
 struct Slot {
     shown: bool,
-    /// The size the panel's content was drawn at, along the group's axis,
-    /// recorded by [`ResizeFrame::hold`].
-    drawn: Rc<Cell<Option<Pixels>>>,
+    /// The size the panel's content was drawn at, recorded by
+    /// [`ResizeFrame::hold`]; both sides, so a group that turns to the other
+    /// axis knows where its panels start.
+    drawn: Rc<Cell<Option<Size<Pixels>>>>,
 }
 
 struct Glide {
@@ -118,7 +119,7 @@ struct Glide {
 pub(crate) struct ResizeFrame {
     axis: Axis,
     pins: Vec<Pin>,
-    drawn: Vec<Rc<Cell<Option<Pixels>>>>,
+    drawn: Vec<Rc<Cell<Option<Size<Pixels>>>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -149,6 +150,16 @@ impl ResizeGlide {
             slots: Vec::new(),
             glide: None,
             generation: 0,
+        }
+    }
+
+    /// Lay the group out along `axis` from now on. A glide under way lands;
+    /// the sizes its panels were last drawn at are kept, so a change of
+    /// which panels show on the frame it turns glides along the new axis.
+    pub(crate) fn turn(&mut self, axis: Axis) {
+        if self.axis != axis {
+            self.axis = axis;
+            self.glide = None;
         }
     }
 
@@ -274,14 +285,19 @@ impl ResizeGlide {
             .iter()
             .enumerate()
             .map(|(ix, slot)| {
+                let drawn = slot
+                    .drawn
+                    .get()
+                    .map(|drawn| along(drawn, self.axis))
+                    .unwrap_or_default();
                 let gliding =
                     self.glide.as_ref().filter(|glide| glide.mounted[ix]).map(
                         |glide| match glide.to[ix] {
                             Some(_) => glide.now[ix],
-                            None => slot.drawn.get().unwrap_or_default(),
+                            None => drawn,
                         },
                     );
-                gliding.or_else(|| slot.shown.then(|| slot.drawn.get().unwrap_or_default()))
+                gliding.or_else(|| slot.shown.then_some(drawn))
             })
             .collect();
         let extent: Pixels = current.iter().flatten().copied().sum();
@@ -404,13 +420,17 @@ impl ResizeFrame {
             )
             .on_prepaint(move |bounds, _, _| {
                 if let Some(drawn) = drawn {
-                    drawn.set(Some(match axis {
-                        Axis::Horizontal => bounds.size.width,
-                        Axis::Vertical => bounds.size.height,
-                    }));
+                    drawn.set(Some(bounds.size));
                 }
             })
             .into_any_element()
+    }
+}
+
+fn along(size: Size<Pixels>, axis: Axis) -> Pixels {
+    match axis {
+        Axis::Horizontal => size.width,
+        Axis::Vertical => size.height,
     }
 }
 
