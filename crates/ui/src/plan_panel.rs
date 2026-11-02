@@ -5,7 +5,8 @@ use crate::widgets::spinner::Spinner;
 use agent::{PlanStep, PlanStepStatus};
 use gpui::{
     AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 
@@ -15,6 +16,8 @@ use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 pub struct PlanPanel {
     store: Entity<WorkspaceStore>,
     vscroll: ScrollHandle,
+    /// The steps last shown, drawn while an emptied list fades out.
+    last_steps: Vec<PlanStep>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -33,6 +36,7 @@ impl PlanPanel {
         Self {
             store,
             vscroll: ScrollHandle::new(),
+            last_steps: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -69,22 +73,46 @@ impl PlanPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let foreground = cx.theme().foreground;
         let primary = cx.theme().primary;
-
-        let marker: AnyElement = match step.status {
-            PlanStepStatus::Completed => Icon::new(IconName::CircleCheck)
-                .text_color(muted)
-                .into_any_element(),
-            PlanStepStatus::InProgress => Spinner::new().color(primary).into_any_element(),
-            PlanStepStatus::Pending => Icon::new(IconName::CircleDot)
-                .text_color(muted)
-                .into_any_element(),
-        };
-
-        let mut text = div().flex_1().min_w_0().child(step.step.clone());
-        if step.status == PlanStepStatus::Completed {
-            text = text.line_through().text_color(muted);
-        }
+        let status = step.status;
+        // The marker cross-fades as the step moves on, and a finished step's
+        // text fades to muted as it is struck through.
+        let marker = crate::motion::Sampled::new(move |window, cx| {
+            crate::motion::cross_fade_part(
+                ("plan-step-marker", index),
+                status,
+                window,
+                cx,
+                move |status, _, _| match status {
+                    PlanStepStatus::Completed => Icon::new(IconName::CircleCheck)
+                        .text_color(muted)
+                        .into_any_element(),
+                    PlanStepStatus::InProgress => Spinner::new().color(primary).into_any_element(),
+                    PlanStepStatus::Pending => Icon::new(IconName::CircleDot)
+                        .text_color(muted)
+                        .into_any_element(),
+                },
+            )
+        });
+        let completed = status == PlanStepStatus::Completed;
+        let label = step.step.clone();
+        let text = crate::motion::Sampled::new(move |window, cx| {
+            let color = gpui_base::motion::transition(
+                gpui::ElementId::from(("plan-step-text", index)),
+                if completed { muted } else { foreground },
+                crate::motion::settle(),
+                window,
+                cx,
+            );
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(color)
+                .when(completed, |text| text.line_through())
+                .child(label)
+                .into_any_element()
+        });
 
         h_flex()
             .id(("plan-step", index))
@@ -128,37 +156,54 @@ impl Render for PlanPanel {
             .session_plan()
             .map(|plan| plan.steps.clone())
             .unwrap_or_default();
-        if steps.is_empty() {
-            return v_flex().size_full().child(self.render_empty(cx));
+        // The step list and the empty state cross-fade; a list that empties
+        // leaves as it last stood.
+        let empty = steps.is_empty();
+        if !empty {
+            self.last_steps = steps;
         }
-
-        // A compact page is inset from the window edges; the right column keeps
-        // its denser padding.
-        let compact = crate::window_seam::window_is_compact(window, cx);
-        let inset = if compact {
-            material::COMPACT_PAGE_INSET
-        } else {
-            material::CARD_INSET
-        };
-        let column = v_flex()
-            .w_full()
-            .min_w_0()
-            .px(px(inset))
-            .py_3()
-            .gap_3()
-            .child(self.render_steps(&steps, compact, cx));
-
-        v_flex().size_full().child(crate::scroll::page_viewport(
-            "plan-scroll-bounce",
-            &self.vscroll,
-            div()
-                .id("plan-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .lock_scroll_axis()
-                .track_scroll(&self.vscroll)
-                .child(column),
-        ))
+        let fade =
+            crate::motion::CrossFade::new("plan-panel", usize::from(!empty), 2, window, cx).fill();
+        let mut layers = Vec::new();
+        if fade.shows(0) {
+            layers.push((0, self.render_empty(cx)));
+        }
+        if fade.shows(1) {
+            // A compact page is inset from the window edges; the right column keeps
+            // its denser padding.
+            let compact = crate::window_seam::window_is_compact(window, cx);
+            let inset = if compact {
+                material::COMPACT_PAGE_INSET
+            } else {
+                material::CARD_INSET
+            };
+            let steps = self.last_steps.clone();
+            let column = v_flex()
+                .w_full()
+                .min_w_0()
+                .px(px(inset))
+                .py_3()
+                .gap_3()
+                .child(self.render_steps(&steps, compact, cx));
+            layers.push((
+                1,
+                v_flex()
+                    .size_full()
+                    .child(crate::scroll::page_viewport(
+                        "plan-scroll-bounce",
+                        &self.vscroll,
+                        div()
+                            .id("plan-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .lock_scroll_axis()
+                            .track_scroll(&self.vscroll)
+                            .child(column),
+                    ))
+                    .into_any_element(),
+            ));
+        }
+        v_flex().size_full().child(fade.render(layers).size_full())
     }
 }
