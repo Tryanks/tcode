@@ -164,11 +164,15 @@ fn reaction_chip(id: SharedString, label: String, own: bool, cx: &App) -> Button
 impl super::detail::ConversationView {
     /// Splices only the rows that changed, so a re-read keeps the reader where they were.
     /// A row that comes in where the reader looks (a new comment, the merge, a pending
-    /// review) opens its room; the rows a conversation opens with are in place at once.
+    /// review) opens its room, and one that goes while in view (a deleted comment, a
+    /// discarded review) folds away, drawn from the conversation it was last drawn from,
+    /// which the view keeps until it has gone. The rows a conversation opens with are in
+    /// place at once. `pending` is how many comments the pending review holds.
     fn sync_rows(
         &mut self,
         items: Vec<Item>,
         conversation: Option<&tcode_protocol::PullRequestConversation>,
+        pending: usize,
         cx: &App,
     ) {
         if self.rows == items {
@@ -187,16 +191,40 @@ impl super::detail::ConversationView {
                 .count();
             let reach = top.item_ix..top.item_ix + shown;
             let at = cx.background_executor().now();
-            for (index, arrival) in crate::motion::list_rows::changes(&self.keys, &keys).arrived {
+            let changed = crate::motion::list_rows::changes(&self.keys, &keys);
+            for (index, arrival) in changed.arrived {
                 if reach.contains(&index) {
                     self.arrivals.arrive(keys[index], arrival, (), at);
+                }
+            }
+            if let Some(drawn) = &self.drawn {
+                for (index, attach) in changed.left {
+                    if index < top.item_ix + shown && index >= top.item_ix {
+                        let left = LeftRow {
+                            item: self.rows[index].clone(),
+                            conversation: drawn.clone(),
+                            pending: self.drawn_pending,
+                        };
+                        self.arrivals.leave(self.keys[index], left, attach, at);
+                    }
                 }
             }
         }
         crate::diff::list::reconcile_rows(&self.list, &self.rows, &items);
         self.rows = items;
         self.keys = keys;
+        self.drawn = conversation.cloned().map(Rc::new);
+        self.drawn_pending = pending;
     }
+}
+
+/// A conversation row that went, as it was last drawn: what it showed, from the
+/// conversation and pending review it was drawn from.
+#[derive(Clone)]
+pub(super) struct LeftRow {
+    item: Item,
+    conversation: Rc<tcode_protocol::PullRequestConversation>,
+    pending: usize,
 }
 
 /// Each row's key: what it shows, not where it is, so a comment keeps its key as others
@@ -290,11 +318,12 @@ impl PullRequestView {
     pub(super) fn scroll_conversation_to_end(&mut self, cx: &mut Context<Self>) {
         let items = self.items(cx);
         let count = items.len();
+        let pending = self.pending_count(cx);
         if let Some(page) = self.page_mut()
             && count > 0
         {
             page.conversation_view
-                .sync_rows(items, page.conversation.data.as_ref(), cx);
+                .sync_rows(items, page.conversation.data.as_ref(), pending, cx);
             let view = &page.conversation_view;
             view.scroll.scroll_to(
                 &view.list,
@@ -470,6 +499,7 @@ impl PullRequestView {
     /// Switches to the conversation at a thread.
     pub(super) fn show_thread(&mut self, id: &str, cx: &mut Context<Self>) {
         let items = self.items(cx);
+        let pending = self.pending_count(cx);
         let Some(page) = self.page_mut() else { return };
         page.tab = Some(Tab::Conversation);
         let position = items.iter().position(|item| match item {
@@ -484,7 +514,7 @@ impl PullRequestView {
         page.conversation_view.expanded.insert(id.to_owned());
         if let Some(position) = position {
             page.conversation_view
-                .sync_rows(items, page.conversation.data.as_ref(), cx);
+                .sync_rows(items, page.conversation.data.as_ref(), pending, cx);
             let view = &page.conversation_view;
             view.scroll.scroll_to(
                 &view.list,
@@ -1764,29 +1794,44 @@ impl PullRequestView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let row = self.render_row(index, cx);
+        let items = self.items(cx);
+        let (Some(item), Some(conversation)) = (
+            items.get(index).cloned(),
+            self.page().and_then(|page| page.conversation.data.clone()),
+        ) else {
+            return div().into_any_element();
+        };
+        let pending = self.pending_count(cx);
+        let row = self.render_row(item, &conversation, pending, cx);
         let Some(view) = self.page().map(|page| &page.conversation_view) else {
             return row;
         };
         let key = view.keys.get(index).copied().unwrap_or_default();
-        view.arrivals.around(key, cx).draw(
+        let around = view.arrivals.around(key, cx);
+        around.draw(
             "pr-conversation-row",
             key,
             crate::motion::list_rows::Glide::Height { scope },
             row,
-            |_, _| div().into_any_element(),
+            |left: &LeftRow, _| {
+                self.render_row(left.item.clone(), &left.conversation, left.pending, cx)
+            },
             window,
         )
     }
 
-    fn render_row(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let items = self.items(cx);
-        let Some(item) = items.get(index).cloned() else {
-            return div().into_any_element();
-        };
-        let Some(conversation) = self.page().and_then(|page| page.conversation.data.clone()) else {
-            return div().into_any_element();
-        };
+    fn pending_count(&self, cx: &App) -> usize {
+        self.draft(cx).map_or(0, |draft| draft.comments.len())
+    }
+
+    /// The row `item` shows, from `conversation` and a pending review of `pending` comments.
+    fn render_row(
+        &mut self,
+        item: Item,
+        conversation: &tcode_protocol::PullRequestConversation,
+        pending: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let row = match item.clone() {
             Item::Notice => {
                 let url = self.url(cx);
@@ -1815,10 +1860,7 @@ impl PullRequestView {
                 Some(block) => block,
                 None => div().into_any_element(),
             },
-            Item::PendingReview => match self.pending_review_line(cx) {
-                Some(line) => line,
-                None => div().into_any_element(),
-            },
+            Item::PendingReview => self.pending_review_line(pending, cx),
             Item::Composer => self.composer(cx),
             Item::Description => self.comment_card(&conversation.description, true, cx),
             Item::Comment(index) => match conversation.comments.get(index) {
@@ -1951,15 +1993,16 @@ impl PullRequestView {
                 .into_any_element();
         }
         let items = self.items(cx);
+        let pending = self.pending_count(cx);
         let Some(page) = self.page_mut() else {
             return div().into_any_element();
         };
         page.conversation_view
-            .sync_rows(items, page.conversation.data.as_ref(), cx);
+            .sync_rows(items, page.conversation.data.as_ref(), pending, cx);
         let state = page.conversation_view.list.clone();
         page.conversation_view.scroll.step(&state, window, cx);
-        let now = cx.background_executor().now();
-        page.conversation_view.arrivals.settle(now);
+        let view = &mut page.conversation_view;
+        view.arrivals.settle_list(&state, &view.keys, cx);
         page.conversation_view
             .shared
             .begin_frame(state.viewport_bounds(), cx);

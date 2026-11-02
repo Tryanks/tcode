@@ -1210,10 +1210,9 @@ impl PullRequestView {
     }
 
     /// The conversation's line above the composer while a review is pending.
-    pub(super) fn pending_review_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let draft = self.draft(cx)?;
-        let count = draft.comments.len();
-        Some(
+    /// The conversation's line for a pending review of `count` comments.
+    pub(super) fn pending_review_line(&self, count: usize, cx: &mut Context<Self>) -> AnyElement {
+        {
             h_flex()
                 .py_2()
                 .gap_2()
@@ -1239,8 +1238,8 @@ impl PullRequestView {
                             this.open_review(window, cx);
                         })),
                 )
-                .into_any_element(),
-        )
+                .into_any_element()
+        }
     }
 }
 
