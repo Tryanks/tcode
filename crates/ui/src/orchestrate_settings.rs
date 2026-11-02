@@ -474,7 +474,11 @@ impl OrchestrateSettingsPanel {
                     let panel = panel.clone();
                     let popover = cx.entity();
                     crate::material::accessible_clickable(
-                        crate::material::menu_item_frame(false, cx),
+                        crate::material::menu_item_frame(
+                            false,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        ),
                         id,
                         gpui::Role::MenuItem,
                         label.clone(),
@@ -485,7 +489,6 @@ impl OrchestrateSettingsPanel {
                     .items_center()
                     .text_body(false, cx)
                     .cursor_pointer()
-                    .hover(|style| style.bg(cx.theme().muted))
                     .child(
                         v_flex()
                             .flex_1()

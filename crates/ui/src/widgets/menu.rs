@@ -386,40 +386,47 @@ impl Render for PopupMenu {
                         .then(|| super::Kbd::binding_for_action(action.as_ref(), None, window))
                         .flatten();
                     items = items.child(
-                        crate::material::menu_item_frame(self.touch, cx)
-                            .text_body(self.touch, cx)
-                            .id(("menu-item", index))
-                            .debug_selector(move || format!("menu-item-{index}"))
-                            .role(Role::MenuItem)
-                            .when_some(label.clone(), |el, label| el.aria_label(label))
-                            .when(selected, |el| el.bg(cx.theme().muted))
-                            .when(disabled, |el| el.text_color(cx.theme().muted_foreground))
-                            .when(!disabled, |el| {
-                                el.hover(|style| style.bg(cx.theme().muted))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.choose(index, window, cx)
-                                    }))
-                            })
-                            .child(div().flex_none().w_4().flex().justify_center().children(
-                                match (*checked, icon.clone()) {
-                                    (true, _) => Some(Icon::new(IconName::Check)),
-                                    (false, Some(icon)) => Some(Icon::new(icon)),
-                                    (false, None) => None,
-                                },
-                            ))
-                            .when_some(label.clone(), |el, label| el.child(label))
-                            .when_some(content, |el, content| el.child(content))
-                            .when_some(key, |el, key| {
-                                el.child(
-                                    div()
-                                        .debug_selector(move || format!("menu-item-{index}-key"))
-                                        .flex_none()
-                                        .ml_auto()
-                                        .pl(cx.theme().tokens.spacing.md)
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(key.appearance(false)),
-                                )
-                            }),
+                        crate::material::menu_item_frame(
+                            self.touch,
+                            if disabled {
+                                crate::material::ItemFill::Inert
+                            } else {
+                                crate::material::ItemFill::highlight(selected, cx.theme().muted)
+                            },
+                            cx,
+                        )
+                        .text_body(self.touch, cx)
+                        .id(("menu-item", index))
+                        .debug_selector(move || format!("menu-item-{index}"))
+                        .role(Role::MenuItem)
+                        .when_some(label.clone(), |el, label| el.aria_label(label))
+                        .when(selected && disabled, |el| el.bg(cx.theme().muted))
+                        .when(disabled, |el| el.text_color(cx.theme().muted_foreground))
+                        .when(!disabled, |el| {
+                            el.on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose(index, window, cx)
+                            }))
+                        })
+                        .child(div().flex_none().w_4().flex().justify_center().children(
+                            match (*checked, icon.clone()) {
+                                (true, _) => Some(Icon::new(IconName::Check)),
+                                (false, Some(icon)) => Some(Icon::new(icon)),
+                                (false, None) => None,
+                            },
+                        ))
+                        .when_some(label.clone(), |el, label| el.child(label))
+                        .when_some(content, |el, content| el.child(content))
+                        .when_some(key, |el, key| {
+                            el.child(
+                                div()
+                                    .debug_selector(move || format!("menu-item-{index}-key"))
+                                    .flex_none()
+                                    .ml_auto()
+                                    .pl(cx.theme().tokens.spacing.md)
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(key.appearance(false)),
+                            )
+                        }),
                     );
                 }
             }

@@ -144,37 +144,40 @@ impl Render for MoveThreadDialog {
                     .w_full()
                     .pt_0p5()
                     .child(
-                        crate::material::menu_item_frame(false, cx)
-                            .id(SharedString::from(format!(
-                                "move-thread-project-{}",
-                                project.id
-                            )))
-                            .role(gpui::Role::ListBoxOption)
-                            .aria_label(format!("{}: {root}", project.name))
-                            .aria_selected(selected)
-                            .w_full()
-                            .cursor_pointer()
-                            .bg(fill)
-                            .hover(|style| style.bg(cx.theme().muted))
-                            .on_click(cx.listener(move |dialog, _, window, cx| {
-                                dialog.selected = Some(id.clone());
-                                dialog.error = None;
-                                cx.notify();
-                                // The footer's Move button is drawn by the dialog frame.
-                                window.refresh();
-                            }))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(div().text_body(false, cx).child(project.name.clone()))
-                                    .child(
-                                        div()
-                                            .text_secondary(false, cx)
-                                            .overflow_hidden()
-                                            .child(crate::widgets::fade_text(root)),
-                                    ),
-                            ),
+                        crate::material::menu_item_frame(
+                            false,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        )
+                        .id(SharedString::from(format!(
+                            "move-thread-project-{}",
+                            project.id
+                        )))
+                        .role(gpui::Role::ListBoxOption)
+                        .aria_label(format!("{}: {root}", project.name))
+                        .aria_selected(selected)
+                        .w_full()
+                        .cursor_pointer()
+                        .bg(fill)
+                        .on_click(cx.listener(move |dialog, _, window, cx| {
+                            dialog.selected = Some(id.clone());
+                            dialog.error = None;
+                            cx.notify();
+                            // The footer's Move button is drawn by the dialog frame.
+                            window.refresh();
+                        }))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_body(false, cx).child(project.name.clone()))
+                                .child(
+                                    div()
+                                        .text_secondary(false, cx)
+                                        .overflow_hidden()
+                                        .child(crate::widgets::fade_text(root)),
+                                ),
+                        ),
                     )
                     .into_any_element()
             },

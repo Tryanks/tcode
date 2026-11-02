@@ -139,7 +139,6 @@ pub(crate) fn native_rewind_button(
         .trigger(trigger)
         .content(move |_state, _window, cx| {
             let muted = cx.theme().muted_foreground;
-            let hover = cx.theme().muted;
             let popover = cx.entity();
             let mut menu = v_flex()
                 .w(px(240.))
@@ -154,7 +153,11 @@ pub(crate) fn native_rewind_button(
                 let popover = popover.clone();
                 menu = menu.child(
                     crate::material::accessible_clickable(
-                        crate::material::menu_item_frame(compact, cx),
+                        crate::material::menu_item_frame(
+                            compact,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        ),
                         ("rewind-option", index),
                         Role::MenuItem,
                         label.clone(),
@@ -165,7 +168,6 @@ pub(crate) fn native_rewind_button(
                     .items_center()
                     .cursor_pointer()
                     .text_body(compact, cx)
-                    .hover(move |style| style.bg(hover))
                     .child(Icon::new(IconName::Undo).text_color(muted))
                     .child(label)
                     .on_click(move |event, window, cx| {

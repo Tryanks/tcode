@@ -16,9 +16,9 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::{PopoverState, h_flex, v_flex};
 
@@ -384,7 +384,7 @@ fn option_row(
     let popover = popover.clone();
     let selected = option.clone();
     crate::material::accessible_clickable(
-        crate::material::menu_item_frame(false, cx),
+        crate::material::menu_item_frame(false, crate::material::ItemFill::Hover, cx),
         ("settings-model-option", index),
         gpui::Role::MenuItem,
         option.name.clone(),
@@ -396,7 +396,6 @@ fn option_row(
     .items_center()
     .text_body(false, cx)
     .cursor_pointer()
-    .hover(|style| style.bg(cx.theme().muted))
     .child(tinted_glyph(
         store,
         option.provider,

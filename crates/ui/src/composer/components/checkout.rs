@@ -223,12 +223,11 @@ impl Composer {
                                      selected: bool,
                                      cx: &mut Context<PopoverState>|
                  -> gpui::Div {
-                    crate::material::menu_item_frame(compact, cx)
+                    crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
                         .w_full()
                         .items_center()
                         .cursor_pointer()
                         .text_body(compact, cx)
-                        .hover(|s| s.bg(cx.theme().muted))
                         .child(div().flex_1().min_w_0().child(label))
                         .when(selected, |this| {
                             this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
@@ -298,14 +297,13 @@ fn branch_row(
     div()
         .pb_0p5()
         .child(
-            crate::material::menu_item_frame(compact, cx)
+            crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
                 .id(("branch-row", index))
                 .flex_none()
                 .w_full()
                 .items_center()
                 .cursor_pointer()
                 .text_body(compact, cx)
-                .hover(|s| s.bg(cx.theme().muted))
                 .child(
                     div()
                         .flex_1()

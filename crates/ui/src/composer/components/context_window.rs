@@ -108,13 +108,12 @@ impl Render for ContextWindowDialog {
         let default_suffix = crate::tr!("composer.option_default").into_owned();
 
         let row = |id: gpui::SharedString, label: String, checked: bool, cx: &App| {
-            crate::material::menu_item_frame(compact, cx)
+            crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
                 .id(id)
                 .w_full()
                 .items_center()
                 .cursor_pointer()
                 .text_body(compact, cx)
-                .hover(|style| style.bg(cx.theme().muted))
                 .child(div().flex_1().min_w_0().child(label))
                 .when(checked, |row| {
                     row.child(Icon::new(IconName::Check).text_color(primary))

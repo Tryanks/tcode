@@ -453,66 +453,69 @@ impl Composer {
                         .bg(gpui::white().opacity(chosen)),
                 );
             options = options.child(
-                crate::material::menu_item_frame(self.compact, cx)
-                    .id(("ui-opt", opt_index))
-                    .role(Role::ListBoxOption)
-                    .aria_label(option.label.clone())
-                    .aria_selected(is_selected)
-                    .flex_none()
-                    .w_full()
-                    .items_start()
-                    .text_body(self.compact, cx)
-                    .cursor_pointer()
-                    .bg(cx.theme().list_active.opacity(chosen))
-                    .hover(|s| s.bg(cx.theme().muted))
-                    .child(
-                        div()
-                            .flex_none()
-                            .pt(cx.theme().tokens.spacing.xxs)
-                            .child(mark),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .items_center()
-                                    // Digits select only while the agent is
-                                    // blocked; the composer keeps them otherwise.
-                                    .when(blocking, |row| {
-                                        row.child(
-                                            div()
-                                                .flex_none()
-                                                .text_color(muted)
-                                                .child(format!("{}", opt_index + 1)),
-                                        )
-                                    })
-                                    .child(div().child(option.label.clone())),
+                crate::material::menu_item_frame(
+                    self.compact,
+                    crate::material::ItemFill::Hover,
+                    cx,
+                )
+                .id(("ui-opt", opt_index))
+                .role(Role::ListBoxOption)
+                .aria_label(option.label.clone())
+                .aria_selected(is_selected)
+                .flex_none()
+                .w_full()
+                .items_start()
+                .text_body(self.compact, cx)
+                .cursor_pointer()
+                .bg(cx.theme().list_active.opacity(chosen))
+                .child(
+                    div()
+                        .flex_none()
+                        .pt(cx.theme().tokens.spacing.xxs)
+                        .child(mark),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            h_flex()
+                                .gap_1p5()
+                                .items_center()
+                                // Digits select only while the agent is
+                                // blocked; the composer keeps them otherwise.
+                                .when(blocking, |row| {
+                                    row.child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(muted)
+                                            .child(format!("{}", opt_index + 1)),
+                                    )
+                                })
+                                .child(div().child(option.label.clone())),
+                        )
+                        .when(!option.description.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .text_secondary(self.compact, cx)
+                                    .child(option.description.clone()),
                             )
-                            .when(!option.description.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .text_secondary(self.compact, cx)
-                                        .child(option.description.clone()),
-                                )
-                            }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.ui_toggle_option(&question_for_click, label.clone(), cx);
-                        // Single-select answers flow onward by themselves: next
-                        // unanswered question, or submission when none remain.
-                        if !multi {
-                            this.ui_advance_or_submit(
-                                &questions_for_click,
-                                request_for_click.clone(),
-                                window,
-                                cx,
-                            );
-                        }
-                    })),
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.ui_toggle_option(&question_for_click, label.clone(), cx);
+                    // Single-select answers flow onward by themselves: next
+                    // unanswered question, or submission when none remain.
+                    if !multi {
+                        this.ui_advance_or_submit(
+                            &questions_for_click,
+                            request_for_click.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                })),
             );
         }
         // The question and its options scroll together within a share of the

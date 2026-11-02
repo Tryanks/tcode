@@ -828,7 +828,11 @@ fn rule_selector<T: Clone + 'static>(
                         let popover = popover.clone();
                         let checked = index == selected;
                         crate::material::accessible_clickable(
-                            crate::material::menu_item_frame(false, cx),
+                            crate::material::menu_item_frame(
+                                false,
+                                crate::material::ItemFill::Hover,
+                                cx,
+                            ),
                             (SharedString::from(format!("{id}-option")), index),
                             Role::MenuItem,
                             SharedString::from(label.clone()),
@@ -838,7 +842,6 @@ fn rule_selector<T: Clone + 'static>(
                         .w_full()
                         .text_body(false, cx)
                         .cursor_pointer()
-                        .hover(|item| item.bg(cx.theme().muted))
                         .child(div().flex_1().child(label))
                         .when(checked, |item| item.child(Icon::new(IconName::Check)))
                         .on_click(move |_, window, cx| {

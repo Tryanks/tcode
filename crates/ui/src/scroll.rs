@@ -10,6 +10,8 @@
 
 use std::{ops::Range, panic::Location, rc::Rc};
 
+use crate::motion::{ListScroll, ScrollTarget};
+
 use gpui::{
     AnyElement, App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ListAlignment,
     ListOffset, ListSizingBehavior, ListState, ParentElement, Pixels, Refineable as _, RenderOnce,
@@ -415,13 +417,25 @@ impl RenderOnce for VirtualList {
                     })
                     .read(cx)
                     .clone();
+                let glide = window
+                    .use_keyed_state((self.id.clone(), "glide"), cx, |_, _| ListScroll::default())
+                    .read(cx)
+                    .clone();
                 if state.item_count() != count {
+                    glide.cancel();
                     state.reset(count);
                     last_revealed = None;
                 }
                 if let Some(index) = reveal_next(self.reveal, self.count, last_revealed) {
+                    let here = state.logical_scroll_top();
                     reveal_row(&state, index);
+                    let to = state.logical_scroll_top();
+                    if to != here {
+                        state.scroll_to(here);
+                        glide.scroll_to(&state, ScrollTarget::Row(to), cx);
+                    }
                 }
+                glide.step(&state, window, cx);
                 // GPUI sizes a list that shrinks to its rows by measuring them
                 // at their widest, so a wrapping row would be measured as one
                 // line. Rows keep the width the list last laid out at, and a
@@ -702,6 +716,75 @@ mod tests {
             assert!(cx.debug_bounds("flexed-0").is_some());
             assert!(cx.debug_bounds("flexed-250").is_none());
         }
+    }
+
+    /// A measured list with a keyboard highlight, as a menu has.
+    struct Highlighted(Option<usize>);
+
+    impl Render for Highlighted {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(200.)).h(px(600.)).child(
+                div().debug_selector(|| "highlighted".into()).child(
+                    VirtualList::measured("highlighted-list", 40, |index, _, _| {
+                        div()
+                            .debug_selector(move || format!("highlighted-{index}"))
+                            .h(px(20.))
+                            .flex_none()
+                    })
+                    .reveal(self.0)
+                    .w_full()
+                    .max_h(px(100.)),
+                ),
+            )
+        }
+    }
+
+    /// How far the highlighted list is scrolled, from the rows it draws.
+    fn highlighted_scroll(cx: &mut VisualTestContext) -> f32 {
+        let top = cx.debug_bounds("highlighted").unwrap().top();
+        (0..40)
+            .find_map(|index| {
+                let row = cx.debug_bounds(format!("highlighted-{index}").leak())?;
+                (row.bottom() > top).then(|| index as f32 * 20. + f32::from(top - row.top()))
+            })
+            .unwrap()
+    }
+
+    /// A highlight moved past the end of the viewport scrolls the list
+    /// there over several frames rather than at once, and the list comes
+    /// to rest with the row's bottom at the viewport's.
+    #[gpui::test]
+    fn a_highlight_out_of_view_glides_the_list_to_it(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| Highlighted(None));
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(highlighted_scroll(cx), 0.);
+
+        view.update(cx, |view, cx| {
+            view.0 = Some(8);
+            cx.notify();
+        });
+        crate::test_frames::draw(cx);
+        let mut scrolls = vec![highlighted_scroll(cx)];
+        for _ in 0..30 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            crate::test_frames::draw(cx);
+            scrolls.push(highlighted_scroll(cx));
+        }
+        // Row 8 ends 180 down; the viewport is 100 tall.
+        assert!(
+            scrolls.windows(2).all(|pair| pair[1] >= pair[0]),
+            "{scrolls:?}"
+        );
+        assert!(
+            scrolls
+                .iter()
+                .filter(|scroll| **scroll > 0. && **scroll < 80.)
+                .count()
+                >= 4,
+            "jumped: {scrolls:?}"
+        );
+        assert_eq!(scrolls.last(), Some(&80.));
     }
 
     struct NarrowRows;

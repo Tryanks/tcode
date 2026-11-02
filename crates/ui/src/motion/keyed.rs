@@ -17,8 +17,8 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Axis, Bounds, Div, ElementId, IntoElement, ParentElement as _, Pixels, Point,
-    SharedString, Window,
+    AnyElement, App, Bounds, ElementId, IntoElement, ParentElement, Pixels, Point, SharedString,
+    Window, px,
 };
 use gpui_base::motion::{MotionStatus, spring, transition, transition_with_status};
 
@@ -113,7 +113,7 @@ pub(crate) fn keyed<T: Clone + 'static, C: BorrowMut<App>>(
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    keyed_along(id.into(), Axis::Vertical, items, window, cx, build)
+    keyed_along(id.into(), Fold::Down, items, window, cx, build)
 }
 
 /// [`keyed`] for rows that sit side by side — chips, tabs, buttons in a row
@@ -126,12 +126,37 @@ pub(crate) fn keyed_across<T: Clone + 'static, C: BorrowMut<App>>(
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    keyed_along(id.into(), Axis::Horizontal, items, window, cx, build)
+    keyed_along(id.into(), Fold::Across(px(0.)), items, window, cx, build)
+}
+
+/// How the rows of [`keyed_in`] fold in and out.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Fold {
+    /// In a column, along their height ([`keyed`]).
+    Down,
+    /// Side by side, along their width, each bringing the row's `gap` before
+    /// it ([`Shown::fold_across_gap`]).
+    Across(Pixels),
+    /// Side by side in a row that divides its width among them, each
+    /// bringing the row's `gap` before it ([`Shown::fold_share`]).
+    Share(Pixels),
+}
+
+/// [`keyed`] with the rows folding as `fold` says.
+pub(crate) fn keyed_in<T: Clone + 'static, C: BorrowMut<App>>(
+    id: impl Into<ElementId>,
+    fold: Fold,
+    items: impl IntoIterator<Item = (SharedString, T)>,
+    window: &mut Window,
+    cx: &mut C,
+    build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
+) -> Keyed {
+    keyed_along(id.into(), fold, items, window, cx, build)
 }
 
 fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
     id: ElementId,
-    axis: Axis,
+    fold: Fold,
     items: impl IntoIterator<Item = (SharedString, T)>,
     window: &mut Window,
     cx: &mut C,
@@ -225,12 +250,13 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
                     id,
                     key,
                     jumped,
-                    wraps: axis == Axis::Horizontal,
+                    wraps: matches!(fold, Fold::Across(_)),
                     bounds: bounds.clone(),
                     origin: origin.clone(),
-                    child: match axis {
-                        Axis::Vertical => shown.fold(content),
-                        Axis::Horizontal => shown.fold_across(content),
+                    child: match fold {
+                        Fold::Down => shown.fold(content),
+                        Fold::Across(gap) => shown.fold_across_gap(gap, content),
+                        Fold::Share(gap) => shown.fold_share(gap, content),
                     },
                 }
                 .into_any_element(),
@@ -247,9 +273,15 @@ pub(crate) struct Keyed {
 }
 
 impl Keyed {
+    /// `elements` drawn after the rows, over them.
+    pub(crate) fn followed_by(mut self, elements: impl IntoIterator<Item = AnyElement>) -> Self {
+        self.rows.extend(elements);
+        self
+    }
+
     /// The rows as the children of `container`, which lays them out; they
     /// glide relative to it.
-    pub(crate) fn render(self, container: Div) -> AnyElement {
+    pub(crate) fn render(self, container: impl ParentElement + IntoElement) -> AnyElement {
         Scope {
             origin: self.origin,
             child: container.children(self.rows).into_any_element(),

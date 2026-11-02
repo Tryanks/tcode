@@ -9298,7 +9298,6 @@ mod tests {
         draw(cx);
         let pane = keyboard_pane(&shell, cx).expect("the menu's pane has the keyboard");
         assert!(!composer_has_keyboard(pane, cx));
-        assert_eq!(hairlines(cx), 0);
         wait(half, cx);
         let [first, second] = fills(cx);
         assert!(
@@ -9307,6 +9306,7 @@ mod tests {
         );
         wait(settle, cx);
         assert_eq!(fills(cx), [0., 0.]);
+        assert_eq!(hairlines(cx), 0);
         let colours = pane_outlines(&shell, cx);
         assert!(colours.iter().all(Option::is_some), "{colours:?}");
         for row in ["sidebar-thread-thread-1", "sidebar-thread-thread-2"] {
@@ -9323,7 +9323,6 @@ mod tests {
         cx.simulate_click(panes[0].center(), gpui::Modifiers::default());
         draw(cx);
         assert!(composer_has_keyboard(0, cx));
-        assert_eq!(hairlines(cx), 1);
         wait(half, cx);
         let [first, second] = fills(cx);
         assert!(
@@ -9332,11 +9331,11 @@ mod tests {
         );
         wait(settle, cx);
         assert_eq!(fills(cx), [active.a, 0.]);
+        assert_eq!(hairlines(cx), 1);
 
         cx.simulate_click(panes[1].center(), gpui::Modifiers::default());
         draw(cx);
         assert!(composer_has_keyboard(1, cx));
-        assert_eq!(hairlines(cx), 1);
         wait(half, cx);
         let [first, second] = fills(cx);
         assert!(
@@ -9345,13 +9344,13 @@ mod tests {
         );
         wait(settle, cx);
         assert_eq!(fills(cx), [0., active.a]);
+        assert_eq!(hairlines(cx), 1);
 
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| state.open_palette(cx));
         draw(cx);
         assert!(!composer_has_keyboard(1, cx));
-        assert_eq!(hairlines(cx), 0);
         wait(half, cx);
         let [first, second] = fills(cx);
         assert!(
@@ -9360,6 +9359,7 @@ mod tests {
         );
         wait(settle, cx);
         assert_eq!(fills(cx), [0., 0.]);
+        assert_eq!(hairlines(cx), 0);
     }
 
     /// Among several panes each pane's header ends with its close button,
