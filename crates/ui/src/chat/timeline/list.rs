@@ -23,6 +23,7 @@ impl ChatView {
             })
             .unwrap_or_default();
 
+        let highlighted_turn = self.highlighted_turn;
         let item_count = self.rows.len();
         let item_cwd = cwd.to_path_buf();
         // Read before the list lays out, which holds its state.
@@ -166,12 +167,13 @@ impl ChatView {
                         trailer.when(gap, |trailer| trailer.pt(px(SEGMENT_GAP) * gap_scale)),
                     )
                 });
-                // A turn a search result jumped to is marked, and the mark
+                // The turn the reader jumped to is marked, and the mark
                 // fades in and out.
+                let highlighted = highlighted_turn == Some(row.turn);
                 let highlight = cx.theme().list_active;
                 let highlight = gpui_base::motion::transition(
                     gpui::ElementId::from(("timeline-highlight", row.identity)),
-                    if this.highlighted_turn == Some(row.turn) {
+                    if highlighted {
                         highlight
                     } else {
                         highlight.opacity(0.)
@@ -209,6 +211,14 @@ impl ChatView {
                     }))
                     .rounded(crate::material::radius_card(cx))
                     .bg(highlight)
+                    // A press inside the mark lets it go, and still does what
+                    // it does: it selects, follows a link, presses a button.
+                    // A drag that selects starts with that press.
+                    .when(highlighted, |item| {
+                        item.capture_any_mouse_down(
+                            cx.listener(|this, _, _, cx| this.dismiss_highlight(cx)),
+                        )
+                    })
                     .when(index == 0, |item| item.pt(px(TIMELINE_EDGE_PADDING)))
                     .pb(padding * edge)
                     // `min_w_0`: a turn holds nowrap content (diff rows, command
@@ -265,5 +275,266 @@ impl ChatView {
         .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
         .flex_1()
         .min_h_0()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::tests::*;
+    use crate::test_frames::draw_settled;
+    use crate::window_state::WindowState;
+    use gpui::{
+        FocusHandle, Modifiers, MouseButton, Pixels, TestAppContext, VisualTestContext, point, size,
+    };
+    use tcode_core::session::TurnMeta;
+
+    /// Four turns; the last ran a command and answered with a link.
+    fn turns() -> Timeline {
+        let mut timeline = synthetic_markdown_timeline(3);
+        timeline.turns.push(TurnMeta::default());
+        timeline.entries.extend([
+            at_turn(entry("user-3", user_item("Where is it documented?")), 3),
+            at_turn(command("command-0"), 3),
+            at_turn(
+                entry(
+                    "assistant-3",
+                    assistant("[Example](https://example.com) has the details."),
+                ),
+                3,
+            ),
+        ]);
+        timeline
+    }
+
+    /// The chat beside another pane, as the shell's dock lays them out.
+    struct Panes {
+        chat: Entity<ChatView>,
+        other: FocusHandle,
+    }
+
+    impl Render for Panes {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            h_flex()
+                .size_full()
+                .child(div().flex_1().min_w_0().h_full().child(self.chat.clone()))
+                .child(
+                    div()
+                        .id("other-pane")
+                        .track_focus(&self.other)
+                        .w(px(200.))
+                        .h_full(),
+                )
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> (TwoThreads, Entity<Panes>, &mut VisualTestContext) {
+        let threads = seed_two_threads(cx, turns());
+        let store = threads.store.clone();
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (panes, cx) = cx.add_window_view(|window, cx| Panes {
+            chat: cx.new(|cx| ChatView::new(store, window_state, window, cx)),
+            other: cx.focus_handle(),
+        });
+        cx.simulate_resize(size(px(1_224.), px(900.)));
+        // The app's window is active: an inactive one holds no focus path.
+        cx.update(|window, _| window.activate_window());
+        draw_settled(cx);
+        // The shell gives the keyboard to the composer of the thread it opens.
+        let chat = panes.read_with(cx, |panes, _| panes.chat.clone());
+        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+        draw_settled(cx);
+        (threads, panes, cx)
+    }
+
+    /// Jump as the palette does, to a turn of the thread on screen.
+    fn jump(threads: &TwoThreads, turn: usize, cx: &mut VisualTestContext) {
+        let thread = threads.first.clone();
+        threads.store.update(cx, |store, cx| {
+            store.select_session_at_turn(thread, turn, cx);
+        });
+        draw_settled(cx);
+    }
+
+    fn marked(panes: &Entity<Panes>, cx: &mut VisualTestContext) -> Option<usize> {
+        panes.read_with(cx, |panes, cx| panes.chat.read(cx).highlighted_turn)
+    }
+
+    fn first_row_of(
+        panes: &Entity<Panes>,
+        turn: usize,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Bounds<Pixels> {
+        let index = panes.read_with(cx, |panes, cx| {
+            rows_of_turn(&panes.chat.read(cx).rows, turn).start
+        });
+        cx.debug_bounds(format!("timeline-row-{index}").leak())
+            .expect("the turn's first row is on screen")
+    }
+
+    fn click(position: gpui::Point<Pixels>, cx: &mut VisualTestContext) {
+        cx.simulate_click(position, Modifiers::default());
+        draw_settled(cx);
+    }
+
+    /// The mark stays on the turn jumped to, however long the reader reads
+    /// and wherever else they click; a press inside it lets it go and still
+    /// does what it does there.
+    #[gpui::test]
+    fn a_press_inside_the_jumped_to_turn_lets_its_mark_go(cx: &mut TestAppContext) {
+        let (threads, panes, cx) = open(cx);
+
+        jump(&threads, 1, cx);
+        assert_eq!(marked(&panes, cx), Some(1));
+        jump(&threads, 3, cx);
+        assert_eq!(marked(&panes, cx), Some(3), "the mark did not move");
+        cx.executor().advance_clock(Duration::from_secs(60));
+        draw_settled(cx);
+        click(first_row_of(&panes, 1, cx).center(), cx);
+        assert_eq!(
+            marked(&panes, cx),
+            Some(3),
+            "time or a click on another turn let the mark go"
+        );
+
+        // The answer is the last message painted, so its block is this one.
+        let link = cx
+            .debug_bounds("markdown-block-0")
+            .expect("the answer's link");
+        click(point(link.left() + px(8.), link.center().y), cx);
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+        assert_eq!(
+            marked(&panes, cx),
+            None,
+            "a click on the link kept the mark"
+        );
+        cx.executor().advance_clock(Duration::from_secs(1));
+        draw_settled(cx);
+        assert_eq!(marked(&panes, cx), None, "the mark came back");
+
+        jump(&threads, 3, cx);
+        assert_eq!(marked(&panes, cx), Some(3));
+        let header = cx
+            .debug_bounds("worklog-header-3-command-0")
+            .expect("the turn's work log");
+        click(header.center(), cx);
+        assert!(
+            cx.debug_bounds("activity-row-command-0").is_some(),
+            "the work log did not open"
+        );
+        assert_eq!(
+            marked(&panes, cx),
+            None,
+            "a click on the work log kept the mark"
+        );
+
+        // A drag inside selects, and lets the mark go as it starts.
+        jump(&threads, 3, cx);
+        let (start, end) = (
+            point(link.left() + px(80.), link.center().y),
+            point(link.left() + px(160.), link.center().y),
+        );
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        draw_settled(cx);
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        draw_settled(cx);
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        draw_settled(cx);
+        let selected = panes.read_with(cx, |panes, cx| {
+            panes.chat.read(cx).selection.read(cx).selected_text(cx)
+        });
+        assert!(!selected.is_empty(), "the drag selected nothing");
+        assert_eq!(marked(&panes, cx), None);
+        threads.shutdown(cx);
+    }
+
+    /// The keyboard rests in the composer while the reader reads the turn
+    /// jumped to; putting it to use there, or taking it out of the chat,
+    /// lets the mark go, and so does showing another thread.
+    #[gpui::test]
+    fn the_jumped_to_turn_mark_goes_when_the_keyboard_is_used(cx: &mut TestAppContext) {
+        let (mut threads, panes, cx) = open(cx);
+        let chat = panes.read_with(cx, |panes, _| panes.chat.clone());
+
+        jump(&threads, 3, cx);
+        assert_eq!(marked(&panes, cx), Some(3));
+        cx.simulate_keystrokes("a");
+        draw_settled(cx);
+        assert_eq!(
+            marked(&panes, cx),
+            None,
+            "typing in the composer kept the mark"
+        );
+
+        jump(&threads, 3, cx);
+        let composer = cx.debug_bounds("chat-composer").expect("the composer");
+        click(
+            point(composer.left() + px(80.), composer.top() + px(24.)),
+            cx,
+        );
+        assert_eq!(
+            marked(&panes, cx),
+            None,
+            "a click on the composer kept the mark"
+        );
+
+        jump(&threads, 3, cx);
+        let other = panes.read_with(cx, |panes, _| panes.other.clone());
+        cx.update(|window, cx| window.focus(&other, cx));
+        draw_settled(cx);
+        assert_eq!(
+            marked(&panes, cx),
+            None,
+            "focusing another pane kept the mark"
+        );
+
+        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+        jump(&threads, 3, cx);
+        assert_eq!(marked(&panes, cx), Some(3));
+        cx.deactivate_window();
+        draw_settled(cx);
+        assert_eq!(
+            marked(&panes, cx),
+            None,
+            "moving to another window kept the mark"
+        );
+
+        cx.update(|window, _| window.activate_window());
+        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+        jump(&threads, 3, cx);
+        assert_eq!(marked(&panes, cx), Some(3));
+        // Opening the terminal hands it the keyboard, inside the chat view.
+        let first = threads.first.clone();
+        threads.store.update(cx, |store, cx| {
+            store.toggle_terminal_panel_for(first, cx);
+            cx.notify();
+        });
+        draw_settled(cx);
+        let drawer = chat.read_with(cx, |chat, _| chat.terminal_drawer());
+        assert!(
+            cx.update(|window, cx| {
+                gpui::Focusable::focus_handle(drawer.read(cx), cx).contains_focused(window, cx)
+            }),
+            "the terminal did not take the keyboard"
+        );
+        assert_eq!(
+            marked(&panes, cx),
+            None,
+            "the terminal taking the keyboard kept the mark"
+        );
+
+        chat.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+        jump(&threads, 3, cx);
+        assert_eq!(marked(&panes, cx), Some(3));
+        let second = threads.second.clone();
+        threads.bind(
+            &chat,
+            &second,
+            single_assistant_timeline("other", "Other"),
+            cx,
+        );
+        draw_settled(cx);
+        assert_eq!(marked(&panes, cx), None, "another thread kept the mark");
+        threads.shutdown(cx);
     }
 }
