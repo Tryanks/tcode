@@ -324,6 +324,10 @@ pub struct AcpPanel {
     /// touch edge bounce see its full extent.
     market_list: ListState,
     market_ids: Vec<String>,
+    /// Agents a search keystroke brings in and takes away, by id, drawn from
+    /// what they were as they fold.
+    market_rows: crate::motion::list_rows::ListRows<(), AcpMarketplaceItem>,
+    market_flip: crate::motion::ListFlip,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -357,6 +361,8 @@ impl AcpPanel {
             account_pending: false,
             account_error: None,
             market_list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
+            market_rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
+            market_flip: Default::default(),
             market_ids: Vec::new(),
             focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -588,10 +594,38 @@ impl AcpPanel {
                 })
                 .collect(),
         );
+        let row_key = |id: &str| {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut hasher);
+            hasher.finish()
+        };
+        let keys: Rc<[u64]> = market.iter().map(|agent| row_key(&agent.id)).collect();
         if !market.iter().map(|agent| &agent.id).eq(&self.market_ids) {
+            let old_keys: Vec<u64> = self.market_ids.iter().map(|id| row_key(id)).collect();
+            let everything = self.store.read(cx).acp_marketplace_items();
+            let old_items: Vec<Option<AcpMarketplaceItem>> = self
+                .market_ids
+                .iter()
+                .map(|id| everything.iter().find(|agent| agent.id == *id).cloned())
+                .collect();
+            self.market_flip.replace(
+                &self.market_list,
+                |index| old_keys.get(index).copied(),
+                &keys,
+                window,
+            );
+            self.market_rows.replace(
+                &old_keys,
+                &keys,
+                |_, _| Some(()),
+                |index| old_items.get(index).cloned().flatten(),
+                cx,
+            );
             self.market_ids = market.iter().map(|agent| agent.id.clone()).collect();
             self.market_list.reset(market.len());
         }
+        self.market_rows.settle_list(&self.market_list, &keys, cx);
         let error = self.store.read(cx).acp_registry_error();
         let loading = self.store.read(cx).acp_registry_loading();
         let empty = market.is_empty();
@@ -637,7 +671,31 @@ impl AcpPanel {
                     list(
                         self.market_list.clone(),
                         cx.processor(move |this, ix: usize, window, cx| {
-                            this.render_market_row(&market[ix], window, cx)
+                            let row = this.render_market_row(&market[ix], window, cx);
+                            let key = keys[ix];
+                            let around = this.market_rows.around(key, cx);
+                            let mut left: Vec<(String, AnyElement)> = around
+                                .above
+                                .iter()
+                                .chain(&around.below)
+                                .map(|(_, agent, _)| {
+                                    (agent.id.clone(), this.render_market_row(agent, window, cx))
+                                })
+                                .collect();
+                            let row = around.draw(
+                                "acp-market-row",
+                                key,
+                                crate::motion::list_rows::Glide::Rest,
+                                row,
+                                |agent, _| {
+                                    left.iter()
+                                        .position(|(id, _)| *id == agent.id)
+                                        .map(|at| left.remove(at).1)
+                                        .unwrap_or_else(|| gpui::Empty.into_any_element())
+                                },
+                                window,
+                            );
+                            this.market_flip.row(ix, ("acp-market-row", key), row)
                         }),
                     )
                     .size_full(),

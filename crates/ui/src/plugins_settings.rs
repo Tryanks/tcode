@@ -83,6 +83,10 @@ pub struct PluginsSettingsPanel {
     search: Entity<InputState>,
     list: ListState,
     listed: Option<(String, Vec<(usize, String)>)>,
+    /// The available rows a search or an install brings in and takes away,
+    /// by entry id, drawn from their catalog index as they fold.
+    list_rows: crate::motion::list_rows::ListRows<(), usize>,
+    list_flip: crate::motion::ListFlip,
     /// `(profile id, entry id, catalog index)` rows whose details disclosure is open.
     expanded: HashSet<(String, String, usize)>,
     /// The challenge whose dialog is open.
@@ -134,6 +138,8 @@ impl PluginsSettingsPanel {
             search,
             list: ListState::new(0, ListAlignment::Top, px(120.)),
             listed: None,
+            list_rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
+            list_flip: Default::default(),
             expanded: HashSet::new(),
             challenge: None,
             answered: HashSet::new(),
@@ -628,54 +634,73 @@ impl PluginsSettingsPanel {
         });
 
         let busy = !catalog.pending.is_empty();
-        let content = match view {
-            View::Installed => {
-                let unlisted = matches!(
-                    catalog.state,
-                    PluginCatalogState::Error { .. }
-                        | PluginCatalogState::Stale {
-                            reason: PluginStaleReason::NotLoaded
-                        }
-                );
-                // Unlisted shows nothing, so the status row above speaks.
-                let state = crate::motion::CrossFade::new(
-                    SharedString::from(format!("plugins-installed-{profile_id}")),
-                    match (installed.is_empty(), unlisted) {
-                        (false, _) => 2,
-                        (true, false) => 1,
-                        (true, true) => 0,
-                    },
-                    3,
-                    window,
-                    cx,
-                );
-                let mut layers = Vec::new();
-                if state.shows(1) {
-                    layers.push((
-                        1,
-                        self.note_card(crate::tr!("providers.plugins.no_installed"), cx),
-                    ));
-                }
-                if state.shows(2) && !installed.is_empty() {
-                    let rows = installed.into_iter().map(|(index, entry)| {
-                        (SharedString::from(entry.id.clone()), (index, entry.clone()))
-                    });
-                    let rows = crate::settings_rows::grouped_keyed(
-                        SharedString::from(format!("plugins-installed-rows-{profile_id}")),
-                        rows,
+        // Each view keeps a layer, so the one left fades out under the one
+        // chosen.
+        let views = [View::Installed, View::Available, View::Marketplaces];
+        let fade = crate::motion::CrossFade::new(
+            SharedString::from(format!("plugins-views-body-{profile_id}")),
+            views.iter().position(|shown| *shown == view).unwrap_or(0),
+            views.len(),
+            window,
+            cx,
+        );
+        let mut bodies = Vec::new();
+        for (layer, shown) in views.into_iter().enumerate() {
+            if !fade.shows(layer) {
+                continue;
+            }
+            let body = match shown {
+                View::Installed => {
+                    let installed = installed.clone();
+                    let unlisted = matches!(
+                        catalog.state,
+                        PluginCatalogState::Error { .. }
+                            | PluginCatalogState::Stale {
+                                reason: PluginStaleReason::NotLoaded
+                            }
+                    );
+                    // Unlisted shows nothing, so the status row above speaks.
+                    let state = crate::motion::CrossFade::new(
+                        SharedString::from(format!("plugins-installed-{profile_id}")),
+                        match (installed.is_empty(), unlisted) {
+                            (false, _) => 2,
+                            (true, false) => 1,
+                            (true, true) => 0,
+                        },
+                        3,
                         window,
                         cx,
-                        |_, (index, entry), window, cx| {
-                            self.installed_row(&profile_id, &catalog, *index, entry, window, cx)
-                        },
                     );
-                    layers.push((2, material::group(cx).child(rows).into_any_element()));
+                    let mut layers = Vec::new();
+                    if state.shows(1) {
+                        layers.push((
+                            1,
+                            self.note_card(crate::tr!("providers.plugins.no_installed"), cx),
+                        ));
+                    }
+                    if state.shows(2) && !installed.is_empty() {
+                        let rows = installed.into_iter().map(|(index, entry)| {
+                            (SharedString::from(entry.id.clone()), (index, entry.clone()))
+                        });
+                        let rows = crate::settings_rows::grouped_keyed(
+                            SharedString::from(format!("plugins-installed-rows-{profile_id}")),
+                            rows,
+                            window,
+                            cx,
+                            |_, (index, entry), window, cx| {
+                                self.installed_row(&profile_id, &catalog, *index, entry, window, cx)
+                            },
+                        );
+                        layers.push((2, material::group(cx).child(rows).into_any_element()));
+                    }
+                    state.render(layers).w_full().into_any_element()
                 }
-                state.render(layers).w_full().into_any_element()
-            }
-            View::Available => self.available(&profile_id, catalog, window, cx),
-            View::Marketplaces => self.marketplaces(&profile_id, &catalog, busy, window, cx),
-        };
+                View::Available => self.available(&profile_id, catalog.clone(), window, cx),
+                View::Marketplaces => self.marketplaces(&profile_id, &catalog, busy, window, cx),
+            };
+            bodies.push((layer, body));
+        }
+        let content = fade.span().render(bodies).w_full();
 
         v_flex()
             .w_full()
@@ -1061,14 +1086,44 @@ impl PluginsSettingsPanel {
             .iter()
             .map(|&index| (index, catalog.entries[index].id.clone()))
             .collect::<Vec<_>>();
+        let row_key = |id: &str| {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut hasher);
+            hasher.finish()
+        };
+        let keys: Rc<[u64]> = listed.iter().map(|(_, id)| row_key(id)).collect();
         if self
             .listed
             .as_ref()
             .is_none_or(|(profile, indices)| profile != profile_id || *indices != listed)
         {
+            // Within one profile, a keystroke or an install folds rows in and
+            // out and glides the rest; another profile's list is in place.
+            match self.listed.as_ref() {
+                Some((profile, old)) if profile == profile_id => {
+                    let old_keys: Vec<u64> = old.iter().map(|(_, id)| row_key(id)).collect();
+                    let old_indices: Vec<usize> = old.iter().map(|(index, _)| *index).collect();
+                    self.list_flip.replace(
+                        &self.list,
+                        |index| old_keys.get(index).copied(),
+                        &keys,
+                        window,
+                    );
+                    self.list_rows.replace(
+                        &old_keys,
+                        &keys,
+                        |_, _| Some(()),
+                        |index| old_indices.get(index).copied(),
+                        cx,
+                    );
+                }
+                _ => self.list_rows.clear(),
+            }
             self.list.reset(matches.len());
             self.listed = Some((profile_id.to_string(), listed));
         }
+        self.list_rows.settle_list(&self.list, &keys, cx);
         // Listing cross-fades to what it found; which of those shows follows
         // the search keystrokes and does not.
         let listing = matches.is_empty() && catalog.loading && none_available;
@@ -1110,13 +1165,47 @@ impl PluginsSettingsPanel {
                                 window,
                                 cx,
                             );
-                            v_flex()
-                                .w_full()
-                                .child(row)
-                                .when(ix + 1 != matches.len(), |col| {
-                                    col.child(material::row_hairline(px(material::CARD_INSET), cx))
+                            let row =
+                                v_flex()
+                                    .w_full()
+                                    .child(row)
+                                    .when(ix + 1 != matches.len(), |col| {
+                                        col.child(material::row_hairline(
+                                            px(material::CARD_INSET),
+                                            cx,
+                                        ))
+                                    });
+                            let key = keys[ix];
+                            let around = this.list_rows.around(key, cx);
+                            let mut left: std::collections::HashMap<usize, AnyElement> = around
+                                .above
+                                .iter()
+                                .chain(&around.below)
+                                .filter_map(|(_, index, _)| {
+                                    let entry = catalog.entries.get(*index)?;
+                                    let row = this.available_row(
+                                        &profile_id,
+                                        &catalog,
+                                        *index,
+                                        entry,
+                                        window,
+                                        cx,
+                                    );
+                                    Some((*index, row))
                                 })
-                                .into_any_element()
+                                .collect();
+                            let row = around.draw(
+                                "plugins-available-row",
+                                key,
+                                crate::motion::list_rows::Glide::Rest,
+                                row,
+                                |index, _| {
+                                    left.remove(index)
+                                        .unwrap_or_else(|| gpui::Empty.into_any_element())
+                                },
+                                window,
+                            );
+                            this.list_flip.row(ix, ("plugins-available-row", key), row)
                         }),
                     )
                     .size_full(),
