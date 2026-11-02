@@ -655,7 +655,11 @@ impl Panel {
 
         let watched = screen.watched;
         let output_id = id.to_string();
-        div()
+        // The rows held for the screen are a guess; when the host's screen
+        // lands, the panel's height glides to the rows it takes.
+        let glide_id = gpui::SharedString::from(format!("command-panel-glide-{id}"));
+        let landed = screen.frame.is_some() as u64;
+        let panel = div()
             .w_full()
             .overflow_hidden()
             .bg(palette.background)
@@ -680,7 +684,14 @@ impl Panel {
                     }
                 })
             })
-            .into_any_element()
+            .into_any_element();
+        crate::motion::Sampled::new(move |window, cx| {
+            let glide = crate::motion::GlideState::keyed(glide_id, window, cx);
+            crate::motion::SizeGlide::new(&glide, panel)
+                .on_change(landed)
+                .into_any_element()
+        })
+        .into_any_element()
     }
 }
 

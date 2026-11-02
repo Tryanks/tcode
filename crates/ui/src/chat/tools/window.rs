@@ -205,8 +205,9 @@ pub(in crate::chat) enum Detail {
     None,
     /// Shut, with something to open.
     Shut,
-    /// Open, or folding shut, as the fold samples it.
-    Fold(crate::motion::Shown<()>, AnyElement),
+    /// Open, or folding shut, as the fold samples it; the key names what
+    /// the body shows, and the body's height glides when it changes.
+    Fold(crate::motion::Shown<()>, AnyElement, u64),
     /// Open, drawn without a fold: a surface that has no window to sample.
     Open(AnyElement),
 }
@@ -231,6 +232,20 @@ pub(in crate::chat) fn fold(
         window,
         cx,
     )
+}
+
+/// An open body whose height glides when what it shows changes at rest:
+/// the whole output replacing the preview, the output arriving, a part of it
+/// opening.
+fn glide_body(key: &str, shows: u64, body: AnyElement) -> AnyElement {
+    let id = SharedString::from(format!("tool-body-glide-{key}"));
+    crate::motion::Sampled::new(move |window, cx| {
+        let glide = crate::motion::GlideState::keyed(id, window, cx);
+        crate::motion::SizeGlide::new(&glide, body)
+            .on_change(shows)
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 pub(in crate::chat) struct WindowSpec {
@@ -282,7 +297,7 @@ pub(in crate::chat) fn tool_window(
     } = spec;
     let expandable = detail.expandable();
     let open = match &detail {
-        Detail::Fold(shown, _) => !shown.leaving(),
+        Detail::Fold(shown, ..) => !shown.leaving(),
         Detail::Open(_) => true,
         Detail::None | Detail::Shut => false,
     };
@@ -331,7 +346,9 @@ pub(in crate::chat) fn tool_window(
         .into_any_element()
     };
     let detail = match detail {
-        Detail::Fold(shown, content) => Some(shown.fold(body(content))),
+        Detail::Fold(shown, content, shows) => {
+            Some(shown.fold(glide_body(&key, shows, body(content))))
+        }
         Detail::Open(content) => Some(body(content)),
         Detail::None | Detail::Shut => None,
     };

@@ -174,6 +174,7 @@ impl ChatView {
                         .gap_1()
                         .children(rows)
                         .into_any_element(),
+                    run.len() as u64,
                 )
             }
             None => window::Detail::Shut,
