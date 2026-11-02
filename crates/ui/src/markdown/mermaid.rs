@@ -850,6 +850,9 @@ pub(super) fn block(
     };
     // Revealed on hover over a diagram, as a formula's actions are, and pinned
     // over code, where there is no hover, and while the diagram is building.
+    // Over the card in either width class; the pin fades as the window
+    // turns compact or wide.
+    let pinned = super::math::actions_pinned(view, path, compact, window, cx);
     let actions = h_flex()
         .id(SharedString::from(format!(
             "markdown-mermaid-actions-{path}"
@@ -865,8 +868,8 @@ pub(super) fn block(
         .children(drawing)
         .children(toggle)
         .child(copy)
-        .when(layer == Layer::Diagram && !compact, |actions| {
-            actions.opacity(reveal)
+        .when(layer == Layer::Diagram, |actions| {
+            actions.opacity(reveal + (1. - reveal) * pinned)
         });
     // The surface takes the glided height, so what a swap clips is clipped
     // at its edge rather than painted past it.
