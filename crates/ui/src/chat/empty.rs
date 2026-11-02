@@ -200,8 +200,11 @@ impl ChatView {
                 .icon(IconName::ChevronDown)
                 .label(crate::tr!("chat.scroll_end"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.list_state.set_follow_mode(FollowMode::Tail);
-                    this.list_state.scroll_to_end();
+                    this.list_scroll.scroll_to(
+                        &this.list_state,
+                        crate::motion::ScrollTarget::End,
+                        cx,
+                    );
                     cx.notify();
                 })),
         );

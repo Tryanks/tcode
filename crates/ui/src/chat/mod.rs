@@ -210,6 +210,9 @@ pub struct ChatView {
     full_outputs: HashMap<String, FullOutput>,
     /// The timeline row message the pointer is over, whose actions fade in.
     pub(super) hover: crate::motion::ListHover,
+    /// The timeline's glide to a turn or to its end; the reader's own
+    /// scroll stops it.
+    pub(super) list_scroll: crate::motion::ListScroll,
     session_key: Option<String>,
     /// The turn the reader jumped to (a palette hit, a thread anchor), by
     /// its turn number in the whole thread: a history page moves the held
@@ -271,7 +274,10 @@ impl ChatView {
         let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
         let chat = cx.entity().downgrade();
+        let list_scroll = crate::motion::ListScroll::default();
+        let glide = list_scroll.clone();
         list_state.set_scroll_handler(move |event, window, cx| {
+            glide.cancel();
             let visible_rows = event.visible_range.clone();
             let chat = chat.clone();
             window.defer(cx, move |_, cx| {
@@ -394,6 +400,7 @@ impl ChatView {
             inline_diffs: InlineDiffCache::new(),
             full_outputs: HashMap::new(),
             hover: crate::motion::ListHover::new(cx.entity_id()),
+            list_scroll,
             session_key: None,
             highlighted_turn: None,
             _limit_tick: None,
@@ -488,7 +495,10 @@ impl Render for ChatView {
                 });
             }
         }
-        let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
+        self.list_scroll.step(&self.list_state, window, cx);
+        // The jump goes as soon as the glide it starts is under way.
+        let show_jump_to_latest =
+            jump_to_latest_visible(&self.list_state) && !self.list_scroll.running();
         self.sync_markdown_scroll_position(cx);
         self.apply_reservation_scroll_back(window, cx);
         // Measure after this frame's list layout, including the initial tail
@@ -843,13 +853,16 @@ impl ChatView {
                         gpui::canvas(
                             {
                                 let list = self.list_state.clone();
+                                let glide = self.list_scroll.clone();
                                 let view = cx.entity().downgrade();
                                 let painted = self.painted_rows.clone();
                                 move |_, window, cx| {
                                     // List prepaint may change geometry after render
                                     // (resize, splice, or markdown remeasurement).
                                     // Reconcile the sibling control after that layout.
-                                    if jump_to_latest_visible(&list) != show_jump_to_latest {
+                                    if (jump_to_latest_visible(&list) && !glide.running())
+                                        != show_jump_to_latest
+                                    {
                                         let view = view.clone();
                                         window.defer(cx, move |_, cx| {
                                             let _ = view.update(cx, |_, cx| cx.notify());
