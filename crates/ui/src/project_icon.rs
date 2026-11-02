@@ -11,9 +11,9 @@ use crate::{
     },
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, Role, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
+    AnyElement, App, AppContext as _, Context, Entity, ImageSource, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, RenderOnce, Role, ScrollStrategy,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
     UniformListScrollHandle, Window, div, img, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_base::{ElementExt as _, Scrollbar, h_flex, v_flex};
@@ -48,15 +48,38 @@ pub(crate) fn artwork(project: &Project, size: f32) -> AnyElement {
             .flex_none()
             .into_any_element();
     }
-    img(images::project_icon(project, size))
-        .size(px(size))
-        .flex_none()
-        .with_fallback(move || {
-            Icon::new(IconName::Folder)
-                .size(px(size))
-                .into_any_element()
-        })
-        .into_any_element()
+    Artwork {
+        id: format!("project-artwork-{}-{size}", project.id).into(),
+        source: images::project_icon(project, size),
+        size,
+    }
+    .into_any_element()
+}
+
+/// A project's picture, or its folder when it has none, fading in once it
+/// is known rather than appearing at once after the blank `img` draws while
+/// it decodes.
+#[derive(IntoElement)]
+struct Artwork {
+    id: SharedString,
+    source: ImageSource,
+    size: f32,
+}
+
+impl RenderOnce for Artwork {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let size = self.size;
+        let arrived = crate::motion::image_arrival(self.id, &self.source, window, cx);
+        img(self.source)
+            .size(px(size))
+            .flex_none()
+            .opacity(arrived)
+            .with_fallback(move || {
+                Icon::new(IconName::Folder)
+                    .size(px(size))
+                    .into_any_element()
+            })
+    }
 }
 
 pub(crate) fn open(
@@ -224,8 +247,16 @@ impl Picker {
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element()
         } else {
-            img(images::icon_thumbnail(path.clone()))
+            let source = images::icon_thumbnail(path.clone());
+            let arrived = crate::motion::image_arrival(
+                SharedString::from(format!("icon-thumbnail-{}", entry.name)),
+                &source,
+                window,
+                cx,
+            );
+            img(source)
                 .size(px(64.))
+                .opacity(arrived)
                 .with_fallback(|| {
                     Icon::empty()
                         .path("icons/image.svg")
