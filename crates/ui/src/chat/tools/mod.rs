@@ -689,52 +689,91 @@ pub(in crate::chat) fn pretty_json(text: &str) -> Option<String> {
     serde_json::to_string_pretty(&value).ok()
 }
 
-fn elided_control(elided: ElidedOutput, id: &str, cx: &App) -> Option<AnyElement> {
-    let control_id = SharedString::from(format!("load-output-{id}"));
-    let note = |text: String| {
-        div()
-            .text_secondary(false, cx)
-            .child(text)
-            .into_any_element()
-    };
-    let load = |on_load: ClickHandler| {
-        let selector = control_id.to_string();
-        div().debug_selector(move || selector.clone()).child(
-            super::components::changed_files::quiet_control(
-                control_id.clone(),
-                crate::tr!("chat.load_full_output").into_owned().into(),
-                on_load,
-                cx,
-            ),
-        )
-    };
-    Some(match elided {
+/// Where loading a shortened output stands, as its control shows it.
+#[derive(Clone, PartialEq)]
+enum Elision {
+    Preview(usize),
+    Loading,
+    Failed(String),
+}
+
+/// The control under a shortened output: the offer to load the rest, then
+/// "loading", then a failure with the offer again; each cross-fades into the
+/// next. It goes with the preview once the whole output is in, which grows
+/// the body in the same frame.
+fn elided_control(elided: ElidedOutput, id: &str, _: &App) -> Option<AnyElement> {
+    let (current, on_load) = match elided {
         ElidedOutput::Preview {
             full_bytes,
             on_load,
-        } => h_flex()
-            .gap_2()
-            .items_center()
-            .child(note(
-                crate::tr!(
-                    "chat.output_elided",
-                    size = crate::thread_export::format_size(full_bytes as usize)
-                )
-                .into_owned(),
-            ))
-            .child(load(on_load))
-            .into_any_element(),
-        ElidedOutput::Loading => note(crate::tr!("chat.full_output_loading").into_owned()),
+        } => (Elision::Preview(full_bytes as usize), Some(on_load)),
+        ElidedOutput::Loading => (Elision::Loading, None),
         ElidedOutput::Loaded(_) => return None,
-        ElidedOutput::Failed { error, on_load } => h_flex()
-            .gap_2()
-            .items_center()
-            .child(note(
-                crate::tr!("chat.full_output_failed", error = error).into_owned(),
-            ))
-            .child(load(on_load))
-            .into_any_element(),
-    })
+        ElidedOutput::Failed { error, on_load } => (Elision::Failed(error), Some(on_load)),
+    };
+    let id = id.to_owned();
+    Some(
+        crate::motion::Sampled::new(move |window, cx| {
+            let control_id = SharedString::from(format!("load-output-{id}"));
+            let mut on_load = on_load;
+            crate::motion::cross_fade(
+                SharedString::from(format!("load-output-state-{id}")),
+                current.clone(),
+                window,
+                cx,
+                move |state, _, cx| {
+                    // The control the current state offers loads; a leaving
+                    // one is inert.
+                    let on_load = if *state == current {
+                        on_load.take()
+                    } else {
+                        None
+                    };
+                    let note = |text: String| {
+                        div()
+                            .text_secondary(false, cx)
+                            .child(text)
+                            .into_any_element()
+                    };
+                    let load = |on_load: Option<ClickHandler>, cx: &App| {
+                        let selector = control_id.to_string();
+                        div().debug_selector(move || selector.clone()).child(
+                            super::components::changed_files::quiet_control(
+                                control_id.clone(),
+                                crate::tr!("chat.load_full_output").into_owned().into(),
+                                on_load.unwrap_or_else(|| Box::new(|_, _, _| {})),
+                                cx,
+                            ),
+                        )
+                    };
+                    let (text, offer) = match state {
+                        Elision::Preview(size) => (
+                            crate::tr!(
+                                "chat.output_elided",
+                                size = crate::thread_export::format_size(*size)
+                            )
+                            .into_owned(),
+                            true,
+                        ),
+                        Elision::Loading => {
+                            return note(crate::tr!("chat.full_output_loading").into_owned());
+                        }
+                        Elision::Failed(error) => (
+                            crate::tr!("chat.full_output_failed", error = error).into_owned(),
+                            true,
+                        ),
+                    };
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(note(text))
+                        .when(offer, |row| row.child(load(on_load, cx)))
+                        .into_any_element()
+                },
+            )
+        })
+        .into_any_element(),
+    )
 }
 
 /// The images a call was shown, as thumbnails that open the image viewer.
