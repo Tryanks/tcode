@@ -8,6 +8,9 @@ use gpui_base::motion::{Presence, PresenceSample, Transition, TransitionId, tran
 
 pub(crate) use gpui_base::motion::PresencePhase;
 
+pub(crate) mod keyed;
+pub(crate) use keyed::keyed;
+
 /// How far a surface rises while it appears, and sinks while it leaves.
 pub(crate) const LIFT: Pixels = px(6.);
 
