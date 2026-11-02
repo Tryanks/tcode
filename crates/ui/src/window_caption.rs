@@ -207,23 +207,48 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
         )
     };
 
-    div()
-        .id(button.id())
-        .flex()
-        .flex_none()
-        .h_full()
-        .w(px(CAPTION_BUTTON_WIDTH))
-        .items_center()
-        .justify_center()
-        .text_color(cx.theme().muted_foreground)
-        .window_control_area(button.area())
-        // Blocking the mouse ends gpui's hit test at this button, so neither the
-        // header's drag listeners nor any enclosing `Drag` control area is in
-        // the hit set — the platform sees a caption button, never a drag area.
-        .occlude()
-        .hover(move |style| style.bg(hover_bg).text_color(active_fg))
-        .active(move |style| style.bg(pressed_bg).text_color(active_fg))
-        .child(Icon::new(button.icon(maximized)).small())
+    let rest_fg = cx.theme().muted_foreground;
+    crate::motion::Sampled::new(move |window, cx| {
+        let (hovered, on_hover) = crate::motion::hovered(button.id(), window, cx);
+        let settle = crate::motion::settle;
+        let fill = gpui_base::motion::transition(
+            (button.id(), "fill"),
+            if hovered {
+                hover_bg
+            } else {
+                hover_bg.opacity(0.)
+            },
+            settle(),
+            window,
+            cx,
+        );
+        let fg = gpui_base::motion::transition(
+            (button.id(), "fg"),
+            if hovered { active_fg } else { rest_fg },
+            settle(),
+            window,
+            cx,
+        );
+        div()
+            .id(button.id())
+            .flex()
+            .flex_none()
+            .h_full()
+            .w(px(CAPTION_BUTTON_WIDTH))
+            .items_center()
+            .justify_center()
+            .bg(fill)
+            .text_color(fg)
+            .window_control_area(button.area())
+            // Blocking the mouse ends gpui's hit test at this button, so neither the
+            // header's drag listeners nor any enclosing `Drag` control area is in
+            // the hit set — the platform sees a caption button, never a drag area.
+            .occlude()
+            .on_hover(on_hover)
+            .active(move |style| style.bg(pressed_bg).text_color(active_fg))
+            .child(Icon::new(button.icon(maximized)).small())
+            .into_any_element()
+    })
 }
 
 #[cfg(test)]

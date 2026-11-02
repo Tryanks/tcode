@@ -294,7 +294,8 @@ impl SettingsPage {
                     )
                     .aria_expanded(open)
                     .cursor_pointer()
-                    .hover(|row| row.bg(cx.theme().list_hover))
+                    .relative()
+                    .child(crate::material::row_hover(gpui::px(0.), cx))
                     .text_body(true, cx)
                     .child(crate::project_icon::artwork(project, 16.))
                     .child(

@@ -538,7 +538,8 @@ impl AcpPanel {
                 move || format!("acp-market-row-{id}")
             })
             .items_start()
-            .hover(|row| row.bg(cx.theme().list_hover))
+            .relative()
+            .child(crate::material::row_hover(gpui::px(0.), cx))
             .child(
                 Icon::empty()
                     .path("icons/box.svg")

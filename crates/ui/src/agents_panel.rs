@@ -1039,7 +1039,9 @@ impl AgentsPanel {
                             .items_center()
                             .rounded(material::radius_card(cx))
                             .when(!crate::window_seam::is_mobile(cx), |header| {
-                                header.hover(|header| header.bg(cx.theme().list_hover))
+                                header
+                                    .relative()
+                                    .child(material::row_hover(material::radius_card(cx), cx))
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.done_expanded = !this.done_expanded;
