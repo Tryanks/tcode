@@ -1911,61 +1911,86 @@ mod machines {
                         .into_any_element()
                 },
             );
-            let mut controls = h_flex().flex_none().gap_2().items_center();
-            if let Some(link) = space.link.clone() {
-                let toggle_id = id.clone();
-                controls = controls
-                    .child(
-                        Button::new(SharedString::from(format!("machine-space-qr-{id}")))
-                            .ghost()
-                            .outline()
-                            .compact()
-                            .label(if open {
-                                crate::tr!("spaces.machines.hide_qr")
-                            } else {
-                                crate::tr!("spaces.machines.show_qr")
-                            })
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                toggle_qr(view, toggle_id.clone(), cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("machine-space-copy-{id}")))
-                            .ghost()
-                            .outline()
-                            .compact()
-                            .icon(IconName::Copy)
-                            .aria_label(crate::tr!("spaces.link.copy"))
-                            .tooltip(crate::tr!("spaces.link.copy").into_owned())
-                            .on_click(move |_, window, cx| copy_link(link.clone(), window, cx)),
-                    );
-            } else if space.link_dead || !space.link_enabled {
-                let action = if space.link_dead {
-                    SpaceAction::RegenerateLink { id: id.clone() }
-                } else {
-                    SpaceAction::SetLinkEnabled {
-                        id: id.clone(),
-                        enabled: true,
-                    }
-                };
-                let spaces = spaces.clone();
-                controls = controls.child(
-                    Button::new(SharedString::from(format!("machine-space-fix-{id}")))
-                        .ghost()
-                        .outline()
-                        .compact()
-                        .label(if space.link_dead {
-                            crate::tr!("spaces.link.regenerate")
-                        } else {
-                            crate::tr!("spaces.machines.resume")
-                        })
-                        .on_click(move |_, window, cx| {
-                            let task = spaces
-                                .update(cx, |spaces, cx| spaces.act(vec![action.clone()], cx));
-                            report("spaces.failed", task, window, cx);
-                        }),
-                );
+            // The link's QR and Copy and the Regenerate or Resume that brings
+            // it back trade places: one set narrows away as the other widens
+            // in.
+            #[derive(Clone)]
+            enum Control {
+                Qr,
+                Copy(String),
+                Fix(bool),
             }
+            let mut items: Vec<(SharedString, Control)> = Vec::new();
+            if let Some(link) = space.link.clone() {
+                items.push(("qr".into(), Control::Qr));
+                items.push(("copy".into(), Control::Copy(link)));
+            } else if space.link_dead || !space.link_enabled {
+                items.push(("fix".into(), Control::Fix(space.link_dead)));
+            }
+            let controls = crate::motion::keyed_across(
+                SharedString::from(format!("machine-space-controls-{id}")),
+                items,
+                window,
+                cx,
+                |_, control, _, cx| {
+                    let button = match control {
+                        Control::Qr => {
+                            let toggle_id = id.clone();
+                            Button::new(SharedString::from(format!("machine-space-qr-{id}")))
+                                .ghost()
+                                .outline()
+                                .compact()
+                                .label(if open {
+                                    crate::tr!("spaces.machines.hide_qr")
+                                } else {
+                                    crate::tr!("spaces.machines.show_qr")
+                                })
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    toggle_qr(view, toggle_id.clone(), cx)
+                                }))
+                        }
+                        Control::Copy(link) => {
+                            let link = link.clone();
+                            Button::new(SharedString::from(format!("machine-space-copy-{id}")))
+                                .ghost()
+                                .outline()
+                                .compact()
+                                .icon(IconName::Copy)
+                                .aria_label(crate::tr!("spaces.link.copy"))
+                                .tooltip(crate::tr!("spaces.link.copy").into_owned())
+                                .on_click(move |_, window, cx| copy_link(link.clone(), window, cx))
+                        }
+                        Control::Fix(dead) => {
+                            let action = if *dead {
+                                SpaceAction::RegenerateLink { id: id.clone() }
+                            } else {
+                                SpaceAction::SetLinkEnabled {
+                                    id: id.clone(),
+                                    enabled: true,
+                                }
+                            };
+                            let spaces = spaces.clone();
+                            Button::new(SharedString::from(format!("machine-space-fix-{id}")))
+                                .ghost()
+                                .outline()
+                                .compact()
+                                .label(if *dead {
+                                    crate::tr!("spaces.link.regenerate")
+                                } else {
+                                    crate::tr!("spaces.machines.resume")
+                                })
+                                .on_click(move |_, window, cx| {
+                                    let task = spaces.update(cx, |spaces, cx| {
+                                        spaces.act(vec![action.clone()], cx)
+                                    });
+                                    report("spaces.failed", task, window, cx);
+                                })
+                        }
+                    };
+                    div().flex_none().pl_2().child(button).into_any_element()
+                },
+            )
+            .render(h_flex().flex_none().items_center());
             let line = crate::material::group_row(cx)
                 .debug_selector({
                     let id = id.clone();
