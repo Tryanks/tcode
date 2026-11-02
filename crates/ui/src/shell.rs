@@ -175,7 +175,7 @@ impl Render for DestinationView {
 /// The views and transport for one host. Everything here is replaced when the
 /// window attaches somewhere else, and nothing here is touched by a resize.
 struct ShellAttachment {
-    link: Attachment,
+    link: Link,
     sidebar: Entity<SessionsSidebar>,
     /// The wide layout's chat column, a dock of [`ThreadPanel`]s.
     thread_panes: Entity<DockArea>,
@@ -214,8 +214,12 @@ struct ShellAttachment {
     /// The workspace split's panels gliding as they open, close, expand and
     /// collapse.
     panel_glide: crate::motion::resize_glide::ResizeGlide,
-    /// Whether the right panel floated last frame.
-    right_floated: bool,
+    /// Whether the right panel floated last frame, when it showed beside
+    /// the chat.
+    right_floated: Option<bool>,
+    /// The right panel on its way between docked and floating.
+    float_glide: Option<FloatGlide>,
+    float_generation: u64,
     /// The width the right panel opens at: the default until the user drags the
     /// panel's own handle, then whatever they chose (for this run). A sidebar
     /// drag never changes it, even when it squeezes the panel.
@@ -243,6 +247,30 @@ struct ShellAttachment {
     stamped: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// An attachment's link and the store it fills. The link closes when the
+/// window leaves the attachment; the store stays for the views still drawing
+/// it.
+struct Link {
+    target: AttachmentTarget,
+    store: Entity<WorkspaceStore>,
+    open: Option<Attachment>,
+}
+
+impl Link {
+    fn link(&self) -> tcode_client::HostLink {
+        self.open
+            .as_ref()
+            .expect("the window's attachment is open")
+            .link()
+    }
+
+    fn close(&mut self, cx: &mut App) {
+        if let Some(open) = self.open.take() {
+            open.close(cx).close();
+        }
+    }
 }
 
 impl ShellAttachment {
@@ -304,6 +332,16 @@ impl ShellAttachment {
     fn chat(&self, cx: &App) -> Entity<ChatView> {
         self.focused_pane.read(cx).chat()
     }
+}
+
+/// The right panel docking or floating as the room beside the chat changes:
+/// drawn floating meanwhile, over the docked place opening or closing
+/// beneath it, its width gliding from the one it was drawn at to the one it
+/// rests at. The panel docks into its place once the glide lands.
+struct FloatGlide {
+    generation: u64,
+    from: Pixels,
+    now: Pixels,
 }
 
 /// Which pane commands the window offers now; none in the compact layout.
@@ -602,7 +640,43 @@ pub struct AppShell {
     /// The title last given to the OS window. The title is in the current
     /// language, and a language switch reaches the shell only as a redraw.
     window_title: String,
+    /// Names what the window is attached to: a new one each time the
+    /// attachment is replaced or dropped.
+    scene_key: u64,
+    /// The wide window's workspaces on screen: the current one, and while
+    /// it rises, the ones it replaced.
+    attachments: crate::motion::Scene<u64>,
+    /// Workspaces the wide window has left, still drawn beneath the one
+    /// replacing them until it has risen over them. Their links are closed
+    /// and they listen to nothing.
+    departed: Vec<Departed>,
+    /// Set while a departed workspace is drawn.
+    departing: Option<Departing>,
+    /// Whether the window turned compact or wide since it was last drawn.
+    layout_flipped: bool,
+    /// This frame's layout, whose sidebar and conversation glide from where
+    /// one layout had them to where the other has them when the window
+    /// turns compact or wide. The two layouts are different trees over the
+    /// same views, so neither can be drawn beside the other for a
+    /// cross-fade; what they share moves instead.
+    layout_reflow: Option<crate::motion::reflow::Reflow>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A workspace the window left, as it was when it left.
+struct Departed {
+    key: u64,
+    attachment: Option<ShellAttachment>,
+    route: Route,
+    destination: Destination,
+}
+
+/// How a departed workspace is drawn.
+struct Departing {
+    destination: Destination,
+    /// The hosts surface is one set of elements; the workspace arriving
+    /// draws it when it shows it too.
+    hosts_withheld: bool,
 }
 
 struct BackSwipe {
@@ -769,6 +843,12 @@ impl AppShell {
             palette_was_open: false,
             last_split_layout: None,
             window_title: String::new(),
+            scene_key: 0,
+            attachments: Default::default(),
+            departed: Vec::new(),
+            departing: None,
+            layout_flipped: false,
+            layout_reflow: None,
             _subscriptions: subscriptions,
             setup,
         };
@@ -1005,11 +1085,35 @@ impl AppShell {
         let Some(attachment) = self.attachment.take() else {
             return;
         };
-        attachment.link.close(cx).close();
+        self.retire(Some(attachment), cx);
         self.hosts.update(cx, |hosts, cx| hosts.set_store(None, cx));
         self.window_state
             .update(cx, |state, cx| state.leave_workspace(cx));
         cx.notify();
+    }
+
+    /// Close what the window was attached to, if anything, and, in the wide
+    /// layout, keep its views on screen, inert, for the next one to rise
+    /// over. Its preview's page goes at once: a native view draws over
+    /// everything, the workspace rising over it included.
+    fn retire(&mut self, old: Option<ShellAttachment>, cx: &mut Context<Self>) {
+        let old = old.map(|mut old| {
+            old.link.close(cx);
+            old._subscriptions.clear();
+            old._tasks.clear();
+            old.preview
+                .update(cx, |preview, cx| preview.release_preview(cx));
+            old
+        });
+        if !self.compact(cx) {
+            self.departed.push(Departed {
+                key: self.scene_key,
+                attachment: old,
+                route: self.window_state.read(cx).route(),
+                destination: self.destination(cx),
+            });
+        }
+        self.scene_key += 1;
     }
 
     fn attach(&mut self, target: AttachmentTarget, window: &mut Window, cx: &mut Context<Self>) {
@@ -1033,9 +1137,8 @@ impl AppShell {
                 .update(cx, |hosts, cx| hosts.set_local_failure(None, cx));
         }
         self.pending_navigation_restore = None;
-        if let Some(old) = self.attachment.take() {
-            old.link.close(cx).close();
-        }
+        let old = self.attachment.take();
+        self.retire(old, cx);
         let Some(link) = Attachment::open(
             target,
             local,
@@ -1198,7 +1301,9 @@ impl AppShell {
                 "workspace-panels",
                 gpui::Axis::Horizontal,
             ),
-            right_floated: false,
+            right_floated: None,
+            float_glide: None,
+            float_generation: 0,
             right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
             floating_split: cx.new(|_| ResizableState::default()),
             floating_focus: cx.new(|cx| {
@@ -1218,7 +1323,11 @@ impl AppShell {
             observed_session_id,
             adopted: false,
             stamped: false,
-            link,
+            link: Link {
+                target: link.target.clone(),
+                store: link.store.clone(),
+                open: Some(link),
+            },
             _tasks: vec![preview_pump],
             _subscriptions: subscriptions,
         });
@@ -2477,6 +2586,7 @@ impl AppShell {
             .window_state
             .update(cx, |state, cx| state.set_compact(compact, cx));
         if flipped {
+            self.layout_flipped = true;
             self.move_edge_back(TouchPhase::Cancelled, window, cx);
             self.page_back = None;
             // The visit survives the resize; only a thread selected in the wide
@@ -2496,8 +2606,20 @@ impl AppShell {
         }
     }
 
+    /// `element` as the part `key` of the window's layout, which glides from
+    /// where the other layout drew it when the window turns compact or wide.
+    fn layout_part(&self, key: &'static str, element: impl IntoElement) -> AnyElement {
+        match (&self.layout_reflow, &self.departing) {
+            (Some(reflow), None) => reflow.part(key, element),
+            _ => element.into_any_element(),
+        }
+    }
+
     fn destination(&self, cx: &App) -> Destination {
-        self.window_state.read(cx).destination()
+        match &self.departing {
+            Some(departing) => departing.destination,
+            None => self.window_state.read(cx).destination(),
+        }
     }
 
     /// Mirror the window's navigation history into the compact stack: pop back
@@ -3355,8 +3477,7 @@ impl AppShell {
 
     fn render_hosts_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
-        let hosts = self.hosts.clone();
-        let body = hosts.update(cx, |panel, cx| panel.render_hosts(window, cx));
+        let body = self.hosts_surface(false, window, cx);
         v_flex()
             .size_full()
             .bg(crate::material::content_surface(cx))
@@ -3381,8 +3502,7 @@ impl AppShell {
     /// — the Hosts list, or the Nearby row that prefilled the endpoint.
     fn render_pair_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
-        let hosts = self.hosts.clone();
-        let body = hosts.update(cx, |panel, cx| panel.render_pair(window, cx));
+        let body = self.hosts_surface(true, window, cx);
         v_flex()
             .size_full()
             .bg(crate::material::content_surface(cx))
@@ -3529,7 +3649,12 @@ impl AppShell {
                 window,
                 cx,
             ))
-            .child(div().flex_1().min_h_0().child(sidebar))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.layout_part("sidebar", sidebar)),
+            )
             .into_any_element()
     }
 
@@ -3631,7 +3756,12 @@ impl AppShell {
                 window,
                 cx,
             ))
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.layout_part("chat", body)),
+            )
             .into_any_element()
     }
 
@@ -4227,6 +4357,24 @@ impl AppShell {
     /// stack; wide shows it in place, inside the Hosts route.
     fn hosts_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let pairing = self.destination(cx) == Destination::Pair;
+        self.hosts_surface(pairing, window, cx)
+    }
+
+    /// The hosts rows, or the pairing form when `pairing`; nothing in a
+    /// departed workspace while the arriving one draws them.
+    fn hosts_surface(
+        &mut self,
+        pairing: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self
+            .departing
+            .as_ref()
+            .is_some_and(|departing| departing.hosts_withheld)
+        {
+            return div().flex_1().into_any_element();
+        }
         let hosts = self.hosts.clone();
         hosts.update(cx, |panel, cx| {
             if pairing {
@@ -4296,8 +4444,59 @@ impl AppShell {
         .into_any_element()
     }
 
+    /// The wide window: the workspace it is attached to, rising over the
+    /// ones it left until it covers them. gpui-base has no transition for a
+    /// whole tree being replaced; the window keeps the trees it left
+    /// ([`Self::retire`]) and [`crate::motion::Scene`] draws them beneath.
     fn render_wide(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let route = self.window_state.read(cx).route();
+        let frame = self
+            .attachments
+            .sample("attachments", self.scene_key, window, cx);
+        let keys: Vec<u64> = frame.scenes().copied().collect();
+        self.departed
+            .retain(|departed| keys.contains(&departed.key));
+        let hosts_withheld = self.attachment.is_none() || route == Route::Hosts;
+        let mut layers = Vec::with_capacity(keys.len());
+        for key in keys {
+            if key == self.scene_key {
+                layers.push(self.render_workspace(route, window, cx));
+                continue;
+            }
+            let Some(ix) = self.departed.iter().position(|left| left.key == key) else {
+                layers.push(gpui::Empty.into_any_element());
+                continue;
+            };
+            let mut left = self.departed.remove(ix);
+            // Its keys would reach a thread the window has left.
+            if left.attachment.as_ref().is_some_and(|attachment| {
+                attachment
+                    .all_panes(cx)
+                    .iter()
+                    .any(|pane| pane.focus_handle(cx).contains_focused(window, cx))
+            }) {
+                window.blur(cx);
+            }
+            std::mem::swap(&mut self.attachment, &mut left.attachment);
+            self.departing = Some(Departing {
+                destination: left.destination,
+                hosts_withheld,
+            });
+            layers.push(self.render_workspace(left.route, window, cx));
+            self.departing = None;
+            std::mem::swap(&mut self.attachment, &mut left.attachment);
+            self.departed.insert(ix, left);
+        }
+        frame.render(layers).into_any_element()
+    }
+
+    /// The wide window showing `route` of whatever `self.attachment` is.
+    fn render_workspace(
+        &mut self,
+        route: Route,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let fullscreen = window.is_fullscreen();
         if self.attachment.is_none() {
             // No host: the hosts page is the whole window, and the only page
@@ -4335,9 +4534,11 @@ impl AppShell {
         // A native WebView is not composited into GPUI and survives removal of
         // its layout node. Synchronize it before a route change or a
         // right-panel tab/close transition can unmount PreviewPanel.
-        attachment
-            .preview
-            .update(cx, |preview, cx| preview.sync_visibility(cx));
+        if self.departing.is_none() {
+            attachment
+                .preview
+                .update(cx, |preview, cx| preview.sync_visibility(cx));
+        }
 
         let scene = attachment.routes.sample("routes", route, window, cx);
         let scenes: Vec<Route> = scene.scenes().copied().collect();
@@ -4418,10 +4619,19 @@ impl AppShell {
             .expect("a workspace route has an attachment");
         let sidebar_width = attachment.sidebar_width.get();
         let sidebar = if sidebar {
-            attachment.sidebar.clone().into_any_element()
+            self.layout_part("sidebar", attachment.sidebar.clone())
         } else {
             div().into_any_element()
         };
+        // The sidebar's column narrows away as it collapses and widens back,
+        // the sidebar keeping to its far edge, as it does beside the chat.
+        let shown_width = gpui_base::motion::transition(
+            "hosts-route-sidebar",
+            if collapsed { px(0.) } else { sidebar_width },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
         // Hosts is a product surface, not a settings page: the sidebar stays,
         // because the feature area that leads here is meant to be persistent.
         let body = self.hosts_body(window, cx);
@@ -4444,8 +4654,16 @@ impl AppShell {
                     .size_full()
                     .min_h_0()
                     .overflow_hidden()
-                    .when(!collapsed, |row| {
-                        row.child(div().flex_none().w(sidebar_width).h_full().child(sidebar))
+                    .when(shown_width > px(0.), |row| {
+                        row.child(
+                            h_flex()
+                                .flex_none()
+                                .w(shown_width)
+                                .h_full()
+                                .justify_end()
+                                .overflow_hidden()
+                                .child(div().flex_none().w(sidebar_width).h_full().child(sidebar)),
+                        )
                     })
                     .child(
                         v_flex()
@@ -4469,7 +4687,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let palette_open = self.window_state.read(cx).palette_mounted();
+        let palette_open = self.window_state.read(cx).palette_mounted() && self.departing.is_none();
         let fullscreen = window.is_fullscreen();
         let collapsed = self.window_state.read(cx).sidebar_collapsed;
         let Some(attachment) = &mut self.attachment else {
@@ -4525,9 +4743,11 @@ impl AppShell {
         };
         let right_floats =
             diff_open && chat_visible && beside_sidebar < chat_min + px(RIGHT_PANEL_MIN_WIDTH);
-        attachment.floating_focus.update(cx, |focus, cx| {
-            focus.sync_open(right_floats, window, cx);
-        });
+        if self.departing.is_none() {
+            attachment.floating_focus.update(cx, |focus, cx| {
+                focus.sync_open(right_floats, window, cx);
+            });
+        }
         let floating_width = attachment
             .right_width
             .get()
@@ -4553,11 +4773,6 @@ impl AppShell {
             }
         }
         let right_docked = diff_open && !right_floats;
-        let (docked_panel, floating_panel) = if right_floats {
-            (None, Some(right_panel))
-        } else {
-            (Some(right_panel), None)
-        };
 
         // The docked right panel's width: the one the user chose, as much of
         // it as leaves the chat its minimum.
@@ -4566,6 +4781,76 @@ impl AppShell {
             .get()
             .min(beside_sidebar - chat_min)
             .max(px(RIGHT_PANEL_MIN_WIDTH));
+
+        let beside_chat = (diff_open && chat_visible).then_some(right_floats);
+        let floated = std::mem::replace(&mut attachment.right_floated, beside_chat);
+        if beside_chat.is_none() {
+            attachment.float_glide = None;
+        } else if floated.is_some() && floated != beside_chat {
+            let from = match (&attachment.float_glide, floated) {
+                (Some(glide), _) => Some(glide.now),
+                (None, Some(true)) => attachment.floating_split.read(cx).sizes().get(1).copied(),
+                (None, _) => split.read(cx).sizes().get(right_ix).copied(),
+            };
+            if let Some(from) = from {
+                attachment.float_generation += 1;
+                attachment.float_glide = Some(FloatGlide {
+                    generation: attachment.float_generation,
+                    from,
+                    now: from,
+                });
+            }
+        }
+        let float_width = match &mut attachment.float_glide {
+            Some(glide) => {
+                let sample = gpui_base::motion::Presence::new(
+                    ElementId::NamedChild(
+                        std::sync::Arc::new(ElementId::from("right-panel-float")),
+                        glide.generation.to_string().into(),
+                    ),
+                    true,
+                )
+                .transition(crate::motion::settle())
+                .sample(window, cx);
+                let to = if right_floats {
+                    floating_width
+                } else {
+                    docked_width
+                };
+                if sample.phase == PresencePhase::Present {
+                    attachment.float_glide = None;
+                    if !right_floats {
+                        // Docked: the panel leaves its overlay at once.
+                        attachment.float_generation += 1;
+                    }
+                    None
+                } else {
+                    glide.now = glide.from + (to - glide.from) * sample.progress;
+                    Some(glide.now)
+                }
+            }
+            None => None,
+        };
+        let (mut docked_panel, mut floating_panel) = if right_floats || float_width.is_some() {
+            (None, Some(right_panel))
+        } else {
+            (Some(right_panel), None)
+        };
+        // A floating panel slides in from the window's edge as it opens and
+        // back out as it closes, drawn as it was while it goes. One that
+        // floats or docks as the room changes glides instead, so its slide
+        // starts afresh, at rest, whenever it does.
+        let overlay_in = gpui_base::motion::transition(
+            ElementId::NamedInteger("right-panel-overlay-in".into(), attachment.float_generation),
+            if floating_panel.is_some() { 1. } else { 0. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let overlay_leaving = floating_panel.is_none() && overlay_in > 0. && !right_docked;
+        if overlay_leaving {
+            floating_panel = docked_panel.take();
+        }
         // Give the docked right panel its width once the group knows about the
         // panel (its count is synced while the group renders, so this lands on
         // the frame after it docks — the group notifies, so that frame comes).
@@ -4587,12 +4872,13 @@ impl AppShell {
                 attachment.right_restore_pending = false;
             }
         }
+        // Held at the width it is being given until the group has it, so no
+        // frame draws it at the group's minimum or rescaled by the window.
+        let docked_pinned = attachment.right_restore_pending && right_docked && chat_visible;
+        let floating_pinned = attachment.floating_restore_pending;
 
-        // Opening, closing, expanding and restoring the right panel, and
-        // collapsing the sidebar, glide; floating or docking with the window's
-        // width does not, as the window's edge moved and the layout follows it.
-        let animate = right_floats == attachment.right_floated;
-        attachment.right_floated = right_floats;
+        // Opening, closing, expanding, restoring, floating and docking the
+        // right panel, and collapsing the sidebar, glide.
         let glide = attachment.panel_glide.sample(
             &[
                 crate::motion::resize_glide::Panel::sized(
@@ -4610,7 +4896,7 @@ impl AppShell {
                     right_docked,
                 ),
             ],
-            animate,
+            true,
             &split,
             window,
             cx,
@@ -4627,7 +4913,7 @@ impl AppShell {
                     gpui_base::PANEL_MIN_SIZE..Pixels::MAX
                 },
             ))
-            .child(glide.hold(1, self.render_chat_column(cx)));
+            .child(glide.hold(1, self.layout_part("chat", self.render_chat_column(cx))));
         let attachment = self.attachment.as_ref().expect("attachment checked above");
         // Beside the chat, `flex_none`: whatever the group's sizes leave over or
         // lack goes to the chat, so the panel is exactly the width restored
@@ -4637,7 +4923,11 @@ impl AppShell {
             .size(px(RIGHT_PANEL_WIDTH))
             .size_range(glide.range(
                 2,
-                px(RIGHT_PANEL_MIN_WIDTH)..if chat_visible { px(1400.) } else { Pixels::MAX },
+                if docked_pinned {
+                    docked_width..docked_width
+                } else {
+                    px(RIGHT_PANEL_MIN_WIDTH)..if chat_visible { px(1400.) } else { Pixels::MAX }
+                },
             ))
             .child(
                 glide.hold(
@@ -4665,10 +4955,11 @@ impl AppShell {
         let floating_right = floating_panel.map(|panel| {
             let focus = attachment.floating_focus.read(cx).focus_handle(cx);
             let remembered = attachment.right_width.clone();
+            let away = floating_width.min(beside_sidebar) * (1. - overlay_in);
             div()
                 .absolute()
                 .top_0()
-                .right_0()
+                .right(px(0.) - away)
                 .h_full()
                 .w(beside_sidebar)
                 .child(
@@ -4684,9 +4975,16 @@ impl AppShell {
                             resizable_panel()
                                 .flex_none()
                                 .size(floating_width)
-                                .size_range(
-                                    px(RIGHT_PANEL_MIN_WIDTH).min(beside_sidebar)..beside_sidebar,
-                                )
+                                .size_range(match float_width {
+                                    Some(width) => {
+                                        width.min(beside_sidebar)..width.min(beside_sidebar)
+                                    }
+                                    None if floating_pinned => floating_width..floating_width,
+                                    None => {
+                                        px(RIGHT_PANEL_MIN_WIDTH).min(beside_sidebar)
+                                            ..beside_sidebar
+                                    }
+                                })
                                 .child(
                                     crate::material::floating_panel(
                                         div().id("right-panel-overlay"),
@@ -4710,10 +5008,15 @@ impl AppShell {
                 )
         });
 
+        let floating_right = floating_right.map(|overlay| {
+            overlay.when(overlay_leaving, |overlay| {
+                overlay.child(crate::motion::shield())
+            })
+        });
         let remembered_right = attachment.right_width.clone();
         let remembered_sidebar = attachment.sidebar_width.clone();
         let sidebar = if draw_sidebar {
-            attachment.sidebar.clone().into_any_element()
+            self.layout_part("sidebar", attachment.sidebar.clone())
         } else {
             div().into_any_element()
         };
@@ -4763,6 +5066,16 @@ impl AppShell {
             true => (Some(sidebar), None),
             false => (None, Some(sidebar)),
         };
+        // The hover overlay slides in from the window's edge and back out,
+        // drawn as it was while it goes.
+        let overlay_in = gpui_base::motion::transition(
+            "sidebar-hover-overlay-in",
+            if overlay_visible { 1. } else { 0. },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
+        let overlay_leaving = !overlay_visible && overlay_in > 0. && collapsed;
         let workspace = div()
             .relative()
             .size_full()
@@ -4806,7 +5119,7 @@ impl AppShell {
                 )
             })
             .when_some(
-                overlay_sidebar.filter(|_| overlay_visible),
+                overlay_sidebar.filter(|_| overlay_visible || overlay_leaving),
                 |this, sidebar| {
                     this.child(
                         crate::material::floating_panel(
@@ -4814,8 +5127,9 @@ impl AppShell {
                             crate::material::Side::Left,
                             cx,
                         )
+                        .debug_selector(|| "sidebar-hover-overlay".into())
                         .absolute()
-                        .left_0()
+                        .left(px(0.) - overlay_width * (1. - overlay_in))
                         .top_0()
                         .h_full()
                         .w(overlay_width)
@@ -4828,7 +5142,10 @@ impl AppShell {
                                 cx,
                             );
                         }))
-                        .child(sidebar),
+                        .child(sidebar)
+                        .when(overlay_leaving, |overlay| {
+                            overlay.child(crate::motion::shield())
+                        }),
                     )
                 },
             )
@@ -4931,11 +5248,18 @@ impl Render for AppShell {
                 .update(cx, |p, cx| p.open(focus_query, window, cx));
         }
         self.palette_was_open = palette_open;
+        let reflow = crate::motion::reflow("shell-layout", window, cx)
+            .reflowed(std::mem::take(&mut self.layout_flipped));
+        self.layout_reflow = Some(reflow.clone());
         let body = if self.compact(cx) {
+            // A compact window's pages slide over the ones they replace.
+            self.departed.clear();
+            self.attachments = Default::default();
             self.render_compact(window, cx)
         } else {
             self.render_wide(window, cx)
         };
+        let body = reflow.render(body);
         let body = if crate::window_seam::is_mobile(cx) && !cfg!(target_os = "ios") {
             self.swipe_back_stack(body, cx).into_any_element()
         } else {
@@ -5929,7 +6253,7 @@ mod tests {
         let (shell, _host, client, cx) =
             mount_restored_at_width(cx, &["hosts"], false, 1024., "plan");
         let assert_locked_on_hosts = |cx: &mut VisualTestContext| {
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             assert!(
                 cx.debug_bounds("hosts-page").is_some(),
                 "the hosts page is the window"
@@ -5982,7 +6306,7 @@ mod tests {
                 shell.switch_to(AttachmentTarget::Remote(Box::new(saved)), window, cx)
             });
         });
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         shell.read_with(cx, |shell, cx| {
             assert!(shell.store().is_some());
             assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
@@ -11055,6 +11379,127 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-feature-hosts").is_none());
     }
 
+    /// Attaching, the workspace rises over Machines; detaching, Machines rises
+    /// over the workspace, whose views are let go once it is covered.
+    #[gpui::test]
+    fn attaching_and_detaching_rise_over_what_the_window_showed(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_initial(cx, None);
+        resize(cx, 1024.);
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("hosts-page").is_some());
+        let half_way = |cx: &mut VisualTestContext| {
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+        };
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.switch_to(AttachmentTarget::Local, window, cx)
+            })
+        });
+        half_way(cx);
+        assert!(
+            cx.debug_bounds("chat-route").is_some(),
+            "the workspace rises"
+        );
+        assert!(cx.debug_bounds("hosts-page").is_some(), "over Machines");
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("hosts-page").is_none());
+
+        let left = shell.read_with(cx, |shell, _| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .diff
+                .downgrade()
+        });
+        shell.update(cx, |shell, cx| shell.detach(cx));
+        half_way(cx);
+        assert!(cx.debug_bounds("hosts-page").is_some(), "Machines rises");
+        assert!(
+            cx.debug_bounds("chat-route").is_some(),
+            "over the workspace the window left"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("chat-route").is_none());
+        assert!(left.upgrade().is_none(), "the workspace left is let go");
+    }
+
+    /// On Machines, the sidebar's column narrows away as it collapses and
+    /// widens back as it expands.
+    #[gpui::test]
+    fn the_hosts_routes_sidebar_collapses_gradually(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        let store = store_of(&shell, cx);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        resize(cx, 1024.);
+        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        crate::test_frames::draw_settled(cx);
+        let left = |cx: &mut VisualTestContext| cx.debug_bounds("hosts-route").unwrap().left();
+        let expanded = left(cx);
+        assert_eq!(expanded, px(SIDEBAR_WIDTH));
+        let half_way = |cx: &mut VisualTestContext| {
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+            left(cx)
+        };
+
+        state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        let collapsing = half_way(cx);
+        assert!(
+            collapsing > px(0.) && collapsing < expanded,
+            "{collapsing:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(left(cx), px(0.));
+
+        state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        let expanding = half_way(cx);
+        assert!(expanding > px(0.) && expanding < expanded, "{expanding:?}");
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(left(cx), expanded);
+    }
+
+    /// A tablet turning compact or wide moves its conversation from where
+    /// one layout drew it to where the other does, rather than jumping.
+    #[gpui::test]
+    fn the_conversation_glides_across_the_breakpoint(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        as_mobile(cx);
+        resize(cx, 1024.);
+        draw_until(&shell, cx, &host, "chat-composer", None);
+        crate::test_frames::draw_settled(cx);
+        let left = |cx: &mut VisualTestContext| cx.debug_bounds("chat-composer").unwrap().left();
+        let wide = left(cx);
+
+        resize(cx, 899.);
+        assert_eq!(left(cx), wide, "the conversation starts where it was");
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let gliding = left(cx);
+        crate::test_frames::draw_settled(cx);
+        let compact = left(cx);
+        assert!(
+            compact < gliding && gliding < wide,
+            "{gliding:?} between {compact:?} and {wide:?}"
+        );
+
+        resize(cx, 1024.);
+        assert_eq!(left(cx), compact, "and back from where it is");
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(left(cx), wide);
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        resize(cx, 899.);
+        assert_eq!(left(cx), compact, "with motion reduced it is there at once");
+    }
+
     /// Settings replaces the whole window, unlike the Hosts route: the left
     /// column is the settings rail, so the workspace sidebar — and the feature
     /// area in it — is gone while the route is showing.
@@ -11891,7 +12336,7 @@ mod tests {
 
         resize(cx, 900.);
         draw_until(&shell, cx, &host, "diff-body", None);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         let overlay = cx.debug_bounds("right-panel-overlay").unwrap();
         let from = gpui::point(overlay.left(), px(400.));
         let to = from + gpui::point(px(60.), px(0.));
@@ -11909,7 +12354,7 @@ mod tests {
         );
         resize(cx, 1600.);
         draw_until(&shell, cx, &host, "diff-body", None);
-        draw(cx);
+        crate::test_frames::draw_settled(cx);
         assert_eq!(
             cx.debug_bounds("right-panel").unwrap().size.width,
             resized,
@@ -12072,17 +12517,37 @@ mod tests {
     }
 
     #[gpui::test]
-    fn escape_closes_the_floating_panel(cx: &mut TestAppContext) {
+    fn the_floating_panel_slides_in_and_escape_slides_it_out(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_crowded_thread(cx);
         let store = store_of(&shell, cx);
         resize(cx, 720.);
+        let left = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("right-panel-overlay")
+                .map(|overlay| overlay.left())
+        };
         store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let opening = left(cx).expect("the panel slides in");
         draw_until(&shell, cx, &host, "diff-body", None);
+        crate::test_frames::draw_settled(cx);
+        let open = left(cx).expect("the open panel");
+        assert!(
+            opening > open && opening < px(720.),
+            "{opening:?}, at rest {open:?}"
+        );
+
         cx.simulate_keystrokes("escape");
         draw(cx);
         assert!(!store.read_with(cx, |store, _| store.panel_state().right_panel_open));
-        assert!(cx.debug_bounds("right-panel-overlay").is_none());
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let closing = left(cx).expect("the panel slides out");
+        assert!(closing > open && closing < px(720.), "{closing:?}");
+        crate::test_frames::draw_settled(cx);
+        assert!(left(cx).is_none());
     }
 
     /// The docked right panel glides in beside the chat as it opens and out
@@ -12139,6 +12604,121 @@ mod tests {
             "the chat follows the sidebar back: {returning:?}"
         );
         assert_eq!(at_rest(cx, "chat-composer"), Some(expanded));
+    }
+
+    /// Narrowed past the room for both, the docked right panel floats over the
+    /// chat: drawn floating at once, its docked place closing beneath it; widened
+    /// again, it stays floating while its docked place opens, and docks there
+    /// once it has.
+    #[gpui::test]
+    fn the_right_panel_floats_and_docks_gradually(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        resize(cx, 1600.);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw_until(&shell, cx, &host, "diff-body", None);
+        crate::test_frames::draw_settled(cx);
+        let docked = cx.debug_bounds("right-panel").expect("docked").size.width;
+        let half_way = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+        };
+
+        // The docked place's content is held at its width and clipped; where
+        // it starts is where the place does.
+        resize(cx, 900.);
+        assert!(
+            cx.debug_bounds("right-panel-overlay").is_some(),
+            "it floats at once"
+        );
+        half_way(cx);
+        let closing = cx
+            .debug_bounds("right-panel")
+            .expect("its docked place is still closing")
+            .left();
+        assert!(
+            closing > px(900.) - docked && closing < px(900.),
+            "{closing:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("right-panel").is_none());
+        assert!(cx.debug_bounds("right-panel-overlay").is_some());
+
+        resize(cx, 1600.);
+        half_way(cx);
+        let opening = cx
+            .debug_bounds("right-panel")
+            .expect("its docked place opens")
+            .left();
+        assert!(
+            opening > px(1600.) - docked && opening < px(1600.),
+            "{opening:?}"
+        );
+        assert!(
+            cx.debug_bounds("right-panel-overlay").is_some(),
+            "it floats over its place until that has opened"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("right-panel-overlay").is_none());
+        assert_eq!(cx.debug_bounds("right-panel").unwrap().size.width, docked);
+    }
+
+    /// With the sidebar collapsed, the window's left edge slides it in over
+    /// the chat, and leaving it slides it back out.
+    #[gpui::test]
+    fn the_collapsed_sidebar_slides_in_from_the_edge_and_back(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_crowded_thread(cx);
+        let store = store_of(&shell, cx);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        resize(cx, 1600.);
+        draw_until(&shell, cx, &host, "chat-composer", None);
+        state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        crate::test_frames::draw_settled(cx);
+        let left = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("sidebar-hover-overlay")
+                .map(|overlay| overlay.left())
+        };
+        let half_way = |cx: &mut VisualTestContext| {
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+            left(cx)
+        };
+        cx.simulate_mouse_move(
+            gpui::point(px(1000.), px(400.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(left(cx), None);
+
+        cx.simulate_mouse_move(
+            gpui::point(px(4.), px(400.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        let opening = half_way(cx).expect("the sidebar slides in");
+        assert!(
+            opening < px(0.) && opening > -px(SIDEBAR_WIDTH),
+            "{opening:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(left(cx), Some(px(0.)));
+
+        cx.simulate_mouse_move(
+            gpui::point(px(1000.), px(400.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        let closing = half_way(cx).expect("the sidebar slides out");
+        assert!(
+            closing < px(0.) && closing > -px(SIDEBAR_WIDTH),
+            "{closing:?}"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(left(cx), None);
     }
 
     /// The terminal drawer glides up under the conversation as it opens, to
