@@ -3416,6 +3416,9 @@ impl WorkspaceStore {
             .get_mut(&session_id)
             .expect("the selected thread is held")
             .timeline = Some(timeline);
+        // As every change the host's events make: what draws the thread
+        // hears of it and folds its rows again.
+        cx.notify();
     }
 
     pub fn with_composer_destination_for<R>(
