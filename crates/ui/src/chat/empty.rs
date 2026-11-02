@@ -181,31 +181,40 @@ impl ChatView {
             .into_any_element()
     }
 
-    pub(super) fn render_scroll_pill(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The jump to the latest row, rising in while the reader is away from
+    /// it and sinking out once they are back.
+    pub(super) fn render_scroll_pill(
+        &self,
+        shown: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let shown = crate::motion::shown("scroll-to-end-pill", shown.then_some(()), window, cx)?;
         // Absolute positioning ignores mx_auto without pinned horizontal
         // insets; span the region and center with flex instead.
-        div()
-            .absolute()
-            .bottom(px(12.) + self.phone_strip_height)
-            .left_0()
-            .right_0()
-            .flex()
-            .justify_center()
-            .child(
-                floating_backing(crate::material::radius_button(cx), cx).child(
-                    Button::new("scroll-to-end")
-                        .debug_selector(|| "scroll-to-end".into())
-                        .outline()
-                        .small()
-                        .icon(IconName::ChevronDown)
-                        .label(crate::tr!("chat.scroll_end"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.list_state.set_follow_mode(FollowMode::Tail);
-                            this.list_state.scroll_to_end();
-                            cx.notify();
-                        })),
-                ),
-            )
-            .into_any_element()
+        let pill = floating_backing(crate::material::radius_button(cx), cx).child(
+            Button::new("scroll-to-end")
+                .debug_selector(|| "scroll-to-end".into())
+                .outline()
+                .small()
+                .icon(IconName::ChevronDown)
+                .label(crate::tr!("chat.scroll_end"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.list_state.set_follow_mode(FollowMode::Tail);
+                    this.list_state.scroll_to_end();
+                    cx.notify();
+                })),
+        );
+        Some(
+            div()
+                .absolute()
+                .bottom(px(12.) + self.phone_strip_height)
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(shown.fade(pill))
+                .into_any_element(),
+        )
     }
 }

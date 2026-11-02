@@ -771,9 +771,7 @@ impl Render for ChatView {
                         .absolute()
                         .size_full(),
                     )
-                    .when(show_jump_to_latest, |this| {
-                        this.child(self.render_scroll_pill(cx))
-                    })
+                    .children(self.render_scroll_pill(show_jump_to_latest, window, cx))
                     .children(phone_strip),
             )
             .child(
