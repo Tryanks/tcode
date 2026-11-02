@@ -221,67 +221,96 @@ impl ChatView {
     /// then the linked pull requests, scrolling sideways when they overflow.
     /// It floats over the chat instead of taking height from it, so each chip
     /// carries its own backing; the last row's padding clears it at the tail.
+    /// It rises in with the first of them and sinks out, as it last stood,
+    /// with the last; the second element is how far in it is.
     pub(super) fn render_phone_strip(
         &self,
         agents: Option<&crate::agents_panel::Agents>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.window_state.read(cx).compact {
-            return None;
-        }
+    ) -> Option<(AnyElement, f32)> {
+        let compact = self.window_state.read(cx).compact;
         let links = self
             .active_pull_requests(cx)
-            .filter(|links| !links.is_empty());
-        if agents.is_none() && links.is_none() {
-            return None;
-        }
+            .filter(|links| compact && !links.is_empty());
+        let agents = agents
+            .filter(|_| compact)
+            .map(|agents| (agents.count(), agents.cue(cx)));
+        let strip = crate::motion::shown(
+            "phone-strip",
+            (agents.is_some() || links.is_some()).then_some(()),
+            window,
+            cx,
+        )?;
+        // Coming or going, the strip moves as a whole; while it stays, a
+        // pill that comes or goes widens into it or narrows out of it, and
+        // the other moves aside.
+        let whole = strip.progress() < 1.;
         let gap = cx.theme().tokens.spacing.xs;
         let radius = crate::material::radius_chip(cx);
-        let agents = agents.map(|agents| self.render_agents_pill(agents, window, cx));
-        // A pull request linked while the strip shows the agents widens into
-        // it beside their pill, and narrows out when the last is unlinked.
+        let agents =
+            crate::motion::shown("phone-agents-pill-fold", agents, window, cx).map(|pill| {
+                let (count, cue) = pill.value;
+                let chip = floating_backing(radius, cx)
+                    .child(self.render_agents_pill(count, cue, window, cx));
+                if whole {
+                    chip.into_any_element()
+                } else {
+                    pill.fold_across(chip)
+                }
+            });
         let pull_requests =
             crate::motion::shown("phone-pr-pill-fold", links, window, cx).and_then(|pill| {
-                let chip = self.render_pull_request_pill(&pill.value, cx)?;
-                Some(pill.fold_across_gap(gap, floating_backing(radius, cx).child(chip)))
+                let chip = floating_backing(radius, cx)
+                    .child(self.render_pull_request_pill(&pill.value, cx)?);
+                Some(if whole {
+                    chip.into_any_element()
+                } else {
+                    pill.fold_across_gap(gap, chip)
+                })
             });
-        Some(
+        let progress = strip.progress();
+        Some((
             crate::material::bar("phone-strip", crate::material::Bar::Toolbar, true, cx)
                 .debug_selector(|| "phone-strip".into())
                 .absolute()
-                .bottom_0()
+                .bottom(-crate::motion::lift(progress))
                 .left_0()
                 .px_0()
+                .opacity(progress)
                 .child(
                     h_flex()
                         .id("phone-strip-scroll")
                         .size_full()
                         .items_center()
                         .px(px(crate::material::COMPACT_PAGE_INSET))
-                        .gap(cx.theme().tokens.spacing.xs)
-                        .children(agents.map(|chip| floating_backing(radius, cx).child(chip)))
+                        .gap(gap)
+                        .children(agents)
                         .children(pull_requests)
                         .overflow_x_scroll_area(),
                 )
+                .when(strip.leaving(), |strip| {
+                    strip.child(crate::motion::shield())
+                })
                 .into_any_element(),
-        )
+            progress,
+        ))
     }
 
     /// The phone entry to the Agents view: a pill that opens the sheet, shown
     /// while the thread has agents.
     fn render_agents_pill(
         &self,
-        agents: &crate::agents_panel::Agents,
+        count: usize,
+        cue: Option<gpui::Hsla>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let label: SharedString = match agents.count() {
+        let label: SharedString = match count {
             1 => crate::tr!("agents.pill_one").into_owned(),
             count => crate::tr!("agents.pill", count = count).into_owned(),
         }
         .into();
-        let cue = agents.cue(cx);
         let panel = self.agents.clone();
         let shown = self.agents.downgrade();
         let pill = Button::new("agents-pill")
