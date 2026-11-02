@@ -14069,6 +14069,111 @@ mod tests {
         );
     }
 
+    /// thread-1's running turn: a question, a command it runs, and a steer
+    /// sent while it works, which the agent has `taken` or not yet.
+    fn steered_timeline(taken: bool) -> tcode_core::session::Timeline {
+        let mut timeline = tcode_core::session::Timeline::default();
+        let mut events = vec![
+            agent::AgentEvent::TurnStarted {
+                turn_id: "0".into(),
+            },
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "user".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::UserMessage {
+                    text: "Look at the build.".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                id: "first".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::CommandExecution {
+                    command: "cargo build".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: agent::ItemStatus::InProgress,
+                },
+            }),
+            agent::AgentEvent::SteerRequested {
+                request_id: "steer".into(),
+                text: "Also check the docs.".into(),
+                attachments: Vec::new(),
+            },
+        ];
+        if taken {
+            events.push(agent::AgentEvent::SteerAccepted {
+                request_id: "steer".into(),
+            });
+        }
+        for event in &events {
+            timeline.apply_at(None, event);
+        }
+        timeline
+    }
+
+    /// A steer the agent takes travels from the turn's trailer to its place
+    /// in the turn. A tablet turning compact part way draws the conversation
+    /// on the compact page: the steer carries on from where it had got to,
+    /// relative to the conversation around it, and is drawn within the
+    /// timeline in the frame of the flip, rather than flying from where the
+    /// wide layout drew it or vanishing behind the old layout's bounds.
+    #[gpui::test]
+    fn a_travelling_steer_carries_on_when_the_window_turns_compact(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        as_mobile(cx);
+        resize(cx, 1024.);
+        let store = store_of(&shell, cx);
+        show_timeline(&store, steered_timeline(false), cx);
+        settle_frames(cx);
+        let _ = sent(&host);
+        // From the question's bubble to the steer's.
+        let steer = |cx: &mut VisualTestContext| {
+            let question = cx.debug_bounds("user-bubble-user").expect("the question");
+            let bubble = cx.debug_bounds("user-bubble-steer").expect("the steer");
+            bubble.top() - question.top()
+        };
+        let painted = |cx: &mut VisualTestContext| {
+            let bubble = cx.debug_bounds("user-bubble-steer").expect("the steer");
+            cx.update(|window, _| {
+                let bubble = bubble.scale(window.scale_factor());
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds.intersects(&bubble)
+                        && quad.background.as_solid().is_some_and(|fill| fill.a > 0.)
+                })
+            })
+        };
+        assert!(steer(cx) > px(0.) && painted(cx));
+
+        show_timeline(&store, steered_timeline(true), cx);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+        cx.simulate_resize(size(px(899.), px(800.)));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
+        assert!(painted(cx), "the steer is drawn in the frame of the flip");
+        display_frame(cx);
+        let partway = steer(cx);
+        assert!(painted(cx), "the steer is drawn as it travels on");
+        settle_frames(cx);
+        let taken = steer(cx);
+        // Where it started, on the compact page.
+        show_timeline(&store, steered_timeline(false), cx);
+        settle_frames(cx);
+        let pending = steer(cx);
+        assert!(
+            taken + px(10.) < pending,
+            "the steer moved up: {pending:?} -> {taken:?}"
+        );
+        assert_between("the travelling steer", pending, taken, partway);
+    }
+
     /// A control the keyboard is on keeps it, and with it its fading ring,
     /// which is kept by its focus handle, when its view is drawn under a new
     /// parent: a command's header in the left of two panes, as the pane is
