@@ -451,6 +451,70 @@ mod tests {
         assert!(open(cx, &["third"]), "the latest folded");
     }
 
+    /// A command's output that folds shut on its own moves the thread around
+    /// it continuously: the frame the folded body leaves moves nothing.
+    #[gpui::test]
+    fn a_command_folding_shut_on_its_own_ends_without_a_drop(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        timeline.entries = vec![entry("user", user_item("go")), command_with_output("first")];
+        let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+        cx.update(|cx| cx.set_reduce_motion(false));
+        let (_view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(900.)));
+        // A running turn's spinner never rests, so frames are delivered one
+        // display frame apart rather than until the window is still.
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            crate::test_frames::draw(cx);
+        };
+        for _ in 0..40 {
+            frame(cx);
+        }
+        timeline.entries.push(command_with_output("second"));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+            cx.notify();
+        });
+        // Where the folding command's header is: the thread pins its live
+        // end, so the fold moves what is above it.
+        let mut tops = Vec::new();
+        let mut gone = None;
+        for index in 0..40 {
+            frame(cx);
+            tops.push(
+                cx.debug_bounds("activity-row-first")
+                    .expect("the folding command is on screen")
+                    .top(),
+            );
+            if gone.is_none() && cx.debug_bounds("tool-detail-first").is_none() {
+                gone = Some(index);
+            }
+        }
+        let gone = gone.expect("the first command folded shut on its own");
+        assert!(
+            tops[0] != tops[gone],
+            "the first command's output folded: {tops:?}"
+        );
+        assert!(
+            tops[gone..]
+                .iter()
+                .all(|top| (*top - tops[gone - 1]).abs() < px(1.)),
+            "the thread moved as the fold ended: {:?}",
+            &tops[gone - 2..gone + 2]
+        );
+    }
+
     #[gpui::test]
     fn manually_collapsed_activity_stays_closed_while_new_activity_opens(cx: &mut TestAppContext) {
         use gpui::{px, size};

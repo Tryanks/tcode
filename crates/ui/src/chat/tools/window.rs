@@ -345,21 +345,33 @@ pub(in crate::chat) fn tool_window(
         .text_token(&cx.theme().tokens.typography.xs)
         .into_any_element()
     };
+    // The space above the body is the body's own, so it folds with it and
+    // nothing below moves by it as the fold starts or ends.
     let detail = match detail {
-        Detail::Fold(shown, content, shows) => {
-            Some(shown.fold(glide_body(&key, shows, body(content))))
-        }
-        Detail::Open(content) => Some(body(content)),
+        Detail::Fold(shown, content, shows) => Some(
+            shown.fold(
+                div()
+                    .w_full()
+                    .pt_1()
+                    .child(glide_body(&key, shows, body(content))),
+            ),
+        ),
+        Detail::Open(content) => Some(
+            div()
+                .w_full()
+                .pt_1()
+                .child(body(content))
+                .into_any_element(),
+        ),
         Detail::None | Detail::Shut => None,
     };
     v_flex()
         .id(SharedString::from(format!("tool-window-{key}")))
         .w_full()
-        .gap_1()
         .child(row)
         // An open body tells the failure in full; the line is for a shut one.
         .when_some(error.filter(|_| !open), |window, error| {
-            window.child(error_line(&key, error, cx))
+            window.child(div().w_full().pt_1().child(error_line(&key, error, cx)))
         })
         .children(detail)
         .context_menu(move |menu, _, _| {
