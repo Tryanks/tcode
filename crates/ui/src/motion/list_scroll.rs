@@ -78,6 +78,18 @@ impl ListScroll {
         });
     }
 
+    /// Glide `list` just far enough that row `index` is in view, to where
+    /// `ListState::scroll_to_reveal_item` would put it at once.
+    pub(crate) fn reveal(&self, list: &ListState, index: usize, cx: &App) {
+        let here = list.logical_scroll_top();
+        list.scroll_to_reveal_item(index);
+        let to = list.logical_scroll_top();
+        list.scroll_to(here);
+        if to != here {
+            self.scroll_to(list, ScrollTarget::Row(to), cx);
+        }
+    }
+
     /// Move `list` to where the glide has got to, asking for the next frame
     /// while it is under way; at its end, the list is at the target.
     pub(crate) fn step(&self, list: &ListState, window: &mut Window, cx: &App) {
