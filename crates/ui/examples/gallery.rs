@@ -574,7 +574,7 @@ impl Gallery {
                     TabItem::new(("gallery-terminal", ix), label)
                         .selected(selected[4] == ix)
                         .on_click(pick(4, ix, cx))
-                        .trailing(
+                        .trailing(move |_, cx| {
                             h_flex()
                                 .gap_1()
                                 .children((ix == 2).then(|| {
@@ -587,8 +587,9 @@ impl Gallery {
                                         .xsmall()
                                         .icon(IconName::Close)
                                         .tooltip("Close terminal"),
-                                ),
-                        )
+                                )
+                                .into_any_element()
+                        })
                 })
                 .collect::<Vec<_>>();
         let merge = ["Merge commit", "Squash and merge", "Rebase and merge"]

@@ -442,41 +442,43 @@ fn render_menu_row(
         secondary = row.secondary.clone()
     )
     .into_owned();
-    crate::material::menu_item_frame(compact, cx)
-        .id(("menu-row", index))
-        .debug_selector(move || format!("menu-row-{index}"))
-        .role(Role::ListBoxOption)
-        .aria_label(accessible_label)
-        .aria_selected(is_active)
-        .when(is_active, |row| row.aria_active_descendant())
-        .flex_none()
-        .w_full()
-        .items_center()
-        .text_body(compact, cx)
-        .cursor_pointer()
-        .when(is_active, |s| s.bg(cx.theme().list_active))
-        .hover(|s| s.bg(cx.theme().muted))
-        .child(icon.text_color(muted))
-        .child(div().flex_none().child(row.primary.clone()))
-        .when(!row.secondary.is_empty(), |this| {
-            this.child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_color(muted)
-                    .child(crate::widgets::fade_text(row.secondary.clone())),
-            )
-        })
-        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-            if this.menu_highlight != index {
-                this.menu_highlight = index;
-                cx.notify();
-            }
-        }))
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.accept_menu(index, window, cx);
-        }))
+    crate::material::menu_item_frame(
+        compact,
+        crate::material::ItemFill::highlight(is_active, cx.theme().list_active),
+        cx,
+    )
+    .id(("menu-row", index))
+    .debug_selector(move || format!("menu-row-{index}"))
+    .role(Role::ListBoxOption)
+    .aria_label(accessible_label)
+    .aria_selected(is_active)
+    .when(is_active, |row| row.aria_active_descendant())
+    .flex_none()
+    .w_full()
+    .items_center()
+    .text_body(compact, cx)
+    .cursor_pointer()
+    .child(icon.text_color(muted))
+    .child(div().flex_none().child(row.primary.clone()))
+    .when(!row.secondary.is_empty(), |this| {
+        this.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_color(muted)
+                .child(crate::widgets::fade_text(row.secondary.clone())),
+        )
+    })
+    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+        if this.menu_highlight != index {
+            this.menu_highlight = index;
+            cx.notify();
+        }
+    }))
+    .on_click(cx.listener(move |this, _, window, cx| {
+        this.accept_menu(index, window, cx);
+    }))
 }
 
 /// What the trigger menu shows: kept while the menu folds away, so it leaves
@@ -645,14 +647,19 @@ mod tests {
         assert!(cx.debug_bounds("menu-row-0").is_some());
         assert!(cx.debug_bounds(last_row).is_none());
 
-        for _ in 0..last {
-            cx.simulate_keystrokes("down");
+        // The list glides to each highlighted row; draw once it is there.
+        let step = |keys: &str, cx: &mut VisualTestContext| {
+            cx.simulate_keystrokes(keys);
             cx.update(|window, cx| _ = window.draw(cx));
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            cx.update(|window, cx| _ = window.draw(cx));
+        };
+        for _ in 0..last {
+            step("down", cx);
         }
         assert!(cx.debug_bounds(last_row).is_some());
         for _ in 0..last {
-            cx.simulate_keystrokes("up");
-            cx.update(|window, cx| _ = window.draw(cx));
+            step("up", cx);
         }
         assert!(cx.debug_bounds("menu-row-0").is_some());
     }

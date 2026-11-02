@@ -2,8 +2,8 @@ use std::borrow::BorrowMut;
 
 use gpui::{
     AnyElement, App, Axis, Div, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Size, Stateful, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    ParentElement as _, Pixels, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::{Presence, PresenceSample, Transition, TransitionId, transition};
 
@@ -188,6 +188,23 @@ impl<T> Shown<T> {
             child: self.frame(content).min_w_0().into_any_element(),
         }
         .into_any_element()
+    }
+
+    /// In a row that divides its width among its children (a segmented
+    /// track): its share grows from nothing and fades in, and gives itself
+    /// back to the others as it fades out, with the `gap` before it. At
+    /// rest it takes a whole share, and no less than its content.
+    pub(crate) fn fold_share(&self, gap: Pixels, content: impl IntoElement) -> AnyElement {
+        let progress = self.progress.clamp(0., 1.);
+        self.frame(content)
+            .flex()
+            .flex_grow(progress)
+            .flex_basis(px(0.))
+            .flex_shrink_0()
+            .when(progress < 1., |frame| {
+                frame.min_w_0().overflow_hidden().ml(-gap * (1. - progress))
+            })
+            .into_any_element()
     }
 
     /// Beside other content in a row: fades and rises in place, as
@@ -481,15 +498,23 @@ pub(crate) fn hover_fill(
     window: &mut Window,
     cx: &mut App,
 ) -> (gpui::Hsla, impl Fn(&bool, &mut Window, &mut App) + 'static) {
+    hover_fill_over(id, hover.opacity(0.), hover, window, cx)
+}
+
+/// [`hover_fill`] from `rest`, the fill the element has while the pointer
+/// is away (a highlight, or nothing); a change of `rest` glides too.
+fn hover_fill_over(
+    id: impl Into<ElementId>,
+    rest: gpui::Hsla,
+    hover: gpui::Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> (gpui::Hsla, impl Fn(&bool, &mut Window, &mut App) + 'static) {
     let id = id.into();
     let hovered = window.use_keyed_state(child_id(&id, "hovered"), cx, |_, _| false);
     let fill = transition(
         child_id(&id, "hover-fill"),
-        if *hovered.read(cx) {
-            hover
-        } else {
-            hover.opacity(0.)
-        },
+        if *hovered.read(cx) { hover } else { rest },
         settle(),
         window,
         cx,
@@ -503,6 +528,27 @@ pub(crate) fn hover_fill(
         });
     };
     (fill, on_hover)
+}
+
+/// The fill of an item built with `&App` only (a menu item, a selectable
+/// row), for its frame's first child, under the item's content: [`hover_fill`]
+/// over `rest`, rounded by `radius`, sampled when the item renders and kept
+/// under the item's id. It hears the pointer through its own hitbox, which
+/// covers the item and leaves the pointer to the item and its content, so
+/// the item's own `on_hover` stays the caller's. The item must be
+/// positioned and have an id.
+pub(crate) fn hover_layer(rest: gpui::Hsla, hover: gpui::Hsla, radius: Pixels) -> Sampled {
+    Sampled::new(move |window, cx| {
+        let (fill, on_hover) = hover_fill_over("hover-layer", rest, hover, window, cx);
+        div()
+            .id("hover-layer")
+            .absolute()
+            .inset_0()
+            .rounded(radius)
+            .bg(fill)
+            .on_hover(on_hover)
+            .into_any_element()
+    })
 }
 
 /// Mutually exclusive states of one region (loading, loaded, failed) that

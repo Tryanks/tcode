@@ -9,7 +9,7 @@ use crate::{
     typography::TextRole as _,
     widgets::{
         Tooltip,
-        tabs::{Glide, label_color, segment, segmented_track},
+        tabs::{Glide, item_key, label_color, segment, segment_list, segmented_track},
     },
 };
 use gpui::{
@@ -124,7 +124,12 @@ impl RenderOnce for ChoiceGroup {
         let count = choices.len();
         let selected = choices.iter().position(|choice| choice.selected);
         let dim = selected.is_some_and(|ix| choices[ix].disabled);
-        let glide = Glide::new(&id, count, selected, window, cx);
+        let glide = Glide::new(
+            &id,
+            selected.map(|ix| item_key(&choices[ix].id)),
+            window,
+            cx,
+        );
         let radios: Vec<_> = choices
             .into_iter()
             .enumerate()
@@ -133,11 +138,10 @@ impl RenderOnce for ChoiceGroup {
         let group = RadioGroup::new(id.clone())
             .axis(Axis::Horizontal)
             .when_some(aria_label, |this, label| this.aria_label(label))
-            .children(glide.pill(dim, cx))
+            .child(glide.pill(dim, cx))
             .children(radios)
             .relative();
-        let group = glide.observe(group);
-        segmented_track(id.clone(), group, compact, cx)
+        segmented_track(id.clone(), segment_list(group, cx), compact)
             .debug_selector(|| id.to_string())
             .refine_style(&style)
     }
@@ -175,6 +179,7 @@ fn render_choice(
         label.clone()
     };
     let selector = id.to_string();
+    let key = item_key(&id);
     let radio = Radio::new(id)
         .debug_selector(move || selector)
         .checked(selected)
@@ -200,6 +205,5 @@ fn render_choice(
             this.child(Icon::new(IconName::Star).flex_none())
                 .with_tooltip(|_, _| Tooltip::new(crate::tr!("choice.recommended")))
         });
-    let pill = selected && !glide.drawn();
-    glide.measure(ix, segment(radio, selected, pill, !disabled, compact, cx))
+    glide.measure(key, segment(radio, selected, !disabled, compact, cx))
 }

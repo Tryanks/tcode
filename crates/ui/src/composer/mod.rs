@@ -1645,14 +1645,21 @@ impl Render for Composer {
         let draft_glide =
             crate::motion::GlideState::keyed(self.motion_id("draft-glide"), window, cx);
 
-        // Focus swaps the hairline to primary. Geometry stays fixed: focus
-        // never changes border width, radius, or layout.
+        // The keyboard turns the hairline primary, gliding there and back.
+        // Geometry stays fixed: focus never changes border width, radius, or
+        // layout.
         let composer_focused = self.has_keyboard(window, cx);
-        let hairline = if composer_focused {
-            cx.theme().primary
-        } else {
-            cx.theme().border
-        };
+        let hairline = gpui_base::motion::transition(
+            self.motion_id("hairline"),
+            if composer_focused {
+                cx.theme().primary
+            } else {
+                cx.theme().border
+            },
+            crate::motion::settle(),
+            window,
+            cx,
+        );
         let card = v_flex()
             .debug_selector(|| "composer-card".into())
             .w_full()

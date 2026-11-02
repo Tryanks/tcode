@@ -594,22 +594,25 @@ impl Composer {
                     .p_1()
                     .gap_0p5()
                     .child(
-                        crate::material::menu_item_frame(true, cx)
-                            .id("attach-photo-library")
-                            .w_full()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_body(true, cx)
-                            .text_color(muted)
-                            .hover(|style| style.bg(cx.theme().muted))
-                            .child(Icon::empty().path("icons/image.svg"))
-                            .child(crate::tr!("attach.photo_library"))
-                            .on_click(move |_, window, cx| {
-                                popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                composer.update(cx, |composer, cx| {
-                                    composer.pick_images_from_library(window, cx)
-                                });
-                            }),
+                        crate::material::menu_item_frame(
+                            true,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        )
+                        .id("attach-photo-library")
+                        .w_full()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_body(true, cx)
+                        .text_color(muted)
+                        .child(Icon::empty().path("icons/image.svg"))
+                        .child(crate::tr!("attach.photo_library"))
+                        .on_click(move |_, window, cx| {
+                            popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            composer.update(cx, |composer, cx| {
+                                composer.pick_images_from_library(window, cx)
+                            });
+                        }),
                     )
                     .into_any_element()
             })
@@ -1047,7 +1050,7 @@ fn render_model_row(
     let popover_fav = popover.clone();
 
     let accessible_label = crate::tr!("composer.model_option", model = name.clone()).into_owned();
-    crate::material::menu_item_frame(compact, cx)
+    crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
         .id(("model-row", index))
         .role(Role::ListBoxOption)
         .aria_label(accessible_label)
@@ -1058,7 +1061,6 @@ fn render_model_row(
         .items_center()
         .cursor_pointer()
         .when(is_current, |row| row.bg(cx.theme().list_active))
-        .hover(|s| s.bg(cx.theme().muted))
         .on_click(move |_, window, cx| {
             let id = id.clone();
             let profile_id = profile_id.clone();
@@ -1340,66 +1342,72 @@ fn render_permission_pane(
         let value = option.value.clone();
         let id = control.id.clone();
         list = list.child(
-            crate::material::menu_item_frame(compact, cx)
-                .id(("permission-row", index))
-                .debug_selector(move || format!("permission-row-{index}"))
-                .role(Role::MenuItem)
-                .aria_label(
-                    std::iter::once(option.label.as_str())
-                        .chain(option.description.as_deref())
-                        .chain(option.unavailable.as_deref())
-                        .collect::<Vec<_>>()
-                        .join(": "),
-                )
-                .aria_selected(effective)
-                .when(effective, |row| row.aria_active_descendant())
-                .w_full()
-                .items_start()
-                .when(effective, |row| row.bg(cx.theme().list_active))
-                .when(disabled, |row| row.opacity(0.55))
-                .when(!disabled, |row| {
-                    row.cursor_pointer()
-                        .hover(|style| style.bg(cx.theme().muted))
-                        .on_click(move |_, window, cx| {
-                            store.update(cx, |store, _cx| {
-                                store.set_active_option_for(
-                                    session_id.clone().unwrap_or_default(),
-                                    id.clone(),
-                                    Some(value.clone()),
-                                )
-                            });
-                            popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        })
-                })
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_0p5()
-                        .child(
-                            h_flex()
-                                .gap_1p5()
-                                .items_center()
-                                .flex_wrap()
-                                .text_body(compact, cx)
-                                .child(div().child(option.label.clone()))
-                                .when(option.recommended, |row| {
-                                    row.child(caption(crate::tr!("permission.recommended").into()))
-                                })
-                                .when(effective, |row| {
-                                    row.child(Icon::new(IconName::Check).text_color(primary))
-                                })
-                                .when(pending, |row| {
-                                    row.child(caption(crate::tr!("permission.pending").into()))
-                                }),
+            crate::material::menu_item_frame(
+                compact,
+                if disabled {
+                    crate::material::ItemFill::Inert
+                } else {
+                    crate::material::ItemFill::Hover
+                },
+                cx,
+            )
+            .id(("permission-row", index))
+            .debug_selector(move || format!("permission-row-{index}"))
+            .role(Role::MenuItem)
+            .aria_label(
+                std::iter::once(option.label.as_str())
+                    .chain(option.description.as_deref())
+                    .chain(option.unavailable.as_deref())
+                    .collect::<Vec<_>>()
+                    .join(": "),
+            )
+            .aria_selected(effective)
+            .when(effective, |row| row.aria_active_descendant())
+            .w_full()
+            .items_start()
+            .when(effective, |row| row.bg(cx.theme().list_active))
+            .when(disabled, |row| row.opacity(0.55))
+            .when(!disabled, |row| {
+                row.cursor_pointer().on_click(move |_, window, cx| {
+                    store.update(cx, |store, _cx| {
+                        store.set_active_option_for(
+                            session_id.clone().unwrap_or_default(),
+                            id.clone(),
+                            Some(value.clone()),
                         )
-                        .when_some(option.description.clone(), |column, description| {
-                            column.child(caption(description.into()))
-                        })
-                        .when_some(option.unavailable.clone(), |column, reason| {
-                            column.child(caption(reason.into()))
-                        }),
-                ),
+                    });
+                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                })
+            })
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .flex_wrap()
+                            .text_body(compact, cx)
+                            .child(div().child(option.label.clone()))
+                            .when(option.recommended, |row| {
+                                row.child(caption(crate::tr!("permission.recommended").into()))
+                            })
+                            .when(effective, |row| {
+                                row.child(Icon::new(IconName::Check).text_color(primary))
+                            })
+                            .when(pending, |row| {
+                                row.child(caption(crate::tr!("permission.pending").into()))
+                            }),
+                    )
+                    .when_some(option.description.clone(), |column, description| {
+                        column.child(caption(description.into()))
+                    })
+                    .when_some(option.unavailable.clone(), |column, reason| {
+                        column.child(caption(reason.into()))
+                    }),
+            ),
         );
     }
     let mut pane = v_flex()
@@ -1624,30 +1632,33 @@ fn render_traits_pane(
                     let opt_id = id.clone();
                     let opt_value = opt.value.clone();
                     pane = pane.child(
-                        crate::material::menu_item_frame(compact, cx)
-                            .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
-                            .flex_none()
-                            .w_full()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_body(compact, cx)
-                            .hover(|s| s.bg(cx.theme().muted))
-                            .child(div().flex_1().min_w_0().child(text))
-                            .when(is_selected, |this| {
-                                this.child(Icon::new(IconName::Check).text_color(primary))
-                            })
-                            .on_click(move |_, window, cx| {
-                                let opt_id = opt_id.clone();
-                                let opt_value = opt_value.clone();
-                                store.update(cx, |store, _cx| {
-                                    store.set_active_option_for(
-                                        session_id.clone().unwrap_or_default(),
-                                        opt_id,
-                                        Some(serde_json::Value::String(opt_value)),
-                                    );
-                                });
-                                pop.update(cx, |st, cx| st.dismiss(window, cx));
-                            }),
+                        crate::material::menu_item_frame(
+                            compact,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        )
+                        .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
+                        .flex_none()
+                        .w_full()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_body(compact, cx)
+                        .child(div().flex_1().min_w_0().child(text))
+                        .when(is_selected, |this| {
+                            this.child(Icon::new(IconName::Check).text_color(primary))
+                        })
+                        .on_click(move |_, window, cx| {
+                            let opt_id = opt_id.clone();
+                            let opt_value = opt_value.clone();
+                            store.update(cx, |store, _cx| {
+                                store.set_active_option_for(
+                                    session_id.clone().unwrap_or_default(),
+                                    opt_id,
+                                    Some(serde_json::Value::String(opt_value)),
+                                );
+                            });
+                            pop.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
                     );
                 }
             }
@@ -1675,29 +1686,32 @@ fn render_traits_pane(
                     let pop = popover.clone();
                     let opt_id = id.clone();
                     pane = pane.child(
-                        crate::material::menu_item_frame(compact, cx)
-                            .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
-                            .flex_none()
-                            .w_full()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_body(compact, cx)
-                            .hover(|s| s.bg(cx.theme().muted))
-                            .child(div().flex_1().min_w_0().child(text))
-                            .when(is_selected, |this| {
-                                this.child(Icon::new(IconName::Check).text_color(primary))
-                            })
-                            .on_click(move |_, window, cx| {
-                                let opt_id = opt_id.clone();
-                                store.update(cx, |store, _cx| {
-                                    store.set_active_option_for(
-                                        session_id.clone().unwrap_or_default(),
-                                        opt_id,
-                                        Some(serde_json::Value::Bool(value)),
-                                    );
-                                });
-                                pop.update(cx, |st, cx| st.dismiss(window, cx));
-                            }),
+                        crate::material::menu_item_frame(
+                            compact,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        )
+                        .id(gpui::SharedString::from(format!("trait-opt-{id}-{index}")))
+                        .flex_none()
+                        .w_full()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_body(compact, cx)
+                        .child(div().flex_1().min_w_0().child(text))
+                        .when(is_selected, |this| {
+                            this.child(Icon::new(IconName::Check).text_color(primary))
+                        })
+                        .on_click(move |_, window, cx| {
+                            let opt_id = opt_id.clone();
+                            store.update(cx, |store, _cx| {
+                                store.set_active_option_for(
+                                    session_id.clone().unwrap_or_default(),
+                                    opt_id,
+                                    Some(serde_json::Value::Bool(value)),
+                                );
+                            });
+                            pop.update(cx, |st, cx| st.dismiss(window, cx));
+                        }),
                     );
                 }
             }
@@ -1806,7 +1820,7 @@ fn render_overflow_pane(
     let muted = cx.theme().muted_foreground;
     let compact = crate::window_seam::window_is_compact(window, cx);
     let item = |icon: Icon, label: String| -> AnyElement {
-        crate::material::menu_item_frame(compact, cx)
+        crate::material::menu_item_frame(compact, crate::material::ItemFill::Inert, cx)
             .w_full()
             .items_center()
             .text_body(compact, cx)

@@ -367,17 +367,54 @@ pub fn panel_row(
         .hover(|style| style.bg(cx.theme().list_hover))
 }
 
+/// What fills a [`menu_item_frame`] beneath its content.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ItemFill {
+    /// Nothing: an item that cannot be chosen.
+    Inert,
+    /// `muted` under the pointer.
+    Hover,
+    /// The fill of the item the keyboard is on, and `muted` under the
+    /// pointer.
+    Highlight(Hsla),
+}
+
+impl ItemFill {
+    /// [`ItemFill::Highlight`] with `fill` while `on`, [`ItemFill::Hover`]
+    /// otherwise.
+    pub fn highlight(on: bool, fill: Hsla) -> Self {
+        if on {
+            Self::Highlight(fill)
+        } else {
+            Self::Hover
+        }
+    }
+}
+
 /// One item of a menu or a menu-like picker: its inset, gap, radius and, on a
-/// touch layout, a [`TOUCH_TARGET`] height. The highlight is `muted`; callers
-/// add it with the content, since a disabled item takes none.
-pub fn menu_item_frame(touch: bool, cx: &App) -> Div {
+/// touch layout, a [`TOUCH_TARGET`] height, and the `fill` beneath its
+/// content, which glides as the pointer and the highlight come and go. The
+/// item must be given an id.
+pub fn menu_item_frame(touch: bool, fill: ItemFill, cx: &App) -> Div {
     let spacing = &cx.theme().tokens.spacing;
+    let radius = radius_button(cx);
+    let hover = cx.theme().muted;
     h_flex()
+        .relative()
         .gap(spacing.sm)
         .px(spacing.sm)
         .py(spacing.xs)
         .when(touch, |item| item.min_h(px(TOUCH_TARGET)))
-        .rounded(radius_button(cx))
+        .rounded(radius)
+        .map(|item| match fill {
+            ItemFill::Inert => item,
+            ItemFill::Hover => {
+                item.child(crate::motion::hover_layer(hover.opacity(0.), hover, radius))
+            }
+            ItemFill::Highlight(rest) => {
+                item.child(crate::motion::hover_layer(rest, hover, radius))
+            }
+        })
 }
 
 /// The three heights a horizontal bar of controls takes. gpui-base's `Toolbar`
@@ -452,7 +489,7 @@ pub(crate) fn selectable_row_height(compact: bool) -> f32 {
 /// accessibility.
 pub(crate) fn selectable_row<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
 where
-    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
     selectable_surface(el, selectable_row_height(compact), selected, compact, cx)
 }
@@ -470,7 +507,7 @@ pub fn selectable_row_inset(compact: bool) -> Pixels {
 /// A [`selectable_row`] holding two lines of text.
 pub fn selectable_row_two_line<E>(el: E, selected: bool, compact: bool, cx: &App) -> E
 where
-    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
     selectable_surface(
         el,
@@ -485,7 +522,7 @@ where
 /// tokens; the denser rail is Tcode's.
 fn selectable_surface<E>(el: E, height: f32, selected: bool, compact: bool, cx: &App) -> E
 where
-    E: Styled + InteractiveElement + gpui::prelude::FluentBuilder,
+    E: Styled + InteractiveElement + gpui::ParentElement + gpui::prelude::FluentBuilder,
 {
     let theme = cx.theme();
     let (active, hover) = (theme.list_active, theme.list_hover);
@@ -495,14 +532,21 @@ where
         px(6.)
     };
     let inset = selectable_row_inset(compact);
+    let radius = theme.tokens.radius.md;
     el.h(px(height))
+        .relative()
         .flex()
         .items_center()
         .gap(gap)
         .px(inset)
-        .rounded(theme.tokens.radius.md)
+        .rounded(radius)
         .when(selected, |row| row.bg(active))
-        .when(!selected, |row| row.hover(move |style| style.bg(hover)))
+        // A row the pointer selects lets its hover fill go as it is selected.
+        .child(crate::motion::hover_layer(
+            hover.opacity(0.),
+            if selected { hover.opacity(0.) } else { hover },
+            radius,
+        ))
 }
 
 /// The caption above one section of a navigable content list: at the page
@@ -942,5 +986,108 @@ mod tests {
 
         crate::test_frames::draw_settled(cx);
         assert_eq!(cx.update(|_, cx| pane_colour(0, cx).to_rgb()), dark);
+    }
+
+    /// A menu item and the rows of a virtual list, each built with `&App`
+    /// only, as a popover's content and a list's rows are.
+    struct Rows;
+
+    fn menu_item(cx: &App) -> impl IntoElement {
+        menu_item_frame(false, ItemFill::Hover, cx)
+            .id("menu-item")
+            .debug_selector(|| "menu-item".into())
+            .w(px(200.))
+            .h(px(32.))
+            .child("Item")
+    }
+
+    impl Render for Rows {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            div().w(px(200.)).child(menu_item(cx)).child(
+                crate::scroll::VirtualList::uniform("rows", 20, |range, _, cx| {
+                    range
+                        .map(|index| {
+                            selectable_row(div().id(("row", index)), false, false, cx)
+                                .debug_selector(move || format!("row-{index}"))
+                                .w_full()
+                                .child("Row")
+                        })
+                        .collect()
+                })
+                .w_full()
+                .h(px(200.)),
+            )
+        }
+    }
+
+    /// The alpha of the fill of `hue` painted over the whole of `selector`.
+    fn fill(selector: &'static str, hue: Hsla, cx: &mut gpui::VisualTestContext) -> f32 {
+        let bounds = cx.debug_bounds(selector).expect(selector);
+        cx.update(|window, _| {
+            let bounds = bounds.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| quad.bounds == bounds)
+                .filter_map(|quad| quad.background.as_solid())
+                .filter(|fill| (fill.h, fill.s, fill.l) == (hue.h, hue.s, hue.l))
+                .map(|fill| fill.a)
+                .fold(0., f32::max)
+        })
+    }
+
+    /// Under the pointer, a menu item and a list row each fill in over
+    /// several frames, delivered as a display delivers them, and fade out
+    /// when the pointer leaves; at rest each holds its full hover fill, or
+    /// none.
+    #[gpui::test]
+    fn menu_items_and_list_rows_fade_their_hover_fill(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| Rows);
+        let away = gpui::point(px(400.), px(400.));
+        cx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+        crate::test_frames::draw_settled(cx);
+        let (muted, list_hover) = cx.update(|_, cx| (cx.theme().muted, cx.theme().list_hover));
+        let frames = |selector: &'static str, hue: Hsla, cx: &mut gpui::VisualTestContext| {
+            (0..20)
+                .map(|_| {
+                    cx.executor()
+                        .advance_clock(std::time::Duration::from_millis(16));
+                    cx.update(|window, cx| {
+                        window.simulate_next_frame(cx);
+                        let _ = window.draw(cx);
+                    });
+                    fill(selector, hue, cx)
+                })
+                .collect::<Vec<_>>()
+        };
+        let fades = |alphas: &[f32], full: f32, rising: bool| {
+            alphas.iter().filter(|a| **a > 0. && **a < full).count() >= 4
+                && alphas.windows(2).all(|pair| {
+                    if rising {
+                        pair[1] >= pair[0]
+                    } else {
+                        pair[1] <= pair[0]
+                    }
+                })
+        };
+        for (selector, hue) in [("menu-item", muted), ("row-2", list_hover)] {
+            let at = cx.debug_bounds(selector).unwrap().center();
+            assert_eq!(fill(selector, hue, cx), 0.);
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+            let alphas = frames(selector, hue, cx);
+            assert!(
+                fades(&alphas, hue.a, true),
+                "{selector} popped in: {alphas:?}"
+            );
+            assert_eq!(alphas.last(), Some(&hue.a));
+            cx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+            let alphas = frames(selector, hue, cx);
+            assert!(
+                fades(&alphas, hue.a, false),
+                "{selector} popped out: {alphas:?}"
+            );
+            assert_eq!(alphas.last(), Some(&0.));
+        }
     }
 }

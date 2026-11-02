@@ -432,7 +432,11 @@ pub fn select_row<T: Clone + 'static>(
                     let on_select = on_select.clone();
                     let label = option.label.clone();
                     let item = crate::material::accessible_clickable(
-                        crate::material::menu_item_frame(compact, cx),
+                        crate::material::menu_item_frame(
+                            compact,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        ),
                         option.id,
                         Role::MenuItem,
                         label.clone(),
@@ -441,8 +445,7 @@ pub fn select_row<T: Clone + 'static>(
                     .aria_selected(option.selected)
                     .w_full()
                     .text_body(compact, cx)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().muted));
+                    .cursor_pointer();
                     let item = if let Some(description) = option.description {
                         item.items_start().child(
                             v_flex()

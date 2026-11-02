@@ -1540,7 +1540,11 @@ fn menu_row(
     cx: &App,
 ) -> gpui::Stateful<gpui::Div> {
     material::accessible_clickable(
-        material::menu_item_frame(compact, cx),
+        material::menu_item_frame(
+            compact,
+            material::ItemFill::highlight(selected, cx.theme().muted),
+            cx,
+        ),
         id,
         Role::MenuItem,
         label,
@@ -1552,8 +1556,6 @@ fn menu_row(
     .items_center()
     .text_body(compact, cx)
     .cursor_pointer()
-    .hover(|row| row.bg(cx.theme().muted))
-    .when(selected, |row| row.bg(cx.theme().muted))
 }
 
 fn turn_row(

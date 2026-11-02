@@ -1612,48 +1612,56 @@ impl Render for TerminalDrawer {
                             )
                         });
                     }))
-                    .trailing(
-                        h_flex()
-                            // A bell's dot folds in before the close button,
-                            // and away once the terminal is answered.
-                            .children(
-                                crate::motion::shown(
-                                    ("terminal-bell", id),
-                                    bell.then_some(()),
-                                    window,
-                                    cx,
+                    .trailing({
+                        let drawer = cx.entity().downgrade();
+                        let bell = *bell;
+                        move |window, cx| {
+                            let drawer = drawer.clone();
+                            h_flex()
+                                // A bell's dot folds in before the close button,
+                                // and away once the terminal is answered.
+                                .children(
+                                    crate::motion::shown(
+                                        ("terminal-bell", id),
+                                        bell.then_some(()),
+                                        window,
+                                        cx,
+                                    )
+                                    .map(|shown| {
+                                        shown.fold_across(
+                                            div()
+                                                .pr(cx.theme().tokens.spacing.xxs)
+                                                .text_token(&cx.theme().tokens.typography.xs)
+                                                .text_color(cx.theme().warning)
+                                                .child("●"),
+                                        )
+                                    }),
                                 )
-                                .map(|shown| {
-                                    shown.fold_across(
-                                        div()
-                                            .pr(cx.theme().tokens.spacing.xxs)
-                                            .text_token(&cx.theme().tokens.typography.xs)
-                                            .text_color(cx.theme().warning)
-                                            .child("●"),
-                                    )
-                                }),
-                            )
-                            .child(
-                                Button::new(("terminal-tab-close", close_id))
-                                    .ghost()
-                                    .compact()
-                                    .xsmall()
-                                    .icon(
-                                        Icon::new(IconName::Close)
-                                            .text_color(cx.theme().muted_foreground),
-                                    )
-                                    .tooltip(crate::tr!("terminal.close_tab"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.close_terminal_for(
-                                                this.session_id.clone().unwrap_or_default(),
-                                                close_id,
-                                                cx,
-                                            )
-                                        });
-                                    })),
-                            ),
-                    )
+                                .child(
+                                    Button::new(("terminal-tab-close", close_id))
+                                        .ghost()
+                                        .compact()
+                                        .xsmall()
+                                        .icon(
+                                            Icon::new(IconName::Close)
+                                                .text_color(cx.theme().muted_foreground),
+                                        )
+                                        .tooltip(crate::tr!("terminal.close_tab"))
+                                        .on_click(move |_, _, cx| {
+                                            _ = drawer.update(cx, |this, cx| {
+                                                this.workspace_store.update(cx, |store, cx| {
+                                                    store.close_terminal_for(
+                                                        this.session_id.clone().unwrap_or_default(),
+                                                        close_id,
+                                                        cx,
+                                                    )
+                                                });
+                                            });
+                                        }),
+                                )
+                                .into_any_element()
+                        }
+                    })
                     .context_menu({
                         let can_split = self
                             .workspace_store

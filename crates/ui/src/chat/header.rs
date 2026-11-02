@@ -1045,7 +1045,6 @@ impl ChatView {
             )
             .content(move |_state, _window, cx| {
                 let muted = cx.theme().muted_foreground;
-                let hover = cx.theme().muted;
                 let popover = cx.entity();
                 let mut menu = v_flex().w(px(210.)).p_1().gap_0p5();
                 for (index, item) in items.clone().into_iter().enumerate() {
@@ -1056,7 +1055,12 @@ impl ChatView {
                     let disabled = item.disabled;
                     let popover = popover.clone();
                     let chat = chat.clone();
-                    let frame = crate::material::menu_item_frame(false, cx)
+                    let fill = if disabled {
+                        crate::material::ItemFill::Inert
+                    } else {
+                        crate::material::ItemFill::Hover
+                    };
+                    let frame = crate::material::menu_item_frame(false, fill, cx)
                         .w_full()
                         .items_center()
                         .text_body(false, cx)
@@ -1084,14 +1088,10 @@ impl ChatView {
                             row = row.with_tooltip(move |_, _| Tooltip::new(text.clone()));
                         }
                     } else {
-                        row = row.cursor_pointer().hover(move |s| s.bg(hover)).on_click(
-                            move |_, window, cx| {
-                                popover.update(cx, |st, cx| st.dismiss(window, cx));
-                                chat.update(cx, |this, cx| {
-                                    this.trigger_git_action(action, window, cx)
-                                });
-                            },
-                        );
+                        row = row.cursor_pointer().on_click(move |_, window, cx| {
+                            popover.update(cx, |st, cx| st.dismiss(window, cx));
+                            chat.update(cx, |this, cx| this.trigger_git_action(action, window, cx));
+                        });
                     }
                     menu = menu.child(row);
                 }
@@ -1187,10 +1187,13 @@ impl ChatView {
                 let p2 = popover.clone();
                 let p3 = popover.clone();
                 let muted = cx.theme().muted_foreground;
-                let hover = cx.theme().muted;
                 let menu_item = move |id: &'static str, icon: IconName, label: SharedString| {
                     crate::material::accessible_clickable(
-                        crate::material::menu_item_frame(false, cx),
+                        crate::material::menu_item_frame(
+                            false,
+                            crate::material::ItemFill::Hover,
+                            cx,
+                        ),
                         id,
                         Role::MenuItem,
                         label.clone(),
@@ -1200,7 +1203,6 @@ impl ChatView {
                     .items_center()
                     .cursor_pointer()
                     .text_body(false, cx)
-                    .hover(move |s| s.bg(hover))
                     .child(Icon::new(icon).text_color(muted))
                     .child(label)
                 };
