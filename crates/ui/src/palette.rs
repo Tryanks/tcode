@@ -137,6 +137,8 @@ pub struct CommandPalette {
     search_generation: u64,
     results: Option<Rc<Results>>,
     list_state: ListState,
+    /// Moving the selection scrolls it into view gradually.
+    list_scroll: crate::motion::ListScroll,
     /// Whether [`Self::open`] has run since the palette last showed closed:
     /// the host opens it on mount, and a palette reopened while it leaves is
     /// still mounted, so it opens itself.
@@ -191,6 +193,7 @@ impl CommandPalette {
             search_generation: 0,
             results: None,
             list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            list_scroll: Default::default(),
             opened: false,
             _search_task: None,
             _subscriptions: subscriptions,
@@ -270,6 +273,7 @@ impl CommandPalette {
     fn invalidate_results(&mut self, scroll_to_top: bool, cx: &mut Context<Self>) {
         self.results = None;
         if scroll_to_top {
+            self.list_scroll.cancel();
             self.list_state.scroll_to(gpui::ListOffset::default());
         }
         cx.notify();
@@ -721,7 +725,7 @@ impl CommandPalette {
             .iter()
             .position(|row| matches!(row, Row::Item(index) if *index == selected))
         {
-            self.list_state.scroll_to_reveal_item(row);
+            self.list_scroll.reveal(&self.list_state, row, cx);
         }
         cx.notify();
     }
@@ -880,6 +884,7 @@ impl Render for CommandPalette {
         }
         let exiting = !open;
         let results = self.results(window, cx);
+        self.list_scroll.step(&self.list_state, window, cx);
         let total = results.items.len();
         if total > 0 && self.selected >= total {
             self.selected = total - 1;
@@ -1527,6 +1532,11 @@ mod tests {
             dispatch_palette_key(&palette, cx, "down");
         }
         draw(cx);
+        assert!(
+            cx.debug_bounds("palette-row-5").is_none(),
+            "the list glides to the selection rather than jumping"
+        );
+        crate::test_frames::draw_settled(cx);
         assert!(
             cx.debug_bounds("palette-row-5").is_some(),
             "the keyboard selection scrolls into view"
