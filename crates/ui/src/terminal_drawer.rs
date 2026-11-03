@@ -127,13 +127,8 @@ impl SelectionDrag {
         position: ScreenPoint,
         point: (usize, usize),
         side: SelectionSide,
-        left_pressed: bool,
     ) -> SelectionDragAction {
-        if !left_pressed
-            || self
-                .mouse_down
-                .is_none_or(|(mouse_id, _)| mouse_id != terminal_id)
-        {
+        if !self.pressed_on(terminal_id) {
             return SelectionDragAction::None;
         }
         if self.selecting != Some(terminal_id)
@@ -179,6 +174,13 @@ impl SelectionDrag {
         }
         self.last_reported_point.remove(&terminal_id);
         was_selecting
+    }
+
+    /// Whether the left button went down on `terminal_id` to select and is
+    /// still held.
+    fn pressed_on(&self, terminal_id: u64) -> bool {
+        self.mouse_down
+            .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
     }
 
     fn should_report_mouse_move(&mut self, terminal_id: u64, point: (usize, usize)) -> bool {
@@ -389,6 +391,9 @@ pub struct TerminalDrawer {
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
     selection_drag: SelectionDrag,
+    /// Scrolls the scrollback while a selection is dragged past the grid's
+    /// top or bottom, held there or not.
+    drag_scroll: gpui_base::AutoScroll,
     _focus_subscriptions: Vec<gpui::Subscription>,
     marked_text: Option<MarkedText>,
     bell_tabs: HashSet<u64>,
@@ -515,6 +520,7 @@ impl TerminalDrawer {
             cell_height: TERMINAL_CELL_HEIGHT,
             scroll_remainder: HashMap::new(),
             selection_drag: SelectionDrag::default(),
+            drag_scroll: gpui_base::AutoScroll::default(),
             _focus_subscriptions: vec![focus_in, focus_out, key_bar_subscription],
             marked_text: None,
             bell_tabs: HashSet::new(),
@@ -863,6 +869,16 @@ impl TerminalDrawer {
         cx.notify();
     }
 
+    /// The whole lines `pixels` of scrolling (positive toward the history)
+    /// come to with what earlier scrolls left over.
+    fn whole_lines(&mut self, terminal_id: u64, pixels: f32) -> i32 {
+        let remainder = self.scroll_remainder.entry(terminal_id).or_default();
+        let total = *remainder + pixels;
+        let lines = (total / self.cell_height).trunc() as i32;
+        *remainder = total - lines as f32 * self.cell_height;
+        lines
+    }
+
     fn on_scroll(
         &mut self,
         terminal_id: u64,
@@ -871,10 +887,7 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
     ) {
         let delta = f32::from(event.delta.pixel_delta(px(self.cell_height)).y);
-        let remainder = self.scroll_remainder.entry(terminal_id).or_default();
-        let total = *remainder + delta;
-        let lines = (total / self.cell_height).trunc() as i32;
-        *remainder = total - lines as f32 * self.cell_height;
+        let lines = self.whole_lines(terminal_id, delta);
         if lines != 0 {
             self.workspace_store.read(cx).with_terminal_workspace_for(
                 self.session_id.as_deref(),
@@ -968,6 +981,35 @@ impl TerminalDrawer {
                             cell_height,
                         },
                     );
+                    // The pane's own listeners hear the pointer only while it
+                    // is over the pane; a selection being dragged follows it
+                    // past the pane and the window, and ends wherever the
+                    // button comes up.
+                    window.on_mouse_event({
+                        let drawer = drawer.clone();
+                        move |event: &MouseMoveEvent, phase, _, cx| {
+                            if phase.capture()
+                                && drawer.read(cx).selection_drag.pressed_on(terminal_id)
+                            {
+                                drawer.update(cx, |drawer, cx| {
+                                    drawer.drag_selection(terminal_id, event, cx)
+                                });
+                            }
+                        }
+                    });
+                    window.on_mouse_event({
+                        let drawer = drawer.clone();
+                        move |event: &MouseUpEvent, phase, _, cx| {
+                            if phase.capture()
+                                && event.button == MouseButton::Left
+                                && drawer.read(cx).selection_drag.pressed_on(terminal_id)
+                            {
+                                drawer.update(cx, |drawer, cx| {
+                                    drawer.end_selection_drag(terminal_id, cx)
+                                });
+                            }
+                        }
+                    });
 
                     let cursor_bounds = paint_terminal_grid(
                         bounds,
@@ -1169,7 +1211,7 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
+        let Some((point, _)) = self.grid_point_and_side(terminal_id, event.position) else {
             self.hovered_link = None;
             return;
         };
@@ -1212,54 +1254,123 @@ impl TerminalDrawer {
                     }
                 } else {
                     self.hovered_link = None;
-                    let action = self.selection_drag.on_move(
-                        terminal_id,
-                        ScreenPoint {
-                            x: f32::from(event.position.x),
-                            y: f32::from(event.position.y),
-                        },
-                        point,
-                        side,
-                        event.pressed_button == Some(MouseButton::Left),
-                    );
-                    if !matches!(action, SelectionDragAction::None) {
-                        match action {
-                            SelectionDragAction::StartSimpleAndUpdate {
-                                anchor,
-                                anchor_side,
-                                point,
-                                side,
-                            } => {
-                                entry.terminal.start_selection(
-                                    SelectionKind::Simple,
-                                    anchor,
-                                    anchor_side,
-                                );
-                                entry.terminal.update_selection(point, side);
-                            }
-                            SelectionDragAction::Update { point, side } => {
-                                entry.terminal.update_selection(point, side);
-                            }
-                            SelectionDragAction::None
-                            | SelectionDragAction::ClearAndWait
-                            | SelectionDragAction::Start { .. } => {
-                                unreachable!("unexpected mouse move action")
-                            }
-                        }
-                        if !mode.contains(Mode::ALT_SCREEN)
-                            && entry.terminal.history_size() > 0
-                            && let Some(lines) = drag_scroll_lines(
-                                event.position.y,
-                                self.grid_bounds.borrow().get(&terminal_id).copied(),
-                                self.cell_height,
-                            )
-                        {
-                            entry.terminal.scroll(lines);
-                        }
-                    }
                 }
             },
         );
+        cx.notify();
+    }
+
+    /// Carries the selection being dragged on `terminal_id` to the pointer,
+    /// wherever it is, and scrolls while it is past the grid's top or bottom.
+    fn drag_selection(&mut self, terminal_id: u64, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            // The release went somewhere this drawer never heard it.
+            self.end_selection_drag(terminal_id, cx);
+            return;
+        }
+        if terminal_link_modifier(event.modifiers, cfg!(target_os = "macos")) {
+            return;
+        }
+        let Some(geometry) = self.grid_bounds.borrow().get(&terminal_id).copied() else {
+            return;
+        };
+        let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
+            return;
+        };
+        let action = self.selection_drag.on_move(
+            terminal_id,
+            ScreenPoint {
+                x: f32::from(event.position.x),
+                y: f32::from(event.position.y),
+            },
+            point,
+            side,
+        );
+        let scrolls = self.workspace_store.read(cx).with_terminal_workspace_for(
+            self.session_id.as_deref(),
+            |workspace| {
+                let entry = workspace.terminal(terminal_id)?;
+                match action {
+                    SelectionDragAction::None => return None,
+                    SelectionDragAction::StartSimpleAndUpdate {
+                        anchor,
+                        anchor_side,
+                        point,
+                        side,
+                    } => {
+                        entry
+                            .terminal
+                            .start_selection(SelectionKind::Simple, anchor, anchor_side);
+                        entry.terminal.update_selection(point, side);
+                    }
+                    SelectionDragAction::Update { point, side } => {
+                        entry.terminal.update_selection(point, side);
+                    }
+                    SelectionDragAction::ClearAndWait | SelectionDragAction::Start { .. } => {
+                        unreachable!("unexpected mouse move action")
+                    }
+                }
+                Some(
+                    !entry.terminal.mode().contains(Mode::ALT_SCREEN)
+                        && entry.terminal.history_size() > 0,
+                )
+            },
+        );
+        let Some(Some(scrolls)) = scrolls else {
+            return;
+        };
+        let delta = scrolls
+            .then(|| gpui_base::AutoScroll::compute_delta(event.position.y, geometry.bounds))
+            .flatten();
+        self.drag_scroll.last_drag_position = Some(event.position);
+        self.drag_scroll.set(delta, cx, move |delta, drawer, cx| {
+            drawer.drag_scroll_tick(terminal_id, delta, cx)
+        });
+        cx.notify();
+    }
+
+    /// One frame of a dragged selection's scrolling: `delta` pixels toward the
+    /// live screen (negative toward the history), the selection's far end
+    /// staying under the pointer as the content moves.
+    fn drag_scroll_tick(&mut self, terminal_id: u64, delta: Pixels, cx: &mut Context<Self>) {
+        let Some(position) = self.drag_scroll.last_drag_position else {
+            return;
+        };
+        let Some((point, side)) = self.grid_point_and_side(terminal_id, position) else {
+            return;
+        };
+        let lines = self.whole_lines(terminal_id, -f32::from(delta));
+        self.workspace_store.read(cx).with_terminal_workspace_for(
+            self.session_id.as_deref(),
+            |workspace| {
+                if let Some(entry) = workspace.terminal(terminal_id) {
+                    entry.terminal.scroll(lines);
+                    entry.terminal.update_selection(point, side);
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// The left button came up, on the grid or anywhere else.
+    fn end_selection_drag(&mut self, terminal_id: u64, cx: &mut Context<Self>) {
+        self.drag_scroll.stop();
+        if self.selection_drag.on_up(terminal_id) {
+            #[cfg(target_os = "linux")]
+            if let Some(text) = self
+                .workspace_store
+                .read(cx)
+                .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
+                    workspace
+                        .terminal(terminal_id)
+                        .and_then(|entry| entry.terminal.selected_text())
+                        .map(|selection| selection.text)
+                })
+                .flatten()
+            {
+                cx.write_to_primary(ClipboardItem::new_string(text));
+            }
+        }
         cx.notify();
     }
 
@@ -1315,24 +1426,8 @@ impl TerminalDrawer {
         if let Some(released_url) = released_url {
             cx.open_url(&released_url);
         }
-        if self.selection_drag.on_up(terminal_id) {
-            #[cfg(target_os = "linux")]
-            if let Some(text) = self
-                .workspace_store
-                .read(cx)
-                .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
-                    workspace
-                        .terminal(terminal_id)
-                        .and_then(|entry| entry.terminal.selected_text())
-                        .map(|selection| selection.text)
-                })
-                .flatten()
-            {
-                cx.write_to_primary(ClipboardItem::new_string(text));
-            }
-        }
+        self.end_selection_drag(terminal_id, cx);
         self.pressed_link = None;
-        cx.notify();
     }
 
     fn render_terminal(&self, terminal_id: u64, cx: &mut Context<Self>) -> AnyElement {
@@ -2816,21 +2911,6 @@ fn selection_drag_started(dx: f32, dy: f32) -> bool {
     dx.hypot(dy) > SELECTION_DRAG_THRESHOLD
 }
 
-fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32) -> Option<i32> {
-    let geometry = geometry?;
-    let top = geometry.bounds.top();
-    let bottom = top + px(geometry.rows as f32 * geometry.cell_height);
-    let pixels = if y < top {
-        f32::from(top - y)
-    } else if y > bottom {
-        -f32::from(y - bottom)
-    } else {
-        return None;
-    };
-    let lines = (pixels.abs().powf(1.1) / cell_height).ceil() as i32;
-    Some(lines.clamp(1, 3) * pixels.signum() as i32)
-}
-
 pub(crate) fn terminal_font() -> gpui::Font {
     let mut terminal_font = font(TERMINAL_FONT_FAMILY);
     terminal_font.features = FontFeatures::disable_ligatures();
@@ -2931,14 +3011,13 @@ mod tests {
             ),
             SelectionDragAction::ClearAndWait
         );
-        for (terminal, x, pressed) in [(7, 12., true), (8, 20., true), (7, 20., false)] {
+        for (terminal, x) in [(7, 12.), (8, 20.)] {
             assert_eq!(
                 drag.on_move(
                     terminal,
                     ScreenPoint { x, y: 10. },
                     (0, 2),
-                    SelectionSide::Right,
-                    pressed
+                    SelectionSide::Right
                 ),
                 SelectionDragAction::None
             );
@@ -2949,7 +3028,6 @@ mod tests {
                 ScreenPoint { x: 12.1, y: 10. },
                 (0, 2),
                 SelectionSide::Right,
-                true
             ),
             SelectionDragAction::StartSimpleAndUpdate {
                 anchor: (0, 1),
@@ -2964,7 +3042,6 @@ mod tests {
                 ScreenPoint { x: 20., y: 40. },
                 (3, 2),
                 SelectionSide::Right,
-                true
             ),
             SelectionDragAction::Update {
                 point: (3, 2),
@@ -2979,7 +3056,6 @@ mod tests {
                 ScreenPoint { x: 30., y: 40. },
                 (3, 3),
                 SelectionSide::Right,
-                true
             ),
             SelectionDragAction::None
         );
@@ -3215,16 +3291,26 @@ mod tests {
         }
     }
 
-    /// Splitting the active terminal opens the second pane out of nothing
-    /// beside the first, which gives way, and closing the split shrinks it
-    /// away again; with motion reduced both happen at once.
-    #[gpui::test]
-    fn a_split_opens_and_closes_its_second_pane_gradually(cx: &mut gpui::TestAppContext) {
-        use crate::test_frames::{draw, draw_settled};
+    /// A drawer window attached to a host link the test plays the host's side
+    /// of, showing a draft thread whose terminals are `terminals`, the first
+    /// active.
+    struct MountedDrawer {
+        drawer: Entity<TerminalDrawer>,
+        store: Entity<WorkspaceStore>,
+        incoming: async_channel::Sender<String>,
+        status: tcode_protocol::SessionStatus,
+        _outgoing: async_channel::Receiver<String>,
+        _pump: Task<()>,
+    }
+
+    fn mount_drawer<'a>(
+        label: &str,
+        terminals: &[u64],
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (MountedDrawer, &'a mut gpui::VisualTestContext) {
         use gpui::AppContext as _;
-        use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
         cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("terminal-split-glide");
+        let root = crate::store::tests::scratch_root(label);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
             tcode_runtime::pipe::HostServices::default(),
@@ -3237,28 +3323,27 @@ mod tests {
         .unwrap();
         host.shutdown_blocking().unwrap();
         std::fs::remove_dir_all(root).unwrap();
-        status.terminals = [7, 8]
-            .into_iter()
-            .map(|id| tcode_protocol::TerminalStatus {
+        status.terminals = terminals
+            .iter()
+            .map(|&id| tcode_protocol::TerminalStatus {
                 id,
                 title: "shell".into(),
                 exited: false,
             })
             .collect();
-        status.active_terminal_id = Some(7);
+        status.active_terminal_id = terminals.first().copied();
         status.terminal_open = true;
-        let session_id = status.session_id.clone();
-        let (to_host, _outgoing) = async_channel::unbounded();
+        let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump = link.clone();
         let executor = cx.background_executor.clone();
-        let _pump = cx.background_executor.spawn(async move {
+        let pump = cx.background_executor.spawn(async move {
             pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
                 .await;
         });
         let store = cx.new(|cx| {
-            crate::store::WorkspaceStore::new_attached(
+            WorkspaceStore::new_attached(
                 link,
                 crate::store::WorkspaceAttachment::Local,
                 None,
@@ -3268,28 +3353,86 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
-        let (_drawer, cx) =
+        let session_id = status.session_id.clone();
+        store.update(cx, |store, cx| store.select_session(session_id, cx));
+        let (drawer, cx) =
             cx.add_window_view(|window, cx| TerminalDrawer::new(store.clone(), window, cx));
-        let publish = |status: &tcode_protocol::SessionStatus, cx: &mut gpui::VisualTestContext| {
-            incoming
+        let mounted = MountedDrawer {
+            drawer,
+            store,
+            incoming,
+            status,
+            _outgoing: outgoing,
+            _pump: pump,
+        };
+        mounted.publish_status(cx);
+        (mounted, cx)
+    }
+
+    impl MountedDrawer {
+        fn publish(
+            &self,
+            topic: tcode_protocol::Topic,
+            event: tcode_protocol::ServerEvent,
+            cx: &mut gpui::VisualTestContext,
+        ) {
+            use tcode_protocol::{EventEnvelope, HostMessage, encode_line};
+            self.incoming
                 .try_send(
                     encode_line(&HostMessage::Event(EventEnvelope {
                         request_id: None,
-                        topic: Topic::SessionStatus {
-                            session_id: session_id.clone(),
-                        },
-                        event: ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+                        topic,
+                        event,
                     }))
                     .unwrap(),
                 )
                 .unwrap();
             cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            self.store
+                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw(cx);
+        }
+
+        fn publish_status(&self, cx: &mut gpui::VisualTestContext) {
+            self.publish(
+                tcode_protocol::Topic::SessionStatus {
+                    session_id: self.status.session_id.clone(),
+                },
+                tcode_protocol::ServerEvent::SessionStatusReplaced(Box::new(self.status.clone())),
+                cx,
+            );
+        }
+
+        fn with_terminal<R>(
+            &self,
+            terminal_id: u64,
+            cx: &mut gpui::VisualTestContext,
+            f: impl FnOnce(&crate::store::terminal::TerminalEntry) -> R,
+        ) -> R {
+            self.store.read_with(cx, |store, _| {
+                store
+                    .with_terminal_workspace_for(
+                        store.active_session_id().as_deref(),
+                        |workspace| f(workspace.terminal(terminal_id).expect("the terminal")),
+                    )
+                    .expect("the thread's terminals")
+            })
+        }
+    }
+
+    /// Splitting the active terminal opens the second pane out of nothing
+    /// beside the first, which gives way, and closing the split shrinks it
+    /// away again; with motion reduced both happen at once.
+    #[gpui::test]
+    fn a_split_opens_and_closes_its_second_pane_gradually(cx: &mut gpui::TestAppContext) {
+        use crate::test_frames::{draw, draw_settled};
+        let (mut mounted, cx) = mount_drawer("terminal-split-glide", &[7, 8], cx);
+        let publish = |mounted: &MountedDrawer, cx: &mut gpui::VisualTestContext| {
+            mounted.publish_status(cx);
             draw(cx);
         };
         cx.simulate_resize(gpui::size(px(800.), px(400.)));
-        publish(&status, cx);
+        publish(&mounted, cx);
         draw_settled(cx);
         // A pane gliding is laid out at its widest and clipped to the room
         // it has, so where the second one starts is how much room it has.
@@ -3313,8 +3456,8 @@ mod tests {
                 .into_iter()
                 .collect();
         };
-        split(true, &mut status);
-        publish(&status, cx);
+        split(true, &mut mounted.status);
+        publish(&mounted, cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         draw(cx);
         let opening = start(cx).expect("the second pane opens");
@@ -3326,8 +3469,8 @@ mod tests {
         let half = start(cx).unwrap();
         assert!((half - whole / 2.).abs() < px(4.), "{half:?} of {whole:?}");
 
-        split(false, &mut status);
-        publish(&status, cx);
+        split(false, &mut mounted.status);
+        publish(&mounted, cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         draw(cx);
         let closing = start(cx).expect("the second pane closes");
@@ -3337,9 +3480,157 @@ mod tests {
         assert_eq!(width("terminal-pane-first", cx), Some(whole));
 
         cx.update(|_, cx| cx.set_reduce_motion(true));
-        split(true, &mut status);
-        publish(&status, cx);
+        split(true, &mut mounted.status);
+        publish(&mounted, cx);
         let at_once = start(cx).unwrap();
         assert!((at_once - whole / 2.).abs() < px(4.), "{at_once:?}");
+    }
+
+    /// A shell with a hundred lines of scrollback under six visible rows,
+    /// scrolled eighty lines back by the wheel, with the grid's bounds.
+    fn mount_scrolled_back<'a>(
+        label: &str,
+        cx: &'a mut gpui::TestAppContext,
+    ) -> (
+        MountedDrawer,
+        Bounds<Pixels>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        let (mounted, cx) = mount_drawer(label, &[7], cx);
+        cx.simulate_resize(gpui::size(px(600.), px(400.)));
+        let row = |text: String| TerminalRow {
+            cells: text.chars().map(|ch| cell(ch, CellWidth::Narrow)).collect(),
+            wrapped: false,
+        };
+        mounted.publish(
+            tcode_protocol::Topic::Terminal { terminal_id: 7 },
+            tcode_protocol::ServerEvent::TerminalFrame {
+                terminal_id: 7,
+                frame: Box::new(TerminalFrame {
+                    cols: 20,
+                    rows: 6,
+                    styles: vec![TerminalStyle::default()],
+                    history: (0..100).map(|line| row(format!("h{line:02}"))).collect(),
+                    visible: (0..6).map(|line| row(format!("v{line}"))).collect(),
+                    ..TerminalFrame::default()
+                }),
+            },
+            cx,
+        );
+        crate::test_frames::draw_settled(cx);
+        let grid = mounted
+            .drawer
+            .read_with(cx, |drawer, _| drawer.grid_bounds.borrow()[&7].bounds);
+        cx.simulate_event(ScrollEvent {
+            position: grid.center(),
+            delta: gpui::ScrollDelta::Lines(point(0., 80.)),
+            ..Default::default()
+        });
+        crate::test_frames::draw(cx);
+        assert_eq!(
+            offset(&mounted, cx),
+            80,
+            "the wheel scrolls into the history"
+        );
+        (mounted, grid, cx)
+    }
+
+    fn offset(mounted: &MountedDrawer, cx: &mut gpui::VisualTestContext) -> usize {
+        mounted.with_terminal(7, cx, |entry| entry.terminal.model().display_offset())
+    }
+
+    fn selected_lines(mounted: &MountedDrawer, cx: &mut gpui::VisualTestContext) -> usize {
+        mounted.with_terminal(7, cx, |entry| {
+            entry
+                .terminal
+                .selected_text()
+                .map_or(0, |selection| selection.text.lines().count())
+        })
+    }
+
+    /// Lets `duration` of display frames pass with the pointer held still.
+    fn hold(duration: Duration, cx: &mut gpui::VisualTestContext) {
+        for _ in 0..duration.as_millis() / 16 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            crate::test_frames::draw(cx);
+        }
+    }
+
+    fn drag_to(position: Point<Pixels>, cx: &mut gpui::VisualTestContext) {
+        cx.simulate_mouse_move(position, Some(MouseButton::Left), gpui::Modifiers::none());
+        crate::test_frames::draw(cx);
+    }
+
+    fn press_second_row(grid: Bounds<Pixels>, cx: &mut gpui::VisualTestContext) -> Point<Pixels> {
+        let start = grid.origin + point(px(4.), px(TERMINAL_CELL_HEIGHT * 1.5));
+        cx.simulate_mouse_move(start, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::none());
+        crate::test_frames::draw(cx);
+        start
+    }
+
+    /// Pressing on the grid and dragging below its bottom keeps scrolling the
+    /// scrollback toward the live screen while the pointer is held there,
+    /// faster the further below it is, outside the window too; the
+    /// selection's far end moves with the content. Coming back over the grid
+    /// stops it.
+    #[gpui::test]
+    fn a_selection_dragged_below_the_grid_scrolls_until_it_comes_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mounted, grid, cx) = mount_scrolled_back("terminal-drag-scroll", cx);
+        let window = cx.update(|window, _| window.viewport_size());
+        let start = press_second_row(grid, cx);
+        let held = Duration::from_millis(160);
+
+        drag_to(point(start.x, grid.bottom() + px(8.)), cx);
+        let (before, lines_before) = (offset(&mounted, cx), selected_lines(&mounted, cx));
+        hold(held, cx);
+        let near = before - offset(&mounted, cx);
+        assert!(near > 0, "held just below the grid, the view scrolls");
+        let lines_near = selected_lines(&mounted, cx);
+        assert_eq!(
+            lines_near - lines_before,
+            near,
+            "the selection's end follows each line scrolled in"
+        );
+
+        drag_to(point(start.x, window.height + px(120.)), cx);
+        let before = offset(&mounted, cx);
+        hold(held, cx);
+        let far = before - offset(&mounted, cx);
+        assert!(
+            far > near,
+            "past the window's bottom it scrolls faster: {far} lines against {near}"
+        );
+        assert_eq!(selected_lines(&mounted, cx) - lines_near, far);
+
+        drag_to(grid.center(), cx);
+        let (back, lines_back) = (offset(&mounted, cx), selected_lines(&mounted, cx));
+        hold(held, cx);
+        assert_eq!(offset(&mounted, cx), back, "over the grid it stops");
+        assert_eq!(selected_lines(&mounted, cx), lines_back);
+    }
+
+    /// Releasing the button outside the window ends the selection there: the
+    /// scrolling stops and the selection keeps what it had.
+    #[gpui::test]
+    fn a_selection_released_outside_the_window_ends(cx: &mut gpui::TestAppContext) {
+        let (mounted, grid, cx) = mount_scrolled_back("terminal-drag-release", cx);
+        let window = cx.update(|window, _| window.viewport_size());
+        let start = press_second_row(grid, cx);
+        let outside = point(start.x, window.height + px(40.));
+        drag_to(outside, cx);
+        hold(Duration::from_millis(80), cx);
+        assert!(offset(&mounted, cx) < 80, "the drag scrolls before it ends");
+
+        cx.simulate_mouse_up(outside, MouseButton::Left, gpui::Modifiers::none());
+        crate::test_frames::draw(cx);
+        let (released, lines) = (offset(&mounted, cx), selected_lines(&mounted, cx));
+        hold(Duration::from_millis(160), cx);
+        cx.simulate_mouse_move(grid.center(), None, gpui::Modifiers::none());
+        crate::test_frames::draw(cx);
+        assert_eq!(offset(&mounted, cx), released);
+        assert_eq!(selected_lines(&mounted, cx), lines);
     }
 }
