@@ -61,11 +61,17 @@ struct AgentRow {
     key: String,
     title: String,
     provider: Option<ProviderKind>,
-    /// "provider · model".
-    detail: String,
+    /// The model it runs on, and the reasoning effort it runs with, as
+    /// reported.
+    model: Option<String>,
+    effort: Option<String>,
     /// Absent for a settled or archived agent the host reports no activity
     /// for.
     execution: Option<AgentExecution>,
+    /// What it waits on the user for, when the host reports it waiting.
+    attention: Option<Attention>,
+    /// The branch it works on, when that is not its lead's.
+    branch: Option<String>,
     /// Absent for a provider-native subagent.
     delivery: Option<AgentDelivery>,
     /// Whether the child's `report_result` reached its lead.
@@ -86,6 +92,27 @@ struct AgentRow {
 }
 
 impl AgentRow {
+    /// "provider · model · effort".
+    fn detail(&self) -> String {
+        [
+            self.provider.map(|provider| provider.display_name()),
+            self.model.as_deref(),
+            self.effort.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
+
+    /// What it waits on the user for, or else how its run stands.
+    fn state(&self) -> Option<AgentState> {
+        match self.attention {
+            Some(attention) => Some(AgentState::Attention(attention)),
+            None => self.execution.map(AgentState::Execution),
+        }
+    }
+
     fn elapsed(&self) -> Option<String> {
         let started = self.started_at?;
         // A start no later than the last end belongs to a finished run: a
@@ -114,10 +141,28 @@ pub(crate) struct Agents {
 
 impl Agents {
     /// The thread's agents as the host reports them. Results are left out:
-    /// only the panel itself shows them, see [`Self::with_results`].
+    /// only the lists that show them read them, see [`Self::with_results`].
     pub(crate) fn of(store: &WorkspaceStore, parent_id: &str) -> Self {
         let live = store.sidebar_sessions();
         let parent = live.iter().find(|meta| meta.id == parent_id);
+        let attention = |id: Option<&str>| {
+            let id = id?;
+            if store.pending_approval_for(id) {
+                Some(Attention::Approval)
+            } else if store.pending_user_input_for(id) {
+                Some(Attention::Answer)
+            } else {
+                None
+            }
+        };
+        let lead_branch = store
+            .session_status_for(Some(parent_id))
+            .and_then(|status| status.git_branch.clone())
+            .or_else(|| {
+                parent
+                    .and_then(|parent| parent.worktree.as_ref())
+                    .map(|worktree| worktree.branch.clone())
+            });
         let mut native = Vec::new();
         store.with_timeline_for(Some(parent_id), |timeline| {
             for entry in &timeline.entries {
@@ -127,7 +172,7 @@ impl Agents {
                     status,
                     summary,
                     model,
-                    ..
+                    effort,
                 }) = &entry.content
                 else {
                     continue;
@@ -149,8 +194,12 @@ impl Agents {
                         .filter(|title| !title.is_empty())
                         .unwrap_or_else(|| agent_type.clone()),
                     provider,
-                    detail: detail(provider, model.as_deref()),
+                    model: model.clone(),
+                    effort: effort.clone(),
                     execution: Some(execution),
+                    attention: attention(mirror.map(|meta| meta.id.as_str())),
+                    // It runs in its lead's process, on its lead's checkout.
+                    branch: None,
                     delivery: None,
                     report: AgentReport::None,
                     archived: false,
@@ -198,8 +247,17 @@ impl Agents {
                 key: meta.id.clone(),
                 title: meta.title.clone(),
                 provider: Some(meta.provider),
-                detail: detail(Some(meta.provider), meta.model.as_deref()),
+                model: meta.model.clone(),
+                effort: None,
                 execution,
+                attention: (!archived)
+                    .then(|| attention(Some(meta.id.as_str())))
+                    .flatten(),
+                branch: meta
+                    .worktree
+                    .as_ref()
+                    .map(|worktree| worktree.branch.clone())
+                    .filter(|branch| lead_branch.as_ref() != Some(branch)),
                 delivery: Some(delivery),
                 report: status.map_or_else(|| meta.report(), |status| status.report),
                 archived,
@@ -222,7 +280,7 @@ impl Agents {
 
     /// Add each dispatched agent's result: the report its latest callback
     /// delivered to the lead, as the child wrote it.
-    fn with_results(mut self, store: &WorkspaceStore, parent_id: &str) -> Self {
+    pub(crate) fn with_results(mut self, store: &WorkspaceStore, parent_id: &str) -> Self {
         let mut results = std::collections::HashMap::new();
         store.with_timeline_for(Some(parent_id), |timeline| {
             for entry in &timeline.entries {
@@ -283,6 +341,8 @@ impl Agents {
 
     /// Every agent as one line each, in the panel's order: those awaiting
     /// settle, the running ones, the provider's own, then the finished ones.
+    /// A finished agent whose result awaits settle says that in place of
+    /// how its run ended.
     pub(crate) fn lines(&self) -> Vec<AgentLine> {
         self.needs_settle
             .iter()
@@ -291,10 +351,24 @@ impl Agents {
             .chain(&self.done)
             .map(|row| {
                 let running = row.execution.is_some_and(AgentExecution::running);
+                let state = match row.state() {
+                    Some(AgentState::Execution(execution))
+                        if !execution.running()
+                            && row.delivery == Some(AgentDelivery::AwaitingSettle) =>
+                    {
+                        Some(AgentState::AwaitingSettle)
+                    }
+                    state => state,
+                };
                 AgentLine {
                     key: row.key.clone(),
                     title: row.title.clone(),
                     execution: row.execution,
+                    state,
+                    model: row.model.clone(),
+                    effort: row.effort.clone(),
+                    branch: row.branch.clone(),
+                    preview: row.preview.clone(),
                     running_since: row.started_at.filter(|started| {
                         running && !row.ended_at.is_some_and(|ended| ended >= *started)
                     }),
@@ -305,8 +379,29 @@ impl Agents {
             .collect()
     }
 
+    /// What the lead's agents wait on the user for, then the running work
+    /// and the results awaiting settle.
     pub(crate) fn summary(&self) -> Option<String> {
         let mut parts = Vec::new();
+        let waiting = |attention| {
+            self.needs_settle
+                .iter()
+                .chain(&self.running)
+                .chain(&self.native)
+                .chain(&self.done)
+                .filter(|row| row.attention == Some(attention))
+                .count()
+        };
+        match waiting(Attention::Approval) {
+            0 => {}
+            1 => parts.push(crate::tr!("agents.summary_approval_one").into_owned()),
+            count => parts.push(crate::tr!("agents.summary_approval", count = count).into_owned()),
+        }
+        match waiting(Attention::Answer) {
+            0 => {}
+            1 => parts.push(crate::tr!("agents.summary_answer_one").into_owned()),
+            count => parts.push(crate::tr!("agents.summary_answer", count = count).into_owned()),
+        }
         match self.running.len() {
             0 => {}
             1 => parts.push(crate::tr!("agents.summary_running_one").into_owned()),
@@ -345,12 +440,57 @@ pub(crate) struct AgentHeading {
     pub(crate) execution: Option<AgentExecution>,
 }
 
+/// What an agent waits on the user for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Attention {
+    Approval,
+    Answer,
+}
+
+/// The word an agent's row says of where it stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentState {
+    Attention(Attention),
+    /// Finished, and its result not yet settled into its lead.
+    AwaitingSettle,
+    Execution(AgentExecution),
+}
+
+impl AgentState {
+    pub(crate) fn label(self) -> SharedString {
+        match self {
+            Self::Attention(Attention::Approval) => {
+                crate::tr!("mobile.approval").into_owned().into()
+            }
+            Self::Attention(Attention::Answer) => crate::tr!("mobile.answer").into_owned().into(),
+            Self::AwaitingSettle => crate::tr!("agents.delivery_awaiting").into_owned().into(),
+            Self::Execution(execution) => execution_label(execution),
+        }
+    }
+
+    pub(crate) fn color(self, cx: &App) -> Hsla {
+        match self {
+            Self::Attention(Attention::Approval) | Self::AwaitingSettle => cx.theme().warning,
+            Self::Attention(Attention::Answer) => cx.theme().primary,
+            Self::Execution(execution) => execution_color(execution, cx),
+        }
+    }
+}
+
 /// One of a lead's agents, as a list beside its thread names it.
 #[derive(Clone, PartialEq)]
 pub(crate) struct AgentLine {
     pub(crate) key: String,
     pub(crate) title: String,
     pub(crate) execution: Option<AgentExecution>,
+    /// Where it stands, in a word.
+    pub(crate) state: Option<AgentState>,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+    /// The branch it works on, when that is not its lead's.
+    pub(crate) branch: Option<String>,
+    /// Its result, once it has one, on one line.
+    pub(crate) preview: Option<String>,
     /// When the run under way started, while it runs.
     pub(crate) running_since: Option<u64>,
     /// How long its last run took, once it has finished.
@@ -361,14 +501,6 @@ pub(crate) struct AgentLine {
 
 fn compact(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn detail(provider: Option<ProviderKind>, model: Option<&str>) -> String {
-    [provider.map(|provider| provider.display_name()), model]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
 }
 
 /// Open a thread reached from its lead: beside the lead in the lead's own
@@ -874,14 +1006,14 @@ impl AgentsPanel {
                 div()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(crate::widgets::fade_text(row.detail.clone())),
+                    .child(crate::widgets::fade_text(row.detail())),
             )
-            .when_some(row.execution, |line, execution| {
+            .when_some(row.state(), |line, state| {
                 line.child(div().flex_none().child("·")).child(
                     div()
                         .flex_none()
-                        .text_color(execution_color(execution, cx))
-                        .child(execution_label(execution)),
+                        .text_color(state.color(cx))
+                        .child(state.label()),
                 )
             });
         // The result's preview folds in under the row as it arrives.
@@ -1277,6 +1409,97 @@ mod tests {
             assert_eq!(keys(&agents.done), ["settled"]);
             assert_eq!(keys(&agents.running), ["unsettled"]);
             assert_eq!(agents.outstanding(), 1);
+        });
+        link.close();
+    }
+
+    /// A child the host reports waiting on an approval says so on its line,
+    /// ahead of how the lead's agents stand, and names its own branch.
+    #[gpui::test]
+    fn a_child_awaiting_approval_says_so_first(cx: &mut TestAppContext) {
+        use tcode_core::project::WorktreeInfo;
+        use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
+        use tcode_protocol::{AgentStatus, SessionActivity};
+        let (to_host, _requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let thread = |id: &str, parent: Option<&str>| {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, "/project".into(), None);
+            meta.id = id.into();
+            meta.parent_session_id = parent.map(str::to_owned);
+            meta
+        };
+        let mut asking = thread("asking", Some("lead"));
+        asking.model = Some("gpt-6".into());
+        asking.worktree = Some(WorktreeInfo {
+            root_project_path: "/project".into(),
+            base: "main".into(),
+            branch: "tcode/asking".into(),
+        });
+        let mut index = IndexSnapshot {
+            sessions: vec![thread("lead", None), asking],
+            projects: vec![],
+            summary: Default::default(),
+        };
+        index.summary.activity.insert(
+            "asking".into(),
+            SessionActivity {
+                agent: Some(AgentStatus {
+                    execution: AgentExecution::Waiting,
+                    delivery: AgentDelivery::Running,
+                    report: AgentReport::Expected,
+                    run_started_at: None,
+                    run_completed_at: None,
+                }),
+                working: false,
+                turn_running: true,
+                waiting: true,
+                waiting_for_approval: true,
+                waiting_for_input: false,
+                failed: false,
+                unread: false,
+                fork: tcode_protocol::ForkAvailability::Available,
+            },
+        );
+        let index = tcode_protocol::encode_line(&HostMessage::Event(EventEnvelope {
+            request_id: None,
+            topic: Topic::Index,
+            event: ServerEvent::IndexSnapshot(index),
+        }))
+        .unwrap();
+        crate::store::tests::seed_full_scope(&store, &incoming, vec![index], cx);
+        let mut driver = crate::store::tests::LocalHostDriver::from_link(link.clone());
+        driver.wait_until(cx, &store, "child status", |cx| {
+            store.read_with(cx, |store, _| store.agent_status("asking").is_some())
+        });
+
+        store.read_with(cx, |store, _| {
+            let agents = Agents::of(store, "lead");
+            let lines = agents.lines();
+            assert_eq!(
+                lines[0].state,
+                Some(super::AgentState::Attention(super::Attention::Approval))
+            );
+            assert_eq!(lines[0].model.as_deref(), Some("gpt-6"));
+            assert_eq!(lines[0].branch.as_deref(), Some("tcode/asking"));
+            assert_eq!(
+                agents.summary(),
+                Some(format!(
+                    "{} · {}",
+                    crate::tr!("agents.summary_approval_one"),
+                    crate::tr!("agents.summary_running_one")
+                ))
+            );
         });
         link.close();
     }
