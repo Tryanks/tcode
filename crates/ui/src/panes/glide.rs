@@ -24,6 +24,13 @@ use gpui_base::dock::{NodeId, PaneNode, PaneRef, PaneTree, PanelId};
 /// stays 100px wide while its share is smaller, so its content fades over
 /// that stretch with the glide's own progress instead ([`Held::opacity`]):
 /// out to nothing as it is taken out, in from nothing as it passes the floor.
+///
+/// Not a [`crate::motion::resize_glide::ResizeGlide`], which leaves its
+/// group's state alone and pins each panel's `size_range` for the frame
+/// instead: the dock gives its slots no range to pin, so the sizes go
+/// through the tree, nested splits and all, and a drag on a gliding split's
+/// handle stops that glide ([`Self::stop`]) rather than being left to the
+/// state.
 #[derive(Default)]
 pub(crate) struct Glides {
     splits: HashMap<NodeId, Glide>,
