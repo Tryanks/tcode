@@ -322,6 +322,21 @@ pub(crate) fn open_agent(
     }
 }
 
+/// Go back from a thread to the lead it was reached from: where the lead
+/// shows in a pane of its own, the thread's pane closes into the lead's;
+/// elsewhere the lead takes the thread's place.
+pub(crate) fn back_to_lead(
+    store: &Entity<WorkspaceStore>,
+    id: Option<&str>,
+    lead: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if !id.is_some_and(|id| crate::shell::close_into(id, &lead, window, cx)) {
+        store.update(cx, |store, cx| store.select_session(lead, cx));
+    }
+}
+
 #[derive(Clone, Copy)]
 enum BadgeStyle {
     Plain,
