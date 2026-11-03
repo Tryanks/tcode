@@ -298,19 +298,16 @@ impl ChatView {
                 .min_w_0()
                 .overflow_hidden()
                 .text_secondary(false, cx)
-                // A new summary cross-fades over the one it replaces.
+                // A new summary cross-fades over the one it replaces. No
+                // summary is still a line tall: this box clips what leaves
+                // to the one that stays, and a card leaving has none.
                 .child(self.motion.cross_fade_part(
                     format!("rail-card-summary-{key}"),
-                    card.summary(self, cx),
+                    card.summary(self, cx).unwrap_or_default(),
                     SHOW,
                     window,
                     cx,
-                    |summary, _, _| match summary {
-                        Some(summary) => {
-                            crate::widgets::fade_text(summary.clone()).into_any_element()
-                        }
-                        None => div().into_any_element(),
-                    },
+                    |summary, _, _| crate::widgets::fade_text(summary.clone()).into_any_element(),
                 )),
         )
         .child(
