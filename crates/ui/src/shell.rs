@@ -2856,7 +2856,14 @@ impl AppShell {
             && self.destination(cx) == Destination::Thread
             && let Some((store, parent)) = self.agent_lead(cx)
         {
+            // A pane of the lead's own, opened beside the agent while the
+            // window was wide, would show the lead a second time once the
+            // agent's pane does.
+            let lead_pane = self.pane_showing(&parent, cx);
             self.swap_thread_in_place(&store, parent, window, cx);
+            if let Some(pane) = lead_pane {
+                self.close_pane_into(&pane, |_, _| None, window, cx);
+            }
             return true;
         }
         // Everything below is one history: settings detail, settings root, a
@@ -8024,6 +8031,36 @@ mod tests {
                 assert!(!store.is_thread_open("agent-1"), "round {round}");
             });
         }
+    }
+
+    /// On a tablet, an agent opened beside its lead, the window then turned
+    /// compact: the compact Back returns to the lead, and the agent's pane,
+    /// which the compact window does not draw, is gone when the window is
+    /// wide again rather than left beside the lead or showing it twice.
+    #[gpui::test]
+    fn back_from_an_agent_in_a_compact_window_returns_to_its_lead(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        as_mobile(cx);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.toggle_agents_panel(cx));
+        settle_panes(cx);
+        open_agent_from_panel(&shell, &host, cx);
+        resize(cx, 600.);
+        settle_panes(cx);
+        assert!(shell.read_with(cx, |shell, cx| shell.compact(cx)));
+
+        let back = cx.debug_bounds("compact-back").expect("the compact Back");
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        settle_panes(cx);
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert!(!store.is_thread_open("agent-1"));
+        });
+        assert!(cx.debug_bounds("compact-thread-page").is_some());
+        resize(cx, 2000.);
+        settle_panes(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
     }
 
     /// Choose the palette's action `label`, in whatever language the host's
