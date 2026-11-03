@@ -1167,17 +1167,22 @@ fn step_until(
 }
 
 /// A command that printed five thousand lines, its host's screen of them in
-/// the window's grid, scrolls back to the first line it printed.
+/// the window's grid, scrolls back to the first line it printed. The record
+/// carried only a preview of them, but the host's screen holds them all, so
+/// the window offers nothing to load.
 #[gpui::test]
 fn a_five_thousand_line_command_scrolls_to_its_first_line(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
-    let (mut thread, cx) = StoredThread::open(cx, &shell_log_of("count", 5_000, true), 1_024.);
+    let log = shell_log_of("count", 5_000, true);
+    assert!(numbered(5_000).len() > tcode_protocol::OUTPUT_PREVIEW_BYTES);
+    let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
     thread.open_work_log("count", cx);
     click(cx, "activity-row-count");
     step_until(&mut thread, "the host's screen never came", cx, |cx| {
         copied_output("count", cx).ends_with("line 5000 of the run")
     });
+    assert!(!shows(cx, "load-output-count"), "nothing left to load");
     scroll_output("count", 6_000., cx);
     let start = copied_output("count", cx);
     assert!(

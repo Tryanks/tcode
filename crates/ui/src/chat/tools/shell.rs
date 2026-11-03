@@ -9,7 +9,7 @@
 //! their parent) has only the text its harness returned, laid out into the
 //! same grid under the same command line.
 
-use std::{collections::HashMap, rc::Rc, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
 
 use agent::ItemStatus;
 use gpui::{
@@ -281,9 +281,15 @@ pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) 
         hosted,
         running,
     } = run;
-    // A record's preview, until the reader loads the rest: then the whole of
-    // it, in the same grid.
-    let (full, elided) = super::full_text(entry, output, ctx);
+    // The host lays its screen out from the whole output it holds, so a
+    // hosted run has nothing to load. A tool call's text is laid out here:
+    // the record's preview, until the reader loads the rest into the grid.
+    let (full, elided) = if hosted {
+        (Cow::Borrowed(output), None)
+    } else {
+        let (full, elided) = super::full_text(entry, output, ctx);
+        (Cow::Owned(full), elided)
+    };
     let id = entry.id.clone();
     let handlers = output_handlers(&id, ctx);
     let panel = if hosted {
