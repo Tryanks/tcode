@@ -772,7 +772,8 @@ impl Render for ChatView {
             .motion
             .layers("chat-surface", surface, 4, GLIDE, window, cx)
             .fill()
-            .stage(SURFACE_THREAD);
+            .stage(SURFACE_THREAD)
+            .keyboard(self.focus_handle.clone());
         let mut layers = Vec::new();
         if fade.shows(SURFACE_SKELETON) {
             layers.push((

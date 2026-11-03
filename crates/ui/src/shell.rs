@@ -9737,6 +9737,74 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
     }
 
+    /// A thread the client still holds, opened again in a pane, waits on its
+    /// skeleton for the host to catch it up, drawn unseen beneath it. A
+    /// click in that pane gives it the keyboard, and what is typed once the
+    /// host has answered goes there.
+    #[gpui::test]
+    fn a_click_on_a_pane_catching_up_gives_it_the_keyboard(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        let click = |at: gpui::Point<Pixels>, modifiers, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_move(at, None, modifiers);
+            draw(cx);
+            cx.simulate_click(at, modifiers);
+            settle_panes(cx);
+        };
+        let row = |id: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(id).expect("the thread's row").center()
+        };
+        // thread-2 in thread-1's place, so thread-1 is left and kept.
+        click(row("sidebar-thread-thread-2", cx), Default::default(), cx);
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
+        settle_panes(cx);
+        let alt = gpui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        click(row("sidebar-thread-thread-1", cx), alt, cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-2".into()), Some("thread-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        store.read_with(cx, |store, _| {
+            assert!(!store.chat_loading_for(Some("thread-1")));
+            assert!(!store.timeline_settled_for("thread-1"), "it is catching up");
+        });
+
+        let right = pane_bounds(&shell, cx)[1];
+        click(right.center(), Default::default(), cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            Some("thread-1".into())
+        );
+
+        serve_thread(&host, "thread-1");
+        await_restore_update(&shell, cx, |store| store.timeline_settled_for("thread-1"));
+        settle_panes(cx);
+        cx.simulate_input("typed as it caught up");
+        draw(cx);
+        let drafts: Vec<_> = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).chat().read(cx).composer().read(cx).draft(cx))
+                .collect()
+        });
+        assert_eq!(drafts, ["", "typed as it caught up"]);
+    }
+
     /// A click in a pane whose thread is still loading gives it the keyboard,
     /// so what is typed next goes there once it has loaded, not to the pane
     /// that had the keyboard before.
