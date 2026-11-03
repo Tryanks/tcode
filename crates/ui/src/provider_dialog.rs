@@ -23,8 +23,8 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::motion::transition;
 use gpui_base::{h_flex, v_flex};
@@ -476,7 +476,6 @@ impl ProviderDialog {
             let label: SharedString = crate::tr!("providers.accent_select", color = hex.clone())
                 .into_owned()
                 .into();
-            let ring = crate::material::focus_ring(cx);
             let dialog = cx.entity().downgrade();
             // The ring is always drawn, clear while unselected, so it can glide.
             let border = transition(
@@ -490,25 +489,41 @@ impl ProviderDialog {
                 window,
                 cx,
             );
+            // gpui-base's `ColorSwatch` keeps its focus handle to itself (no
+            // `track_focus`), leaving only `focus_visible`, which switches at
+            // once, to show the keyboard's focus. So the swatch is drawn as
+            // one is — a radio button named for its colour, stating both
+            // toggled and selected — on a clickable that holds its handle and
+            // fades its ring (`motion::focus_ring`). Back to `ColorSwatch`
+            // once it takes a focus handle.
             swatches = swatches.child(
-                gpui_base::ColorSwatch::new(("accent", index), rgb(value).into())
-                    .selected(selected)
-                    .accessibility_label(label.clone())
-                    // A swatch is its colour at a fixed size; there is no token for it.
-                    .size(px(22.))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .bg(rgb(value))
-                    .border_2()
-                    .border_color(border)
-                    .focus_visible(move |style| style.shadow(vec![ring]))
-                    .with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(label.clone()))
-                    .on_click(move |_, _, _, cx| {
-                        _ = dialog.update(cx, |this, cx| {
-                            this.accent = Some(hex.clone());
-                            cx.notify();
-                        });
-                    }),
+                crate::material::accessible_clickable(
+                    div(),
+                    ("accent", index),
+                    gpui::Role::RadioButton,
+                    label.clone(),
+                    cx,
+                )
+                .aria_toggled(if selected {
+                    gpui::Toggled::True
+                } else {
+                    gpui::Toggled::False
+                })
+                .aria_selected(selected)
+                // A swatch is its colour at a fixed size; there is no token for it.
+                .size(px(22.))
+                .rounded_full()
+                .cursor_pointer()
+                .bg(rgb(value))
+                .border_2()
+                .border_color(border)
+                .with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(label.clone()))
+                .on_click(move |_, _, cx| {
+                    _ = dialog.update(cx, |this, cx| {
+                        this.accent = Some(hex.clone());
+                        cx.notify();
+                    });
+                }),
             );
         }
         swatches = swatches.child(
