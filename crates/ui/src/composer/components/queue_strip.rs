@@ -421,6 +421,9 @@ impl Composer {
                         .xsmall()
                         .touch(self.compact)
                         .icon(IconName::ArrowUp)
+                        // The row's grab cursor covers its children; a button
+                        // keeps Button's own, the default.
+                        .cursor_default()
                         // Scheduled rows always support send-now: the
                         // runtime removes the deadline and uses the normal
                         // send/queue path even when native steering is absent.
@@ -443,6 +446,7 @@ impl Composer {
                         .xsmall()
                         .touch(self.compact)
                         .icon(IconName::Close)
+                        .cursor_default()
                         .disabled(!editable || !self.interactive(cx))
                         .tooltip(crate::tr!("composer.drop_queued"))
                         .on_click(cx.listener(move |this, _, window, cx| {
