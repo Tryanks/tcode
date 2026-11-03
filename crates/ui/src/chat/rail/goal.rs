@@ -9,7 +9,7 @@ use gpui::{
     AnyElement, App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _,
     Window, div,
 };
-use gpui_base::{h_flex, v_flex};
+use gpui_base::v_flex;
 
 use crate::chat::ChatView;
 use crate::theme::ActiveTheme as _;
@@ -48,9 +48,9 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     )
 }
 
-/// What the card shows below its header, laid out at the rail's width: the objective
-/// under its status's glyph, and the latest check's verdict while the goal
-/// is not met. A goal cleared while the card leaves is drawn as it stood.
+/// What the card shows below its header, laid out at the rail's width: the
+/// objective, and the latest check's verdict while the goal is not met; the
+/// header's summary says its status. A goal cleared while the card leaves is drawn as it stood.
 pub(super) fn body(
     chat: &ChatView,
     window: &mut Window,
@@ -61,8 +61,6 @@ pub(super) fn body(
         last.replace(Some(goal.clone()));
     }
     let goal = last.borrow().clone()?;
-    let (icon, color) = crate::composer::goal_status_mark(goal.status, cx);
-    let status = crate::motion::status_icon("rail-goal-status", icon, color, CHANGE, window, cx);
     let verdict = chat
         .motion
         .shown(
@@ -105,20 +103,12 @@ pub(super) fn body(
         },
     );
     Some(
-        h_flex()
+        v_flex()
             .w_full()
             .min_w_0()
             .px_1()
-            .gap_2()
-            .items_start()
-            .child(div().flex_none().pt_0p5().child(status))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(objective)
-                    .children(verdict),
-            )
+            .child(objective)
+            .children(verdict)
             .into_any_element(),
     )
 }
