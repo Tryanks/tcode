@@ -141,34 +141,43 @@ impl ListHover {
         value
     }
 
+    /// What hears the pointer over `item` for an item that takes clicks: a
+    /// layer over the item, for the first children of its frame, under its
+    /// content, with a hitbox of its own that takes no clicks. GPUI's
+    /// `on_hover` reports the pointer gone from an element with click
+    /// listeners as soon as it moves while pressing it, so an item hearing
+    /// its own would fade its reveal back as a quick click lands and replay
+    /// it on release. The item must be positioned.
+    pub(crate) fn hitbox(&self, item: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
+        use gpui::{InteractiveElement as _, StatefulInteractiveElement as _, Styled as _};
+        gpui::div()
+            .id("list-hover-layer")
+            .absolute()
+            .inset_0()
+            .on_hover(self.on_hover(item))
+    }
+
     /// The hover fill of `item`, for the first child of its frame, under the
     /// item's content: `fill` [blended](super::blend) in at the item's
-    /// reveal, rounded by `radius`. It hears the pointer through its own
-    /// hitbox over the item, so the item's own `on_hover` stays the
-    /// caller's. [`super::hover_layer`] for an item of a list: the fill
-    /// holds no state of its own. The item must be positioned.
+    /// reveal, rounded by `radius`, over its [`Self::hitbox`], so the item's
+    /// own `on_hover` stays the caller's. [`super::hover_layer`] for an item
+    /// of a list: the fill holds no state of its own.
     pub(crate) fn layer(
         &self,
         item: impl Into<SharedString>,
         fill: gpui::Hsla,
         radius: gpui::Pixels,
     ) -> super::Sampled {
-        use gpui::{
-            InteractiveElement as _, IntoElement as _, StatefulInteractiveElement as _,
-            Styled as _, prelude::FluentBuilder as _,
-        };
+        use gpui::{IntoElement as _, Styled as _, prelude::FluentBuilder as _};
         let (hover, item) = (self.clone(), item.into());
         super::Sampled::new(move |window, cx| {
             let reveal = hover.reveal(&item, window, cx);
-            gpui::div()
-                .id("list-hover-layer")
-                .absolute()
-                .inset_0()
+            hover
+                .hitbox(item.clone())
                 .rounded(radius)
                 .when(reveal > 0., |layer| {
                     layer.bg(super::blend(fill.opacity(0.), fill, reveal))
                 })
-                .on_hover(hover.on_hover(item))
                 .into_any_element()
         })
     }

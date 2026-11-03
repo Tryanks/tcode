@@ -1030,9 +1030,10 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
-    /// Track the pointer over `group`'s row for [`Self::hover_progress`].
-    fn track_hover<R: gpui::StatefulInteractiveElement>(&self, row: R, group: &str) -> R {
-        row.on_hover(self.hover.on_hover(group.to_owned()))
+    /// Track the pointer over `group`'s row, a positioned row that takes
+    /// clicks, for [`Self::hover_progress`].
+    fn track_hover<R: gpui::ParentElement>(&self, row: R, group: &str) -> R {
+        row.child(self.hover.hitbox(group.to_owned()))
     }
     pub fn new(
         store: Entity<WorkspaceStore>,
@@ -5934,6 +5935,88 @@ mod tests {
         lifecycle(archive(), false, cx);
         assert_eq!(top("middle", cx), None, "reduced motion takes it at once");
         assert!(top("oldest", cx) < Some(oldest), "and closes up at once");
+
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A row the pointer comes onto and clicks while its time is still
+    /// fading out for the row's controls, the pointer still moving as it
+    /// presses, selects the thread and fades the time out once: it never
+    /// comes back or starts over.
+    #[gpui::test]
+    fn a_quick_click_fades_the_rows_time_out_once(cx: &mut TestAppContext) {
+        /// The sidebar, with the opacity its middle row's time is drawn at
+        /// in each frame: the test platform lays out text without painting
+        /// glyphs, so it is read from the reveal the row draws it at, on the
+        /// frame's clock.
+        struct Drawn {
+            sidebar: Entity<SessionsSidebar>,
+            opacity: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
+        }
+        impl Render for Drawn {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let hover = self.sidebar.read(cx).hover.clone();
+                let opacity = 1. - hover.reveal("flat-thread-middle", window, cx);
+                self.opacity.borrow_mut().push(opacity);
+                div().size_full().child(self.sidebar.clone())
+            }
+        }
+
+        let (sidebar, store, _, mut driver, host, root) =
+            sidebar_over_host(cx, "sidebar-time-click", &["newest", "middle", "oldest"]);
+        let opacity = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let drawn = cx.new(|_| Drawn {
+                sidebar: sidebar.clone(),
+                opacity: opacity.clone(),
+            });
+            gpui_base::Root::new(drawn, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_resize(size(px(320.), px(800.)));
+        let (none, left) = (gpui::Modifiers::none(), gpui::MouseButton::Left);
+        cx.simulate_mouse_move(gpui::point(px(300.), px(790.)), None, none);
+        crate::test_frames::draw_settled(cx);
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+        };
+
+        let row = cx.debug_bounds("sidebar-thread-middle").unwrap();
+        let at = gpui::point(row.center().x, row.top() + px(8.));
+        cx.simulate_mouse_move(at, None, none);
+        let since = opacity.borrow().len();
+        for _ in 0..3 {
+            frame(cx);
+        }
+        cx.simulate_mouse_down(at, left, none);
+        let at = at + gpui::point(px(2.), px(0.));
+        cx.simulate_mouse_move(at, Some(left), none);
+        frame(cx);
+        cx.simulate_mouse_up(at, left, none);
+        cx.simulate_mouse_move(at + gpui::point(px(1.), px(0.)), None, none);
+        for _ in 0..20 {
+            frame(cx);
+        }
+
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            Some("middle".into())
+        );
+        let drawn = opacity.borrow()[since..].to_vec();
+        assert!(
+            drawn[2] > 0. && drawn[2] < 1.,
+            "the click lands mid-fade: {drawn:?}"
+        );
+        assert!(
+            drawn.windows(2).all(|pair| pair[1] <= pair[0]),
+            "the time came back: {drawn:?}"
+        );
+        assert_eq!(drawn.last(), Some(&0.));
 
         driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
