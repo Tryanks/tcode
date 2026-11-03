@@ -1037,7 +1037,7 @@ impl ChatView {
                 .any(|meta| meta.id == child_id)
         };
         let store = self.workspace_store.clone();
-        let lead = self.session_id.clone();
+        let host = self.agent_host(cx);
         // The row that opens the agent is what its card grows out of.
         let origin = SharedString::from(format!("callback-{key}"));
         let on_open = exists.then(|| {
@@ -1046,7 +1046,7 @@ impl ChatView {
                 crate::agents_panel::open_agent(
                     &store,
                     child_id.clone(),
-                    lead.as_deref(),
+                    host.clone(),
                     Some(origin.clone()),
                     window,
                     cx,
@@ -1477,13 +1477,13 @@ impl ChatView {
         let on_click: tools::window::ClickHandler = match child {
             Some(child) => {
                 let store = self.workspace_store.clone();
-                let lead = self.session_id.clone();
+                let host = self.agent_host(cx);
                 let origin = origin.clone();
                 Box::new(move |_, window, cx| {
                     crate::agents_panel::open_agent(
                         &store,
                         child.clone(),
-                        lead.as_deref(),
+                        host.clone(),
                         origin.clone(),
                         window,
                         cx,

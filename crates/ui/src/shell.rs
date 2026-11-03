@@ -572,26 +572,32 @@ pub(crate) fn shows_selection(window: &Window, cx: &App) -> bool {
     })
 }
 
-/// The chat that shows an agent opened from `lead` beside it: the chat of
-/// the pane showing `lead`, or of the pane showing `lead` beside its own
-/// lead, which has room for one agent beside it. None in the compact
-/// layout, which shows one thread at a time.
+/// The chat that shows an agent opened from `lead` beside it, for what
+/// knows only the lead (the right panel, which shows the focused thread's
+/// agents): the chat of the pane showing `lead`, or else of a pane showing
+/// `lead` beside its own lead, which has room for one agent beside it. A
+/// thread shown in a pane and beside its lead in another is the pane's.
+/// None in the compact layout, which shows one thread at a time.
 pub(crate) fn side_host_for(lead: &str, cx: &App) -> Option<Entity<ChatView>> {
     let shell = current_shell(cx)?;
     let shell = shell.read(cx);
     if shell.compact(cx) {
         return None;
     }
-    shell
+    let chats: Vec<_> = shell
         .attachment
         .as_ref()?
         .panes(cx)
         .into_iter()
         .map(|pane| pane.read(cx).chat())
-        .find(|chat| {
-            let chat = chat.read(cx);
-            chat.session_id() == Some(lead) || chat.side_session_id() == Some(lead)
-        })
+        .collect();
+    let showing = |shown: fn(&ChatView) -> Option<&str>| {
+        chats
+            .iter()
+            .find(|chat| shown(chat.read(cx)) == Some(lead))
+            .cloned()
+    };
+    showing(ChatView::session_id).or_else(|| showing(ChatView::side_session_id))
 }
 
 /// Whether one of `panes` draws `session_id` beside its own thread, which
@@ -8000,6 +8006,213 @@ mod tests {
         }
     }
 
+    /// `id`'s log as the host answers it: a turn still running, in which it
+    /// asked for each of `spawns`' native subagents.
+    fn serve_spawning(host: &MountedShell, id: &str, spawns: &[&str]) {
+        let records: Vec<tcode_core::session::StoredEvent> = [
+            agent::AgentEvent::TurnStarted {
+                turn_id: format!("{id}-turn"),
+            },
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: format!("{id}-ask"),
+                parent_item_id: None,
+                content: agent::ItemContent::UserMessage {
+                    text: "Look around".into(),
+                    context_len: None,
+                    attachments: vec![],
+                },
+            }),
+        ]
+        .into_iter()
+        .chain(spawns.iter().map(|spawn| {
+            agent::AgentEvent::ItemStarted(agent::ThreadItem {
+                id: (*spawn).into(),
+                parent_item_id: None,
+                content: agent::ItemContent::Subagent {
+                    agent_type: "explore".into(),
+                    description: format!("Survey for {spawn}"),
+                    status: agent::ItemStatus::InProgress,
+                    summary: None,
+                    model: None,
+                    effort: None,
+                },
+            })
+        }))
+        .map(Into::into)
+        .collect();
+        serve_status(host, id, false);
+        send_events(
+            host,
+            vec![(
+                Topic::SessionEvents {
+                    session_id: id.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: records.len() as u64,
+                    total_turns: 1,
+                    truncated: false,
+                    from: 0,
+                    end: records.len() as u64,
+                    records,
+                },
+            )],
+        );
+    }
+
+    /// The agent each pane on screen shows beside its thread, in the
+    /// layout's order.
+    fn pane_sides(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<Option<String>> {
+        shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .all_panes(cx)
+                .iter()
+                .map(|pane| {
+                    pane.read(cx)
+                        .chat()
+                        .read(cx)
+                        .side_session_id()
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+    }
+
+    /// An agent opened from what a pane draws opens in that pane, whatever
+    /// else shows its lead. Here `thread-1`'s agent is open beside it on the
+    /// left and, its agents spread, in a pane of its own on the right. An
+    /// agent the right pane's thread ran, opened from that thread's rail row
+    /// or, too narrow for the rail, from the right panel's row, shows beside
+    /// it on the right; one that agent ran in turn, opened from its window
+    /// in the agent's own timeline, takes its place there; Escape closes it.
+    /// The left pane keeps its thread, its place and the agent beside it
+    /// throughout, over leads too narrow for the card and on the card beside
+    /// wider ones.
+    #[gpui::test]
+    fn an_agent_opens_in_the_pane_it_was_opened_from(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("panes_index sends a snapshot");
+        };
+        // `thread-1` dispatched `agent-1`, whose provider ran `agent-2`,
+        // which ran `agent-3`.
+        for (id, lead, spawn) in [
+            ("agent-1", "thread-1", None),
+            ("agent-2", "agent-1", Some("spawn-2")),
+            ("agent-3", "agent-2", Some("spawn-3")),
+        ] {
+            let mut agent = index.sessions[1].clone();
+            agent.id = id.into();
+            agent.title = id.into();
+            agent.parent_session_id = Some(lead.into());
+            agent.native_subagent = spawn.map(Into::into);
+            agent.created_at = 3;
+            index.sessions.push(agent);
+        }
+        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+        await_restore_update(&shell, cx, |store| store.thread_meta("agent-3").is_some());
+        settle_panes(cx);
+        let press = |selector: &'static str, cx: &mut VisualTestContext| {
+            let at = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("no {selector}"));
+            cx.simulate_mouse_move(at.center(), None, gpui::Modifiers::default());
+            draw(cx);
+            cx.simulate_click(at.center(), gpui::Modifiers::default());
+            draw(cx);
+            // The subagents run, so their windows never rest.
+            for _ in 0..16 {
+                display_frame(cx);
+            }
+        };
+        let serve_agent = |id: &str, spawns: &[&str], cx: &mut VisualTestContext| {
+            serve_spawning(&host, id, spawns);
+            if id != "agent-1" {
+                serve_subagent_status(&host, id);
+            }
+            await_restore_update(&shell, cx, |store| {
+                !store.chat_loading()
+                    && store.timeline_settled_for(id)
+                    && (id == "agent-1" || store.native_subagent_readonly_for(Some(id)))
+            });
+            settle_panes(cx);
+            settle_frames(cx);
+        };
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                crate::shell::side_host_for("thread-1", cx),
+                None,
+                window,
+                cx,
+            )
+        });
+        serve_agent("agent-1", &["spawn-2"], cx);
+        choose_from_palette(&shell, &PaneLayout::SpreadAgents.label(), cx);
+        // The agent's pane asks for its log again.
+        serve_agent("agent-1", &["spawn-2"], cx);
+        let both = [Some("thread-1".to_owned()), Some("agent-1".to_owned())];
+        assert_eq!(pane_threads(&shell, cx), both);
+        assert_eq!(pane_sides(&shell, cx), [Some("agent-1".into()), None]);
+
+        for (width, card) in [(2000., false), (2600., true)] {
+            resize(cx, width);
+            settle_panes(cx);
+            let left = pane_bounds(&shell, cx)[0];
+            if card {
+                press("rail-agent-spawn-2", cx);
+            } else {
+                // The keyboard in the right pane, its agents in the panel.
+                cx.simulate_keystrokes("secondary-alt-right");
+                settle_panes(cx);
+                assert_eq!(keyboard_pane(&shell, cx), Some(1));
+                store.update(cx, |store, cx| store.toggle_agents_panel(cx));
+                settle_panes(cx);
+                press("agent-row-spawn-2", cx);
+            }
+            serve_agent("agent-2", &["spawn-3"], cx);
+            assert_eq!(pane_threads(&shell, cx), both, "{width}");
+            assert_eq!(pane_bounds(&shell, cx)[0], left, "{width}");
+            assert_eq!(
+                pane_sides(&shell, cx),
+                [Some("agent-1".into()), Some("agent-2".into())],
+                "{width}"
+            );
+            assert_eq!(
+                cx.debug_bounds("chat-side-sheet").is_some(),
+                !card,
+                "{width}: the agents cover their leads"
+            );
+
+            if cx.debug_bounds("activity-row-spawn-3").is_none() {
+                press("worklog-header-0-spawn-3", cx);
+            }
+            press("activity-row-spawn-3", cx);
+            serve_agent("agent-3", &[], cx);
+            assert_eq!(pane_threads(&shell, cx), both, "{width}");
+            assert_eq!(pane_bounds(&shell, cx)[0], left, "{width}");
+            assert_eq!(
+                pane_sides(&shell, cx),
+                [Some("agent-1".into()), Some("agent-3".into())],
+                "{width}"
+            );
+
+            cx.simulate_keystrokes("escape");
+            settle_panes(cx);
+            assert_eq!(pane_threads(&shell, cx), both, "{width}");
+            assert_eq!(
+                pane_sides(&shell, cx),
+                [Some("agent-1".into()), None],
+                "{width}"
+            );
+        }
+    }
+
     /// [`mount_panes`] with `agent-1` dispatched by `thread-1`.
     fn mount_lead_with_agent(
         cx: &mut TestAppContext,
@@ -8334,7 +8547,7 @@ mod tests {
             crate::agents_panel::open_agent(
                 &store,
                 "agent-1".into(),
-                Some("thread-1"),
+                crate::shell::side_host_for("thread-1", cx),
                 None,
                 window,
                 cx,
@@ -8669,7 +8882,7 @@ mod tests {
             crate::agents_panel::open_agent(
                 &store,
                 "agent-1".into(),
-                Some("thread-1"),
+                crate::shell::side_host_for("thread-1", cx),
                 None,
                 window,
                 cx,
@@ -8851,7 +9064,7 @@ mod tests {
             crate::agents_panel::open_agent(
                 &store,
                 "agent-1".into(),
-                Some("thread-1"),
+                crate::shell::side_host_for("thread-1", cx),
                 None,
                 window,
                 cx,
