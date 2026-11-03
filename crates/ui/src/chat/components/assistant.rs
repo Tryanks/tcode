@@ -272,7 +272,7 @@ pub(crate) fn reserve_action_row(
 mod tests {
     use super::MdState;
     use crate::chat::model::plain_text_as_markdown;
-    use crate::markdown::{FADE, MarkdownState, MarkdownView};
+    use crate::markdown::{MarkdownState, MarkdownView};
     use crate::test_frames::{draw, draw_settled};
     use crate::theme::ActiveTheme as _;
     use gpui::{
@@ -437,24 +437,25 @@ mod tests {
         draw(cx);
         assert!(frames_requested(cx) > 0, "the delta fades in");
         let mut lagged = false;
-        let mut elapsed = std::time::Duration::ZERO;
-        while elapsed < FADE {
+        for frame in 0..600 {
             let chips = chips_in_reading_order(cx);
             assert_eq!(chips.len(), 5, "every chip is painted: {chips:?}");
             assert!(
                 chips.windows(2).all(|pair| pair[1] <= pair[0] + 1e-4),
-                "a later chip is ahead of an earlier one at {elapsed:?}: {chips:?}"
+                "a later chip is ahead of an earlier one at frame {frame}: {chips:?}"
             );
             lagged |= chips[4] + 0.05 < chips[0];
+            if chips.iter().all(|alpha| *alpha == rest) {
+                break;
+            }
             next_frame(cx);
-            elapsed += std::time::Duration::from_millis(16);
         }
         assert!(lagged, "the chips lit up together, not in order");
         assert!(
             chips_in_reading_order(cx)
                 .iter()
                 .all(|alpha| *alpha == rest),
-            "the burst is whole once the fade has played"
+            "the burst comes whole once the fade has played"
         );
         frames_requested(cx);
         draw(cx);
