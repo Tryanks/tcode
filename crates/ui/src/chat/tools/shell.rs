@@ -465,9 +465,9 @@ const DEFAULT_COLS: u16 = 80;
 /// Grid rows one panel shows, command line included.
 const MAX_ROWS: usize = 16;
 const MAX_COMMAND_ROWS: usize = 4;
-/// Rows of output a panel holds: a screen and the scrollback a host's frame
-/// carries.
-const FRAME_ROWS: usize = MAX_ROWS + tcode_protocol::terminal::HISTORY_LIMIT;
+/// Rows of output a panel lays out from text at most: a screen and the
+/// scrollback a host's frame of a finished command carries.
+const FRAME_ROWS: usize = MAX_ROWS + tcode_protocol::STORED_OUTPUT_HISTORY;
 
 pub(crate) type ColsChangeHandler = Box<dyn Fn(&u16, &mut Window, &mut App) + 'static>;
 
@@ -909,10 +909,24 @@ impl Panel {
 /// carries.
 fn text_frame(text: &str, cols: u16) -> TerminalFrame {
     let cols = usize::from(cols.max(2));
-    let mut tail: Vec<&str> = text.lines().rev().take(FRAME_ROWS).collect();
-    tail.reverse();
+    // As a host frames a finished command: its last bytes, from a line's
+    // start, and what comes before counted.
+    let cut = text
+        .len()
+        .saturating_sub(tcode_protocol::STORED_OUTPUT_BYTES);
+    let start = if cut == 0 {
+        0
+    } else {
+        text[text.ceil_char_boundary(cut)..]
+            .find('\n')
+            .map_or(text.len(), |at| text.ceil_char_boundary(cut) + at + 1)
+    };
+    let mut evicted = text[..start].matches('\n').count();
+    let lines: Vec<&str> = text[start..].lines().collect();
+    evicted += lines.len().saturating_sub(FRAME_ROWS);
+    let tail = &lines[lines.len().saturating_sub(FRAME_ROWS)..];
     let mut visible = Vec::new();
-    for line in tail {
+    for &line in tail {
         let mut row = TerminalRow::default();
         let mut col = 0usize;
         let mut push = |row: &mut TerminalRow, col: &mut usize, text: &str, width: usize| {
@@ -960,14 +974,48 @@ fn text_frame(text: &str, cols: u16) -> TerminalFrame {
     while visible.last().is_some_and(|row| row.cells.is_empty()) {
         visible.pop();
     }
-    visible.drain(..visible.len().saturating_sub(FRAME_ROWS));
+    let wrapped = visible.len().saturating_sub(FRAME_ROWS);
+    visible.drain(..wrapped);
     TerminalFrame {
         cols: cols.min(u16::MAX as usize) as u16,
         rows: visible.len().min(u16::MAX as usize) as u16,
         styles: vec![TerminalStyle::default()],
         visible,
+        lines_evicted: (evicted + wrapped) as u64,
         ..TerminalFrame::default()
     }
+}
+
+/// `text` as one row of cells, as far as `cols` holds it.
+fn note_row(text: &str, cols: usize) -> TerminalRow {
+    let mut row = TerminalRow::default();
+    let mut col = 0;
+    for grapheme in text.graphemes(true) {
+        let width = grapheme.width().min(2);
+        if width == 0 {
+            continue;
+        }
+        if col + width > cols {
+            break;
+        }
+        row.cells.push(TerminalCell {
+            text: grapheme.to_string(),
+            width: if width == 2 {
+                CellWidth::Wide
+            } else {
+                CellWidth::Narrow
+            },
+            ..TerminalCell::default()
+        });
+        if width == 2 {
+            row.cells.push(TerminalCell {
+                width: CellWidth::Spacer,
+                ..TerminalCell::default()
+            });
+        }
+        col += width;
+    }
+    row
 }
 
 /// Which half of its cell `position` is over, as a terminal selects.
@@ -990,6 +1038,12 @@ fn side_of(
 fn output_model(frame: &TerminalFrame, budget: usize) -> (TerminalModel, usize, usize) {
     let mut frame = frame.clone();
     let mut lines = std::mem::take(&mut frame.history);
+    // What the frame leaves out is said where it would be, first, and how to
+    // have all of it.
+    if frame.lines_evicted > 0 {
+        let note = crate::tr!("tools.lines_left_out", count = frame.lines_evicted);
+        lines.insert(0, note_row(&note, usize::from(frame.cols)));
+    }
     lines.append(&mut frame.visible);
     let total = lines.len();
     let rows = total.min(budget);

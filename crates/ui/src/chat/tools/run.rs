@@ -191,6 +191,7 @@ impl ChatView {
                 elapsed_ms,
                 compact: false,
                 copy: copy_items,
+                whole_output: None,
                 path: None,
                 hover: self.hover.clone(),
                 motion: self.motion.clone(),

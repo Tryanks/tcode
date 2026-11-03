@@ -593,6 +593,26 @@ impl ChatView {
         }
     }
 
+    pub(in crate::chat) fn on_copy_whole_output(
+        &mut self,
+        action: &super::super::CopyWholeOutput,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.full_outputs.get(&action.item_id) {
+            Some(FullOutput::Loaded(output)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(output.to_string()));
+            }
+            Some(FullOutput::Loading { .. }) => {
+                self.copy_when_loaded = Some(action.item_id.clone());
+            }
+            None | Some(FullOutput::Failed(_)) => {
+                self.copy_when_loaded = Some(action.item_id.clone());
+                self.load_full_output(action.item_id.clone(), action.turn, cx);
+            }
+        }
+    }
+
     pub(in crate::chat) fn on_rewind_turn(
         &mut self,
         action: &RewindTurn,
@@ -1343,6 +1363,7 @@ impl ChatView {
                     elapsed_ms,
                     compact: false,
                     copy: tools::diff::file_copy_items(file),
+                    whole_output: None,
                     path: Some((file.row.path.clone(), cwd.to_path_buf())),
                     hover: self.hover.clone(),
                     motion: self.motion.clone(),
@@ -1382,13 +1403,32 @@ impl ChatView {
         let tools::Activity {
             header,
             status,
-            copy,
+            mut copy,
             expandable,
             path,
             ..
         } = activity;
         // A subagent's window also opens on the way to its thread.
         let expandable = expandable || tools::subagent::child_thread(self, entry, cx).is_some();
+        // Of an output the record holds a preview of, Copy takes the whole.
+        let elided = self
+            .workspace_store
+            .read(cx)
+            .with_timeline_for(self.session_id.as_deref(), |timeline| {
+                timeline.elided_outputs.contains_key(&entry.id)
+            })
+            .unwrap_or(false);
+        let label = crate::tr!("chat.copy_output").into_owned();
+        let whole_output = (elided && copy.iter().any(|(item, _)| *item == label)).then(|| {
+            copy.retain(|(item, _)| *item != label);
+            (
+                label,
+                super::super::CopyWholeOutput {
+                    item_id: entry.id.clone(),
+                    turn,
+                },
+            )
+        });
         let detail = if !expandable {
             tools::window::Detail::None
         } else {
@@ -1412,6 +1452,7 @@ impl ChatView {
                 elapsed_ms,
                 compact: row.compact,
                 copy,
+                whole_output,
                 path: path.map(|path| (path, cwd.to_path_buf())),
                 hover: self.hover.clone(),
                 motion: self.motion.clone(),
@@ -1561,7 +1602,13 @@ impl ChatView {
                     return;
                 }
                 let output = match result {
-                    Ok(output) => FullOutput::Loaded(output.into()),
+                    Ok(output) => {
+                        if this.copy_when_loaded.as_deref() == Some(id.as_str()) {
+                            this.copy_when_loaded = None;
+                            cx.write_to_clipboard(ClipboardItem::new_string(output.clone()));
+                        }
+                        FullOutput::Loaded(output.into())
+                    }
                     Err(error) => FullOutput::Failed(error),
                 };
                 this.remeasure_activity(turn, &id, cx);

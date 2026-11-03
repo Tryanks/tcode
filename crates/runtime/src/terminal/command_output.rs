@@ -5,28 +5,35 @@
 //! blocking-I/O executor: it is pure CPU over one string.
 
 use tcode_protocol::{
-    STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS,
+    STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
     terminal::{HISTORY_LIMIT, TerminalFrame},
 };
 use term::{GridEmulator, Projector};
 
-/// Output bytes replayed into the emulator: more than a
-/// [`STORED_OUTPUT_ROWS`]-row screen and the [`HISTORY_LIMIT`] rows of
-/// scrollback the frame carries hold of any ordinary output, which a client's
-/// window scrolls through.
-const TAIL_BYTES: usize = 512 * 1024;
+/// A command still running is pushed again as it grows, so its frame is a
+/// window onto the end of its output.
+const RUNNING_BYTES: usize = 512 * 1024;
 
 /// Render `output` as it would have looked in a `cols`-wide terminal: its
-/// last screen, and what scrolled off it as the frame's history.
+/// last screen, and what scrolled off it as the frame's history; all of it
+/// once the command has finished, up to the ceiling. What it leaves out, it
+/// counts in `lines_evicted`.
 ///
 /// `cols` is clamped into [`STORED_OUTPUT_COLS`], so the frame's own `cols` is
 /// the authority on what the caller actually got.
-pub fn render(output: &str, cols: u16) -> TerminalFrame {
+pub fn render(output: &str, cols: u16, running: bool) -> TerminalFrame {
     let cols = cols.clamp(*STORED_OUTPUT_COLS.start(), *STORED_OUTPUT_COLS.end());
-    let emulator = GridEmulator::with_size(usize::from(cols), usize::from(STORED_OUTPUT_ROWS));
-    emulator.feed(&normalized_tail(output.as_bytes()));
+    let (bytes, history) = if running {
+        (RUNNING_BYTES, HISTORY_LIMIT)
+    } else {
+        (STORED_OUTPUT_BYTES, STORED_OUTPUT_HISTORY)
+    };
+    let (tail, dropped) = tail(output.as_bytes(), bytes);
+    let emulator =
+        GridEmulator::with_scrollback(usize::from(cols), usize::from(STORED_OUTPUT_ROWS), history);
+    emulator.feed(&normalized(tail));
 
-    let snapshot = emulator.snapshot_since(0, HISTORY_LIMIT);
+    let snapshot = emulator.snapshot_since(0, history);
     let mut projector = Projector::default();
     let mut visible = (0..snapshot.screen_lines)
         .map(|row| projector.visible_row(&snapshot, row))
@@ -45,18 +52,32 @@ pub fn render(output: &str, cols: u16) -> TerminalFrame {
         styles: projector.into_styles(),
         visible,
         history,
-        lines_evicted: snapshot.lines_evicted,
+        lines_evicted: dropped + snapshot.lines_evicted,
         ..TerminalFrame::default()
     }
 }
 
+/// The last `limit` bytes of `bytes`, from the start of a line, and how many
+/// lines come before them.
+fn tail(bytes: &[u8], limit: usize) -> (&[u8], u64) {
+    let cut = bytes.len().saturating_sub(limit);
+    if cut == 0 {
+        return (bytes, 0);
+    }
+    let start = bytes[cut..]
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .map_or(bytes.len(), |at| cut + at + 1);
+    let dropped = bytes[..start].iter().filter(|&&byte| byte == b'\n').count();
+    (&bytes[start..], dropped as u64)
+}
+
 /// Captured output is a log, not a PTY stream: a bare LF means "next line at
 /// column zero". Feeding it raw would leave every line indented by the last.
-fn normalized_tail(bytes: &[u8]) -> Vec<u8> {
-    let start = bytes.len().saturating_sub(TAIL_BYTES);
-    let mut previous_was_cr = start > 0 && bytes[start - 1] == b'\r';
-    let mut normalized = Vec::with_capacity(bytes.len() - start);
-    for &byte in &bytes[start..] {
+fn normalized(bytes: &[u8]) -> Vec<u8> {
+    let mut previous_was_cr = false;
+    let mut normalized = Vec::with_capacity(bytes.len());
+    for &byte in bytes {
         if byte == b'\n' && !previous_was_cr {
             normalized.push(b'\r');
         }
@@ -85,12 +106,72 @@ mod tests {
         text.trim_end().to_owned()
     }
 
-    /// An output longer than a screen keeps what scrolled off it, oldest
-    /// first, ahead of the screen, so a window holds all of it.
+    fn rows(frame: &tcode_protocol::terminal::TerminalFrame) -> Vec<String> {
+        frame
+            .history
+            .iter()
+            .chain(&frame.visible)
+            .map(text)
+            .collect()
+    }
+
+    /// A finished command's output longer than a screen keeps what scrolled
+    /// off it, oldest first, ahead of the screen, so a window holds all of
+    /// it: five thousand lines, all there.
     #[test]
     fn a_long_output_carries_what_scrolled_off_its_screen() {
+        let output: String = (1..=5_000).map(|line| format!("line {line}\n")).collect();
+        let frame = super::render(&output, 80, false);
+        let rows = rows(&frame);
+        assert_eq!(rows.first().map(String::as_str), Some("line 1"));
+        assert_eq!(rows.last().map(String::as_str), Some("line 5000"));
+        assert_eq!((rows.len(), frame.lines_evicted), (5_000, 0));
+    }
+
+    /// Past the ceiling, the frame holds the output's end and counts the
+    /// lines before it.
+    #[test]
+    fn an_output_past_the_ceiling_counts_what_it_leaves_out() {
+        let lines = tcode_protocol::STORED_OUTPUT_HISTORY + 500;
+        let output: String = (1..=lines).map(|line| format!("line {line}\n")).collect();
+        let frame = super::render(&output, 80, false);
+        let rows = rows(&frame);
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some(format!("line {lines}").as_str())
+        );
+        let first = rows.first().expect("rows");
+        assert_eq!(
+            first.as_str(),
+            format!("line {}", frame.lines_evicted + 1),
+            "what it leaves out is counted"
+        );
+        assert_eq!(rows.len() as u64 + frame.lines_evicted, lines as u64);
+    }
+
+    /// The densest output at the ceiling, every cell a character, makes a
+    /// frame well inside one transport line.
+    #[test]
+    fn a_frame_at_the_ceiling_fits_one_transport_line() {
+        let line = "x".repeat(79);
+        let output: String = std::iter::repeat_n(
+            format!("{line}\n"),
+            tcode_protocol::STORED_OUTPUT_BYTES / 80,
+        )
+        .collect();
+        let frame = super::render(&output, 80, false);
+        let bytes = serde_json::to_vec(&frame)
+            .expect("a frame serializes")
+            .len();
+        assert!(bytes < 12 * 1024 * 1024, "{bytes} bytes");
+    }
+
+    /// An output longer than a screen keeps what scrolled off it while the
+    /// command runs, too, as far as its window goes.
+    #[test]
+    fn a_running_output_carries_its_last_rows() {
         let output: String = (1..=100).map(|line| format!("line {line}\n")).collect();
-        let frame = super::render(&output, 80);
+        let frame = super::render(&output, 80, true);
         let rows: Vec<String> = frame
             .history
             .iter()

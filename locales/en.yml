@@ -2903,6 +2903,7 @@ tools:
   copy_diff: "Copy diff"
   line_range: "L%{first}–%{last}"
   copy_content: "Copy content"
+  lines_left_out: "… %{count} earlier lines not shown here — Copy output copies all of them"
   lines_not_shown: "+%{count} lines not shown; copy the content to read them"
   results: "%{count} results"
   more_results: "+%{count} more"

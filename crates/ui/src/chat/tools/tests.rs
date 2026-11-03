@@ -993,25 +993,44 @@ fn a_shortened_output_loads_whole_when_asked(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
-/// A log of one turn whose shell call `id` printed `lines` numbered lines.
-fn shell_log(id: &str, lines: usize) -> String {
-    let output = (1..=lines)
+/// `lines` numbered lines, as a command prints them.
+fn numbered(lines: usize) -> String {
+    (1..=lines)
         .map(|line| format!("line {line} of the run"))
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+/// A log of one turn whose shell call `id` printed `lines` numbered lines.
+fn shell_log(id: &str, lines: usize) -> String {
+    shell_log_of(id, lines, false)
+}
+
+/// [`shell_log`], the command run by its harness's own shell (`hosted`, a
+/// command execution whose screen the host renders) or as a tool call.
+fn shell_log_of(id: &str, lines: usize, hosted: bool) -> String {
+    let output = numbered(lines);
+    let command = format!("seq 1 {lines}");
+    let content = if hosted {
+        serde_json::json!({
+            "kind": "command_execution",
+            "command": command,
+            "output": output,
+            "exit_code": 0,
+            "status": "completed",
+        })
+    } else {
+        serde_json::json!({
+            "kind": "tool_call",
+            "name": "Bash",
+            "input": { "command": command },
+            "output": output,
+            "status": "completed",
+        })
+    };
     let call = serde_json::json!({
         "ts": 2_000,
-        "event": {
-            "type": "item_completed",
-            "id": id,
-            "content": {
-                "kind": "tool_call",
-                "name": "Bash",
-                "input": { "command": format!("seq 1 {lines}") },
-                "output": output,
-                "status": "completed",
-            },
-        },
+        "event": { "type": "item_completed", "id": id, "content": content },
     });
     [
         serde_json::json!({ "ts": 1_000, "event": { "type": "turn_started", "turn_id": "t" } }),
@@ -1135,6 +1154,90 @@ fn a_shortened_commands_output_loads_into_its_grid(cx: &mut TestAppContext) {
         start.starts_with("line 1 of the run\n"),
         "it scrolls back to the first line: {start}"
     );
+    thread.shutdown(cx);
+}
+
+/// Steps the host until `done`, failing with `what` after a few seconds.
+fn step_until(
+    thread: &mut StoredThread,
+    what: &str,
+    cx: &mut VisualTestContext,
+    mut done: impl FnMut(&mut VisualTestContext) -> bool,
+) {
+    let store = thread.store.clone();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        thread.driver.step(cx, &store);
+        draw_settled(cx);
+        if done(cx) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{what}");
+    }
+}
+
+/// A command that printed five thousand lines, its host's screen of them in
+/// the window's grid, scrolls back to the first line it printed.
+#[gpui::test]
+fn a_five_thousand_line_command_scrolls_to_its_first_line(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (mut thread, cx) = StoredThread::open(cx, &shell_log_of("count", 5_000, true), 1_024.);
+    thread.open_work_log("count", cx);
+    click(cx, "activity-row-count");
+    step_until(&mut thread, "the host's screen never came", cx, |cx| {
+        copied_output("count", cx).ends_with("line 5000 of the run")
+    });
+    scroll_output("count", 6_000., cx);
+    let start = copied_output("count", cx);
+    assert!(
+        start.starts_with("line 1 of the run\n"),
+        "it scrolls back to the first line: {start}"
+    );
+    thread.shutdown(cx);
+}
+
+/// An output longer than a grid holds says so where its first lines would
+/// be, and its window's Copy output copies all of it, loading it first.
+#[gpui::test]
+fn an_output_past_the_grids_ceiling_says_so_and_copies_whole(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let lines = tcode_protocol::STORED_OUTPUT_HISTORY + 5_000;
+    let (mut thread, cx) = StoredThread::open(cx, &shell_log("long", lines), 1_024.);
+    thread.open_work_log("long", cx);
+    let header = cx.debug_bounds("activity-row-long").expect("the window");
+    cx.simulate_mouse_down(
+        header.center(),
+        gpui::MouseButton::Right,
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        header.center(),
+        gpui::MouseButton::Right,
+        Modifiers::default(),
+    );
+    draw_settled(cx);
+    click(cx, "menu-item-1");
+    let whole = numbered(lines);
+    step_until(&mut thread, "Copy output never copied it all", cx, |cx| {
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .as_deref()
+            == Some(whole.as_str())
+    });
+
+    click(cx, "activity-row-long");
+    scroll_output("long", (lines * 2) as f32, cx);
+    let start = copied_output("long", cx);
+    let left_out = lines - tcode_protocol::STORED_OUTPUT_HISTORY - 16;
+    assert!(
+        start.starts_with(&format!(
+            "… {left_out} earlier lines not shown here — Copy output copies all of them\n"
+        )),
+        "the grid says what it leaves out: {start}"
+    );
+    scroll_output("long", -((lines * 2) as f32), cx);
+    assert!(copied_output("long", cx).ends_with(&format!("line {lines} of the run")));
     thread.shutdown(cx);
 }
 

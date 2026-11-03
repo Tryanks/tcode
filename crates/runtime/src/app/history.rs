@@ -1369,7 +1369,7 @@ impl AppState {
         session_id: &str,
         item_id: String,
         cx: &mut HostCx,
-    ) -> HostTask<Result<String, ProtocolError>> {
+    ) -> HostTask<Result<(String, bool), ProtocolError>> {
         let scoped = matches!(cx.principal, tcode_protocol::Principal::Space { .. });
         let read_id = session_id.to_owned();
         self.query_item(
@@ -1382,9 +1382,11 @@ impl AppState {
                     .rev()
                     .find(|entry| entry.id == item_id)
                     .and_then(|entry| match &entry.content {
-                        EntryContent::Item(ItemContent::CommandExecution { output, .. }) => {
-                            Some(output.clone())
-                        }
+                        EntryContent::Item(ItemContent::CommandExecution {
+                            output,
+                            status,
+                            ..
+                        }) => Some((output.clone(), *status == agent::ItemStatus::InProgress)),
                         _ => None,
                     })
                     .ok_or_else(|| {

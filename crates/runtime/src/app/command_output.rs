@@ -227,9 +227,9 @@ impl AppState {
         let read = self.stored_command_output(session_id, item_id.clone(), cx);
         let host_cx = cx.clone();
         cx.spawn_background(async move {
-            let output = read.await?;
+            let (output, running) = read.await?;
             Ok(host_cx
-                .unblock(move || crate::terminal::render_command_output(&output, cols))
+                .unblock(move || crate::terminal::render_command_output(&output, cols, running))
                 .await)
         })
     }

@@ -81,6 +81,15 @@ pub(crate) struct RewindTurn {
 
 gpui::actions!(tcode_chat, [OpenMoveThreadDialog, RevokeSelfSettle]);
 
+/// A window's context-menu "Copy output" for an output the record holds only
+/// a preview of: the whole of it, loaded first when it is not here yet.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_chat, no_json)]
+pub(crate) struct CopyWholeOutput {
+    pub(crate) item_id: String,
+    pub(crate) turn: usize,
+}
+
 /// A changed-file chip's context-menu "View diff".
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_chat, no_json)]
@@ -238,6 +247,8 @@ pub struct ChatView {
     agent_reports: tools::subagent::Reports,
     /// Whole tool outputs fetched for the open session, by item id.
     full_outputs: HashMap<String, FullOutput>,
+    /// The output a Copy waits for, copied once it has loaded.
+    copy_when_loaded: Option<String>,
     /// The timeline item the pointer is over: a message whose actions fade
     /// in, or a header, a row or a link whose hover fill or underline does.
     pub(super) hover: crate::motion::ListHover,
@@ -437,6 +448,7 @@ impl ChatView {
             inline_diffs: InlineDiffCache::new(),
             agent_reports: Default::default(),
             full_outputs: HashMap::new(),
+            copy_when_loaded: None,
             hover: crate::motion::ListHover::new(),
             list_scroll,
             session_key: None,
@@ -997,6 +1009,7 @@ impl ChatView {
             .min_h_0()
             .on_action(cx.listener(Self::on_link_url))
             .on_action(cx.listener(Self::on_rewind_turn))
+            .on_action(cx.listener(Self::on_copy_whole_output))
             .on_action(cx.listener(Self::on_open_file_diff))
             .child(
                 div()
