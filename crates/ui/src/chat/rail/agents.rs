@@ -7,7 +7,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::settlement::AgentExecution;
@@ -23,10 +23,6 @@ const ROWS: Duration = Duration::from_millis(200);
 
 /// How long an agent's state word takes to cross-fade to its next.
 const CHANGE: Duration = Duration::from_millis(200);
-
-/// The width the status mark is centred in, which the lines under the
-/// title are indented by.
-const MARK: f32 = 16.;
 
 fn agents(chat: &ChatView, cx: &App) -> Option<Agents> {
     let lead = chat.session_id.as_deref()?;
@@ -53,11 +49,11 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     )
 }
 
-/// What the card shows below its header, laid out at the rail's width: a row for each
-/// agent, with its state, its title and how long it has run, opening it on
-/// a click; under the title, what of its state word, model, effort, branch
-/// and result is reported. Agents that leave the list fold away as they
-/// stood.
+/// What the card shows below its header, laid out at the rail's width: a row
+/// for each agent, with its title and how long it has run, opening it on a
+/// click; under the title, its state word whenever it has a state, and what
+/// of its model, effort, branch and result is reported. Agents that leave the
+/// list fold away as they stood.
 pub(super) fn body(
     chat: &ChatView,
     window: &mut Window,
@@ -125,9 +121,6 @@ fn row(
         .gap_2()
         .items_center()
         .text_body(false, cx)
-        .child(h_flex().flex_none().w(px(MARK)).justify_center().child(
-            crate::agents_panel::status_mark(&line.key, line.execution, window, cx),
-        ))
         .child(
             div()
                 .flex_1()
@@ -142,16 +135,6 @@ fn row(
                 .text_secondary(false, cx)
                 .child(elapsed)
         }));
-    // Under the title, indented to it: each line folds in as what it says
-    // is first reported, and away once it no longer is.
-    let under = |content: AnyElement| {
-        h_flex()
-            .w_full()
-            .min_w_0()
-            .gap_2()
-            .child(div().flex_none().w(px(MARK)))
-            .child(div().flex_1().min_w_0().child(content))
-    };
     let facts: Vec<String> = [line.model.clone(), line.effort.clone()]
         .into_iter()
         .flatten()
@@ -186,7 +169,7 @@ fn row(
             )
         });
         let separator = word.is_some() && !facts.is_empty();
-        shown.fold(under(
+        shown.fold(
             h_flex()
                 .w_full()
                 .min_w_0()
@@ -205,7 +188,7 @@ fn row(
                     )
                 })
                 .into_any_element(),
-        ))
+        )
     });
     let failed = line.execution == Some(AgentExecution::Failed);
     let result = crate::motion::shown(
@@ -216,7 +199,7 @@ fn row(
         cx,
     )
     .map(|shown| {
-        shown.fold(under(
+        shown.fold(
             div()
                 .w_full()
                 .pt_0p5()
@@ -230,7 +213,7 @@ fn row(
                 })
                 .child(crate::widgets::fade_text(shown.value.clone()))
                 .into_any_element(),
-        ))
+        )
     });
     let key = line.key.clone();
     crate::material::accessible_clickable(
