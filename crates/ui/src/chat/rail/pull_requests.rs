@@ -6,8 +6,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    AnyElement, App, Context, Hsla, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::pull_request::{
@@ -15,8 +15,11 @@ use tcode_core::pull_request::{
 };
 
 use crate::chat::ChatView;
+use crate::icon::IconName;
+use crate::sizing::Size;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
+use crate::widgets::tooltip::{Tooltip, TooltipTrigger as _};
 
 /// How long a row takes to fold in or out, or to move to a new place.
 const ROWS: Duration = Duration::from_millis(200);
@@ -73,8 +76,8 @@ impl Line {
 }
 
 /// What the card shows below its header, laid out at the rail's width: a row for each
-/// linked pull request, with its number, title, state, checks and review,
-/// opening it in the Pull requests tab on a click. Pull requests that leave
+/// linked pull request on one line, its number and title then small glyphs
+/// for its state, checks and review, opening it in the Pull requests tab on a click. Pull requests that leave
 /// fold away as they stood.
 pub(super) fn body(
     chat: &ChatView,
@@ -117,24 +120,17 @@ fn row(
     window: &mut Window,
     cx: &mut Context<ChatView>,
 ) -> AnyElement {
-    let (glyph, color, state) = crate::pull_requests::appearance(line.state, cx);
     let number = format!("#{}", line.key.number);
     let title = line
         .title
         .clone()
         .unwrap_or_else(|| line.key.repository.clone());
-    let detail = std::iter::once(state)
-        .chain(
-            line.checks
-                .map(|checks| crate::pull_requests::checks_appearance(checks, cx).2),
-        )
-        .chain(
-            line.review
-                .map(|review| crate::pull_requests::review_appearance(review, cx).2),
-        )
-        .map(|key| crate::tr!(key).into_owned())
-        .collect::<Vec<_>>()
-        .join(" · ");
+    let state = glyph(
+        format!("rail-pr-state-{id}"),
+        crate::pull_requests::appearance(line.state, cx),
+        window,
+        cx,
+    );
     let checks = signal(
         format!("rail-pr-checks-{id}"),
         line.checks,
@@ -149,6 +145,18 @@ fn row(
         window,
         cx,
     );
+    let detail = std::iter::once(crate::pull_requests::appearance(line.state, cx).2)
+        .chain(
+            line.checks
+                .map(|checks| crate::pull_requests::checks_appearance(checks, cx).2),
+        )
+        .chain(
+            line.review
+                .map(|review| crate::pull_requests::review_appearance(review, cx).2),
+        )
+        .map(|key| crate::tr!(key).into_owned())
+        .collect::<Vec<_>>()
+        .join(" · ");
     let radius = crate::material::radius_card(cx);
     let key = line.key.clone();
     let session = session.to_owned();
@@ -166,55 +174,28 @@ fn row(
     .min_w_0()
     .px_1()
     .py_1()
-    .gap_2()
-    .items_start()
+    .gap_1()
+    .items_center()
     .rounded(radius)
     .cursor_pointer()
+    .text_body(false, cx)
     .child(crate::material::row_hover(radius, cx))
-    .child(div().flex_none().pt_0p5().child(crate::motion::status_icon(
-        SharedString::from(format!("rail-pr-state-{id}")),
-        glyph,
-        color,
-        CHANGE,
-        window,
-        cx,
-    )))
     .child(
-        v_flex()
+        div()
+            .flex_none()
+            .text_color(cx.theme().muted_foreground)
+            .child(number),
+    )
+    .child(
+        div()
             .flex_1()
             .min_w_0()
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_1()
-                    .items_center()
-                    .text_body(false, cx)
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(number),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .child(crate::widgets::fade_text(title)),
-                    )
-                    .children(checks)
-                    .children(review),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_secondary(false, cx)
-                    .child(crate::widgets::fade_text(detail)),
-            ),
+            .overflow_hidden()
+            .child(crate::widgets::fade_text(title)),
     )
+    .child(state)
+    .children(checks)
+    .children(review)
     .on_click(cx.listener(move |chat, _, _, cx| {
         let key = key.clone();
         let session = session.clone();
@@ -225,25 +206,40 @@ fn row(
     .into_any_element()
 }
 
-/// A signal beside a row's title, its glyph in its colour, which folds in
-/// and away with the value it shows and cross-fades between values.
+/// A signal at the end of a row, which folds in and away with the value it
+/// shows and cross-fades between values.
 fn signal<T: Copy + PartialEq + 'static>(
     id: String,
     value: Option<T>,
-    appearance: fn(T, &App) -> (crate::icon::IconName, gpui::Hsla, &'static str),
+    appearance: fn(T, &App) -> (IconName, Hsla, &'static str),
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
     let shown = crate::motion::shown(SharedString::from(id.clone()), value, CHANGE, window, cx)?;
-    let (icon, color, _) = appearance(shown.value, cx);
-    Some(
-        shown.fold_across(div().pl_1().child(crate::motion::status_icon(
+    let appearance = appearance(shown.value, cx);
+    Some(shown.fold_across(glyph(id, appearance, window, cx)))
+}
+
+/// A signal's glyph in its colour, drawn small and named in its tooltip; a
+/// new glyph cross-fades over the one it replaces.
+fn glyph(
+    id: String,
+    (icon, color, word): (IconName, Hsla, &'static str),
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("{id}-tip")))
+        .pl_1()
+        .child(crate::motion::status_icon_sized(
             SharedString::from(format!("{id}-icon")),
             icon,
             color,
+            Size::XSmall,
             CHANGE,
             window,
             cx,
-        ))),
-    )
+        ))
+        .with_tooltip(move |_, _| Tooltip::new(crate::tr!(word)))
+        .into_any_element()
 }

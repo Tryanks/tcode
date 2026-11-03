@@ -691,8 +691,23 @@ pub(crate) fn status_icon(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
+    status_icon_sized(id, icon, color, None, curve, window, cx)
+}
+
+/// A [`status_icon`] drawn at `size` rather than at its text's size.
+pub(crate) fn status_icon_sized(
+    id: impl Into<ElementId>,
+    icon: crate::icon::IconName,
+    color: gpui::Hsla,
+    size: impl Into<Option<crate::sizing::Size>>,
+    curve: impl Into<Curve>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     use crate::icon::IconNamed as _;
+    use crate::sizing::Sizable as _;
     let id = id.into();
+    let size = size.into();
     let curve = curve.into();
     let color = transition(
         child_id(&id, "color"),
@@ -711,6 +726,7 @@ pub(crate) fn status_icon(
             crate::icon::Icon::empty()
                 .path(path.clone())
                 .text_color(color)
+                .when_some(size, |icon, size| icon.with_size(size))
                 .into_any_element()
         },
     )
