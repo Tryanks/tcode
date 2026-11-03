@@ -2,11 +2,16 @@
 # console-suppressing helpers in `crates/services/src/process.rs` and
 # `crates/agent/src/process.rs`; blocking work goes through
 # `Host::unblock` in `crates/runtime/src/host.rs` or the agent crate's
-# `process::unblock`. Each approved site carries an explicit allow.
+# `process::unblock`. Computer use acts on its target application, never on
+# the user's own pointer or keyboard focus, so global input is refused too.
+# Each approved site carries an explicit allow.
 disallowed-methods = [
     { path = "std::process::Command::new", reason = "use services::process::command or agent's process::command so Windows never flashes a console" },
     { path = "smol::process::Command::new", reason = "use services::process::async_command or agent's process::async_command so Windows never flashes a console" },
     { path = "gpui::StatefulInteractiveElement::tooltip", reason = "use tcode_ui::widgets::TooltipTrigger::with_tooltip so the tooltip shows through the window's tooltip layer and can leave" },
     { path = "gpui::InteractiveText::tooltip", reason = "track the text's parts with widgets::tooltip::track_parts so the tooltip shows through the window's tooltip layer and can leave" },
     { path = "smol::unblock", reason = "use Host::unblock or the agent crate's process::unblock so blocking work is scheduled in one place" },
+    { path = "core_graphics::event::CGEvent::post", reason = "a global tap moves the user's pointer and types into whatever has focus; post to the target with CGEvent::post_to_pid" },
+    { path = "core_graphics::display::CGDisplay::warp_mouse_cursor_position", reason = "moves the user's pointer; computer use shows its own agent cursor" },
+    { path = "core_graphics::display::CGDisplay::move_cursor_to_point", reason = "moves the user's pointer; computer use shows its own agent cursor" },
 ]
