@@ -298,11 +298,6 @@ impl Composer {
             .update(cx, |input, cx| input.replace_all(text, window, cx));
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_compact(&self) -> bool {
-        self.compact
-    }
-
     /// Write to `session_id`'s thread, or none. What the composer holds for
     /// a thread follows on the next render. Another thread is a new scene:
     /// its controls are drawn at rest, rather than carrying on from where
