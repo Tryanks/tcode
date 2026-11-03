@@ -950,6 +950,9 @@ impl Render for CommandPalette {
         };
         let available = (viewport.height - insets.top - insets.bottom - reserve).max(px(0.));
         let height = px(crate::overlay::DIALOG_LIST_HEIGHT).min(available);
+        // The sheet reaches the screen's bottom edge, under the home
+        // indicator and behind the keyboard; what it holds stays above them.
+        let pad = if compact { insets.bottom } else { px(0.) };
         let dismissal = self.outside_dismissal.clone();
 
         let body = if total == 0 {
@@ -1017,7 +1020,7 @@ impl Render for CommandPalette {
             crate::sizing::fit_viewport(640., viewport.width)
         };
         let glide = self.motion.glide_state("card-size");
-        let size = glide.toward(u64::from(compact), gpui::size(width, height), cx);
+        let size = glide.toward(u64::from(compact), gpui::size(width, height + pad), cx);
         // The card is placed against the window, and its host lays the
         // palette out in a different place in each layout.
         let reflow = self
@@ -1026,7 +1029,7 @@ impl Render for CommandPalette {
             .in_window();
         // The card is laid out at exactly this size.
         glide.painted_at(size, window);
-        let surface = v_flex().h(size.height).overflow_hidden();
+        let surface = v_flex().h(size.height).pb(pad).overflow_hidden();
         let card = if compact {
             crate::material::sheet_contour(surface.w(size.width), cx)
         } else {
@@ -1119,10 +1122,10 @@ impl Render for CommandPalette {
                     div()
                         .absolute()
                         .left_0()
-                        .bottom(
-                            insets.bottom
-                                - crate::edge_back::BackProgress::offset(progress, height),
-                        )
+                        .bottom(-crate::edge_back::BackProgress::offset(
+                            progress,
+                            height + pad,
+                        ))
                         .child(reflow.part("card", card)),
                 );
             return reflow.render(sheet);
