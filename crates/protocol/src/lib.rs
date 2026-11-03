@@ -254,6 +254,10 @@ pub use wire::{
 // its history: a finished command's whole output up to STORED_OUTPUT_BYTES
 // and STORED_OUTPUT_HISTORY rows, and lines_evicted counts the lines before
 // them it leaves out.
+// A session events subscription is answered by one snapshot that reaches the
+// end of the log: the records after its cursor when they fit one window,
+// otherwise the baseline a subscription without a cursor gets; a client no
+// longer asks again from where a truncated continuation ended.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]

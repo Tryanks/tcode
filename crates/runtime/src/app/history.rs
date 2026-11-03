@@ -382,14 +382,33 @@ impl LogView<'_> {
         }
     }
 
-    /// The window answering a subscription: the records from its cursor on,
-    /// or without one a baseline: the tail from a turn start about
-    /// [`BASELINE_RECORDS`] rows back, cut to the byte budget from its newest
-    /// end.
+    /// The window answering a subscription, which always reaches the end of
+    /// the log: the records from its cursor on when they fit one reply, and
+    /// otherwise, or without a cursor, a baseline: the tail from a turn start
+    /// about [`BASELINE_RECORDS`] rows back, cut to the byte budget from its
+    /// newest end. A client that missed more than a reply holds gets the
+    /// thread as a fresh subscriber does, in one reply, rather than every
+    /// record it missed over as many round trips.
     fn events_window(&self, subscription: &Subscription) -> ServerEvent {
+        let continuation = subscription
+            .after
+            .filter(|after| *after <= self.end)
+            .map(|after| self.window(&subscription.topic, Some(after)));
+        match continuation {
+            Some(ServerEvent::SessionSnapshot { end, total, .. }) if end < total => {
+                self.window(&subscription.topic, None)
+            }
+            Some(window) => window,
+            None => self.window(&subscription.topic, None),
+        }
+    }
+
+    /// The records from `after` on, as many as fit one reply, or without it
+    /// the baseline [`Self::events_window`] describes.
+    fn window(&self, topic: &Topic, after: Option<u64>) -> ServerEvent {
         let empty = HostMessage::Event(EventEnvelope {
             request_id: Some(u64::MAX),
-            topic: subscription.topic.clone(),
+            topic: topic.clone(),
             event: ServerEvent::SessionSnapshot {
                 from: u64::MAX,
                 end: u64::MAX,
@@ -400,7 +419,6 @@ impl LogView<'_> {
             },
         });
         let total = self.end;
-        let after = subscription.after.filter(|after| *after <= total);
         let from = after
             .unwrap_or_else(|| self.turn_aligned_start(total.saturating_sub(BASELINE_RECORDS)));
         let first = self.index(from);
@@ -746,16 +764,17 @@ impl Tail {
                 tail.records.push(record);
                 tail.rows.push(row);
                 if bytes > SESSION_WINDOW_BYTES {
-                    if after.is_some() {
-                        tail.covered_end = row + 1;
-                    } else {
-                        tail.from = row;
-                    }
+                    tail.from = row;
                     return false;
                 }
                 true
             },
         )?;
+        if after.is_some() && bytes > SESSION_WINDOW_BYTES {
+            // More follows the cursor than one reply holds: the subscriber
+            // gets the baseline instead (`LogView::events_window`).
+            return Self::read_cut(read, None, page);
+        }
         if after.is_none() {
             tail.records.reverse();
             tail.rows.reverse();
@@ -1512,7 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_continuation_covers_only_the_rows_it_read() {
+    fn a_cursor_whose_rest_overflows_a_reply_gets_the_tail_cold_or_resident() {
         let root = std::env::temp_dir().join(format!("cold-cursor-{}", uuid::Uuid::new_v4()));
         let store = SessionStore::open_at(root.clone()).unwrap();
         let oversized = serde_json::to_string(&AgentEvent::Warning {
@@ -1541,49 +1560,43 @@ mod tests {
             known_index: None,
         };
         let resident = SessionLog::new(store.read_log("thread").unwrap());
-        let mut cold_records = Vec::new();
-        let mut resident_records = Vec::new();
-        for cold in [false, true] {
-            subscription.after = Some(0);
-            let collected = if cold {
-                &mut cold_records
-            } else {
-                &mut resident_records
-            };
-            loop {
-                let window = if cold {
-                    Tail::read_cut(&cut, subscription.after, None)
-                        .unwrap()
-                        .unwrap()
-                        .view()
-                        .events_window(&subscription)
-                } else {
-                    resident.events_window(&subscription)
-                };
-                let ServerEvent::SessionSnapshot {
-                    from,
-                    end,
-                    total,
-                    records,
-                    ..
-                } = window
-                else {
-                    panic!("snapshot");
-                };
-                assert_eq!(from, subscription.after.unwrap());
-                assert!(end > from && end <= total);
-                collected.extend(records);
-                if end == total {
-                    break;
-                }
-                subscription.after = Some(end);
-            }
-        }
-        assert_eq!(cold_records, resident_records);
-        assert_eq!(cold_records.len(), 3);
-        assert!(matches!(&cold_records[1].event, AgentEvent::Delta { text, .. } if text == "ab"));
-        assert!(
-            matches!(&cold_records[2].event, AgentEvent::Warning { message } if message == "last")
+        // The record after the cursor alone overflows a reply, so both the
+        // cold read and the resident log answer with the tail, in one reply
+        // that reaches the end of the log.
+        let cold = Tail::read_cut(&cut, subscription.after, None)
+            .unwrap()
+            .unwrap()
+            .view()
+            .events_window(&subscription);
+        assert_eq!(cold, resident.events_window(&subscription));
+        let ServerEvent::SessionSnapshot {
+            from,
+            end,
+            total,
+            total_turns,
+            records,
+            ..
+        } = cold
+        else {
+            panic!("snapshot");
+        };
+        assert!(from > 0, "the tail, not the continuation");
+        assert_eq!(end, total);
+        assert_eq!(records.len(), 2);
+        assert!(matches!(&records[0].event, AgentEvent::Delta { text, .. } if text == "ab"));
+        assert!(matches!(&records[1].event, AgentEvent::Warning { message } if message == "last"));
+        subscription.after = Some(from);
+        assert_eq!(
+            resident.events_window(&subscription),
+            ServerEvent::SessionSnapshot {
+                from,
+                end,
+                records,
+                total,
+                total_turns,
+                truncated: false,
+            },
+            "a cursor whose rest fits one reply continues"
         );
         drop(cut);
         store.close().unwrap();
