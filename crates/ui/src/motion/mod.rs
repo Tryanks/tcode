@@ -370,6 +370,11 @@ impl gpui::Element for Reveal {
                 Axis::Vertical => {
                     style.size.width = gpui::relative(1.).into();
                     style.size.height = (size.height * progress.clamp(0., 1.)).into();
+                    // Content at rest is no shorter than itself in a column
+                    // that overflows; a box with only a height would be
+                    // shrunk to make room, to nothing in a full scroll
+                    // column, and the fold would jump open at its end.
+                    style.flex_shrink = 0.;
                 }
                 Axis::Horizontal => {
                     let progress = progress.clamp(0., 1.);
@@ -887,6 +892,74 @@ mod tests {
         set(false, cx);
         assert!(cx.debug_bounds("section-body-1").is_none());
         assert_eq!(cx.debug_bounds("below").unwrap().top(), px(0.));
+    }
+
+    /// A section under a header in a column capped at the height the header
+    /// already fills, which scrolls what it holds (the chat's side rail).
+    struct FullColumn {
+        open: bool,
+    }
+
+    impl Render for FullColumn {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let body = super::shown("full-section", self.open.then_some(()), SHOW, window, cx)
+                .map(|fold| fold.fold(div().h(px(80.))));
+            div()
+                .id("full-column")
+                .w(px(200.))
+                .max_h(px(100.))
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .child(
+                    div()
+                        .debug_selector(|| "full-header".into())
+                        .h(px(80.))
+                        .flex_none(),
+                )
+                .children(body)
+                .child(
+                    div()
+                        .debug_selector(|| "full-below".into())
+                        .h(px(10.))
+                        .flex_none(),
+                )
+        }
+    }
+
+    /// Opening in a column that already overflows, a fold grows steadily to
+    /// its height and what is below moves with it, rather than being
+    /// squeezed by the column and jumping open at its end.
+    #[gpui::test]
+    fn a_fold_in_a_full_column_opens_steadily(cx: &mut TestAppContext) {
+        use crate::test_frames::draw;
+        let (section, cx) = cx.add_window_view(|_, _| FullColumn { open: false });
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        draw(cx);
+        let fold = |cx: &mut VisualTestContext| {
+            let header = cx.debug_bounds("full-header").unwrap();
+            cx.debug_bounds("full-below").unwrap().top() - header.bottom()
+        };
+        assert_eq!(fold(cx), px(0.));
+        section.update(cx, |section, cx| {
+            section.open = true;
+            cx.notify();
+        });
+        draw(cx);
+        let mut seen = vec![fold(cx)];
+        for _ in 0..16 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+            seen.push(fold(cx));
+        }
+        assert_eq!(*seen.last().unwrap(), px(80.), "{seen:?}");
+        assert!(
+            seen.windows(2)
+                .all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] < px(24.)),
+            "the fold was squeezed or jumped: {seen:?}"
+        );
     }
 
     /// A chip between two neighbours in a row with a gap.
