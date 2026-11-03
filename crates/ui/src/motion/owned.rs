@@ -138,6 +138,12 @@ impl Owned {
         self.values.borrow_mut().clear();
     }
 
+    /// How many values the store holds, every scope's.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.values.borrow().len()
+    }
+
     fn key(&self, key: impl Into<SharedString>) -> SharedString {
         let key = key.into();
         if self.prefix.is_empty() {

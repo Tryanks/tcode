@@ -256,6 +256,12 @@ impl Composer {
         self.model_search.read(cx).focus_handle(cx)
     }
 
+    /// How many values the composer's motion holds.
+    #[cfg(test)]
+    pub(crate) fn motion_len(&self) -> usize {
+        self.motion.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn draft(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
@@ -273,10 +279,14 @@ impl Composer {
     }
 
     /// Write to `session_id`'s thread, or none. What the composer holds for
-    /// a thread follows on the next render.
+    /// a thread follows on the next render. Another thread is a new scene:
+    /// its controls are drawn at rest, rather than carrying on from where
+    /// the composer last drew that thread's, and the composer's motion holds
+    /// only the thread it shows.
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
         if self.session_id != session_id {
             self.session_id = session_id;
+            self.motion.clear();
             cx.notify();
         }
     }
