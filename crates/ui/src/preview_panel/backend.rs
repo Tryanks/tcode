@@ -66,9 +66,9 @@ fn resize_drag_active(cx: &App) -> bool {
 const HANDLE_BAND_REACH: Pixels = px(5.);
 
 /// The even margin between the panel's content area and the page's frame.
-/// It is at least the band's reach, so a resize handle beside the panel (the
-/// chat/right-panel divider, the floating panel's edge) is GPUI content along
-/// its whole width and never lies over the page.
+/// It is at least the band's reach, so the resize handle beside the panel
+/// (the right panel's edge) is GPUI content along its whole width and never
+/// lies over the page.
 #[cfg(not(target_os = "android"))]
 fn page_margin(cx: &App) -> Pixels {
     cx.theme().tokens.spacing.sm.max(HANDLE_BAND_REACH)

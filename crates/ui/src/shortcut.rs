@@ -88,6 +88,11 @@ pub(crate) fn init(cx: &mut App) {
             crate::chat::CloseSide,
             Some(crate::chat::SIDE_CONTEXT),
         ),
+        KeyBinding::new(
+            "escape",
+            crate::shell::CloseRightPanel,
+            Some(crate::shell::RIGHT_PANEL_CONTEXT),
+        ),
     ]);
     cx.bind_keys(blanks);
     cx.bind_keys([

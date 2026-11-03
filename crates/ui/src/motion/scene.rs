@@ -220,6 +220,12 @@ impl Epoch {
         true
     }
 
+    /// The surface took down what it shows and will put it up anew: a new
+    /// scene, for that content to start at rest whatever it left moving.
+    pub(crate) fn restart(&self) {
+        self.0.count.set(self.0.count.get() + 1);
+    }
+
     /// `id` in this scene: the id of the element the surface's motion is
     /// drawn under.
     pub(crate) fn id(&self, id: impl Into<ElementId>) -> ElementId {

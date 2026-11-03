@@ -1959,11 +1959,22 @@ impl WorkspaceStore {
     }
 
     pub fn close_diff_panel(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+        let session_id = self.focused_session_id.clone();
+        self.close_right_panel_for(session_id.as_deref(), cx);
+    }
+
+    /// Close `session_id`'s right panel, whichever tab it shows.
+    pub fn close_right_panel_for(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
+        let running = self
+            .thread(session_id)
+            .is_some_and(ThreadReplica::turn_running);
+        if let Some(ui) = self.thread_conversation_ui_mut(session_id) {
             ui.pending_diff_focus = None;
             ui.right_panel_open = false;
+            if running {
+                ui.auto_open_task_suppressed = true;
+            }
         }
-        self.suppress_task_auto_open_if_running();
         cx.notify();
     }
 
@@ -2167,6 +2178,12 @@ impl WorkspaceStore {
         self.conversation_ui
             .iter_mut()
             .find_map(|(destination, ui)| (destination.preference_key() == key).then_some(ui))
+    }
+
+    /// Whether the conversation `key` names has its right panel open.
+    pub(crate) fn right_panel_open_for_key(&self, key: &str) -> bool {
+        self.conversation_ui_by_key(key)
+            .is_some_and(|ui| ui.right_panel_open)
     }
 
     pub fn preview_url(&self, key: &str) -> Option<String> {

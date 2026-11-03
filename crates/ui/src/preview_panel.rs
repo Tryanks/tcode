@@ -42,8 +42,9 @@
 //! overlays above the native page. Its element owns document bounds and clipping.
 //! GPUI overlays are not reliably painted above the page after a window resize,
 //! so the palette and the compact menu still hide the page on every platform.
-//! Panel close, tab/conversation switch and route changes
-//! hide inactive pages without discarding their loaded documents.
+//! Tab/conversation switch and route changes hide inactive pages without
+//! discarding their loaded documents; the desktop drawer sliding shut lets
+//! its conversation's page go ([`PreviewPanel::release_page`]).
 
 use gpui::{
     AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
@@ -166,6 +167,9 @@ pub struct PreviewPanel {
     /// actual page URL or conversation changes.
     mirrored_url: Option<String>,
     compact_overflow_open: bool,
+    /// Pages the desktop drawer let go of while their thread's turn was
+    /// running, by key, with that thread: let go once the turn ends.
+    idle_releases: std::collections::HashMap<String, String>,
     /// The panel's motion, kept here: the window draws the panel under
     /// another parent as it turns compact or wide.
     motion: crate::motion::owned::Owned,
@@ -194,6 +198,7 @@ impl PreviewPanel {
                 // therefore follows WorkspaceStore directly, even while this
                 // entity is no longer mounted in the right-panel tree.
                 this.prune_deleted_webviews(cx);
+                this.release_idle_pages(cx);
                 this.sync_visibility(cx);
                 cx.notify();
             }),
@@ -223,6 +228,7 @@ impl PreviewPanel {
             mirrored: None,
             mirrored_url: None,
             compact_overflow_open: false,
+            idle_releases: Default::default(),
             motion: Default::default(),
             #[cfg(preview_backend)]
             dev_ports: Vec::new(),
@@ -322,6 +328,43 @@ impl PreviewPanel {
         // (now empty) URL map instead of showing the stale address.
         self.mirrored = None;
         cx.notify();
+    }
+
+    /// The desktop drawer has slid shut on the focused conversation: let its
+    /// page go, keeping its URL and canvas for the drawer to load again.
+    /// While the thread's turn runs, its agent may be driving the page
+    /// through the preview tools, which reach it with the drawer shut; the
+    /// page is let go once the turn ends, unless the drawer opens again.
+    pub(crate) fn release_page(&mut self, cx: &mut Context<Self>) {
+        let Some((session_id, key)) = self.store.read(cx).preview_active_identity() else {
+            return;
+        };
+        if self.store.read(cx).turn_running_for(&session_id) {
+            self.idle_releases.insert(key, session_id);
+        } else {
+            self.drop_webview(&key, cx);
+        }
+    }
+
+    fn release_idle_pages(&mut self, cx: &mut Context<Self>) {
+        if self.idle_releases.is_empty() {
+            return;
+        }
+        let store = self.store.read(cx);
+        let mut idle = Vec::new();
+        self.idle_releases.retain(|key, session_id| {
+            if store.right_panel_open_for_key(key) {
+                return false;
+            }
+            if store.turn_running_for(session_id) {
+                return true;
+            }
+            idle.push(key.clone());
+            false
+        });
+        for key in idle {
+            self.drop_webview(&key, cx);
+        }
     }
 
     fn close_panel(&mut self, cx: &mut Context<Self>) {

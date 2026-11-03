@@ -284,6 +284,21 @@ impl DiffPanel {
             + 1
     }
 
+    /// Let go of what was built to draw the diffs — the host's answer, the
+    /// rendered and highlighted files — and of the pull requests' rendered
+    /// pages, once the right panel has taken the panel down. The scope, base
+    /// and options chosen, and a comment being written, stay; the next draw
+    /// reads and renders again. A read or render under way lands nowhere:
+    /// its key is no longer the one awaited.
+    pub(crate) fn release(&mut self, cx: &mut Context<Self>) {
+        self.cache = None;
+        self.git_preview = None;
+        self.loading_key = None;
+        self.render_loading_key = None;
+        self.pull_requests
+            .update(cx, |pull_requests, cx| pull_requests.release(cx));
+    }
+
     fn selected_scope(&self, session: &str, cx: &App) -> Option<DiffScope> {
         self.scopes
             .get(session)
