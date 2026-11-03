@@ -4754,8 +4754,14 @@ impl AppShell {
             .into_iter()
             .map(|shown| {
                 let sidebar = collapsed || sidebar_scene == Some(shown);
+                // Settings draws its own rail where the workspace routes draw
+                // their sidebar.
+                let column = scene.unshared(&shown, |above| {
+                    (*above == Route::Settings) == (shown == Route::Settings)
+                });
+                let sidebar = sidebar.then_some(column);
                 match shown {
-                    Route::Settings => self.render_settings_route(fullscreen, cx),
+                    Route::Settings => self.render_settings_route(fullscreen, column, cx),
                     Route::Hosts => self.render_hosts_route(sidebar, fullscreen, window, cx),
                     Route::Chat => self.render_chat_route(sidebar, window, cx),
                 }
@@ -4764,11 +4770,20 @@ impl AppShell {
         scene.render(layers).into_any_element()
     }
 
-    fn render_settings_route(&mut self, fullscreen: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// The Settings route, its rail at `rail` opacity.
+    fn render_settings_route(
+        &mut self,
+        fullscreen: bool,
+        rail: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let attachment = self
             .attachment
             .as_ref()
             .expect("a workspace route has an attachment");
+        attachment
+            .settings_page
+            .update(cx, |page, _| page.fade_rail(rail));
         // Settings is a window of its own: opening it switches the whole
         // window, so the settings rail — not the workspace sidebar — is the
         // left column. Root owns the translucent canvas across both routes;
@@ -4800,11 +4815,11 @@ impl AppShell {
             .into_any_element()
     }
 
-    /// The Hosts route; `sidebar`, whether it draws the sidebar or leaves its
-    /// place empty for the route beneath it to show.
+    /// The Hosts route; `sidebar`, the opacity it draws the sidebar at, or
+    /// none to leave its place empty for the route beneath it to show.
     fn render_hosts_route(
         &mut self,
-        sidebar: bool,
+        sidebar: Option<f32>,
         fullscreen: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -4815,10 +4830,13 @@ impl AppShell {
             .as_ref()
             .expect("a workspace route has an attachment");
         let sidebar_width = attachment.sidebar_width.get();
-        let sidebar = if sidebar {
-            self.layout_part("sidebar", attachment.sidebar.clone())
-        } else {
-            div().into_any_element()
+        let sidebar = match sidebar {
+            Some(opacity) => div()
+                .size_full()
+                .opacity(opacity)
+                .child(self.layout_part("sidebar", attachment.sidebar.clone()))
+                .into_any_element(),
+            None => div().into_any_element(),
         };
         // The sidebar's column narrows away as it collapses and widens back,
         // the sidebar keeping to its far edge, as it does beside the chat.
@@ -4880,7 +4898,7 @@ impl AppShell {
     /// The Chat route; `sidebar` as for [`Self::render_hosts_route`].
     fn render_chat_route(
         &mut self,
-        draw_sidebar: bool,
+        draw_sidebar: Option<f32>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -5226,10 +5244,13 @@ impl AppShell {
         });
         let remembered_right = attachment.right_width.clone();
         let remembered_sidebar = attachment.sidebar_width.clone();
-        let sidebar = if draw_sidebar {
-            self.layout_part("sidebar", attachment.sidebar.clone())
-        } else {
-            div().into_any_element()
+        let sidebar = match draw_sidebar {
+            Some(opacity) => div()
+                .size_full()
+                .opacity(opacity)
+                .child(self.layout_part("sidebar", attachment.sidebar.clone()))
+                .into_any_element(),
+            None => div().into_any_element(),
         };
         let overlay_width = attachment.sidebar_width.get();
         let overlay_visible = attachment.sidebar_overlay_visible;
@@ -12055,6 +12076,75 @@ mod tests {
             "{gliding:?} between {start:?} and {end:?}"
         );
         assert!(cx.debug_bounds("composer-checkout").is_none());
+    }
+
+    /// Settings shares nothing with the workspace: the workspace's sidebar
+    /// fades out beneath the settings rail as Settings rises, and the rail
+    /// beneath the sidebar as the workspace comes back, neither drawn at full
+    /// strength under the other.
+    #[gpui::test]
+    fn settings_and_the_workspace_fade_through_each_other(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        crate::test_frames::draw_settled(cx);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        // The fills painted within the window's left column, which the
+        // sidebar and the rail each fill over the canvas.
+        let fills = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                let column = px(SIDEBAR_WIDTH).scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter_map(|quad| {
+                        let painted = quad.background.as_solid()?;
+                        (painted.a > 0. && quad.bounds.right() <= column)
+                            .then_some((quad.bounds, painted))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let half_way = |cx: &mut VisualTestContext| {
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+            draw(cx);
+        };
+        let fades = |what: &str,
+                     rest: &[(gpui::Bounds<gpui::ScaledPixels>, gpui::Hsla)],
+                     cx: &mut VisualTestContext| {
+            assert!(!rest.is_empty(), "{what} paints its column");
+            let now = fills(cx);
+            let drawn: Vec<(f32, f32)> = rest
+                .iter()
+                .flat_map(|(bounds, full)| {
+                    now.iter()
+                        .filter(move |(at, painted)| {
+                            at == bounds
+                                && (painted.h, painted.s, painted.l) == (full.h, full.s, full.l)
+                        })
+                        .map(move |(_, painted)| (painted.a, full.a))
+                })
+                .collect();
+            assert!(!drawn.is_empty(), "{what} is still drawn, beneath");
+            assert!(
+                drawn.iter().all(|(alpha, full)| alpha < full),
+                "{what} is drawn at full strength beneath the route rising: {drawn:?}"
+            );
+        };
+
+        let sidebar = fills(cx);
+        state.update(cx, |state, cx| state.open_settings(cx));
+        half_way(cx);
+        assert!(cx.debug_bounds("settings-route").is_some());
+        fades("the workspace sidebar", &sidebar, cx);
+        crate::test_frames::draw_settled(cx);
+
+        let rail = fills(cx);
+        state.update(cx, |state, cx| state.close_settings(cx));
+        half_way(cx);
+        assert!(cx.debug_bounds("chat-route").is_some());
+        fades("the settings rail", &rail, cx);
     }
 
     /// Settings replaces the whole window, unlike the Hosts route: the left

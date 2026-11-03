@@ -489,6 +489,9 @@ pub struct SettingsPage {
     /// Whether the machine group's **Advanced** subgroup is open, once the user
     /// has said. `None` keeps the capability-derived default.
     advanced_expanded: Option<bool>,
+    /// The rail's opacity, below 1 while a route that draws its own left
+    /// column rises over Settings or Settings over it.
+    rail_opacity: f32,
     /// Latches the one usage refresh fired when Usage becomes the active
     /// section; cleared as soon as the page shows anything else.
     usage_refresh_sent: bool,
@@ -737,6 +740,7 @@ impl SettingsPage {
             archived_held: false,
             capabilities,
             advanced_expanded: None,
+            rail_opacity: 1.,
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
             auto_settle_input: SettingsInput::new(auto_settle_input.clone()),
@@ -1056,6 +1060,11 @@ impl SettingsPage {
             .into_any_element()
     }
 
+    /// Draw the rail at `opacity` from this frame on.
+    pub(crate) fn fade_rail(&mut self, opacity: f32) {
+        self.rail_opacity = opacity;
+    }
+
     fn advanced_expanded(&self) -> bool {
         self.advanced_expanded
             .unwrap_or(!self.capabilities.folds_advanced())
@@ -1193,6 +1202,7 @@ impl SettingsPage {
             .flex_none()
             .w(px(NAV_WIDTH))
             .h_full()
+            .opacity(self.rail_opacity)
             .bg(cx.theme().sidebar)
             // Settings replaces the whole window, so this rail is the window's
             // left column: it carries the wordmark and clears the platform's
