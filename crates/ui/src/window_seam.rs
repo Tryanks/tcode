@@ -25,9 +25,8 @@ pub(crate) const COMPACT_BREAKPOINT: f32 = 900.;
 /// what `WindowInsets::effective()` computes for the window. Backgrounds still
 /// paint edge to edge; only interactive content is constrained, and only once.
 ///
-/// Each value is where the system's edges end up: GPUI gives no curve or
-/// duration for a software keyboard's slide, so what follows these insets
-/// moves at once while the keyboard animates (see `AppShell::within_seam`).
+/// Each value is where the system's edges end up; what lays content out
+/// against them moves there with [`content_insets_gliding`].
 pub(crate) fn content_insets(window: &Window) -> Edges<Pixels> {
     let viewport = window.viewport_size();
     let visible = window.fully_visible_bounds();
@@ -36,6 +35,49 @@ pub(crate) fn content_insets(window: &Window) -> Edges<Pixels> {
         right: viewport.width - visible.right(),
         bottom: viewport.height - visible.bottom(),
         left: visible.origin.x,
+    }
+}
+
+/// [`content_insets`] as the surface `id` lays its content out against them:
+/// each edge glides to a new value (a software keyboard sliding up or down,
+/// a rotation) over the house settle, and lands at once with motion reduced.
+/// The glide is kept by `owner` for a surface drawn under a new parent as
+/// the window turns compact or wide, in element state otherwise.
+///
+/// Gap: the platform moves its keyboard on its own curve and duration, but
+/// GPUI's `WindowInsets` carries only where the keyboard ends up — the iOS
+/// host reads just the end frame of `keyboardWillChangeFrame`, and Android's
+/// insets listener reports end states — so the content cannot ride the
+/// keyboard's own curve and takes gpui-base's default ease out instead. Once
+/// GPUI hands over the keyboard's animation, the insets follow it here.
+pub(crate) fn content_insets_gliding(
+    id: &'static str,
+    owner: Option<&crate::motion::owned::Owned>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Edges<Pixels> {
+    let target = content_insets(window);
+    let mut edge = |name: &'static str, value: Pixels| match owner {
+        Some(owner) => owner.transition(
+            format!("{id}/{name}"),
+            value,
+            &crate::motion::owned::Curve::settle(),
+            window,
+            cx,
+        ),
+        None => gpui_base::motion::transition(
+            gpui::ElementId::NamedChild(std::sync::Arc::new(id.into()), name.into()),
+            value,
+            crate::motion::settle(),
+            window,
+            cx,
+        ),
+    };
+    Edges {
+        top: edge("top", target.top),
+        right: edge("right", target.right),
+        bottom: edge("bottom", target.bottom),
+        left: edge("left", target.left),
     }
 }
 

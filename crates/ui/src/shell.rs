@@ -4519,16 +4519,16 @@ impl AppShell {
     /// Constrain the shell to the window's safe content rectangle. Backgrounds
     /// paint edge to edge — the surface below is the window's — and interactive
     /// content is inset exactly once, at both widths. A window the system does
-    /// not occlude gets no wrapper at all.
-    ///
-    /// The insets jump to each new value (a software keyboard sliding up, a
-    /// rotation): GPUI reports only where the keyboard ends up, not the curve
-    /// and duration the platform moves it on, so a glide here would run on
-    /// its own clock beside the keyboard's instead of with it. That gap is
-    /// GPUI's (`content_insets`); once it hands over the keyboard's
-    /// animation, the insets transition on it here.
-    fn within_seam(&self, body: AnyElement, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let seam = crate::window_seam::content_insets(window);
+    /// not occlude gets no wrapper at all. The insets glide to each new value
+    /// (a software keyboard sliding up, a rotation) on gpui-base's default
+    /// curve, not the keyboard's own (`content_insets_gliding` names why).
+    fn within_seam(
+        &self,
+        body: AnyElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let seam = crate::window_seam::content_insets_gliding("shell-seam", None, window, cx);
         if seam == gpui::Edges::default() {
             return body;
         }
@@ -10337,6 +10337,10 @@ mod tests {
         assert!(cx.debug_bounds("hosts-local-failure").is_none());
     }
 
+    /// The compact palette opens from the threads page and a thread as a
+    /// sheet inside the window's seam, which the page beneath and the sheet
+    /// glide onto as the status bar and the keyboard come; Back dismisses the
+    /// keyboard before the sheet.
     #[gpui::test]
     fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -10388,6 +10392,13 @@ mod tests {
                         .contains_focused(window, cx)
                 );
             });
+            // The status bar and the keyboard cover the window: the page
+            // beneath and the sheet glide onto the new seam together rather
+            // than jumping there.
+            let page_top = |cx: &mut VisualTestContext| {
+                cx.debug_bounds(selector).expect("the page beneath").top()
+            };
+            let uncovered = page_top(cx);
             crate::window_seam::occlude_for_test(
                 cx,
                 gpui::Edges {
@@ -10397,6 +10408,29 @@ mod tests {
                 },
             );
             draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE / 3);
+            draw(cx);
+            let gliding = |seen: Pixels, from: Pixels, to: Pixels, what: &str| {
+                assert!(
+                    from.min(to) + px(1.) < seen && seen < from.max(to) - px(1.),
+                    "{what} jumped: {seen:?}, not between {from:?} and {to:?}"
+                );
+            };
+            gliding(
+                page_top(cx),
+                uncovered,
+                uncovered + px(47.),
+                "the page's top",
+            );
+            gliding(
+                cx.debug_bounds("palette-card").unwrap().bottom(),
+                px(852.),
+                px(452.),
+                "the sheet's bottom",
+            );
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            assert_eq!(page_top(cx), uncovered + px(47.));
             let card = cx.debug_bounds("palette-card").unwrap();
             assert_eq!(card.top(), px(99.));
             assert_eq!(card.bottom(), px(452.));
@@ -10419,6 +10453,21 @@ mod tests {
             cx.executor().advance_clock(Duration::from_millis(250));
             draw(cx);
         }
+        // With motion reduced the page lands on the seam at once.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let uncovered = cx.debug_bounds("compact-open-palette").unwrap().top();
+        crate::window_seam::occlude_for_test(
+            cx,
+            gpui::Edges {
+                top: px(47.),
+                ..Default::default()
+            },
+        );
+        draw(cx);
+        assert_eq!(
+            cx.debug_bounds("compact-open-palette").unwrap().top(),
+            uncovered + px(47.)
+        );
     }
 
     fn draw(cx: &mut VisualTestContext) {

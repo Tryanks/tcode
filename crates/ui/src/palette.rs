@@ -922,7 +922,12 @@ impl Render for CommandPalette {
         }
         let muted = cx.theme().muted_foreground;
         let viewport = window.viewport_size();
-        let insets = crate::window_seam::content_insets(window);
+        let insets = crate::window_seam::content_insets_gliding(
+            "palette-seam",
+            Some(&self.motion),
+            window,
+            cx,
+        );
         // A sheet stops a window strip short of the top; the desktop card hangs
         // `DESKTOP_TOP_OFFSET` down and keeps a section gap clear below.
         let reserve = if compact {

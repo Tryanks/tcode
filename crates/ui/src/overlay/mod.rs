@@ -220,7 +220,7 @@ impl Render for Overlays {
         // dialog centred in the raw window would sit under a notch, and a toast
         // pinned to the corner would sit under the status bar.
         let compact = crate::window_seam::window_is_compact(window, cx);
-        let seam = crate::window_seam::content_insets(window);
+        let seam = crate::window_seam::content_insets_gliding("overlay-seam", None, window, cx);
         let inset = px(crate::material::COMPACT_PAGE_INSET);
         // Each layout places the toasts against the window, and only a
         // change of layout moves them: a resize within one keeps them where

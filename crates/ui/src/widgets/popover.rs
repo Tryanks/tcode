@@ -492,7 +492,7 @@ impl Popover {
         // Do not mount invisible hit targets over the trigger.
         if presence.should_render() && (open || progress > 0.) {
             let viewport = window.viewport_size();
-            let insets = crate::window_seam::content_insets(window);
+            let insets = crate::window_seam::content_insets_gliding("sheet-seam", None, window, cx);
             // The sheet stops a window strip short of the top so the page it
             // covers stays in view; no owner names that reserve yet.
             let max_height = (viewport.height - insets.top - px(52.) - insets.bottom).max(px(0.));
@@ -673,8 +673,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // The open sheet glides onto the seam the keyboard and status bar
+        // leave it.
+        crate::test_frames::draw_settled(cx);
         let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
         assert_eq!(sheet.top(), px(99.));
         assert_eq!(sheet.bottom(), px(552.));
