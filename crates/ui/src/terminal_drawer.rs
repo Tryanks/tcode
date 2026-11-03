@@ -2551,7 +2551,7 @@ fn layout_row(
 
         // Alacritty stores emoji variation/modifier codepoints as extras;
         // its following placeholder space is not an independently painted
-        // character. This mirrors Zed's terminal layout workaround.
+        // character.
         let blank = cell.text.is_empty();
         if blank && previous_cell_had_extras {
             previous_cell_had_extras = false;
