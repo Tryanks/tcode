@@ -240,7 +240,7 @@ pub(super) fn body(
         |shot, _, cx| {
             let ago = shot.ago();
             h_flex()
-                .w(px(full))
+                .w_full()
                 .gap(cx.theme().tokens.spacing.sm)
                 .text_secondary(false, cx)
                 .child(
@@ -325,11 +325,12 @@ pub(super) fn body(
                         .into_any_element()
                 },
             );
-            fold.fold(
+            fold.fold_across_gap(
+                cx.theme().tokens.spacing.sm,
                 h_flex()
-                    .w(px(full))
-                    .justify_center()
-                    .gap(cx.theme().tokens.spacing.sm)
+                    .flex_none()
+                    .gap_1()
+                    .items_center()
                     .child(
                         Button::new("rail-screen-earlier")
                             .motion(&chat.motion)
@@ -365,8 +366,14 @@ pub(super) fn body(
             .w_full()
             .gap(cx.theme().tokens.spacing.sm)
             .child(h_flex().w_full().justify_center().child(picture))
-            .child(caption)
-            .children(stepper)
+            .child(
+                h_flex()
+                    .w(px(full))
+                    .gap(cx.theme().tokens.spacing.sm)
+                    .items_center()
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(caption))
+                    .children(stepper),
+            )
             .into_any_element(),
     )
 }
