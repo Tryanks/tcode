@@ -1194,7 +1194,13 @@ mod tests {
 
     impl PaletteHarness {
         fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-            let window_state = cx.new(|_| WindowState::new(false));
+            // A wide window draws the palette only on an attached
+            // workspace's Chat route.
+            let window_state = cx.new(|cx| {
+                let mut state = WindowState::new(false);
+                state.enter_workspace(cx);
+                state
+            });
             Self {
                 palette: cx.new(|cx| CommandPalette::new(store, window_state.clone(), window, cx)),
                 window_state,
@@ -1418,11 +1424,7 @@ mod tests {
             let harness = harness.read(cx);
             (harness.palette.clone(), harness.window_state.clone())
         });
-        let settle = |cx: &mut VisualTestContext| {
-            cx.executor().advance_clock(crate::edge_back::SETTLE);
-            cx.run_until_parked();
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-        };
+        let settle = crate::test_frames::draw_settled;
         let open = |cx: &mut VisualTestContext, focus_query: bool| {
             cx.update(|window, cx| {
                 window_state.update(cx, |state, cx| state.open_palette(cx));
