@@ -2,10 +2,11 @@
 //!
 //! A `FileChange` carries each file's diff from its harness. An edit made as
 //! a tool call (a subagent's `Edit`/`Write` recorded before subagents mapped
-//! like their parent, Codex's imported `apply_patch`, OpenCode's `edit` and
-//! `patch`) carries only what it asked for: its replaced and replacing text,
-//! the content it wrote, or its patch. The window builds the same diff from
-//! that, without line numbers where the call never said which lines.
+//! like their parent, Codex's imported `apply_patch`, an `edit` or `patch`
+//! recorded from OpenCode 1.x) carries only what it asked for: its replaced
+//! and replacing text, the content it wrote, or its patch. The window builds
+//! the same diff from that, without line numbers where the call never said
+//! which lines.
 
 use std::collections::HashMap;
 use std::path::Path;
