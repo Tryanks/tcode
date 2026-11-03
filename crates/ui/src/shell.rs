@@ -12147,6 +12147,37 @@ mod tests {
         fades("the settings rail", &rail, cx);
     }
 
+    /// The rows of Settings' Advanced subgroup span the rail as the rows above
+    /// them do.
+    #[gpui::test]
+    fn the_settings_advanced_rows_span_the_rail(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.open_settings(cx));
+        crate::test_frames::draw_settled(cx);
+        let general = cx
+            .debug_bounds("settings-nav-general")
+            .expect("a plain rail row");
+        let advanced: Vec<_> = [
+            "settings-nav-computer-use",
+            "settings-nav-browser",
+            "settings-nav-maintenance",
+        ]
+        .into_iter()
+        .filter_map(|row| cx.debug_bounds(row).map(|bounds| (row, bounds)))
+        .collect();
+        assert!(!advanced.is_empty(), "the Advanced subgroup is open");
+        for (row, bounds) in advanced {
+            assert_eq!(
+                (bounds.left(), bounds.size.width),
+                (general.left(), general.size.width),
+                "{row}"
+            );
+        }
+    }
+
     /// Settings replaces the whole window, unlike the Hosts route: the left
     /// column is the settings rail, so the workspace sidebar — and the feature
     /// area in it — is gone while the route is showing.
