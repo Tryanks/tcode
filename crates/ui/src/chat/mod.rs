@@ -997,7 +997,10 @@ impl ChatView {
         };
 
         let composer = self.composer.clone().into_any_element();
-        let deliveries = self.workspace_store.read(cx).delivery_messages();
+        let deliveries = self
+            .workspace_store
+            .read(cx)
+            .delivery_messages_for(self.session_id.as_deref());
         self.shown_deliveries = deliveries.iter().map(|(key, ..)| key.clone()).collect();
         let waiting = !self
             .workspace_store

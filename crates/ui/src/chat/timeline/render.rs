@@ -673,7 +673,7 @@ impl ChatView {
         if self
             .workspace_store
             .read(cx)
-            .delivery_messages()
+            .delivery_messages_for(self.session_id.as_deref())
             .iter()
             .any(|(key, _, _, _)| {
                 entry_id == format!("local-user-{key}") || entry_id == format!("local-steer-{key}")

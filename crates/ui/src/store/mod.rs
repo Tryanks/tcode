@@ -829,7 +829,16 @@ impl WorkspaceStore {
     }
 
     pub(crate) fn delivery_messages(&self) -> Vec<(String, String, Option<String>, bool)> {
-        let active = self.active_session_id().unwrap_or_default();
+        self.delivery_messages_for(self.active_session_id().as_deref())
+    }
+
+    /// The messages sent to `session_id`'s thread that its timeline does
+    /// not hold yet: key, text, failure, and whether the host has it.
+    pub(crate) fn delivery_messages_for(
+        &self,
+        session_id: Option<&str>,
+    ) -> Vec<(String, String, Option<String>, bool)> {
+        let active = session_id.unwrap_or_default();
         let message = |command: &Command| match command {
             Command::SendTurn {
                 session_id, text, ..
@@ -845,7 +854,7 @@ impl WorkspaceStore {
             }
             | Command::OrchestrateTurn {
                 session_id, text, ..
-            } if session_id == &active => Some(text.clone()),
+            } if session_id == active => Some(text.clone()),
             _ => None,
         };
         self.host
@@ -867,7 +876,7 @@ impl WorkspaceStore {
                     .into_iter()
                     .filter_map(|entry| {
                         let text = message(&entry.command)?;
-                        let thread = self.threads.get(&active);
+                        let thread = self.threads.get(active);
                         let queued = thread
                             .and_then(|thread| thread.status.as_ref())
                             .is_some_and(|status| {
@@ -988,7 +997,7 @@ impl WorkspaceStore {
     /// Whether a conversation showing `session_id`, or no thread, is still
     /// waiting for what it draws.
     pub fn chat_loading_for(&self, session_id: Option<&str>) -> bool {
-        if !self.delivery_messages().is_empty() {
+        if !self.delivery_messages_for(session_id).is_empty() {
             return false;
         }
         if !self.index_hydrated || !self.settings_hydrated {
@@ -3657,7 +3666,7 @@ impl WorkspaceStore {
                     .map(|meta| (meta.title.clone(), meta.cwd.clone(), false))
             })
             .or_else(|| {
-                (!self.delivery_messages().is_empty()).then(|| {
+                (!self.delivery_messages_for(session_id).is_empty()).then(|| {
                     (
                         crate::tr!("chat.waiting_connection").into_owned(),
                         PathBuf::new(),
