@@ -355,18 +355,18 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
     click(cx, &format!("activity-row-{failed}"));
     // A shell run as a tool opens on the same terminal window as a command:
     // its command line over what it printed, verbatim, its harness's report
-    // included, and the whole output a click away.
-    for shell in [exec, child] {
+    // included, all of it in the grid, with nothing more to open.
+    let pi = "tool_mJeTs4Cc0I6gPcCx5W0BlgpT";
+    for shell in [exec, child, pi] {
         click(cx, &format!("activity-row-{shell}"));
         assert!(shows(cx, &format!("tool-shell-{shell}")), "{shell}");
         assert!(shows(cx, &format!("command-output-{shell}")), "{shell}");
+        assert!(
+            !shows(cx, &format!("tool-text-{shell}-output-more")),
+            "{shell}"
+        );
         click(cx, &format!("activity-row-{shell}"));
     }
-    // A command's window offers its whole output the same way.
-    let pi = "tool_mJeTs4Cc0I6gPcCx5W0BlgpT";
-    click(cx, &format!("activity-row-{pi}"));
-    click(cx, &format!("tool-text-{pi}-output-more"));
-    assert!(shows(cx, &format!("tool-text-{pi}-output")));
     thread.shutdown(cx);
 }
 
@@ -904,6 +904,151 @@ fn a_shortened_output_loads_whole_when_asked(cx: &mut TestAppContext) {
     }
     click(cx, "tool-text-long-output-more");
     assert!(shows(cx, "tool-text-long-output"));
+    thread.shutdown(cx);
+}
+
+/// A log of one turn whose shell call `id` printed `lines` numbered lines.
+fn shell_log(id: &str, lines: usize) -> String {
+    let output = (1..=lines)
+        .map(|line| format!("line {line} of the run"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let call = serde_json::json!({
+        "ts": 2_000,
+        "event": {
+            "type": "item_completed",
+            "id": id,
+            "content": {
+                "kind": "tool_call",
+                "name": "Bash",
+                "input": { "command": format!("seq 1 {lines}") },
+                "output": output,
+                "status": "completed",
+            },
+        },
+    });
+    [
+        serde_json::json!({ "ts": 1_000, "event": { "type": "turn_started", "turn_id": "t" } }),
+        serde_json::json!({ "ts": 1_001, "event": { "type": "item_completed", "id": "user",
+            "content": { "kind": "user_message", "text": "Count." } } }),
+        call,
+        serde_json::json!({ "ts": 3_000, "event": { "type": "turn_completed", "turn_id": "t",
+            "status": "completed", "usage": null } }),
+    ]
+    .map(|line| line.to_string())
+    .join("\n")
+}
+
+/// What `id`'s output grid shows, as the reader takes it: dragged across
+/// from its first cell to its last and copied.
+fn copied_output(id: &str, cx: &mut VisualTestContext) -> String {
+    let output = cx
+        .debug_bounds(format!("command-output-{id}").leak())
+        .expect("the output's grid");
+    let from = output.origin + gpui::point(px(1.), px(1.));
+    let to = output.bottom_right() - gpui::point(px(1.), px(1.));
+    cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::default());
+    cx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), Modifiers::default());
+    cx.simulate_mouse_up(to, gpui::MouseButton::Left, Modifiers::default());
+    draw_settled(cx);
+    cx.dispatch_action(gpui_base::input::Copy);
+    cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap_or_default()
+}
+
+/// The wheel over `id`'s output, `lines` rows' worth, up into what scrolled
+/// off for a positive count.
+fn scroll_output(id: &str, lines: f32, cx: &mut VisualTestContext) {
+    let output = cx
+        .debug_bounds(format!("command-output-{id}").leak())
+        .expect("the output's grid");
+    cx.simulate_event(gpui::ScrollEvent {
+        position: output.center(),
+        delta: gpui::ScrollDelta::Lines(gpui::point(0., lines)),
+        ..Default::default()
+    });
+    draw_settled(cx);
+}
+
+/// A long command's window draws all it printed in its terminal grid,
+/// within the window's height and with nothing more to open: it opens on
+/// the end, scrolls back to the first line inside the window, and down to
+/// the last again.
+#[gpui::test]
+fn a_long_commands_output_scrolls_within_its_grid(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let (thread, cx) = StoredThread::open(cx, &shell_log("count", 150), 1_024.);
+    thread.open_work_log("count", cx);
+    click(cx, "activity-row-count");
+    assert!(shows(cx, "command-output-count"));
+    assert!(!shows(cx, "tool-text-count-output-more"), "no show-all");
+    assert!(!shows(cx, "tool-text-count-output"), "no text view");
+    let grid = cx.debug_bounds("command-output-count").expect("drawn");
+    let window = cx.debug_bounds("tool-shell-count").expect("drawn");
+    assert!(
+        grid.size.height < px(150. * crate::terminal_drawer::TERMINAL_CELL_HEIGHT / 4.),
+        "the grid keeps to the window's height: {grid:?}"
+    );
+    assert!(window.size.height >= grid.size.height);
+
+    let end = copied_output("count", cx);
+    assert!(
+        end.ends_with("line 150 of the run"),
+        "it opens on the end: {end}"
+    );
+    assert!(!end.contains("line 1 of the run\n"));
+    scroll_output("count", 400., cx);
+    let start = copied_output("count", cx);
+    assert!(
+        start.starts_with("line 1 of the run\n"),
+        "it scrolls back to the first line: {start}"
+    );
+    assert!(!start.contains("line 150 of the run"));
+    scroll_output("count", -400., cx);
+    assert!(copied_output("count", cx).ends_with("line 150 of the run"));
+    thread.shutdown(cx);
+}
+
+/// A command whose output came as a preview, its first part, loads the rest
+/// into the same grid: once loaded, the grid ends on the last line the
+/// command printed, which the preview did not hold, and still scrolls back to
+/// the first.
+#[gpui::test]
+fn a_shortened_commands_output_loads_into_its_grid(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let log = shell_log("long", 600);
+    let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
+    thread.open_work_log("long", cx);
+    click(cx, "activity-row-long");
+    let preview = copied_output("long", cx);
+    assert!(
+        !preview.contains("line 600 of the run"),
+        "the preview holds the start: {preview}"
+    );
+    click(cx, "load-output-long");
+    let store = thread.store.clone();
+    // Loaded, the grid ends on the command's last line.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        thread.driver.step(cx, &store);
+        draw_settled(cx);
+        if copied_output("long", cx).ends_with("line 600 of the run") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the output never loaded into the grid"
+        );
+    }
+    assert!(!shows(cx, "tool-text-long-output"), "no text view");
+    scroll_output("long", 1_000., cx);
+    let start = copied_output("long", cx);
+    assert!(
+        start.starts_with("line 1 of the run\n"),
+        "it scrolls back to the first line: {start}"
+    );
     thread.shutdown(cx);
 }
 
