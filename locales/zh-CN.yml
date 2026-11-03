@@ -83,6 +83,7 @@ chat:
   rail_screen: "屏幕"
   rail_changes: "更改"
   rail_goal: "目标"
+  rail_pull_requests: "拉取请求"
   copy: "复制"
   copied: "已复制！"
   copy_message: "复制消息"
@@ -124,6 +125,8 @@ chat:
   rewind_all_done: "Claude Code 已恢复代码和对话。"
   rewind_conversation_done: "Claude Code 已恢复对话，原始提示已放回输入框，可编辑后重发。"
   rewind_files_done: "Claude Code 已恢复其跟踪的文件。"
+rail:
+  pull_requests: "%{count} 个拉取请求"
 markdown:
   math_show_rendered: "显示渲染结果"
   math_show_source: "显示 LaTeX 源码"

@@ -5,6 +5,7 @@ mod agents;
 mod changes;
 mod goal;
 mod plan;
+mod pull_requests;
 pub(super) mod screen;
 
 use std::borrow::Cow;
@@ -217,15 +218,17 @@ pub(super) enum RailCard {
     Agents,
     Screen,
     Changes,
+    PullRequests,
 }
 
 impl RailCard {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Goal,
         Self::Plan,
         Self::Agents,
         Self::Screen,
         Self::Changes,
+        Self::PullRequests,
     ];
 
     /// Its key among the rail's cards and in the view's expansion state.
@@ -236,6 +239,7 @@ impl RailCard {
             Self::Agents => "agents",
             Self::Screen => "screen",
             Self::Changes => "changes",
+            Self::PullRequests => "pull-requests",
         }
     }
 
@@ -266,6 +270,7 @@ impl RailCard {
             Self::Agents => crate::tr!("chat.rail_agents"),
             Self::Screen => crate::tr!("chat.rail_screen"),
             Self::Changes => crate::tr!("chat.rail_changes"),
+            Self::PullRequests => crate::tr!("chat.rail_pull_requests"),
         }
     }
 
@@ -276,6 +281,7 @@ impl RailCard {
             Self::Agents => IconName::Bot,
             Self::Screen => IconName::Monitor,
             Self::Changes => IconName::Files,
+            Self::PullRequests => IconName::GitPullRequest,
         }
     }
 
@@ -287,6 +293,7 @@ impl RailCard {
             Self::Plan => Some(RightTab::Plan),
             Self::Agents => Some(RightTab::Agents),
             Self::Changes => Some(RightTab::Diff),
+            Self::PullRequests => Some(RightTab::PullRequests),
         }
     }
 
@@ -297,6 +304,7 @@ impl RailCard {
             Self::Agents => agents::present(chat, cx),
             Self::Screen => screen::present(chat, cx),
             Self::Changes => changes::present(chat, cx),
+            Self::PullRequests => pull_requests::present(chat, cx),
         }
     }
 
@@ -307,6 +315,7 @@ impl RailCard {
             Self::Agents => agents::summary(chat, cx),
             Self::Screen => screen::summary(chat, cx),
             Self::Changes => changes::summary(chat, cx),
+            Self::PullRequests => pull_requests::summary(chat, cx),
         }
     }
 
@@ -322,6 +331,7 @@ impl RailCard {
             Self::Agents => agents::body(chat, window, cx),
             Self::Screen => screen::body(chat, window, cx),
             Self::Changes => changes::body(chat, window, cx),
+            Self::PullRequests => pull_requests::body(chat, window, cx),
         }
     }
 }
