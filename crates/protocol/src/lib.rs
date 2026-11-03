@@ -239,35 +239,19 @@ pub use wire::{
 // Version 23 (v0.3.4): the assistant_message item carries `summarized`, set
 // when the provider delivered a summary of the message rather than its text.
 //
-// Unreleased: the protocol adds the StartProviderLogin,
-// SubmitProviderLoginCode, CancelProviderLogin and LogoutProvider commands,
-// and a provider snapshot carries `login`, the sign-in the host runs for that
-// profile. The CreateAccountProfile command answers with the new ProfileId
-// response, CreateThirdPartyProfile carries `inherit_config`, the
-// ProfileConfig runtime error reports a profile's config directory that could
-// not be prepared or removed, and ProviderProbeDiagnostic adds
-// SharedCredentials. Items gain the plan kind, approval requests the plan
-// kind naming its item, approval decisions feedback (the user's words), and
-// timeline entries feedback. The instruction channel drops per_prompt_system:
-// OpenCode 2.x keeps Tcode's instructions in a session instruction entry.
-// A command output frame carries the rows that scrolled off its screen as
-// its history: a finished command's whole output up to STORED_OUTPUT_BYTES
-// and STORED_OUTPUT_HISTORY rows, and lines_evicted counts the lines before
-// them it leaves out.
-// A session events subscription is answered by one snapshot that reaches the
-// end of the log: the records after its cursor when they fit one window,
-// otherwise the baseline a subscription without a cursor gets; a client no
-// longer asks again from where a truncated continuation ended.
-// A tool_call item arrives canonical from every provider, history included:
-// the tool's text in output and its inline images in image_reads. Codex's
-// sleep and image generation arrive as the sleep and image_generation tool
-// calls instead of other items, and Grok's MCP calls are named server/tool.
-// In the store, an item row's envelope carries item_version 1; a row without
-// it is converted to that form when read.
-// A session plan carries the explanation the agent gave with it.
-// Events add item_backgrounded: a call that returned while the work it started
-// goes on, until its item settles.
-pub const PROTOCOL_VERSION: u32 = 23;
+// Version 24 (v0.4.0-rc.1): provider sign-in commands (StartProviderLogin,
+// SubmitProviderLoginCode, CancelProviderLogin, LogoutProvider) with a
+// provider snapshot's `login`, the ProfileId response to
+// CreateAccountProfile, CreateThirdPartyProfile's `inherit_config`, the
+// ProfileConfig runtime error and the SharedCredentials probe diagnostic;
+// the plan item kind with plan approvals, decision and timeline feedback,
+// and no per_prompt_system instruction channel; a command output frame's
+// scrolled-off history and lines_evicted; one snapshot answering an events
+// subscription to the end of the log; canonical tool_call items from every
+// provider (output, image_reads, Codex sleep and image_generation, Grok's
+// server/tool names) stored with item_version 1; a session plan's
+// explanation; and the item_backgrounded event.
+pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]
 mod tests;
