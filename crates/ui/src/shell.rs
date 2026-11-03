@@ -6217,6 +6217,7 @@ mod tests {
                 ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
                     session_id: "thread-a".into(),
                     steps: Vec::new(),
+                    explanation: None,
                 }),
             ),
             (
@@ -7125,6 +7126,7 @@ mod tests {
                 ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
                     session_id: session.into(),
                     steps: Vec::new(),
+                    explanation: None,
                 }),
             ),
             (
