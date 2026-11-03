@@ -22,6 +22,9 @@ use gpui::{
 };
 use gpui_base::motion::{Presence, PresencePhase};
 
+/// How long a change of scene takes.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The scenes a surface has been showing, kept by the surface's owner: one
 /// at rest, and while it changes, every scene still on screen.
 pub(crate) struct Scene<K> {
@@ -92,7 +95,7 @@ impl<K: Clone + Eq + Hash> Scene<K> {
                 ),
                 index <= at,
             )
-            .transition(super::settle())
+            .transition(gpui_base::motion::Transition::new(GLIDE))
             .sample(window, cx);
             match sample.phase {
                 PresencePhase::Absent => gone.push(index),

@@ -16,6 +16,9 @@ use tcode_core::session::{TimelineEntry, TurnMeta};
 
 use super::super::timeline::rows::RowPart;
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) type WorkLogArgs<'a> = (
     usize,
     &'a RowPart,
@@ -141,7 +144,7 @@ fn settled_state(
     let danger = cx.theme().danger;
     let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
-        motion.cross_fade_part(id, running, window, cx, move |running, _, cx| {
+        motion.cross_fade_part(id, running, CHANGE, window, cx, move |running, _, cx| {
             if *running {
                 return Spinner::new().color(primary).into_any_element();
             }

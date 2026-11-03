@@ -1,5 +1,8 @@
 use super::super::*;
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Composer {
     pub(in super::super) fn render_checkout_row(
         &self,
@@ -95,6 +98,7 @@ impl Composer {
                         "branch-states",
                         usize::from(!branches.is_empty()),
                         2,
+                        CHANGE,
                         window,
                         cx,
                     );

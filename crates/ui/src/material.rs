@@ -14,6 +14,9 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, Toolbar, h_flex, v_flex};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Height reserved beneath chat messages for hover-revealed actions.
 pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
 /// Maximum width of the shared chat/composer content column.
@@ -583,7 +586,7 @@ where
         let fill = fill_motion.transition(
             fill_key,
             if selected { active } else { active.opacity(0.) },
-            &crate::motion::Curve::settle(),
+            GLIDE,
             window,
             cx,
         );

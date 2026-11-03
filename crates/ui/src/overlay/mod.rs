@@ -19,6 +19,9 @@ use crate::theme::ActiveTheme as _;
 use dialog::ActiveDialog;
 use notification::NotificationList;
 
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The release guard for popups gpui-base dismisses on a press outside them.
 ///
 /// gpui-base closes a popover, menu or sheet on the outside press itself,
@@ -183,6 +186,7 @@ impl Render for Overlays {
                 crate::motion::appear(
                     ElementId::from(("tcode-dialog", active.id)),
                     !active.closing,
+                    APPEAR,
                     window,
                     cx,
                 )

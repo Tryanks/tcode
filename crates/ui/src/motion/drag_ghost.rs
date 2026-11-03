@@ -19,13 +19,19 @@ use gpui::{
     IntoElement, ParentElement as _, Pixels, Point, Render, SharedString, Styled, Window, deferred,
     div, prelude::FluentBuilder as _,
 };
-use gpui_base::motion::{MotionStatus, transition, transition_with_status};
+use gpui_base::motion::{MotionStatus, Transition, transition, transition_with_status};
 
 use super::{
     LIFT, child_id,
     keyed::{FlipBounds, flip_offset},
-    settle,
 };
+
+/// How long a ghost takes to lift off its row as a drag picks it up, and to
+/// settle into its slot as the drag drops it.
+const LIFTING: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to spring to a new place.
+const FLIP: std::time::Duration = std::time::Duration::from_millis(200);
 
 type Content = Rc<dyn Fn(f32, &mut Window, &mut App) -> AnyElement>;
 
@@ -252,13 +258,13 @@ impl Render for DragGhosts {
             let id = ElementId::from(("drag-ghost", ghost.id as usize));
             let lift_id = child_id(&id, "lift");
             if std::mem::take(&mut ghost.fresh) {
-                transition(lift_id.clone(), 0f32, settle(), window, cx);
+                transition(lift_id.clone(), 0f32, Transition::new(LIFTING), window, cx);
             }
             let carried = matches!(ghost.flight, Flight::Carried);
             let lift = transition_with_status(
                 lift_id,
                 if carried { 1f32 } else { 0. },
-                settle(),
+                Transition::new(LIFTING),
                 window,
                 cx,
             );
@@ -274,6 +280,7 @@ impl Render for DragGhosts {
                         super::Clock::Element,
                         child_id(&id, "flight"),
                         Point::default(),
+                        FLIP,
                         window,
                         cx,
                     );
@@ -293,6 +300,7 @@ impl Render for DragGhosts {
                         super::Clock::Element,
                         child_id(&id, "flight"),
                         jump,
+                        FLIP,
                         window,
                         cx,
                     );

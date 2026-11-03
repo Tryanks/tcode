@@ -11,6 +11,9 @@ use crate::{
     typography::TextRole as _, widgets::button::Button,
 };
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) struct HostPermissions {
     store: Entity<WorkspaceStore>,
     result: Option<Result<ComputerUsePermissions, String>>,
@@ -78,6 +81,7 @@ impl Render for HostPermissions {
         let status = crate::motion::cross_fade(
             "host-permissions-status",
             (self.result.clone(), self.connected),
+            CHANGE,
             window,
             cx,
             |(result, connected), _, cx| {

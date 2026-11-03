@@ -31,6 +31,9 @@ use crate::settings_rows::{ToggleRow, row_labels, settings_group};
 use crate::store::WorkspaceStore;
 use crate::widgets::input::{Input, InputEvent, InputState};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub struct RemoteController {
     mux: HostMux,
     host: Option<TraverseHost>,
@@ -526,7 +529,7 @@ impl HostingPanel {
         // Pairing is a setting of a running host, so it folds in and out
         // with hosting.
         if let Some(shown) =
-            crate::motion::shown("remote-pairing", hosting.then_some(()), window, cx)
+            crate::motion::shown("remote-pairing", hosting.then_some(()), SHOW, window, cx)
         {
             rows.push(shown.fold(ToggleRow::new(
                 "remote-pairing",
@@ -578,8 +581,9 @@ impl Render for HostingPanel {
         // The section folds itself in and out with hosting, so it stays
         // mounted; its gap rides inside the fold.
         let gap = crate::material::section_gap(cx);
-        let access = crate::motion::shown("remote-access-gap", hosting.then_some(()), window, cx)
-            .map(|shown| shown.fold(div().h(gap)));
+        let access =
+            crate::motion::shown("remote-access-gap", hosting.then_some(()), SHOW, window, cx)
+                .map(|shown| shown.fold(div().h(gap)));
         v_flex()
             .w_full()
             .min_w_0()

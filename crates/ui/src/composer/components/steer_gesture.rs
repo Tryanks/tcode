@@ -8,6 +8,12 @@ use super::super::*;
 use gpui::{Bounds, Pixels, Point, TouchDragEvent, TouchPhase, canvas, deferred};
 use gpui_base::Positioner;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 const CHOICE_GAP: Pixels = px(8.);
 
 pub(in super::super) struct SteerGesture {
@@ -84,6 +90,7 @@ impl Composer {
                 let revealed = crate::motion::shown(
                     "steer-choices",
                     choices.filter(|choices| choices.revealed).map(|_| ()),
+                    SHOW,
                     window,
                     cx,
                 );
@@ -209,7 +216,7 @@ fn render_steer_choices(
                 gpui_base::motion::transition(
                     (id, part),
                     color,
-                    crate::motion::settle(),
+                    gpui_base::motion::Transition::new(GLIDE),
                     window,
                     cx,
                 )

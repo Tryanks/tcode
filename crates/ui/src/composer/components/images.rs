@@ -7,6 +7,12 @@ use image::GenericImageView as _;
 use std::cell::RefCell;
 use tcode_core::attachments::{AttachError, MAX_EDGE_PX, MAX_IMAGES, MAX_SOURCE_BYTES};
 
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Clone)]
 /// A pending image attachment: validated, persisted to the session attachments
 /// dir, and shown in the composer thumbnail strip. Kept per active session.
@@ -489,6 +495,7 @@ impl Composer {
             self.motion_key("image-strip"),
             crate::motion::keyed::Fold::Down,
             strip,
+            ROWS,
             window,
             cx,
             |_, thumbs, window, cx| {
@@ -497,6 +504,7 @@ impl Composer {
                     self.motion_key("image-thumbs"),
                     crate::motion::keyed::Fold::Across(px(0.)),
                     thumbs.clone(),
+                    ROWS,
                     window,
                     cx,
                     |key, thumb, window, cx| {
@@ -542,6 +550,7 @@ impl Composer {
             crate::motion::Clock::from(&self.motion),
             self.motion_key(format_args!("thumb-arrival-{key}")),
             &preview,
+            ARRIVE,
             window,
             cx,
         );

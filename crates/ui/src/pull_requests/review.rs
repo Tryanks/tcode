@@ -37,6 +37,12 @@ use crate::{
     },
 };
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The Review sheet's client-local state: the verdict until the sheet closes, the summary being
 /// typed and its pending save.
 #[derive(Default)]
@@ -611,7 +617,7 @@ impl PullRequestView {
         });
         // The bar grows open under the toolbar with the first pending comment and folds when the
         // review is submitted or discarded, holding what it said while it goes.
-        let kept = crate::motion::shown(id("shown"), shown, window, cx)?;
+        let kept = crate::motion::shown(id("shown"), shown, SHOW, window, cx)?;
         let (count, stale) = kept.value;
         let summary = if count == 1 {
             crate::tr!("pull_requests.review.bar_one").into_owned()
@@ -620,11 +626,15 @@ impl PullRequestView {
         } else {
             crate::tr!("pull_requests.review.bar", count = count.to_string()).into_owned()
         };
-        let summary =
-            crate::motion::cross_fade(id("summary"), summary, window, cx, |summary, _, _| {
-                crate::widgets::fade_text(summary.clone()).into_any_element()
-            });
-        let stale = crate::motion::shown(id("stale"), stale.then_some(()), window, cx);
+        let summary = crate::motion::cross_fade(
+            id("summary"),
+            summary,
+            CHANGE,
+            window,
+            cx,
+            |summary, _, _| crate::widgets::fade_text(summary.clone()).into_any_element(),
+        );
+        let stale = crate::motion::shown(id("stale"), stale.then_some(()), SHOW, window, cx);
         let finish = Button::new("pr-review-finish")
             .primary()
             .xsmall()

@@ -385,9 +385,9 @@ fn install(theme: Theme, cx: &mut App) {
             })
             .with_motion(
                 ScrollbarMotion::default()
-                    .with_enter(crate::edge_back::SETTLE)
-                    .with_exit(crate::edge_back::SETTLE)
-                    .with_expand(crate::edge_back::SETTLE),
+                    .with_enter(crate::widgets::scrollbar::MOTION)
+                    .with_exit(crate::widgets::scrollbar::MOTION)
+                    .with_expand(crate::widgets::scrollbar::MOTION),
             )
             .with_styles(
                 ScrollbarStyles::default()

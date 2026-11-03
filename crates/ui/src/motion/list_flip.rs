@@ -18,6 +18,9 @@ use gpui::{AnyElement, App, Bounds, ElementId, IntoElement, ListState, Pixels, P
 
 use super::keyed::flip_offset;
 
+/// How long a row drawn here takes to spring to a new place.
+const FLIP: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Where the rows a list showed were drawn before its rows were replaced, by
 /// their index in the rows that replaced them; kept by the list's owner.
 #[derive(Clone, Default)]
@@ -132,7 +135,14 @@ impl gpui::Element for FlipRow {
             .map(|was| was - bounds.origin)
             .filter(|jump| jump.x.abs() >= px(1.) || jump.y.abs() >= px(1.))
             .unwrap_or_default();
-        let offset = flip_offset(super::Clock::Element, self.id.clone(), jump, window, cx);
+        let offset = flip_offset(
+            super::Clock::Element,
+            self.id.clone(),
+            jump,
+            FLIP,
+            window,
+            cx,
+        );
         window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
     }
 

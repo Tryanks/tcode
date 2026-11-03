@@ -45,6 +45,18 @@ mod stack;
 pub use detail::PullRequestView;
 pub use stack::present_result as present_stack_result;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace=tcode_pull_requests,no_json)]
 pub struct LinkUrl(pub String);
@@ -146,7 +158,7 @@ pub fn badge(links: &[ThreadPullRequestLink], _size: f32, cx: &App) -> Option<An
             let color = gpui_base::motion::transition(
                 "pull-request-badge-color",
                 color,
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -200,6 +212,7 @@ pub fn numbers(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> 
             let chips = crate::motion::keyed_across(
                 "pull-request-numbers",
                 chips,
+                ROWS,
                 window,
                 cx,
                 |_, (number, glyph, color), window, cx| {
@@ -207,7 +220,7 @@ pub fn numbers(links: &[ThreadPullRequestLink], cx: &App) -> Option<AnyElement> 
                     let color = gpui_base::motion::transition(
                         SharedString::from(format!("pull-request-number-{number}")),
                         *color,
-                        crate::motion::settle(),
+                        gpui_base::motion::Transition::new(GLIDE),
                         window,
                         cx,
                     );
@@ -1090,6 +1103,7 @@ impl PullRequestsPanel {
         let line_two = crate::motion::cross_fade(
             (row_key.clone(), "line"),
             placeholder.clone(),
+            CHANGE,
             window,
             cx,
             |shown, _, _| match shown {
@@ -1107,6 +1121,7 @@ impl PullRequestsPanel {
         let title = crate::motion::cross_fade(
             (row_key.clone(), "title"),
             (title.clone(), snapshot.is_none()),
+            CHANGE,
             window,
             cx,
             |(title, mono), _, cx| {
@@ -1127,7 +1142,7 @@ impl PullRequestsPanel {
             } else {
                 cx.theme().muted_foreground
             },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -1147,6 +1162,7 @@ impl PullRequestsPanel {
         let eye = crate::motion::shown(
             (row_key.clone(), "eye"),
             (watched && snapshot.is_none_or(|s| s.state == PullRequestState::Open)).then_some(()),
+            SHOW,
             window,
             cx,
         );
@@ -1170,7 +1186,7 @@ impl PullRequestsPanel {
                 } else {
                     cx.theme().muted_foreground
                 },
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -1226,6 +1242,7 @@ impl PullRequestsPanel {
         if let Some(check) = crate::motion::shown(
             (row_key.clone(), "checks"),
             open_snapshot.and_then(|s| s.checks_state),
+            SHOW,
             window,
             cx,
         ) {
@@ -1255,6 +1272,7 @@ impl PullRequestsPanel {
                                 (row_key.clone(), "checks-icon"),
                                 icon,
                                 color,
+                                CHANGE,
                                 window,
                                 cx,
                             ))
@@ -1270,6 +1288,7 @@ impl PullRequestsPanel {
         if let Some(review) = crate::motion::shown(
             (row_key.clone(), "review"),
             open_snapshot.and_then(|s| s.review_decision),
+            SHOW,
             window,
             cx,
         ) {
@@ -1299,6 +1318,7 @@ impl PullRequestsPanel {
                                 (row_key.clone(), "review-icon"),
                                 icon,
                                 color,
+                                CHANGE,
                                 window,
                                 cx,
                             ))
@@ -1316,6 +1336,7 @@ impl PullRequestsPanel {
             open_snapshot
                 .filter(|s| s.mergeability == Mergeability::Conflicting)
                 .map(|s| s.base_branch.clone()),
+            SHOW,
             window,
             cx,
         ) {
@@ -1356,7 +1377,8 @@ impl PullRequestsPanel {
                 .map(|operation| stack::chip_words(operation, cx));
             (stack::row_blocker(links, &key), running)
         };
-        if let Some(kept) = crate::motion::shown((row_key.clone(), "blocker"), blocker, window, cx)
+        if let Some(kept) =
+            crate::motion::shown((row_key.clone(), "blocker"), blocker, SHOW, window, cx)
         {
             let blocker = kept.value.clone();
             signals = signals.child(
@@ -1375,8 +1397,14 @@ impl PullRequestsPanel {
             );
         }
         // A merge, a close or an unlink recolours the row where it stands.
-        let glyph =
-            crate::motion::status_icon((row_key.clone(), "state"), glyph, color, window, cx);
+        let glyph = crate::motion::status_icon(
+            (row_key.clone(), "state"),
+            glyph,
+            color,
+            CHANGE,
+            window,
+            cx,
+        );
         let draft = crate::motion::shown(
             (row_key.clone(), "draft"),
             snapshot
@@ -1384,6 +1412,7 @@ impl PullRequestsPanel {
                     snapshot.is_draft && snapshot.state == PullRequestState::Open
                 })
                 .then_some(()),
+            SHOW,
             window,
             cx,
         );
@@ -1418,6 +1447,7 @@ impl PullRequestsPanel {
             crate::motion::cross_fade(
                 (row_key.clone(), "trailing"),
                 trailing,
+                CHANGE,
                 window,
                 cx,
                 |(running, updated), _, cx| match running {
@@ -1635,6 +1665,7 @@ pub(crate) fn agent_sees_body(
         let not_attached = crate::motion::shown(
             SharedString::from(format!("{id}-not-attached")),
             (!attached).then_some(()),
+            SHOW,
             window,
             cx,
         )
@@ -1647,6 +1678,7 @@ pub(crate) fn agent_sees_body(
         let heading = crate::motion::shown(
             SharedString::from(format!("{id}-instructions-caption")),
             (!instructions.is_empty()).then_some(()),
+            SHOW,
             window,
             cx,
         )
@@ -1675,6 +1707,7 @@ pub(crate) fn agent_sees_body(
         let rows = crate::motion::keyed(
             SharedString::from(format!("{id}-instructions")),
             items,
+            ROWS,
             window,
             cx,
             move |_, (index, injected), _, cx| {
@@ -1805,7 +1838,7 @@ impl PullRequestsPanel {
         let share = self.motion.transition(
             "pr-agent-tools-share",
             if fill { 1f32 } else { 0. },
-            &crate::motion::Curve::settle(),
+            GLIDE,
             window,
             cx,
         );
@@ -1863,7 +1896,7 @@ impl Render for PullRequestsPanel {
             self.detail
                 .update(cx, |detail, cx| detail.show(session, key, cx));
         }
-        let page = crate::motion::shown("pr-detail-page", opened.then_some(()), window, cx);
+        let page = crate::motion::shown("pr-detail-page", opened.then_some(()), SHOW, window, cx);
         let Some(page) = page else {
             return self.list(window, cx);
         };
@@ -2043,6 +2076,7 @@ impl PullRequestsPanel {
         let entries = crate::motion::keyed(
             "pull-request-entries",
             entries,
+            ROWS,
             window,
             cx,
             |key, entry, window, cx| {
@@ -2119,6 +2153,7 @@ impl PullRequestsPanel {
             "pr-monitoring-shown",
             (!read_only && watchable && tcode_core::pull_request::watched(&links).next().is_some())
                 .then_some(watches_paused),
+            SHOW,
             window,
             cx,
         )
@@ -2159,7 +2194,7 @@ impl PullRequestsPanel {
         let emptied = gpui_base::motion::transition(
             "pr-empty",
             if count == 0 { 1. } else { 0. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -2343,7 +2378,7 @@ impl LinkDialog {
 }
 impl Render for LinkDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let error = crate::motion::shown("pr-link-error", self.error.clone(), window, cx);
+        let error = crate::motion::shown("pr-link-error", self.error.clone(), SHOW, window, cx);
         let description = match self.store.read(cx).github_repository(&self.id) {
             Some(repository) => {
                 crate::tr!("pull_requests.dialog_desc_repo", repository = repository)

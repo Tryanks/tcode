@@ -15,6 +15,9 @@ use crate::widgets::checkbox::Checkbox;
 use crate::widgets::choice::{Choice, ChoiceGroup};
 use crate::widgets::switch::Switch;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) type GrantChange = Rc<dyn Fn(ControlGrant, &mut Window, &mut App)>;
 
 pub(crate) fn tier_label(tier: ControlTier) -> String {
@@ -221,6 +224,7 @@ pub(crate) fn grant_editor(
             let Some(shown) = crate::motion::shown(
                 SharedString::from(format!("{id}-projects")),
                 shown_projects,
+                SHOW,
                 window,
                 cx,
             ) else {

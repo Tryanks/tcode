@@ -11,6 +11,12 @@ use tcode_core::session::{EntryContent, TimelineEntry};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The images a run of reads showed, as tiles in a row that wraps. A tile
 /// that arrives widens in, a tile it pushes onto another line glides there,
 /// and the row's height glides to a line it starts.
@@ -118,6 +124,7 @@ pub(crate) fn tile_row(
         id,
         crate::motion::keyed::Fold::Across(px(0.)),
         tiles,
+        ROWS,
         window,
         cx,
         |_, tile, _, cx| item_tile(tile.clone(), &session_id, motion, cx),
@@ -184,6 +191,7 @@ pub(crate) fn item_tile(
                         crate::motion::Clock::from(&motion),
                         id,
                         &source,
+                        ARRIVE,
                         window,
                         cx,
                     );

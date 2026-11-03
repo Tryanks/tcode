@@ -19,6 +19,12 @@ use crate::{
     widgets::button::{Button, ButtonVariants as _},
 };
 
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// What a command does when its row is pressed.
 type ItemHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -133,7 +139,8 @@ fn side(anchor: Bounds<Pixels>, visible: Bounds<Pixels>) -> Placement {
 impl RenderOnce for EditMenu {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = self.id;
-        let presence = crate::motion::appear((id.clone(), "presence"), self.open, window, cx);
+        let presence =
+            crate::motion::appear((id.clone(), "presence"), self.open, APPEAR, window, cx);
         if !presence.should_render() {
             return gpui::Empty.into_any_element();
         }
@@ -159,6 +166,7 @@ impl RenderOnce for EditMenu {
         let items = crate::motion::keyed_across(
             (id.clone(), "items"),
             items,
+            ROWS,
             window,
             cx,
             move |_, (ix, item), _, _| {

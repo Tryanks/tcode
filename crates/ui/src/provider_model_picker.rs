@@ -7,6 +7,9 @@
 
 use std::rc::Rc;
 
+/// How long a model option takes to fold in or out as the list changes.
+const OPTIONS: std::time::Duration = std::time::Duration::from_millis(200);
+
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -29,6 +32,9 @@ use crate::provider_card::provider_glyph;
 use crate::provider_status::{ProviderSnapshot, redact_email, signed_in_account};
 use crate::settings::provider_label;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelOption {
@@ -255,6 +261,7 @@ impl Render for ProviderModelPicker {
                     "settings-model-option-tabs",
                     current_tab,
                     profiles.len().max(1),
+                    CHANGE,
                     window,
                     cx,
                 );
@@ -418,7 +425,7 @@ fn option_list(
         available.len(),
         move |index, _, cx| row(index, &available[index], cx),
     )
-    .keyed(keys, crate::edge_back::SETTLE, leaving)
+    .keyed(keys, OPTIONS, leaving)
     .scrollbar()
     .size_full()
     .pt_1()

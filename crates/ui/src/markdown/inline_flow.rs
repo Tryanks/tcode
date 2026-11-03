@@ -24,6 +24,9 @@ use super::{
     state::{MarkdownState, PendingContextTarget},
 };
 
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const ELEMENT_LEN: usize = 1;
 const INLINE_CODE_PADDING_X: Pixels = px(3.);
 const INLINE_CODE_PADDING_Y: Pixels = px(1.);
@@ -181,6 +184,7 @@ impl InlineFlow {
             crate::motion::Clock::from(&view.read(cx).motion()),
             path.to_owned(),
             &source,
+            ARRIVE,
             window,
             cx,
         );

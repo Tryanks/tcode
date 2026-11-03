@@ -23,6 +23,12 @@ use crate::{
     theme::ActiveTheme as _,
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 const CONTEXT: &str = "TcodePopupMenu";
 
 /// The actions every context menu can offer without its surface wiring a
@@ -353,7 +359,7 @@ impl Render for PopupMenu {
                 .background_executor()
                 .now()
                 .saturating_duration_since(since);
-            let progress = crate::motion::settle_progress(elapsed);
+            let progress = crate::motion::Curve::new(GLIDE).progress(elapsed);
             self.scroll
                 .set_offset(point(from.x, from.y + (to.y - from.y) * progress));
             if progress < 1. {
@@ -710,9 +716,9 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
         };
         // Sampled only while there is a menu, so a mounted trigger with
         // none asks for no frames.
-        let presence = menu
-            .is_some()
-            .then(|| crate::motion::appear((self.id, "context-menu"), !closing, window, cx));
+        let presence = menu.is_some().then(|| {
+            crate::motion::appear((self.id, "context-menu"), !closing, APPEAR, window, cx)
+        });
         if presence.is_some_and(|presence| !presence.should_render()) {
             state.update(cx, |state, _| {
                 state.menu = None;

@@ -71,6 +71,7 @@ pub(crate) fn image_arrival(
     clock: super::Clock<'_>,
     id: impl Into<ElementId>,
     source: &ImageSource,
+    curve: impl Into<super::Curve>,
     window: &mut Window,
     cx: &mut App,
 ) -> f32 {
@@ -78,7 +79,7 @@ pub(crate) fn image_arrival(
     clock.transition(
         super::child_id(&id.into(), "image-arrival"),
         if settled { 1f32 } else { 0. },
-        &super::Curve::settle(),
+        &curve.into(),
         window,
         cx,
     )
@@ -86,6 +87,9 @@ pub(crate) fn image_arrival(
 
 #[cfg(test)]
 mod tests {
+    /// How long a picture drawn here takes to fade in once it has decoded.
+    const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
     use std::{
         cell::RefCell,
         rc::Rc,
@@ -116,6 +120,7 @@ mod tests {
                 super::super::Clock::Element,
                 "tile",
                 &self.source,
+                ARRIVE,
                 window,
                 cx,
             );

@@ -4,7 +4,7 @@
 //! way a control learns that the keyboard focused it unless it holds its own
 //! focus handle: gpui-base's controls keep theirs, and a raw clickable's
 //! `tab_index` makes one GPUI keeps. [`paint`] draws the ring of a control
-//! whose handle Tcode holds, fading over `SETTLE` as the keyboard brings focus
+//! whose handle Tcode holds, fading over [`GLIDE`] as the keyboard brings focus
 //! to it and takes it away. The fades are kept by focus handle for the whole
 //! app: at rest it holds the one focused control, whatever the windows draw.
 //!
@@ -26,6 +26,9 @@ use gpui::{
     Entity, EntityId, FocusHandle, Global, GlobalElementId, InspectorElementId, IntoElement,
     LayoutId, Pixels, WeakEntity, WeakFocusHandle, Window,
 };
+
+/// How long a focus ring takes to fade in or out.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// A ring's fade: from where, to where, since when.
 type Fade = (f32, f32, Instant);
@@ -55,14 +58,13 @@ fn reveal(handle: &FocusHandle, window: &mut Window, cx: &mut App) -> f32 {
     let index = rings.iter().position(|(weak, _)| handle == weak);
     let value = |(from, to, at): Fade| {
         // A ring that turns back part way runs the part it has left.
-        let span = crate::edge_back::SETTLE.mul_f32((to - from).abs().max(0.01));
+        let span = GLIDE.mul_f32((to - from).abs().max(0.01));
         let elapsed = now.saturating_duration_since(at);
         if elapsed >= span {
             return to;
         }
-        let progress = super::settle_progress(
-            crate::edge_back::SETTLE.mul_f32(elapsed.as_secs_f32() / span.as_secs_f32()),
-        );
+        let progress = crate::motion::Curve::new(GLIDE)
+            .progress(GLIDE.mul_f32(elapsed.as_secs_f32() / span.as_secs_f32()));
         from + (to - from) * progress
     };
     let fade = match index.map(|index| rings[index].1) {
@@ -168,7 +170,7 @@ pub(crate) fn focus_reveal(
         gpui_base::motion::transition(
             super::child_id(id, "focus-reveal"),
             if handle.is_focused(window) { 1f32 } else { 0. },
-            super::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         )

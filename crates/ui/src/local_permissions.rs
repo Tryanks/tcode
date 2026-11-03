@@ -25,6 +25,12 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const KINDS: [PermissionKind; 2] = [
     PermissionKind::Accessibility,
     PermissionKind::ScreenRecording,
@@ -160,6 +166,7 @@ impl LocalPermissions {
         let chip = crate::motion::cross_fade(
             (gpui::ElementId::from(grant_id), "chip"),
             granted,
+            CHANGE,
             window,
             cx,
             |&granted, _, cx| {
@@ -182,6 +189,7 @@ impl LocalPermissions {
         let asking = crate::motion::shown(
             (gpui::ElementId::from(grant_id), "asking"),
             (!granted).then_some(grant_label),
+            SHOW,
             window,
             cx,
         );
@@ -252,8 +260,13 @@ impl Render for LocalPermissions {
             .iter()
             .map(|kind| self.permission_row(*kind, compact, window, cx))
             .collect();
-        let banner =
-            crate::motion::shown("perm-restart", self.restart_hint.then_some(()), window, cx);
+        let banner = crate::motion::shown(
+            "perm-restart",
+            self.restart_hint.then_some(()),
+            SHOW,
+            window,
+            cx,
+        );
         v_flex()
             .w_full()
             .child(crate::material::grouped(rows, cx))

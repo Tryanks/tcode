@@ -31,6 +31,15 @@ use tcode_protocol::{AcpMarketplaceItem, CommandResponse};
 use crate::material;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// One installed ACP agent, rendered with the same anatomy as a native provider card.
 pub struct AcpAgentCard {
     store: Entity<WorkspaceStore>,
@@ -78,7 +87,7 @@ impl AcpAgentCard {
         let id = agent.id.clone();
         let toggle_id = id.clone();
         let name = agent.name.clone();
-        let settle = crate::motion::settle;
+        let settle = || gpui_base::motion::Transition::new(GLIDE);
         let dot_color = transition(
             "acp-status-dot",
             if agent.enabled {
@@ -487,6 +496,7 @@ impl AcpPanel {
                 2
             },
             3,
+            CHANGE,
             window,
             cx,
         );
@@ -645,12 +655,13 @@ impl AcpPanel {
                 2
             },
             3,
+            CHANGE,
             window,
             cx,
         )
         .fill();
-        let error =
-            crate::motion::shown("acp-market-error", error, window, cx).map(|error| error.value);
+        let error = crate::motion::shown("acp-market-error", error, SHOW, window, cx)
+            .map(|error| error.value);
         let mut layers = Vec::new();
         if let Some(error) = error.filter(|_| state.shows(0)) {
             layers.push((
@@ -1152,6 +1163,7 @@ impl Render for AcpPanel {
             "acp-panel-page",
             current.unwrap_or_default(),
             PAGES.len(),
+            CHANGE,
             window,
             cx,
         )

@@ -14,6 +14,9 @@ use web_time::Instant;
 
 use gpui::{App, FollowMode, ListOffset, ListState, Pixels, Window, px};
 
+/// How long a list takes to scroll a row into view.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Where a [`ListScroll`] takes its list.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ScrollTarget {
@@ -103,7 +106,7 @@ impl ListScroll {
         let progress = if cx.reduce_motion() {
             1.
         } else {
-            super::settle_progress(
+            crate::motion::Curve::new(GLIDE).progress(
                 cx.background_executor()
                     .now()
                     .saturating_duration_since(run.at),

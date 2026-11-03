@@ -26,6 +26,15 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 actions!(image_viewer, [ZoomIn, ZoomOut, ZoomToFit, ActualSize]);
 
 const CONTEXT: &str = "ImageViewer";
@@ -644,7 +653,7 @@ impl Render for ImageViewer {
         self.decode(window, cx);
         self.placement = self.clamped(self.placement);
         let policy = if self.animate {
-            crate::motion::settle()
+            gpui_base::motion::Transition::new(GLIDE)
         } else {
             Transition::new(Duration::ZERO)
         };
@@ -661,7 +670,7 @@ impl Render for ImageViewer {
         let arrived = transition(
             "image-viewer-arrived",
             if image.is_some() { 1. } else { 0. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -669,7 +678,7 @@ impl Render for ImageViewer {
         let now = cx.background_executor().now();
         let swapped = match &self.replaced {
             Some((_, at)) if !cx.reduce_motion() => {
-                crate::motion::settle_progress(now.saturating_duration_since(*at))
+                crate::motion::Curve::new(GLIDE).progress(now.saturating_duration_since(*at))
             }
             _ => 1.,
         };
@@ -700,7 +709,8 @@ impl Render for ImageViewer {
                 Placeholder::Glyph
             }
         });
-        let placeholder = crate::motion::shown("image-viewer-placeholder", placeholder, window, cx);
+        let placeholder =
+            crate::motion::shown("image-viewer-placeholder", placeholder, SHOW, window, cx);
         let stage = div()
             .id("image-viewer-stage")
             .absolute()
@@ -748,6 +758,7 @@ impl Render for ImageViewer {
                 placeholder.fade(crate::motion::cross_fade(
                     "image-viewer-placeholder-state",
                     state,
+                    CHANGE,
                     window,
                     cx,
                     move |state, _, cx| match state {
@@ -798,6 +809,7 @@ impl Render for ImageViewer {
         let transfer = crate::motion::shown(
             "image-viewer-transfer",
             show_transfer.then(|| self.original_state.clone()).flatten(),
+            SHOW,
             window,
             cx,
         );

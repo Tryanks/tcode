@@ -35,6 +35,21 @@ use crate::{
     },
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A comment's ⋯ menu item that writes.
 #[derive(Action, Clone, PartialEq, Deserialize)]
 #[action(namespace = tcode_pull_requests, no_json)]
@@ -139,7 +154,8 @@ fn fade_on_edit(
     let editing = editor.is_some();
     Some(
         crate::motion::Sampled::new(move |window, cx| {
-            let fade = crate::motion::CrossFade::new(id, usize::from(editing), 2, window, cx);
+            let fade =
+                crate::motion::CrossFade::new(id, usize::from(editing), 2, CHANGE, window, cx);
             let layers = [(0, text), (1, editor)]
                 .into_iter()
                 .filter_map(|(layer, element)| element.map(|element| (layer, element)));
@@ -960,6 +976,7 @@ impl PullRequestView {
                 let chips = crate::motion::keyed_across(
                     SharedString::from(format!("pr-reactions-row-{comment_id}")),
                     chips,
+                    ROWS,
                     window,
                     cx,
                     |_, reaction, _, cx| {
@@ -1019,7 +1036,7 @@ impl PullRequestView {
             ));
             let count = reaction.count.to_string();
             crate::motion::Sampled::new(move |window, cx| {
-                crate::motion::cross_fade(id, count, window, cx, |count, _, _| {
+                crate::motion::cross_fade(id, count, CHANGE, window, cx, |count, _, _| {
                     div().child(count.clone()).into_any_element()
                 })
             })
@@ -1290,7 +1307,7 @@ impl PullRequestView {
             );
             let id = SharedString::from(format!("pr-thread-{}-{inline}-{label}", thread.id));
             crate::motion::Sampled::new(move |window, cx| {
-                match crate::motion::shown(id, shown.then_some(()), window, cx) {
+                match crate::motion::shown(id, shown.then_some(()), SHOW, window, cx) {
                     Some(kept) => kept.fade(chip),
                     None => div().absolute().into_any_element(),
                 }
@@ -1394,7 +1411,7 @@ impl PullRequestView {
                     let rail = gpui_base::motion::transition(
                         rail_id,
                         rail,
-                        crate::motion::settle(),
+                        gpui_base::motion::Transition::new(GLIDE),
                         window,
                         cx,
                     );
@@ -1518,7 +1535,7 @@ impl PullRequestView {
                 .text_secondary(compact, cx)
                 .text_color(cx.theme().warning);
             card = card.child(crate::motion::Sampled::new(move |window, cx| {
-                match crate::motion::shown(failed_id, error, window, cx) {
+                match crate::motion::shown(failed_id, error, SHOW, window, cx) {
                     Some(kept) => kept.fold(
                         note.child(
                             crate::tr!(
@@ -1650,7 +1667,7 @@ impl PullRequestView {
                 let id = SharedString::from(format!("pr-reply-editing-{}", thread.id));
                 let mut reply = Some(reply);
                 crate::motion::Sampled::new(move |window, cx| {
-                    crate::motion::cross_fade(id, editing, window, cx, |shown, _, cx| {
+                    crate::motion::cross_fade(id, editing, CHANGE, window, cx, |shown, _, cx| {
                         match reply.take().filter(|_| *shown == editing) {
                             Some(reply) => reply,
                             None if !*shown => {
@@ -2057,13 +2074,18 @@ fn settle_media(url: &str, stand_in: Option<(bool, AnyElement)>) -> Option<AnyEl
     Some(
         crate::motion::Sampled::new(move |window, cx| {
             let mut stand_in = Some(stand_in);
-            crate::motion::cross_fade(id, loading, window, cx, |shown, _, cx| {
-                match stand_in.take().filter(|_| *shown == loading) {
+            crate::motion::cross_fade(
+                id,
+                loading,
+                CHANGE,
+                window,
+                cx,
+                |shown, _, cx| match stand_in.take().filter(|_| *shown == loading) {
                     Some(stand_in) => stand_in,
                     None if *shown => loading_media(cx).into_any_element(),
                     None => div().into_any_element(),
-                }
-            })
+                },
+            )
         })
         .into_any_element(),
     )
@@ -2249,6 +2271,7 @@ pub(super) fn avatar_image(
                 crate::motion::Clock::Element,
                 id,
                 &source,
+                ARRIVE,
                 window,
                 cx,
             );

@@ -11,6 +11,9 @@ use gpui_base::motion::{Transition, transition};
 use gpui_base::{ProgressIndicator, ProgressTrack};
 use std::time::Duration;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(IntoElement)]
 pub struct Progress {
     id: ElementId,
@@ -62,7 +65,7 @@ impl RenderOnce for Progress {
         let color = transition(
             (self.id.clone(), "color"),
             self.color.unwrap_or(cx.theme().primary),
-            Transition::new(crate::edge_back::SETTLE),
+            Transition::new(GLIDE),
             window,
             cx,
         );
@@ -77,7 +80,7 @@ impl RenderOnce for Progress {
         let shown = transition(
             (self.id.clone(), "value"),
             value,
-            Transition::new(crate::edge_back::SETTLE),
+            Transition::new(GLIDE),
             window,
             cx,
         );

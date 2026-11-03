@@ -86,16 +86,17 @@ impl Curve {
             .sample(elapsed)
             .directed_progress
     }
-
-    /// [`settle`]'s curve.
-    pub(crate) fn settle() -> Self {
-        Self::new(crate::edge_back::SETTLE)
-    }
 }
 
 impl From<std::time::Duration> for Curve {
     fn from(duration: std::time::Duration) -> Self {
         Self::new(duration)
+    }
+}
+
+impl From<&Curve> for Curve {
+    fn from(curve: &Curve) -> Self {
+        curve.clone()
     }
 }
 
@@ -108,11 +109,12 @@ pub(crate) const LIFT: Pixels = px(6.);
 pub(crate) fn appear(
     id: impl Into<TransitionId>,
     present: bool,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut App,
 ) -> PresenceSample {
     let id: ElementId = id.into().into();
-    Clock::Element.appear(id, present, &Curve::settle(), window, cx)
+    Clock::Element.appear(id, present, &curve.into(), window, cx)
 }
 
 /// The vertical offset at `progress`: [`LIFT`] away from rest when absent,
@@ -124,17 +126,6 @@ pub(crate) fn lift(progress: f32) -> Pixels {
 /// How long a list a keystroke refilters takes to fold its rows in and out:
 /// short enough to keep pace with typing.
 pub(crate) const KEYSTROKE: std::time::Duration = std::time::Duration::from_millis(120);
-
-/// The house transition: [`crate::edge_back::SETTLE`].
-pub(crate) fn settle() -> Transition {
-    Transition::new(crate::edge_back::SETTLE)
-}
-
-/// How far [`settle`] has come `elapsed` after it started, from 0 to 1, for
-/// motion that keeps its own clock: its easing over its duration.
-pub(crate) fn settle_progress(elapsed: std::time::Duration) -> f32 {
-    Curve::settle().progress(elapsed)
-}
 
 /// A colour as a glide carries it: mixed over premultiplied alpha
 /// ([`crate::theme::mix`]), so every frame paints between what its ends
@@ -150,12 +141,6 @@ impl gpui_base::motion::Interpolate for Colour {
         Self(crate::theme::mix(self.0, target.0, progress))
     }
 }
-
-/// The house spring, for a position that follows the pointer or a reorder
-/// and may be retargeted mid-flight: [`crate::edge_back::SETTLE`], at rest a
-/// quarter pixel away.
-pub(crate) const FOLLOW: gpui_base::motion::Spring =
-    gpui_base::motion::Spring::new(crate::edge_back::SETTLE).with_epsilon(0.25);
 
 fn child_id(id: &ElementId, channel: impl Into<gpui::SharedString>) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(id.clone()), channel.into())
@@ -178,7 +163,7 @@ pub(crate) struct Shown<T> {
 /// a fold under way carries on when its element is drawn under a new parent.
 pub(crate) type Measure = std::rc::Rc<std::cell::Cell<Option<Size<Pixels>>>>;
 
-/// Follow `value` in and out of a page over `SETTLE`. Once it is `None` the
+/// Follow `value` in and out of a page along `curve`. Once it is `None` the
 /// last value it had is kept until it has gone, so whatever leaves is drawn
 /// as it was. A page that opens with it shows it at rest. The caller draws
 /// the result through [`Shown::fold`] or [`Shown::fade`] whenever this is
@@ -187,10 +172,11 @@ pub(crate) type Measure = std::rc::Rc<std::cell::Cell<Option<Size<Pixels>>>>;
 pub(crate) fn shown<T: Clone + PartialEq + 'static>(
     id: impl Into<ElementId>,
     value: Option<T>,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Shown<T>> {
-    Clock::Element.shown(id, value, &Curve::settle(), window, cx)
+    Clock::Element.shown(id, value, &curve.into(), window, cx)
 }
 
 impl<T> Shown<T> {
@@ -494,11 +480,12 @@ impl gpui::Element for Reveal {
 pub(crate) fn cross_fade<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
     id: impl Into<ElementId>,
     value: T,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut C,
     build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
 ) -> AnyElement {
-    Clock::Element.cross_fade(id, value, &Curve::settle(), window, cx, build)
+    Clock::Element.cross_fade(id, value, &curve.into(), window, cx, build)
 }
 
 /// [`cross_fade`] for a part of a control — its glyph, its status — which
@@ -507,11 +494,12 @@ pub(crate) fn cross_fade<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
 pub(crate) fn cross_fade_part<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
     id: impl Into<ElementId>,
     value: T,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut C,
     build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
 ) -> AnyElement {
-    Clock::Element.cross_fade_part(id, value, &Curve::settle(), window, cx, build)
+    Clock::Element.cross_fade_part(id, value, &curve.into(), window, cx, build)
 }
 
 /// A [`cross_fade`]'s frame: the `current` state, of its generation, coming
@@ -576,10 +564,11 @@ impl CrossFade {
         id: impl Into<ElementId>,
         current: usize,
         count: usize,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
-        Clock::Element.layers(id, current, count, &Curve::settle(), window, cx)
+        Clock::Element.layers(id, current, count, &curve.into(), window, cx)
     }
 
     /// Layers at the opacities their owner sampled from a clock it keeps,
@@ -686,15 +675,24 @@ pub(crate) fn status_icon(
     id: impl Into<ElementId>,
     icon: crate::icon::IconName,
     color: gpui::Hsla,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     use crate::icon::IconNamed as _;
     let id = id.into();
-    let color = transition(child_id(&id, "color"), color, settle(), window, cx);
+    let curve = curve.into();
+    let color = transition(
+        child_id(&id, "color"),
+        color,
+        curve.transition(),
+        window,
+        cx,
+    );
     cross_fade_part(
         child_id(&id, "glyph"),
         icon.path(),
+        curve,
         window,
         cx,
         move |path, _, _| {
@@ -727,6 +725,12 @@ impl gpui::RenderOnce for Sampled {
 
 #[cfg(test)]
 mod tests {
+    /// How long what is drawn here only some of the time takes to come in or go.
+    const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+    /// How long a part drawn here takes to cross-fade to another of its states.
+    const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
     use std::{cell::Cell, rc::Rc};
 
     use gpui::{
@@ -744,7 +748,7 @@ mod tests {
 
     impl Render for States {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let fade = CrossFade::new("states", self.current, 2, window, cx);
+            let fade = CrossFade::new("states", self.current, 2, CHANGE, window, cx);
             let clicks = self.clicks.clone();
             let mut layers = Vec::new();
             if fade.shows(0) {
@@ -815,17 +819,18 @@ mod tests {
 
     impl Render for Section {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let body = super::shown("section", self.open.then_some(()), window, cx).map(|fold| {
-                let clicks = window.use_keyed_state("section-clicks", cx, |_, _| 0usize);
-                let count = *clicks.read(cx);
-                fold.fold(
-                    div()
-                        .id("section-body")
-                        .debug_selector(move || format!("section-body-{count}"))
-                        .h(px(80.))
-                        .on_click(move |_, _, cx| clicks.update(cx, |count, _| *count += 1)),
-                )
-            });
+            let body =
+                super::shown("section", self.open.then_some(()), SHOW, window, cx).map(|fold| {
+                    let clicks = window.use_keyed_state("section-clicks", cx, |_, _| 0usize);
+                    let count = *clicks.read(cx);
+                    fold.fold(
+                        div()
+                            .id("section-body")
+                            .debug_selector(move || format!("section-body-{count}"))
+                            .h(px(80.))
+                            .on_click(move |_, _, cx| clicks.update(cx, |count, _| *count += 1)),
+                    )
+                });
             div()
                 .w(px(200.))
                 .flex()
@@ -894,17 +899,18 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let gap = px(8.);
             let clicks = self.clicks.clone();
-            let chip = super::shown("pill-chip", self.chip.then_some(()), window, cx).map(|chip| {
-                chip.fold_across_gap(
-                    gap,
-                    div()
-                        .id("chip")
-                        .debug_selector(|| "chip".into())
-                        .w(px(50.))
-                        .h(px(20.))
-                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
-                )
-            });
+            let chip =
+                super::shown("pill-chip", self.chip.then_some(()), SHOW, window, cx).map(|chip| {
+                    chip.fold_across_gap(
+                        gap,
+                        div()
+                            .id("chip")
+                            .debug_selector(|| "chip".into())
+                            .w(px(50.))
+                            .h(px(20.))
+                            .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                    )
+                });
             // A row as wide as its children, at the right end of its parent,
             // so its own width follows what the chip takes.
             div().w(px(400.)).flex().justify_end().child(

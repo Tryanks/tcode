@@ -13,6 +13,15 @@ use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 use crate::material;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub struct PlanPanel {
     store: Entity<WorkspaceStore>,
     vscroll: ScrollHandle,
@@ -59,7 +68,7 @@ impl PlanPanel {
             (key, step.clone())
         });
         let steps_col =
-            crate::motion::keyed("plan-steps", keyed, window, cx, |key, step, _, cx| {
+            crate::motion::keyed("plan-steps", keyed, ROWS, window, cx, |key, step, _, cx| {
                 self.render_step(key, step, compact, cx)
             })
             .render(v_flex().w_full().min_w_0().gap_1());
@@ -93,8 +102,13 @@ impl PlanPanel {
         let marker_id = SharedString::from(format!("plan-step-marker-{key}"));
         let text_id = SharedString::from(format!("plan-step-text-{key}"));
         let marker = crate::motion::Sampled::new(move |window, cx| {
-            crate::motion::cross_fade_part(marker_id, status, window, cx, move |status, _, _| {
-                match status {
+            crate::motion::cross_fade_part(
+                marker_id,
+                status,
+                CHANGE,
+                window,
+                cx,
+                move |status, _, _| match status {
                     PlanStepStatus::Completed => Icon::new(IconName::CircleCheck)
                         .text_color(muted)
                         .into_any_element(),
@@ -102,8 +116,8 @@ impl PlanPanel {
                     PlanStepStatus::Pending => Icon::new(IconName::CircleDot)
                         .text_color(muted)
                         .into_any_element(),
-                }
-            })
+                },
+            )
         });
         let completed = status == PlanStepStatus::Completed;
         let label = step.step.clone();
@@ -111,7 +125,7 @@ impl PlanPanel {
             let color = gpui_base::motion::transition(
                 text_id,
                 if completed { muted } else { foreground },
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -174,7 +188,8 @@ impl Render for PlanPanel {
             self.last_steps = steps;
         }
         let fade =
-            crate::motion::CrossFade::new("plan-panel", usize::from(!empty), 2, window, cx).fill();
+            crate::motion::CrossFade::new("plan-panel", usize::from(!empty), 2, CHANGE, window, cx)
+                .fill();
         let mut layers = Vec::new();
         if fade.shows(0) {
             layers.push((0, self.render_empty(cx)));

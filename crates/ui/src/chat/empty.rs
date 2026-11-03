@@ -1,5 +1,11 @@
 use super::*;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl ChatView {
     /// The phone's "new thread" empty state: which project the thread
     /// starts in, and which provider/model the first message reaches.
@@ -137,6 +143,7 @@ impl ChatView {
             hub_projects
                 .into_iter()
                 .map(|row| (SharedString::from(row.0.id.clone()), row)),
+            ROWS,
             window,
             cx,
             |_, (project, last_activity), _, cx| {
@@ -216,9 +223,9 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let shown = self
-            .motion
-            .shown("scroll-to-end-pill", shown.then_some(()), window, cx)?;
+        let shown =
+            self.motion
+                .shown("scroll-to-end-pill", shown.then_some(()), SHOW, window, cx)?;
         // Absolute positioning ignores mx_auto without pinned horizontal
         // insets; span the region and center with flex instead.
         let pill = floating_backing(crate::material::radius_button(cx), cx).child(

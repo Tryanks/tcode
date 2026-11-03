@@ -66,6 +66,9 @@ use gpui::{
 };
 use gpui_base::motion::{Easing, Timing};
 
+/// How long a row's height, and a list's tail, take to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How a row that arrived while the reader was looking came in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Arrival {
@@ -139,12 +142,6 @@ pub(crate) struct ListRows<A, V> {
     leaving: Vec<Leaving<V>>,
     /// How long a row takes to come in or fold away.
     duration: Duration,
-}
-
-impl<A, V> Default for ListRows<A, V> {
-    fn default() -> Self {
-        Self::over(crate::edge_back::SETTLE)
-    }
 }
 
 impl<A, V> ListRows<A, V> {
@@ -682,8 +679,8 @@ impl Element for RowGlide {
                 state.height.map(|height| {
                     let shown = match state.run {
                         Some((from, at)) => {
-                            let progress =
-                                super::settle_progress(now.saturating_duration_since(at));
+                            let progress = crate::motion::Curve::new(GLIDE)
+                                .progress(now.saturating_duration_since(at));
                             if progress < 1. {
                                 window.request_animation_frame();
                             }
@@ -721,7 +718,7 @@ impl Element for RowGlide {
                         let clock =
                             super::Clock::from(self.owner.as_ref().map(|owner| &owner.motion));
                         let (glided, settled) =
-                            clock.glide("tail", target, &super::Curve::settle(), window, cx);
+                            clock.glide("tail", target, &super::Curve::new(GLIDE), window, cx);
                         let gliding = !settled;
                         self.measured(global_id, window, |state| state.gliding = gliding);
                         Some(((glided + measured - target).max(px(0.)), px(0.)))

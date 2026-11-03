@@ -1,6 +1,15 @@
 use super::*;
 use crate::chat::tools;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A whole tool output fetched on request.
 pub(in crate::chat) enum FullOutput {
     /// Dropping the task cancels the fetch.
@@ -399,6 +408,7 @@ impl ChatView {
             .shown(
                 format!("changed-files-fold-{index}"),
                 (!turn.running && !changes.is_empty()).then_some(()),
+                SHOW,
                 window,
                 cx,
             )
@@ -474,6 +484,7 @@ impl ChatView {
                 motion.cross_fade(
                     format!("turn-status-{index}"),
                     turn.running,
+                    CHANGE,
                     window,
                     cx,
                     move |running, window, cx| {
@@ -534,6 +545,7 @@ impl ChatView {
             format!("pending-steers-{index}"),
             crate::motion::keyed::Fold::Down,
             pending,
+            ROWS,
             window,
             cx,
             |key, id, window, cx| {
@@ -1226,6 +1238,7 @@ impl ChatView {
             format!("live-window-{index}-{segment_id}"),
             crate::motion::keyed::Fold::Down,
             items,
+            ROWS,
             window,
             cx,
             |_, (ids, newer), window, cx| {

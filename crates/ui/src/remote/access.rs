@@ -24,6 +24,18 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Mint a new invitation, replacing the current one.
 pub(super) type NewInvitation = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -187,6 +199,7 @@ impl AccessSection {
         let live = crate::motion::shown(
             "remote-invitation-live",
             invitation.map(|(link, remaining)| (link, remaining, group)),
+            SHOW,
             window,
             cx,
         )
@@ -204,7 +217,7 @@ impl AccessSection {
                 cx,
             ))
         });
-        let expired = crate::motion::shown("remote-invitation-expired", expired, window, cx)
+        let expired = crate::motion::shown("remote-invitation-expired", expired, SHOW, window, cx)
             .map(|shown| shown.fold(expired_invitation_row(compact, on_new, cx)));
         settings_group(
             crate::tr!("remote.invite.title"),
@@ -255,6 +268,7 @@ impl AccessSection {
         let rows = crate::motion::keyed(
             "remote-devices",
             rows,
+            ROWS,
             window,
             cx,
             |_, device, window, cx| {
@@ -278,13 +292,14 @@ impl AccessSection {
                         Some(_) => cx.theme().success,
                         None => cx.theme().muted_foreground,
                     },
-                    crate::motion::settle(),
+                    gpui_base::motion::Transition::new(GLIDE),
                     window,
                     cx,
                 );
                 let path = crate::motion::cross_fade(
                     SharedString::from(format!("device-path-{}", device.id)),
                     super::path_label(device.path.as_ref()),
+                    CHANGE,
                     window,
                     cx,
                     move |label, _, cx| {
@@ -384,7 +399,7 @@ impl gpui::Render for AccessSection {
         // The section folds in at the machine's first answer, and out with
         // the machine it last showed once there is none to manage: hosting
         // stopped, or the attachment lost the scope.
-        let Some(shown) = crate::motion::shown("remote-access", loaded, window, cx) else {
+        let Some(shown) = crate::motion::shown("remote-access", loaded, SHOW, window, cx) else {
             self.sync_ticker(false, cx);
             return div().into_any_element();
         };
@@ -422,6 +437,7 @@ impl gpui::Render for AccessSection {
         let invitation = crate::motion::shown(
             "remote-invitation-group",
             accepting.then_some(()),
+            SHOW,
             window,
             cx,
         )

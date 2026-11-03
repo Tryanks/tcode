@@ -50,6 +50,15 @@ use tcode_core::{
 };
 use tcode_protocol::{GitDiffResult, GitDiffScope, GitFileText};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A diff view toggle. The compact toolbar reaches these through its overflow
 /// menu, which addresses items by action rather than by callback.
 #[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -754,7 +763,7 @@ impl DiffPanel {
             self.motion.transition(
                 "tab-icons",
                 if icons { 1f32 } else { 0. },
-                &crate::motion::Curve::settle(),
+                GLIDE,
                 window,
                 cx,
             )
@@ -1221,8 +1230,13 @@ impl DiffPanel {
         };
         // The base picker fades in beside the scope picker when Branch is chosen, and out.
         let base_selector = crate::motion::Sampled::new(move |window, cx| {
-            match crate::motion::shown("diff-base-selector", branch_scope.then_some(()), window, cx)
-            {
+            match crate::motion::shown(
+                "diff-base-selector",
+                branch_scope.then_some(()),
+                SHOW,
+                window,
+                cx,
+            ) {
                 Some(shown) => shown.fade(base_selector),
                 // Out of flow, so an absent picker takes no gap in the toolbar.
                 None => div().absolute().into_any_element(),
@@ -1394,9 +1408,15 @@ impl DiffPanel {
     fn render_body(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let loading = self.cache.is_none()
             && (self.loading_key.is_some() || self.render_loading_key.is_some());
-        let fade =
-            crate::motion::CrossFade::new("diff-loading", usize::from(!loading), 2, window, cx)
-                .fill();
+        let fade = crate::motion::CrossFade::new(
+            "diff-loading",
+            usize::from(!loading),
+            2,
+            CHANGE,
+            window,
+            cx,
+        )
+        .fill();
         let column = |body: AnyElement| {
             div()
                 .size_full()
@@ -1449,7 +1469,7 @@ impl DiffPanel {
                 } else {
                     px(0.)
                 },
-                &crate::motion::Curve::settle(),
+                GLIDE,
                 window,
                 cx,
             ))
@@ -1465,7 +1485,7 @@ impl DiffPanel {
             .then(|| crate::tr!("diff.truncated").into_owned());
         let error = preview.and_then(|preview| preview.result.error.clone());
         for (id, notice) in [("diff-truncated", truncated), ("diff-error", error)] {
-            if let Some(shown) = crate::motion::shown(id, notice, window, cx) {
+            if let Some(shown) = crate::motion::shown(id, notice, SHOW, window, cx) {
                 content = content.child(shown.fold(render_notice(shown.value.clone(), cx)));
             }
         }
@@ -1769,7 +1789,7 @@ impl Render for DiffPanel {
         // turns wide.
         let strip = self
             .motion
-            .swap("tab-strip", usize::from(!compact), 2, window, cx);
+            .swap("tab-strip", usize::from(!compact), 2, CHANGE, window, cx);
         let strip_layer = strip
             .shows(1)
             .then(|| (1, self.render_tab_strip(window, cx)));
@@ -1787,7 +1807,8 @@ impl Render for DiffPanel {
             RightTab::Plan => 2,
             RightTab::Agents => 3,
         };
-        let fade = crate::motion::CrossFade::new("right-tab-body", layer, 4, window, cx).fill();
+        let fade =
+            crate::motion::CrossFade::new("right-tab-body", layer, 4, CHANGE, window, cx).fill();
         let body = || v_flex().size_full().min_h_0();
         let mut layers = Vec::new();
         if fade.shows(0) {
@@ -1797,9 +1818,14 @@ impl Render for DiffPanel {
                     .child({
                         // The overflow menu and the four toggles trade places
                         // as the window turns.
-                        let toolbar =
-                            self.motion
-                                .swap("toolbar", usize::from(compact), 2, window, cx);
+                        let toolbar = self.motion.swap(
+                            "toolbar",
+                            usize::from(compact),
+                            2,
+                            CHANGE,
+                            window,
+                            cx,
+                        );
                         let layers = [(0, false), (1, true)]
                             .into_iter()
                             .filter(|(layer, _)| toolbar.shows(*layer))

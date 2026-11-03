@@ -31,6 +31,9 @@ use tcode_core::ui::RightTab;
 
 use crate::window_state::Route;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Height of a caption strip. Matches the shell's 52px top rows so the cluster
 /// sits flush with the window top on every host surface.
 pub(crate) const CAPTION_STRIP_HEIGHT: f32 = 52.;
@@ -210,7 +213,7 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
     let rest_fg = cx.theme().muted_foreground;
     crate::motion::Sampled::new(move |window, cx| {
         let (hovered, on_hover) = crate::motion::hovered(button.id(), window, cx);
-        let settle = crate::motion::settle;
+        let settle = || gpui_base::motion::Transition::new(GLIDE);
         let fill = gpui_base::motion::transition(
             (button.id(), "fill"),
             if hovered {

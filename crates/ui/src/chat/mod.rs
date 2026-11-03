@@ -3,6 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// How long a timeline row takes to come in, or to fold away as it leaves.
+const ROWS_IN: std::time::Duration = std::time::Duration::from_millis(200);
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
 #[cfg(target_family = "wasm")]
@@ -10,6 +13,15 @@ use web_time::Instant;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub(crate) mod components;
 mod empty;
@@ -425,7 +437,7 @@ impl ChatView {
             reservation_scroll_back: None,
             carried_anchor: false,
             rows: Vec::new(),
-            rows_motion: Default::default(),
+            rows_motion: crate::motion::list_rows::ListRows::over(ROWS_IN),
             row_folds: Vec::new(),
             shared: Default::default(),
             timeline_folds: 0,
@@ -703,14 +715,7 @@ impl Render for ChatView {
         };
         let fade = self
             .motion
-            .layers(
-                "chat-surface",
-                surface,
-                4,
-                &crate::motion::Curve::settle(),
-                window,
-                cx,
-            )
+            .layers("chat-surface", surface, 4, GLIDE, window, cx)
             .fill()
             .stage(SURFACE_THREAD);
         let mut layers = Vec::new();
@@ -916,7 +921,7 @@ impl ChatView {
                 } else {
                     cx.theme().muted_foreground
                 },
-                &crate::motion::Curve::settle(),
+                GLIDE,
                 window,
                 cx,
             );
@@ -931,25 +936,28 @@ impl ChatView {
                 });
                 (line, failure.is_some())
             });
-            let status = motion.shown("status", status, window, cx).map(|status| {
-                let (danger, muted) = (cx.theme().danger, cx.theme().muted_foreground);
-                let line = motion.cross_fade(
-                    "status-line",
-                    status.value.clone(),
-                    window,
-                    cx,
-                    move |(line, failed), _, cx| {
-                        div()
-                            .text_secondary(false, cx)
-                            .text_color(if *failed { danger } else { muted })
-                            .child(line.clone())
-                            .into_any_element()
-                    },
-                );
-                status.fold(h_flex().pt_1().justify_end().child(line))
-            });
+            let status = motion
+                .shown("status", status, SHOW, window, cx)
+                .map(|status| {
+                    let (danger, muted) = (cx.theme().danger, cx.theme().muted_foreground);
+                    let line = motion.cross_fade(
+                        "status-line",
+                        status.value.clone(),
+                        CHANGE,
+                        window,
+                        cx,
+                        move |(line, failed), _, cx| {
+                            div()
+                                .text_secondary(false, cx)
+                                .text_color(if *failed { danger } else { muted })
+                                .child(line.clone())
+                                .into_any_element()
+                        },
+                    );
+                    status.fold(h_flex().pt_1().justify_end().child(line))
+                });
             let actions = motion
-                .shown("actions", failure.is_some().then_some(()), window, cx)
+                .shown("actions", failure.is_some().then_some(()), SHOW, window, cx)
                 .map(|actions| {
                     actions.fold(
                         h_flex()

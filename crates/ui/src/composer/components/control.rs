@@ -2,6 +2,9 @@ use super::super::*;
 use tcode_core::control::ReferenceOrigin;
 use tcode_protocol::{ControlStatus, ThreadReferenceStatus};
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Composer {
     fn control_status(&self, cx: &App) -> Option<(String, ControlStatus)> {
         let store = self.workspace_store.read(cx);
@@ -38,6 +41,7 @@ impl Composer {
         self.motion.cross_fade(
             self.motion_key("control-request"),
             pending.request.clone(),
+            CHANGE,
             window,
             cx,
             move |request, _, cx| self.render_control_request(&session_id, request, count, cx),

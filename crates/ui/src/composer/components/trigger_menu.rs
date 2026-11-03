@@ -1,5 +1,8 @@
 use super::super::*;
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Composer {
     /// Whether the trigger menu is shown and owns Enter/arrows. A `/` or `$`
     /// token that matches nothing is ordinary text (a path, a shell variable,
@@ -355,7 +358,7 @@ impl Composer {
             };
             let (motion, key) = (self.motion.clone(), self.motion_key("trigger-empty"));
             crate::motion::Sampled::new(move |window, cx| {
-                motion.cross_fade(key, text, window, cx, |text, _, cx| {
+                motion.cross_fade(key, text, CHANGE, window, cx, |text, _, cx| {
                     crate::material::empty_row(text.clone(), cx).into_any_element()
                 })
             })

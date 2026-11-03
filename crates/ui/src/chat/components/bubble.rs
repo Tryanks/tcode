@@ -21,6 +21,12 @@ use super::assistant;
 use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 use crate::widgets::copy::{action_button, copy_button};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub(crate) type SharedClickHandler = Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub(crate) type UserMessageArgs<'a> = (
@@ -246,15 +252,21 @@ pub(crate) fn user_bubble(
         let motion = motion.clone();
         move |window, cx| {
             let gap = px(2.);
-            let rewind = motion.shown(rewind_id, offered, window, cx).map(|shown| {
-                let button = match rewind.take() {
-                    Some(button) if !shown.leaving() => button,
-                    _ => {
-                        native_rewind_button(shown.value.clone(), compact, Vec::new(), &motion, cx)
-                    }
-                };
-                shown.fold_across_gap(gap, button)
-            });
+            let rewind = motion
+                .shown(rewind_id, offered, SHOW, window, cx)
+                .map(|shown| {
+                    let button = match rewind.take() {
+                        Some(button) if !shown.leaving() => button,
+                        _ => native_rewind_button(
+                            shown.value.clone(),
+                            compact,
+                            Vec::new(),
+                            &motion,
+                            cx,
+                        ),
+                    };
+                    shown.fold_across_gap(gap, button)
+                });
             h_flex()
                 .gap(gap)
                 .items_center()
@@ -299,6 +311,7 @@ pub(crate) fn user_bubble(
                                 crate::motion::Clock::from(&motion),
                                 id,
                                 &source,
+                                ARRIVE,
                                 window,
                                 cx,
                             );

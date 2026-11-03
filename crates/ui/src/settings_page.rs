@@ -38,6 +38,15 @@ use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
 
 use crate::settings_rows::{SelectRowOption, ToggleRow};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const NAV_WIDTH: f32 = 255.;
 /// Archived rows rendered per page. Each row carries two buttons with click
 /// listeners, so the whole list is unaffordable once thousands are archived.
@@ -1459,7 +1468,9 @@ impl SettingsPage {
         // compact sections arrive through the shell's navigation stack. The
         // fade is the page's, so the window turning wide mid-way carries it on
         // rather than fading the section in again under the page's new parent.
-        let entering = self.motion.entered("section", self.section, window, cx);
+        let entering = self
+            .motion
+            .entered("section", self.section, CHANGE, window, cx);
         let column = if self.window_state.read(cx).compact {
             column
         } else {
@@ -1832,7 +1843,8 @@ impl SettingsPage {
             let ago = humanize_ago(now_secs().saturating_sub(checked_at));
             crate::tr!("providers.checked", when = ago).into_owned()
         });
-        if let Some(checked) = crate::motion::shown("providers-checked", checked, window, cx) {
+        if let Some(checked) = crate::motion::shown("providers-checked", checked, SHOW, window, cx)
+        {
             header = header.child(
                 checked.fade(
                     div()
@@ -1842,9 +1854,13 @@ impl SettingsPage {
             );
         }
         let update_available = self.store.read(cx).tcode_update_status().update_available;
-        if let Some(update) =
-            crate::motion::shown("tcode-update", update_available.then_some(()), window, cx)
-        {
+        if let Some(update) = crate::motion::shown(
+            "tcode-update",
+            update_available.then_some(()),
+            SHOW,
+            window,
+            cx,
+        ) {
             header = header.child(update.fade(self.render_tcode_update_popover(cx)));
         }
         header = header.child(
@@ -1860,6 +1876,7 @@ impl SettingsPage {
         if let Some(update_all) = crate::motion::shown(
             "update-all-providers",
             (!automatic.is_empty()).then(|| automatic.clone()),
+            SHOW,
             window,
             cx,
         ) {
@@ -1933,12 +1950,12 @@ impl SettingsPage {
             .iter()
             .map(|(id, card)| (SharedString::from(id.clone()), card.clone()));
         let acp_cards =
-            crate::motion::keyed("acp-cards", acp_cards, window, cx, |_, card, _, _| {
+            crate::motion::keyed("acp-cards", acp_cards, ROWS, window, cx, |_, card, _, _| {
                 div().w_full().pt_3().child(card.clone()).into_any_element()
             });
 
         let mut section = v_flex().w_full().gap_3().child(header);
-        if let Some(shown) = crate::motion::shown("provider-update-run", run, window, cx) {
+        if let Some(shown) = crate::motion::shown("provider-update-run", run, SHOW, window, cx) {
             let run = &shown.value;
             section = section.child(
                 shown.fold(
@@ -2023,7 +2040,7 @@ impl SettingsPage {
             let ago = humanize_ago(now_secs().saturating_sub(updated_at));
             crate::tr!("usage.updated", when = ago).into_owned()
         });
-        if let Some(updated) = crate::motion::shown("usage-updated", updated, window, cx) {
+        if let Some(updated) = crate::motion::shown("usage-updated", updated, SHOW, window, cx) {
             header = header.child(
                 updated.fade(
                     div()
@@ -2051,6 +2068,7 @@ impl SettingsPage {
         if let Some(none) = crate::motion::shown(
             "usage-no-profiles",
             rows.is_empty().then_some(()),
+            SHOW,
             window,
             cx,
         ) {
@@ -2071,6 +2089,7 @@ impl SettingsPage {
         let cards = crate::motion::keyed(
             "usage-cards",
             cards,
+            ROWS,
             window,
             cx,
             |_, (profile_id, name, kind, usage, checking), window, cx| {
@@ -2109,6 +2128,7 @@ impl SettingsPage {
         let plan = crate::motion::shown(
             (card_id.clone(), "plan"),
             usage.and_then(|u| u.plan.clone()),
+            SHOW,
             window,
             cx,
         );
@@ -2117,6 +2137,7 @@ impl SettingsPage {
         let error = crate::motion::shown(
             (card_id.clone(), "error"),
             reported.and_then(|usage| usage.error.clone()),
+            SHOW,
             window,
             cx,
         );
@@ -2130,6 +2151,7 @@ impl SettingsPage {
         let body = crate::motion::cross_fade(
             (card_id.clone(), "body"),
             slot,
+            CHANGE,
             window,
             cx,
             |slot, window, cx| match *slot {
@@ -2159,6 +2181,7 @@ impl SettingsPage {
                     let windows = crate::motion::keyed(
                         (card_id.clone(), "windows"),
                         windows,
+                        ROWS,
                         window,
                         cx,
                         |_, window, _, cx| {
@@ -2290,8 +2313,13 @@ impl SettingsPage {
             "empty"
         };
         let mut groups = Some(groups).filter(|groups| !groups.is_empty());
-        let body =
-            crate::motion::cross_fade("archived-body", slot, window, cx, |slot, window, cx| {
+        let body = crate::motion::cross_fade(
+            "archived-body",
+            slot,
+            CHANGE,
+            window,
+            cx,
+            |slot, window, cx| {
                 match *slot {
                     "list" => match groups.take() {
                         Some(groups) => self
@@ -2318,7 +2346,8 @@ impl SettingsPage {
                         })
                         .into_any_element(),
                 }
-            });
+            },
+        );
         v_flex().child(body)
     }
 
@@ -2421,6 +2450,7 @@ impl SettingsPage {
         let projects = crate::motion::keyed(
             "archived-projects",
             projects,
+            ROWS,
             window,
             cx,
             |project_id, (project_name, sessions), window, cx| {
@@ -2430,6 +2460,7 @@ impl SettingsPage {
                 let rows = crate::motion::keyed(
                     SharedString::from(format!("archived-rows-{project_id}")),
                     rows,
+                    ROWS,
                     window,
                     cx,
                     |_, meta, _, cx| self.archived_row(meta, now, full, compact, cx),

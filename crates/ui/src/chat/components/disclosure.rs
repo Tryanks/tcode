@@ -16,6 +16,9 @@ use tcode_core::notice::{CallbackEvent, HostNotice, OrchestrateCallback};
 
 use super::super::model::one_line;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
 
 /// One line naming a notice. A row per callback names only its callback.
@@ -222,6 +225,7 @@ fn disclosure_with(
             let shown = motion.shown(
                 format!("callback-open-shown-{key}"),
                 on_open.is_some().then_some(()),
+                SHOW,
                 window,
                 cx,
             )?;
@@ -243,6 +247,7 @@ fn disclosure_with(
             .shown(
                 format!("disclosure-fold-{key}"),
                 expanded.then_some(()),
+                SHOW,
                 window,
                 cx,
             )

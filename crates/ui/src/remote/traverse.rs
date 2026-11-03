@@ -30,6 +30,18 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::switch::Switch;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How often the sources' status is read again while hosting.
 const STATUS_REFRESH: Duration = Duration::from_secs(2);
 
@@ -297,6 +309,7 @@ impl TraversePanel {
                 let chip = crate::motion::shown(
                     SharedString::from(format!("remote-traverse-chip-{key}")),
                     enabled.then_some(()),
+                    SHOW,
                     window,
                     cx,
                 )
@@ -559,6 +572,7 @@ fn status_chip(
     let chip = crate::motion::cross_fade(
         SharedString::from(format!("remote-traverse-state-{key}")),
         (label.clone(), tone),
+        CHANGE,
         window,
         cx,
         |(label, tone), _, cx| {
@@ -573,13 +587,14 @@ fn status_chip(
     let turned = gpui_base::motion::transition(
         SharedString::from(format!("remote-traverse-chevron-{key}")),
         if expanded { 1. } else { 0. },
-        crate::motion::settle(),
+        gpui_base::motion::Transition::new(GLIDE),
         window,
         cx,
     );
     let chevron = crate::motion::shown(
         SharedString::from(format!("remote-traverse-chevron-shown-{key}")),
         disclosure.then_some(()),
+        SHOW,
         window,
         cx,
     )
@@ -668,7 +683,7 @@ fn status_detail(
     // so it takes that gap with it.
     let gap = cx.theme().tokens.spacing.sm;
     let error = |id: SharedString, text: Option<&str>, window: &mut Window, cx: &mut App| {
-        crate::motion::shown(id, text.map(str::to_owned), window, cx).map(|shown| {
+        crate::motion::shown(id, text.map(str::to_owned), SHOW, window, cx).map(|shown| {
             shown.fold(
                 div()
                     .w_full()
@@ -716,7 +731,7 @@ fn status_detail(
             manifest_error,
         ));
     let titled = |key: &str, title: Option<SharedString>, window: &mut Window, cx: &mut App| {
-        crate::motion::shown(id(key, "heading"), title, window, cx)
+        crate::motion::shown(id(key, "heading"), title, SHOW, window, cx)
             .map(|shown| shown.fold(div().pt(gap).child(heading(shown.value.clone(), cx))))
     };
     let relays_title = titled(
@@ -736,6 +751,7 @@ fn status_detail(
     let relays = crate::motion::keyed(
         id("relays", "rows"),
         relays,
+        ROWS,
         window,
         cx,
         |_, relay, window, cx| {
@@ -743,16 +759,21 @@ fn status_detail(
                 Some(ms) => crate::tr!("remote.traverse.status.latency", ms = ms),
                 None => crate::tr!("remote.traverse.status.unmeasured"),
             };
-            let home =
-                crate::motion::shown(id("home", &relay.url), relay.home.then_some(()), window, cx)
-                    .map(|shown| {
-                        shown.fade(crate::material::semantic_chip(
-                            crate::tr!("remote.traverse.status.home").into_owned(),
-                            cx.theme().success.opacity(0.15),
-                            cx.theme().success,
-                            cx,
-                        ))
-                    });
+            let home = crate::motion::shown(
+                id("home", &relay.url),
+                relay.home.then_some(()),
+                SHOW,
+                window,
+                cx,
+            )
+            .map(|shown| {
+                shown.fade(crate::material::semantic_chip(
+                    crate::tr!("remote.traverse.status.home").into_owned(),
+                    cx.theme().success.opacity(0.15),
+                    cx.theme().success,
+                    cx,
+                ))
+            });
             let relay_error = error(id("relay", &relay.url), relay.error.as_deref(), window, cx);
             div()
                 .w_full()
@@ -790,6 +811,7 @@ fn status_detail(
     let lookups = crate::motion::keyed(
         id("lookups", "rows"),
         lookups,
+        ROWS,
         window,
         cx,
         |_, lookup, window, cx| {
@@ -809,6 +831,7 @@ fn status_detail(
             let value = crate::motion::cross_fade(
                 id("lookup", &lookup.url),
                 (SharedString::from(value.into_owned()), color),
+                CHANGE,
                 window,
                 cx,
                 |(value, color), _, _| {

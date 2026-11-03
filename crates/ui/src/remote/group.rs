@@ -25,6 +25,12 @@ use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) struct GroupSection {
     store: Entity<WorkspaceStore>,
     resolve: Resolve,
@@ -166,6 +172,7 @@ impl GroupSection {
         let rows = crate::motion::keyed(
             "group-machines",
             machines,
+            ROWS,
             window,
             cx,
             |_, machine, _, cx| {
@@ -229,6 +236,7 @@ impl GroupSection {
         let shown = crate::motion::shown(
             "group-declined",
             (!group.declined.is_empty()).then(|| group.declined.clone()),
+            SHOW,
             window,
             cx,
         )?;
@@ -240,6 +248,7 @@ impl GroupSection {
         let rows = crate::motion::keyed(
             "group-declined-rows",
             devices,
+            ROWS,
             window,
             cx,
             |_, device, _, cx| {
@@ -379,20 +388,23 @@ impl gpui::Render for GroupSection {
         let state = spaces.map(|spaces| spaces.read(cx).group().cloned());
         // Creating, joining or leaving a group replaces the whole page: the
         // state that goes folds into the one that comes.
-        let off = crate::motion::shown("group-off", state.is_none().then_some(()), window, cx).map(
-            |shown| {
-                shown.fold(settings_group(
-                    crate::tr!("group.section"),
-                    vec![empty_row(crate::tr!("remote.hosting_off"), cx).into_any_element()],
-                    cx,
-                ))
-            },
-        );
-        let detail = crate::motion::shown("group-detail", state.clone().flatten(), window, cx)
-            .map(|shown| shown.fold(self.detail(&shown.value, compact, window, cx)));
+        let off =
+            crate::motion::shown("group-off", state.is_none().then_some(()), SHOW, window, cx).map(
+                |shown| {
+                    shown.fold(settings_group(
+                        crate::tr!("group.section"),
+                        vec![empty_row(crate::tr!("remote.hosting_off"), cx).into_any_element()],
+                        cx,
+                    ))
+                },
+            );
+        let detail =
+            crate::motion::shown("group-detail", state.clone().flatten(), SHOW, window, cx)
+                .map(|shown| shown.fold(self.detail(&shown.value, compact, window, cx)));
         let intro = crate::motion::shown(
             "group-intro",
             matches!(state, Some(None)).then_some(()),
+            SHOW,
             window,
             cx,
         )

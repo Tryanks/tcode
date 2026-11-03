@@ -45,6 +45,12 @@ use crate::{
 };
 use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) const TERMINAL_FONT_SIZE: f32 = 13.;
 pub(crate) const TERMINAL_CELL_WIDTH: f32 = 7.83;
 pub(crate) const TERMINAL_CELL_HEIGHT: f32 = 17.;
@@ -1469,6 +1475,7 @@ impl TerminalDrawer {
             move |window, cx| match crate::motion::shown(
                 ("terminal-exited", terminal_id),
                 status,
+                SHOW,
                 window,
                 cx,
             ) {
@@ -1582,6 +1589,7 @@ impl TerminalDrawer {
                     match crate::motion::shown(
                         ("terminal-add-context-shown", terminal_id),
                         has_selection.then_some(()),
+                        SHOW,
                         window,
                         cx,
                     ) {
@@ -1739,6 +1747,7 @@ impl Render for TerminalDrawer {
                                     crate::motion::shown(
                                         ("terminal-bell", id),
                                         bell.then_some(()),
+                                        SHOW,
                                         window,
                                         cx,
                                     )
@@ -1888,6 +1897,7 @@ impl Render for TerminalDrawer {
             let restart = crate::motion::shown(
                 "terminal-restart-shown",
                 active_exited.then_some(()),
+                SHOW,
                 window,
                 cx,
             );
@@ -2064,6 +2074,7 @@ impl Render for TerminalDrawer {
             "terminal-starting",
             usize::from(first.is_some()),
             2,
+            CHANGE,
             window,
             cx,
         );
@@ -2228,6 +2239,7 @@ impl Render for TerminalDrawer {
                 crate::motion::shown(
                     "terminal-key-bar-shown",
                     should_show_terminal_key_bar(self.terminal_focused, cx).then_some(()),
+                    SHOW,
                     window,
                     cx,
                 )

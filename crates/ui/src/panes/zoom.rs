@@ -9,8 +9,11 @@ use gpui_base::motion::Interpolate as _;
 
 use super::ThreadPanel;
 
+/// How long a zoomed pane takes to grow over the column, and to shrink back.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The pane zoomed over the whole chat column: it grows out of its slot until
-/// it covers the column over `edge_back::SETTLE`, and shrinks back into its
+/// it covers the column over [`APPEAR`], and shrinks back into its
 /// slot as the zoom ends. The other panes stay where they are, drawn beneath
 /// it and shielded, so they take no pointer and no drop; the dock's tree and
 /// its shares never change for it.
@@ -118,6 +121,7 @@ impl Zoom {
         let sample = crate::motion::appear(
             ElementId::NamedInteger("pane-zoom".into(), zoomed.generation),
             zoomed.zoomed,
+            APPEAR,
             window,
             cx,
         );

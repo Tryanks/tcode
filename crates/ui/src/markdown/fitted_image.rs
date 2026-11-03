@@ -19,6 +19,9 @@ use gpui::{
 use super::state::MarkdownState;
 use crate::motion::GlideState;
 
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(super) const MAX_HEIGHT: Pixels = px(720.);
 const MIN_SIDE: Pixels = px(15.);
 /// The size of the tile drawn for an image without a preview.
@@ -126,6 +129,7 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
             crate::motion::Clock::from(&self.motion),
             format!("markdown-image-{}", self.path),
             &self.source,
+            ARRIVE,
             window,
             cx,
         );

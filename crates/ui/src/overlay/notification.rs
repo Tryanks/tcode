@@ -26,6 +26,9 @@ use crate::{
 };
 use gpui_base::StyledExt as _;
 
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 const DEFAULT_WIDTH: gpui::Pixels = px(356.);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -242,7 +245,7 @@ impl EventEmitter<DismissEvent> for Notification {}
 impl Render for Notification {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let present = self.transition_status != ToastTransitionStatus::Ending;
-        let progress = self.motion.appear("presence", present, window, cx);
+        let progress = self.motion.appear("presence", present, APPEAR, window, cx);
         if !present && progress <= 0. {
             return div().into_any_element();
         }
@@ -371,17 +374,16 @@ impl Render for Notification {
     }
 }
 
+/// How long a toast takes to leave, and a compact one to enter.
+const TOAST: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A leaving toast stays mounted for its `appear` exit. A compact toast also
-/// enters over `SETTLE`; a wide one keeps the stack's own sonner timing.
+/// enters over [`TOAST`]; a wide one keeps the stack's own sonner timing.
 fn toast_manager(compact: bool) -> ToastManager<NotificationId, Entity<Notification>> {
     let sonner = ToastMotion::sonner();
     ToastManager::new(ToastMotion {
-        duration: if compact {
-            crate::edge_back::SETTLE
-        } else {
-            sonner.duration
-        },
-        exit_duration: crate::edge_back::SETTLE,
+        duration: if compact { TOAST } else { sonner.duration },
+        exit_duration: TOAST,
         ..sonner
     })
 }

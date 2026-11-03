@@ -7,6 +7,9 @@ use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 
+/// How long a diff row takes to come in, or to fold away as it leaves.
+const ROWS_IN: std::time::Duration = std::time::Duration::from_millis(200);
+
 use crate::icon::{Icon, IconName};
 use crate::material;
 use crate::sizing::Sizable as _;
@@ -31,6 +34,12 @@ use super::model::{ExpandDir, FileNotice, PairedRow, RenderedFile, display_colum
 use super::parse::RowKind;
 use super::rows::{DisplayRow as DiffListItem, expand, project_file};
 use crate::motion::list_rows::{Arrival, Attach, Glide, ListRows, RowGlide, changes};
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// A code row's context-menu action on the line selection.
 #[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -578,6 +587,7 @@ pub(crate) fn render_list<H: DiffListHost>(
         gpui::SharedString::from(format!("{id}-layout")),
         usize::from(split),
         2,
+        CHANGE,
         window,
         cx,
     );
@@ -1062,7 +1072,7 @@ impl RowMotion {
     fn new(files: &[RenderedFile], items: &[DiffListItem]) -> Self {
         Self {
             keys: row_keys(files, items, &[], &[]),
-            rows: Default::default(),
+            rows: std::cell::RefCell::new(ListRows::over(ROWS_IN)),
             pending: Default::default(),
         }
     }
@@ -1303,7 +1313,7 @@ fn render_gap<H: DiffListHost>(
             ));
             return row
                 .child(crate::motion::Sampled::new(move |window, cx| {
-                    let shown = crate::motion::appear(id, true, window, cx).progress;
+                    let shown = crate::motion::appear(id, true, APPEAR, window, cx).progress;
                     div()
                         .opacity(shown)
                         .child(crate::tr!("pull_requests.files.loading_lines"))

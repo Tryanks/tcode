@@ -19,6 +19,9 @@ use gpui::{
 use gpui_base::{Radio, RadioGroup, StyledExt as _};
 use std::rc::Rc;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 type SelectHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// One option of a [`ChoiceGroup`].
@@ -174,7 +177,7 @@ fn render_choice(
     let opacity = gpui_base::motion::transition(
         (id.clone(), "dim"),
         if disabled { 0.5 } else { 1. },
-        crate::motion::settle(),
+        gpui_base::motion::Transition::new(GLIDE),
         window,
         cx,
     );

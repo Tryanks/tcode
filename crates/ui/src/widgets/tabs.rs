@@ -27,6 +27,12 @@ use gpui_base::motion::{Transition, transition};
 use gpui_base::{ElementExt as _, StyledExt as _, Tab, Tabs};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 type ElementBuilder = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
@@ -310,7 +316,7 @@ impl Glide {
     ) -> Self {
         let state = window.use_keyed_state((id.clone(), "glide"), cx, |_, _| Selection::default());
         let progress_id = |change: u64| (id.clone(), SharedString::from(format!("glide-{change}")));
-        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let settle = || Transition::new(GLIDE);
         let (to, change) = {
             let state = state.read(cx);
             (state.to.clone(), state.change)
@@ -541,7 +547,7 @@ pub(crate) fn label_color(
     transition(
         (id.clone(), channel),
         target,
-        Transition::new(crate::edge_back::SETTLE),
+        Transition::new(GLIDE),
         window,
         cx,
     )
@@ -593,6 +599,7 @@ impl RenderOnce for TabBar {
             (id.clone(), "tabs"),
             fold,
             keyed,
+            ROWS,
             window,
             cx,
             |key, item, window, cx| {

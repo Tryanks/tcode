@@ -45,6 +45,18 @@ use gpui::{
 use gpui_base::PopoverState;
 use gpui_base::input::{MoveDown, MoveUp};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) const CONTEXT: &str = "Composer";
 
 /// A context-menu action on the composer's chips, queue rows and pending
@@ -970,6 +982,7 @@ impl Composer {
         let button = self.motion.cross_fade(
             self.motion_key("compact-action"),
             mode,
+            CHANGE,
             window,
             cx,
             move |mode, _, cx| {
@@ -1034,6 +1047,7 @@ impl Composer {
             .shown(
                 self.motion_key("compact-action-caption"),
                 (mode == CompactAction::Arrow && turn_running && has_text).then_some(()),
+                SHOW,
                 window,
                 cx,
             )
@@ -1045,13 +1059,14 @@ impl Composer {
                     } else {
                         cx.theme().muted_foreground
                     },
-                    &crate::motion::Curve::settle(),
+                    GLIDE,
                     window,
                     cx,
                 );
                 let text = self.motion.cross_fade_part(
                     self.motion_key("compact-action-caption-text"),
                     armed,
+                    CHANGE,
                     window,
                     cx,
                     |armed, _, _| {
@@ -1157,6 +1172,7 @@ impl Composer {
             parts
                 .iter()
                 .map(|part| (gpui::SharedString::from(part.key()), *part)),
+            ROWS,
             window,
             cx,
             |_, part, _, cx| {
@@ -1311,6 +1327,7 @@ impl Composer {
             self.motion_key("chip-rows"),
             crate::motion::keyed::Fold::Down,
             rows,
+            ROWS,
             window,
             cx,
             |key, row, window, cx| {
@@ -1323,6 +1340,7 @@ impl Composer {
                         contexts
                             .iter()
                             .map(|context| (context.id.to_string().into(), context.clone())),
+                        ROWS,
                         window,
                         cx,
                         |_, context, _, cx| chip(self.terminal_context_chip(context, cx)),
@@ -1349,6 +1367,7 @@ impl Composer {
                             id.clone(),
                             crate::motion::keyed::Fold::Across(px(0.)),
                             items.collect::<Vec<_>>(),
+                            ROWS,
                             window,
                             cx,
                             |key, (index, comment), _, cx| {
@@ -1364,6 +1383,7 @@ impl Composer {
                             references.iter().map(|reference| {
                                 (reference.thread_id.clone().into(), reference.clone())
                             }),
+                            ROWS,
                             window,
                             cx,
                             |_, reference, _, cx| {
@@ -1512,6 +1532,7 @@ impl Render for Composer {
             .shown(
                 self.motion_key("mic"),
                 (!subagent && mic.is_some()).then_some(()),
+                SHOW,
                 window,
                 cx,
             )
@@ -1532,6 +1553,7 @@ impl Render for Composer {
             .shown(
                 self.motion_key("attach-menu"),
                 attach_shown.then_some(()),
+                SHOW,
                 window,
                 cx,
             )
@@ -1555,7 +1577,13 @@ impl Render for Composer {
         let model_label = model_picker.as_ref().map(|(label, _)| label.clone());
         let model_picker = self
             .motion
-            .shown(self.motion_key("model-picker"), model_label, window, cx)
+            .shown(
+                self.motion_key("model-picker"),
+                model_label,
+                SHOW,
+                window,
+                cx,
+            )
             .map(|shown| {
                 let picker = match model_picker.take() {
                     Some((_, picker)) if !shown.leaving() => picker,
@@ -1581,6 +1609,7 @@ impl Render for Composer {
             .shown(
                 self.motion_key("primary"),
                 (!subagent).then_some(()),
+                SHOW,
                 window,
                 cx,
             )
@@ -1604,6 +1633,7 @@ impl Render for Composer {
                     .shown(
                         self.motion_key(format_args!("control-row-{part}")),
                         subagent.then_some(()),
+                        SHOW,
                         window,
                         cx,
                     )
@@ -1626,6 +1656,7 @@ impl Render for Composer {
                                 .shown(
                                     self.motion_key("control-row-traits"),
                                     traits_picker.as_ref().map(|(label, _)| label.clone()),
+                                    SHOW,
                                     window,
                                     cx,
                                 )
@@ -1667,6 +1698,7 @@ impl Render for Composer {
                     .shown(
                         self.motion_key(format_args!("control-row-{part}")),
                         shown.then_some(()),
+                        SHOW,
                         window,
                         cx,
                     )
@@ -1680,6 +1712,7 @@ impl Render for Composer {
                         .as_ref()
                         .filter(|_| !folded)
                         .map(|(label, _)| label.clone()),
+                    SHOW,
                     window,
                     cx,
                 )
@@ -1798,7 +1831,7 @@ impl Render for Composer {
             } else {
                 cx.theme().border
             },
-            &crate::motion::Curve::settle(),
+            GLIDE,
             window,
             cx,
         );
@@ -1808,7 +1841,7 @@ impl Render for Composer {
         let frame = self.motion.transition(
             self.motion_key("card-frame"),
             if subagent { 0f32 } else { 1. },
-            &crate::motion::Curve::settle(),
+            GLIDE,
             window,
             cx,
         );
@@ -1817,6 +1850,7 @@ impl Render for Composer {
             .shown(
                 self.motion_key("draft"),
                 (!subagent).then_some(()),
+                SHOW,
                 window,
                 cx,
             )
@@ -1946,6 +1980,7 @@ impl Render for Composer {
         if let Some(shown) = self.motion.shown(
             self.motion_key("approval"),
             approval.map(|request| (request, approval_count)),
+            SHOW,
             window,
             cx,
         ) {
@@ -1956,6 +1991,7 @@ impl Render for Composer {
         if let Some(shown) = self.motion.shown(
             self.motion_key("control-request"),
             self.control_request(cx),
+            SHOW,
             window,
             cx,
         ) {
@@ -1964,21 +2000,25 @@ impl Render for Composer {
         }
         if let Some(shown) =
             self.motion
-                .shown(self.motion_key("user-input"), user_input, window, cx)
+                .shown(self.motion_key("user-input"), user_input, SHOW, window, cx)
         {
             let panel = self.render_user_input_panel(&shown.value, window, cx);
             panels.push(column_fold(&shown, panel));
         }
-        if let Some(shown) =
-            self.motion
-                .shown(self.motion_key("fallback"), fallback_block, window, cx)
-        {
+        if let Some(shown) = self.motion.shown(
+            self.motion_key("fallback"),
+            fallback_block,
+            SHOW,
+            window,
+            cx,
+        ) {
             let panel = self.render_fallback_panel(&shown.value, window, cx);
             panels.push(column_fold(&shown, panel));
         }
         if let Some(shown) = self.motion.shown(
             self.motion_key("fallback-review"),
             fallback_review,
+            SHOW,
             window,
             cx,
         ) {
@@ -1988,6 +2028,7 @@ impl Render for Composer {
         if let Some(shown) = self.motion.shown(
             self.motion_key("trigger-menu"),
             self.trigger_menu(cx),
+            SHOW,
             window,
             cx,
         ) {
@@ -1996,10 +2037,13 @@ impl Render for Composer {
         } else {
             self.menu_rows_seen.borrow_mut().clear();
         }
-        if let Some(shown) =
-            self.motion
-                .shown(self.motion_key("goal"), composer_state.goal, window, cx)
-        {
+        if let Some(shown) = self.motion.shown(
+            self.motion_key("goal"),
+            composer_state.goal,
+            SHOW,
+            window,
+            cx,
+        ) {
             let panel = self.render_goal_strip(&shown.value, window, cx);
             panels.push(column_fold(&shown, panel));
         }
@@ -2013,6 +2057,7 @@ impl Render for Composer {
                 composer_state
                     .checkout
                     .filter(|_| !self.compact && !subagent),
+                SHOW,
                 window,
                 cx,
             )
@@ -2033,6 +2078,7 @@ impl Render for Composer {
             .shown(
                 self.motion_key("settings-drawer"),
                 (self.compact && !subagent).then_some(()),
+                SHOW,
                 window,
                 cx,
             )

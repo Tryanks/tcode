@@ -26,6 +26,18 @@ use crate::icon::IconName;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
 
 /// The error `preview_screenshot` reports where native-webview snapshots have no
@@ -495,6 +507,7 @@ impl PreviewPanel {
         let shown = crate::motion::shown(
             "preview-dev-ports",
             (!self.dev_ports.is_empty()).then(|| self.dev_ports.clone()),
+            SHOW,
             window,
             cx,
         )?;
@@ -503,36 +516,37 @@ impl PreviewPanel {
             .value
             .iter()
             .map(|port| (gpui::SharedString::from(port.to_string()), *port));
-        let buttons = crate::motion::keyed_across("preview-dev-port-buttons", ports, window, cx, {
-            |_, port, _, cx| {
-                let port = *port;
-                div()
+        let buttons =
+            crate::motion::keyed_across("preview-dev-port-buttons", ports, ROWS, window, cx, {
+                |_, port, _, cx| {
+                    let port = *port;
+                    div()
+                        .flex_none()
+                        .pr(gap)
+                        .child(
+                            Button::new(("dev-port", port as usize))
+                                .outline()
+                                .small()
+                                .compact()
+                                .label(format!(":{port}"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    let url = format!("http://localhost:{port}/");
+                                    if let Some(key) = this.active_key(cx) {
+                                        this.navigate(&key, &url, window, cx);
+                                    }
+                                })),
+                        )
+                        .into_any_element()
+                }
+            })
+            .render(
+                gpui_base::h_flex()
                     .flex_none()
-                    .pr(gap)
-                    .child(
-                        Button::new(("dev-port", port as usize))
-                            .outline()
-                            .small()
-                            .compact()
-                            .label(format!(":{port}"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let url = format!("http://localhost:{port}/");
-                                if let Some(key) = this.active_key(cx) {
-                                    this.navigate(&key, &url, window, cx);
-                                }
-                            })),
-                    )
-                    .into_any_element()
-            }
-        })
-        .render(
-            gpui_base::h_flex()
-                .flex_none()
-                .w_full()
-                .px(gap)
-                .pb(gap)
-                .flex_wrap(),
-        );
+                    .w_full()
+                    .px(gap)
+                    .pb(gap)
+                    .flex_wrap(),
+            );
         Some(shown.fold(buttons))
     }
 
@@ -654,7 +668,7 @@ impl PreviewPanel {
             },
             None => 3,
         };
-        let fade = crate::motion::CrossFade::new("preview-body", state, 5, window, cx);
+        let fade = crate::motion::CrossFade::new("preview-body", state, 5, CHANGE, window, cx);
         let mut layers = Vec::new();
         for layer in (0..5).filter(|layer| fade.shows(*layer)) {
             let content = match layer {
@@ -711,7 +725,7 @@ impl PreviewPanel {
         // A page that failed to load says so in a banner that folds in over
         // it, and away once a load succeeds, drawn as it was.
         let error = active.and_then(|key| self.lifecycle_entity().read(cx).load_error(key, cx));
-        if let Some(shown) = crate::motion::shown("preview-load-error", error, window, cx) {
+        if let Some(shown) = crate::motion::shown("preview-load-error", error, SHOW, window, cx) {
             let error = &shown.value;
             let banner = div()
                 .px(cx.theme().tokens.spacing.sm)
@@ -1393,7 +1407,7 @@ impl PageSize {
 }
 
 /// The page's size: a fixed `canvas` within the area, or the whole area,
-/// gliding over `SETTLE` when the one changes to the other or the canvas
+/// gliding over [`GLIDE`] when the one changes to the other or the canvas
 /// changes. gpui has no layout transition and the native view follows its
 /// element's bounds, so the size is eased here; a panel resized is followed
 /// at once. Before the area is known the page fills it.
@@ -1437,7 +1451,8 @@ fn page_size(canvas: Option<(u32, u32)>, window: &mut Window, cx: &mut App) -> P
     glide.canvas = Some(canvas);
     let size = match (glide.from, glide.started) {
         (Some(from), Some(started)) => {
-            let progress = crate::motion::settle_progress(now.saturating_duration_since(started));
+            let progress =
+                crate::motion::Curve::new(GLIDE).progress(now.saturating_duration_since(started));
             if progress >= 1. {
                 glide.from = None;
                 glide.started = None;

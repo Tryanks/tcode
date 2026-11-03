@@ -18,6 +18,9 @@ use gpui_base::StyledExt as _;
 use gpui_base::{InputBase, RoleOverride};
 use serde::Deserialize;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A right-click menu item of a field. The menu takes focus while it is open,
 /// so its choice is forwarded to the field's own focus handle, where the
 /// editor's Cut, Copy, Paste and Select All handlers live.
@@ -281,7 +284,7 @@ impl RenderOnce for Input {
         let border = gpui_base::motion::transition(
             (motion_id.clone(), "border"),
             if focused { theme.ring } else { theme.input },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -292,7 +295,7 @@ impl RenderOnce for Input {
         let ink = gpui_base::motion::transition(
             (motion_id, "ink"),
             if self.disabled { 0.5 } else { 1. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -593,7 +596,7 @@ impl RenderOnce for NumberInput {
             } else {
                 cx.theme().input
             },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );

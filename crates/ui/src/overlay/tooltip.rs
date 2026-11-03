@@ -19,6 +19,9 @@ use gpui_base::{TooltipDefaults, TooltipPositioner};
 
 use crate::widgets::Tooltip;
 
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Above gpui-base's popups, the layer its `TooltipOverlay` draws on.
 const TOOLTIP_PRIORITY: usize = gpui_base::POPUP_PRIORITY + 100;
 
@@ -242,6 +245,7 @@ impl Render for TooltipHost {
             crate::motion::appear(
                 gpui::ElementId::from(("tcode-tooltip-presence", shown.id)),
                 present,
+                APPEAR,
                 window,
                 cx,
             )

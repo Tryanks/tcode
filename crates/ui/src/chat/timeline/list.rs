@@ -1,5 +1,11 @@
 use super::*;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl ChatView {
     /// The timeline's virtual list: one element per [`TimelineRow`], each
     /// drawn in the centred content column with the rhythm around it.
@@ -239,7 +245,7 @@ impl ChatView {
                     } else {
                         highlight.opacity(0.)
                     },
-                    &crate::motion::Curve::settle(),
+                    GLIDE,
                     window,
                     cx,
                 );
@@ -249,8 +255,13 @@ impl ChatView {
                             .workspace_store
                             .read(cx)
                             .history_loading_for(this.session_id.as_deref());
-                        this.motion
-                            .shown("history-activity", loading.then_some(()), window, cx)
+                        this.motion.shown(
+                            "history-activity",
+                            loading.then_some(()),
+                            SHOW,
+                            window,
+                            cx,
+                        )
                     })
                     .flatten();
                 let painted = this.painted_rows.clone();

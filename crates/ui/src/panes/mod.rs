@@ -35,6 +35,12 @@ use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 actions!(
     tcode,
     [SplitRight, SplitDown, ClosePane, CloseOtherPanes, ZoomPane]
@@ -335,7 +341,7 @@ impl ThreadPanel {
 
     /// Show `chat`, as bound, in place of the pane's own, which it returns.
     /// A chat drawn at `from` in another pane on the last frame travels
-    /// from there into this pane over `edge_back::SETTLE`, drawn over the
+    /// from there into this pane over [`GLIDE`], drawn over the
     /// column on the opaque canvas, at the pane's size; under reduced motion
     /// it is here at once.
     ///
@@ -503,7 +509,8 @@ impl ThreadPanel {
 
 /// How far a chat that set off `at` has come into its pane, from 0 to 1.
 fn flight_progress(at: Instant, cx: &App) -> f32 {
-    crate::motion::settle_progress(cx.background_executor().now().saturating_duration_since(at))
+    crate::motion::Curve::new(GLIDE)
+        .progress(cx.background_executor().now().saturating_duration_since(at))
 }
 
 impl EventEmitter<PanelEvent> for ThreadPanel {}
@@ -535,7 +542,7 @@ impl Render for ThreadPanel {
                 "pane-content",
                 if waiting { WAITING } else { CHAT },
                 2,
-                &crate::motion::Curve::settle(),
+                GLIDE,
                 window,
                 cx,
             )
@@ -767,7 +774,7 @@ fn drop_placeholder(
     cx: &mut App,
 ) -> AnyElement {
     let id = "pane-drop-placeholder";
-    let Some(shown) = crate::motion::shown(id, target, window, cx) else {
+    let Some(shown) = crate::motion::shown(id, target, SHOW, window, cx) else {
         return Empty.into_any_element();
     };
     // Coming in from nothing it starts where it lands; coming back while it
@@ -778,7 +785,9 @@ fn drop_placeholder(
         gpui_base::motion::spring(
             (id, channel),
             target,
-            crate::motion::FOLLOW.with_travel(travel),
+            gpui_base::motion::Spring::new(GLIDE)
+                .with_epsilon(0.25)
+                .with_travel(travel),
             window,
             cx,
         )
@@ -850,13 +859,7 @@ impl TabGroupRenderer for ThreadTabs {
             Some(colour) => colour.opacity(0.),
             None => gpui::transparent_black(),
         };
-        let outline = motion.transition(
-            "outline",
-            outline,
-            &crate::motion::Curve::settle(),
-            window,
-            cx,
-        );
+        let outline = motion.transition("outline", outline, GLIDE, window, cx);
         div()
             .relative()
             .size_full()

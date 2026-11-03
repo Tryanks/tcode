@@ -12,6 +12,9 @@ use gpui_base::{
     motion::{Presence, PresencePhase},
 };
 
+/// How long a resized surface takes to glide to its new size.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// What one panel of a group is once the layout rests.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Panel {
@@ -233,7 +236,7 @@ impl ResizeGlide {
             ),
             true,
         )
-        .transition(crate::motion::settle())
+        .transition(gpui_base::motion::Transition::new(GLIDE))
         .sample(window, cx);
         let landed = sample.phase == PresencePhase::Present;
         let progress = if landed { 1. } else { sample.progress };

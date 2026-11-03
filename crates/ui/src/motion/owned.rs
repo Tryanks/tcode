@@ -495,14 +495,14 @@ impl Owned {
         &self,
         key: impl Into<SharedString>,
         target: T,
-        curve: &Curve,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &App,
     ) -> T
     where
         T: Interpolate + PartialEq + 'static,
     {
-        self.glide(self.key(key.into()), target, curve, window, cx)
+        self.glide(self.key(key.into()), target, &curve.into(), window, cx)
             .0
     }
 
@@ -512,12 +512,12 @@ impl Owned {
         key: impl Into<SharedString>,
         current: usize,
         count: usize,
-        curve: &Curve,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &mut App,
     ) -> CrossFade {
         self.clock()
-            .layers(key.into(), current, count, curve, window, cx)
+            .layers(key.into(), current, count, &curve.into(), window, cx)
     }
 
     /// [`Clock::cross_fade`] kept here.
@@ -525,6 +525,7 @@ impl Owned {
         &self,
         key: impl Into<SharedString>,
         value: T,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &mut C,
         build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
@@ -534,7 +535,7 @@ impl Owned {
         C: std::borrow::BorrowMut<App>,
     {
         self.clock()
-            .cross_fade(key.into(), value, &Curve::settle(), window, cx, build)
+            .cross_fade(key.into(), value, &curve.into(), window, cx, build)
     }
 
     /// [`Clock::cross_fade_part`] kept here.
@@ -542,6 +543,7 @@ impl Owned {
         &self,
         key: impl Into<SharedString>,
         value: T,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &mut C,
         build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
@@ -551,7 +553,7 @@ impl Owned {
         C: std::borrow::BorrowMut<App>,
     {
         self.clock()
-            .cross_fade_part(key.into(), value, &Curve::settle(), window, cx, build)
+            .cross_fade_part(key.into(), value, &curve.into(), window, cx, build)
     }
 
     /// [`Clock::shown`] kept here, its fold's measurement too.
@@ -559,11 +561,12 @@ impl Owned {
         &self,
         key: impl Into<SharedString>,
         value: Option<T>,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Shown<T>> {
         self.clock()
-            .shown(key.into(), value, &Curve::settle(), window, cx)
+            .shown(key.into(), value, &curve.into(), window, cx)
     }
 
     /// [`Clock::appear`]'s progress kept here.
@@ -571,11 +574,12 @@ impl Owned {
         &self,
         key: impl Into<SharedString>,
         present: bool,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &mut App,
     ) -> f32 {
         self.clock()
-            .appear(key.into(), present, &Curve::settle(), window, cx)
+            .appear(key.into(), present, &curve.into(), window, cx)
             .progress
     }
 
@@ -584,11 +588,12 @@ impl Owned {
         &self,
         key: impl Into<SharedString>,
         value: T,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &mut App,
     ) -> f32 {
         self.clock()
-            .entered(key.into(), value, &Curve::settle(), window, cx)
+            .entered(key.into(), value, &curve.into(), window, cx)
     }
 
     /// The handle kept under `key`: made the first time it is asked for,
@@ -648,13 +653,14 @@ impl Owned {
         key: impl Into<SharedString>,
         current: usize,
         count: usize,
+        curve: impl Into<Curve>,
         window: &mut Window,
         cx: &mut App,
     ) -> Swap {
         let key = key.into();
         Swap {
             fade: self
-                .layers(key.clone(), current, count, &Curve::settle(), window, cx)
+                .layers(key.clone(), current, count, curve, window, cx)
                 .span(),
             height: self.glide_state(key),
             current,
@@ -869,6 +875,9 @@ mod tests {
     use super::Owned;
     use crate::test_frames::{draw, draw_settled};
 
+    /// How long the page's note takes to swap for the other layout's.
+    const NOTE: std::time::Duration = std::time::Duration::from_millis(200);
+
     /// A row that a window turning compact draws under another parent, as
     /// the shell draws a settings page: a label and a control beside it, or
     /// the control under it, over a neighbour whose place follows the row's
@@ -902,7 +911,7 @@ mod tests {
             };
             let swap = self
                 .motion
-                .swap("note", usize::from(compact), 2, window, cx);
+                .swap("note", usize::from(compact), 2, NOTE, window, cx);
             let layers = (0..2)
                 .filter(|layer| swap.shows(*layer))
                 .map(|layer| {
