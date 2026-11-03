@@ -319,26 +319,20 @@ fn answer(source: &Source, window: &mut Window, cx: &mut App) -> Option<Answer> 
         .entries
         .entry(source.clone())
         .or_insert_with(|| Entry::new(after_frame));
-    let due = match &entry.answer {
-        None => true,
-        Some(Answer::Unreached(failed)) => failed.elapsed() >= RETRY_UNREACHED,
-        Some(_) => {
-            entry.stale
-                || entry
-                    .expiry
-                    .as_ref()
-                    .is_some_and(|expiry| expiry.at <= tcode_core::project::now_secs())
-        }
-    };
+    let due = entry.stale
+        || match &entry.answer {
+            None => true,
+            Some(Answer::Unreached(failed)) => failed.elapsed() >= RETRY_UNREACHED,
+            Some(_) => entry
+                .expiry
+                .as_ref()
+                .is_some_and(|expiry| expiry.at <= tcode_core::project::now_secs()),
+        };
     let read = due && entry.read.is_none();
     if entry.answer.is_none() || read {
         entry.waiting.insert(view);
     }
     let answer = entry.answer.clone();
-    let validator = entry
-        .expiry
-        .as_ref()
-        .and_then(|expiry| expiry.validator.clone());
     let hold = entry.hold.clone();
     let mut key = std::hash::DefaultHasher::new();
     source.hash(&mut key);
@@ -350,17 +344,28 @@ fn answer(source: &Source, window: &mut Window, cx: &mut App) -> Option<Answer> 
         })
     });
     if read {
-        let reading = reading(source, validator, cx);
-        let landing = source.clone();
-        let task = cx.spawn(async move |cx| {
-            let read = cx.background_executor().spawn(reading).await;
-            cx.update(|cx| landed(&landing, read, cx));
-        });
-        if let Some(entry) = images(cx).entries.get_mut(source) {
-            entry.read = Some(task);
-        }
+        start_read(source, cx);
     }
     answer
+}
+
+/// Reads `source` (pull request media with the validator of the copy it holds), in place of any
+/// read in flight.
+fn start_read(source: &Source, cx: &mut App) {
+    let validator = images(cx)
+        .entries
+        .get(source)
+        .and_then(|entry| entry.expiry.as_ref())
+        .and_then(|expiry| expiry.validator.clone());
+    let reading = reading(source, validator, cx);
+    let landing = source.clone();
+    let task = cx.spawn(async move |cx| {
+        let read = cx.background_executor().spawn(reading).await;
+        cx.update(|cx| landed(&landing, read, cx));
+    });
+    if let Some(entry) = images(cx).entries.get_mut(source) {
+        entry.read = Some(task);
+    }
 }
 
 fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading {
@@ -512,7 +517,10 @@ fn landed(source: &Source, read: Read, cx: &mut App) {
     let Some(entry) = images.entries.get_mut(source) else {
         return;
     };
-    entry.read = None;
+    // The read landing is this task's own: detached, not cancelled from inside its run.
+    if let Some(task) = entry.read.take() {
+        task.detach();
+    }
     entry.stale = false;
     let answer = match read {
         Read::Image { image, expiry } => {
@@ -592,8 +600,9 @@ fn draw(
     Some(drawn(answer, window))
 }
 
-/// Lets go of what no window draws: past the budget, the decodes released longest ago, and at
-/// once those of a host this client no longer reads; then every retired image's atlas tiles.
+/// Lets go of what no element asks for: past the budget, the decodes released longest ago, and at
+/// once answers without a picture and those of a host this client no longer reads; then every
+/// retired image's atlas tiles.
 fn sweep(cx: &mut App) {
     let open: Vec<WindowId> = cx
         .windows()
@@ -617,16 +626,19 @@ fn sweep(cx: &mut App) {
             _ => 0,
         };
         total += cost;
+        // An answer without a picture is kept only while something asks for it.
+        let pictureless = entry.answer.is_some() && cost == 0;
         let gone = source
             .namespace()
             .is_some_and(|held| Some(held) != namespace);
-        if !entry.held() && (cost > 0 || gone) {
-            unheld.push((!gone, entry.hold.released.get(), cost, source.clone()));
+        if !entry.held() && (cost > 0 || pictureless || gone) {
+            let keep = !(pictureless || gone);
+            unheld.push((keep, entry.hold.released.get(), cost, source.clone()));
         }
     }
-    unheld.sort_by_key(|(current, released, ..)| (*current, *released));
-    for (current, _, cost, source) in unheld {
-        if current && total <= BUDGET {
+    unheld.sort_by_key(|(keep, released, ..)| (*keep, *released));
+    for (keep, _, cost, source) in unheld {
+        if keep && total <= BUDGET {
             break;
         }
         images.entries.remove(&source);
@@ -829,7 +841,8 @@ pub(crate) fn project_icon(
 }
 
 /// A reset can return to a previously read default after the project config changes, so every
-/// display scale's icon, error included, is read again when next drawn.
+/// display scale's icon, error included, is read again when next drawn. A read already in flight
+/// may have left before the change: it is read again now, for the views waiting on it.
 pub(crate) fn invalidate_project_icon(project: &tcode_core::project::Project, cx: &mut App) {
     let Some(namespace) = cx.try_global::<HostImages>().map(|images| images.namespace) else {
         return;
@@ -837,6 +850,7 @@ pub(crate) fn invalidate_project_icon(project: &tcode_core::project::Project, cx
     if !cx.has_global::<Images>() {
         return;
     }
+    let mut in_flight = Vec::new();
     for (source, entry) in &mut images(cx).entries {
         if let Source::Host(
             held,
@@ -849,7 +863,13 @@ pub(crate) fn invalidate_project_icon(project: &tcode_core::project::Project, cx
             && *override_path == project.icon_path
         {
             entry.stale = true;
+            if entry.read.is_some() {
+                in_flight.push(source.clone());
+            }
         }
+    }
+    for source in in_flight {
+        start_read(&source, cx);
     }
 }
 
@@ -1303,40 +1323,42 @@ mod tests {
                 })
                 .collect()
         };
-        let step = |answer: &dyn Fn() -> Result<QueryResponse, ProtocolError>,
-                    cx: &mut VisualTestContext| {
+        // Every assertion on what is drawn is made on a frame drawn while a read is in flight:
+        // an answer that lands notifies the shelf, and a test window draws a notified view as
+        // the update ends (`App::flush_effects` in test mode), so after one lands the picture
+        // drawn is already its answer.
+        let frame = |cx: &mut VisualTestContext| {
             draw(cx);
             cx.run_until_parked();
-            let asked = host.answer(|_| answer());
-            cx.run_until_parked();
-            validators(asked)
         };
-
-        // Read once, already past its expiry.
-        assert_eq!(step(&|| media_image(bmp(4), Some("first"), 1), cx), [None]);
-        // Drawn, and so read again with its validator, the same picture drawn meanwhile.
-        assert_eq!(
-            step(
-                &|| media(PullRequestMedia::NotModified { expires_at: 1 }),
-                cx
-            ),
-            [Some("first".to_string())]
-        );
-        let first = drawn.borrow_mut().take().expect("the picture is drawn");
-        // Still current, and still past its expiry: drawn on while read again.
-        assert_eq!(
-            step(&|| media_image(bmp(4), Some("second"), u64::MAX), cx),
-            [Some("first".to_string())]
-        );
-        assert!(
+        let drawing = |picture: &Arc<RenderImage>| {
             drawn
                 .borrow()
                 .as_ref()
-                .is_some_and(|drawn| Arc::ptr_eq(drawn, &first)),
+                .is_some_and(|drawn| Arc::ptr_eq(drawn, picture))
+        };
+
+        // Read once, already past its expiry.
+        frame(cx);
+        let asked = host.answer(|_| media_image(bmp(4), Some("first"), 1));
+        assert_eq!(validators(asked), [None]);
+        cx.run_until_parked();
+        // Drawn, and so read again with its validator.
+        frame(cx);
+        let first = drawn.borrow().clone().expect("the picture is drawn");
+        let asked = host.answer(|_| media(PullRequestMedia::NotModified { expires_at: 1 }));
+        assert_eq!(validators(asked), [Some("first".to_string())]);
+        cx.run_until_parked();
+        // Still current, and still past its expiry: drawn on while it is read again.
+        frame(cx);
+        assert!(
+            drawing(&first),
             "a copy the host says is current is drawn on, not decoded again"
         );
-        draw(cx);
+        let asked = host.answer(|_| media_image(bmp(4), Some("second"), u64::MAX));
+        assert_eq!(validators(asked), [Some("first".to_string())]);
         cx.run_until_parked();
+        frame(cx);
         let second = drawn.borrow_mut().take().expect("the new picture is drawn");
         assert!(!Arc::ptr_eq(&second, &first), "new bytes are a new picture");
         assert!(atlas_holds(&second, cx));
@@ -1346,8 +1368,10 @@ mod tests {
             "the picture they replaced leaves memory once no frame draws it"
         );
         assert!(!atlas_holds(&first, cx), "and the atlas");
+        frame(cx);
         assert!(
-            step(&|| panic!("a current copy is not read again"), cx).is_empty(),
+            host.answer(|_| panic!("a current copy is not read again"))
+                .is_empty(),
             "a copy within its expiry is not read again"
         );
     }
@@ -1415,10 +1439,13 @@ mod tests {
         let scale = cx.update(|window, _| window.scale_factor());
         let pixels = [16., 32.].map(|size: f32| (size * scale).round() as u32);
         let mut previous: Option<Vec<Drawn>> = None;
-        for (reconnect, color) in [
-            (None, None),
-            (Some(true), Some([255, 0, 0, 255])),
-            (Some(false), Some([0, 0, 255, 255])),
+        // The host answers a color, or an error by its code: "not_found" is its answer,
+        // "timeout" never reached it.
+        for (reconnect, answer) in [
+            (None, Err("not_found")),
+            (Some(true), Err("timeout")),
+            (Some(false), Ok([255, 0, 0, 255])),
+            (Some(true), Ok([0, 0, 255, 255])),
         ] {
             store.update(cx, |store, cx| {
                 let event = if reconnect == Some(false) {
@@ -1493,20 +1520,20 @@ mod tests {
                     .map(|(_, id, pixels)| (id.clone(), *pixels))
                     .collect::<Vec<_>>(),
                 pixels.map(|pixels| (project.id.clone(), pixels)),
-                "a project event has every drawn icon, error or not, read again"
+                "a project event has every drawn icon read again, whatever it last answered"
             );
             for (id, _, pixels) in asked {
-                let result = match color {
-                    Some(color) => {
+                let result = match answer {
+                    Ok(color) => {
                         let mut png = std::io::Cursor::new(Vec::new());
                         image::RgbaImage::from_pixel(pixels, pixels, image::Rgba(color))
                             .write_to(&mut png, image::ImageFormat::Png)
                             .unwrap();
                         Ok(QueryResponse::FileBytes(png.into_inner()))
                     }
-                    None => Err(ProtocolError {
-                        code: "not_found".into(),
-                        message: "no default icon".into(),
+                    Err(code) => Err(ProtocolError {
+                        code: code.into(),
+                        message: "no icon".into(),
                     }),
                 };
                 replies
@@ -1516,8 +1543,8 @@ mod tests {
             cx.run_until_parked();
             draw(cx);
             for (shown, pixels) in drawn.borrow().iter().zip(pixels) {
-                match (color, shown) {
-                    (Some([red, green, blue, alpha]), Some(Ok(image))) => {
+                match (answer, shown) {
+                    (Ok([red, green, blue, alpha]), Some(Ok(image))) => {
                         let size = image.size(0);
                         assert_eq!(
                             (size.width.0, size.height.0),
@@ -1526,7 +1553,7 @@ mod tests {
                         // Decoded pictures are BGRA.
                         assert_eq!(image.as_bytes(0).unwrap()[..4], [blue, green, red, alpha]);
                     }
-                    (None, Some(Err(_))) => {}
+                    (Err(_), Some(Err(_))) => {}
                     _ => panic!("the icon draws the host's answer"),
                 }
             }
