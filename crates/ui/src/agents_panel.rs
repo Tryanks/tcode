@@ -319,6 +319,33 @@ impl Agents {
         }
         (!parts.is_empty()).then(|| parts.join(" · "))
     }
+
+    /// The row of the agent whose thread is `open`, as its lead's Agents
+    /// view shows it.
+    pub(crate) fn heading(&self, open: &str) -> Option<AgentHeading> {
+        self.needs_settle
+            .iter()
+            .chain(&self.running)
+            .chain(&self.native)
+            .chain(&self.done)
+            .find(|row| row.open.as_deref() == Some(open))
+            .map(|row| AgentHeading {
+                key: row.key.clone(),
+                title: row.title.clone(),
+                detail: row.detail.clone(),
+                execution: row.execution,
+            })
+    }
+}
+
+/// What an agent's row says of it, for a surface that heads its thread.
+pub(crate) struct AgentHeading {
+    /// The row's key, which its status mark's motion is kept under.
+    pub(crate) key: String,
+    pub(crate) title: String,
+    /// "provider · model".
+    pub(crate) detail: String,
+    pub(crate) execution: Option<AgentExecution>,
 }
 
 /// One of a lead's agents, as a list beside its thread names it.
@@ -347,10 +374,12 @@ fn detail(provider: Option<ProviderKind>, model: Option<&str>) -> String {
         .join(" · ")
 }
 
-/// Open a thread reached from its lead: beside the lead's pane on the
-/// desktop, in the lead's place where there are no panes or no room. An
-/// archived agent is reached the way Settings → Archived Threads reaches
-/// every archived thread: unarchived.
+/// Open a thread reached from its lead: beside the lead in the lead's own
+/// chat on the desktop; in the lead's place in the compact layout, which has
+/// no room beside it and goes back with its navigation. A thread a pane
+/// already shows takes the keyboard there instead. An archived agent is
+/// reached the way Settings → Archived Threads reaches every archived
+/// thread: unarchived.
 pub(crate) fn open_agent(
     store: &Entity<WorkspaceStore>,
     id: String,
@@ -367,24 +396,18 @@ pub(crate) fn open_agent(
             store.unarchive_session(id.clone());
         }
     });
-    if !crate::shell::show_beside(&id, lead, window, cx) {
-        store.update(cx, |store, cx| store.select_session(id, cx));
+    let host = lead
+        .filter(|_| !crate::shell::shown_in_pane(&id, cx))
+        .and_then(|lead| crate::shell::side_host_for(lead, cx));
+    match host {
+        Some(host) => host.update(cx, |chat, cx| chat.open_side(id, window, cx)),
+        None => store.update(cx, |store, cx| store.select_session(id, cx)),
     }
 }
 
-/// Go back from a thread to the lead it was reached from: where the lead
-/// shows in a pane of its own, the thread's pane closes into the lead's;
-/// elsewhere the lead takes the thread's place.
-pub(crate) fn back_to_lead(
-    store: &Entity<WorkspaceStore>,
-    id: Option<&str>,
-    lead: String,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    if !id.is_some_and(|id| crate::shell::close_into(id, &lead, window, cx)) {
-        store.update(cx, |store, cx| store.select_session(lead, cx));
-    }
+/// Go back from a thread opened in its lead's place to the lead.
+pub(crate) fn back_to_lead(store: &Entity<WorkspaceStore>, lead: String, cx: &mut App) {
+    store.update(cx, |store, cx| store.select_session(lead, cx));
 }
 
 #[derive(Clone, Copy)]

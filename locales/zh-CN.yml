@@ -2416,6 +2416,7 @@ agents:
   readonly: "由 %{provider} 管理，此处只读。"
   empty_title: "还没有子代理"
   empty_desc: "此对话派发的子代理会显示在这里。"
+  close_side: "关闭子代理"
   back_to_parent: "返回“%{title}”"
   open_child: "打开"
 tabs:

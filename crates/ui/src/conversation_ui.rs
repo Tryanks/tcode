@@ -24,6 +24,9 @@ pub(crate) struct ConversationUiState {
     pub auto_open_task_suppressed: bool,
     pub preview_url: Option<String>,
     pub preview_canvas: Option<(u32, u32)>,
+    /// The agent shown beside this conversation in its chat. Kept for the
+    /// session only: a reopened lead shows it again, a restart does not.
+    pub side_thread: Option<String>,
 }
 
 impl ConversationUiState {
@@ -42,6 +45,7 @@ impl ConversationUiState {
             auto_open_task_suppressed: false,
             preview_url: None,
             preview_canvas: None,
+            side_thread: None,
         }
     }
 

@@ -389,15 +389,8 @@ impl ChatView {
                 .tooltip(name)
                 .on_click({
                     let store = self.workspace_store.clone();
-                    let session_id = self.session_id.clone();
-                    move |_, window, cx| {
-                        crate::agents_panel::back_to_lead(
-                            &store,
-                            session_id.as_deref(),
-                            parent_id.clone(),
-                            window,
-                            cx,
-                        );
+                    move |_, _, cx| {
+                        crate::agents_panel::back_to_lead(&store, parent_id.clone(), cx);
                     }
                 })
                 .into_any_element(),
