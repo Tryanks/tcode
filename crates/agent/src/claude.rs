@@ -2757,8 +2757,16 @@ impl Mapper {
                     self.task_tools
                         .insert(agent_id.to_owned(), tool_use_id.clone());
                 }
+                let ToolItem::Subagent { parent_item_id, .. } = &item else {
+                    unreachable!("matched as a subagent");
+                };
+                let parent_item_id = parent_item_id.clone();
                 self.tool_items.insert(tool_use_id.clone(), item);
                 out.extend(self.update_subagent(&tool_use_id, ItemStatus::InProgress, None));
+                out.push(AgentEvent::ItemBackgrounded {
+                    item_id: tool_use_id.clone(),
+                    parent_item_id,
+                });
                 continue;
             }
             let is_error = block
@@ -2773,8 +2781,9 @@ impl Mapper {
                 ItemStatus::Completed
             };
             let mut parent_item_id = None;
+            let backgrounded = launched_in_background && matches!(item, ToolItem::Command { .. });
             let content = match item {
-                ToolItem::Command { command, .. } if launched_in_background => {
+                ToolItem::Command { command, .. } if backgrounded => {
                     self.tool_items.insert(
                         tool_use_id.clone(),
                         ToolItem::Command {
@@ -2836,6 +2845,12 @@ impl Mapper {
                 out.extend(self.gate_subagent_terminal(&tool_use_id, event));
             } else {
                 out.push(event);
+            }
+            if backgrounded {
+                out.push(AgentEvent::ItemBackgrounded {
+                    item_id: tool_use_id.clone(),
+                    parent_item_id: None,
+                });
             }
         }
         out
@@ -5324,16 +5339,20 @@ mod tests {
             &mut m,
             r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu-bg","type":"tool_result","content":"Command running in background with ID: bg-1","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"backgroundTaskId":"bg-1"}}"#,
         );
+        // The call returned; the command goes on in the background.
         assert!(matches!(
             running.as_slice(),
-            [AgentEvent::ItemUpdated(ThreadItem {
-                content: ItemContent::CommandExecution {
-                    status: ItemStatus::InProgress,
-                    exit_code: None,
+            [
+                AgentEvent::ItemUpdated(ThreadItem {
+                    content: ItemContent::CommandExecution {
+                        status: ItemStatus::InProgress,
+                        exit_code: None,
+                        ..
+                    },
                     ..
-                },
-                ..
-            })]
+                }),
+                AgentEvent::ItemBackgrounded { item_id, parent_item_id: None },
+            ] if item_id == "toolu-bg"
         ));
         let first_result = feed(
             &mut m,
@@ -6022,6 +6041,12 @@ mod tests {
         for line in trace.lines() {
             events.extend(feed(&mut mapper, line));
         }
+        // The lead waited on this agent: its call never returned early.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ItemBackgrounded { .. }))
+        );
         // task_started opened a transcript tail; every terminal snapshot
         // (task_updated, task_notification, tool_result) waits for its ack.
         assert!(events.iter().all(|event| !matches!(
@@ -6146,11 +6171,17 @@ mod tests {
                 .all(|status| status == ItemStatus::InProgress),
             "launch acknowledgement and task_notification must not settle the item yet"
         );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
-        );
+        // The launch acknowledgement returns the call; the agent goes on in
+        // the background past the turn.
+        let position = |wanted: &dyn Fn(&AgentEvent) -> bool| events.iter().position(wanted);
+        let backgrounded = position(&|event| {
+            matches!(event, AgentEvent::ItemBackgrounded { item_id, parent_item_id: None }
+                if item_id == "toolu_spawn_bg")
+        })
+        .expect("the launch backgrounds the spawn");
+        let turn_completed = position(&|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+            .expect("the turn completes");
+        assert!(backgrounded < turn_completed);
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall { status: ItemStatus::Completed, .. }, .. })

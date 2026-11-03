@@ -17,7 +17,7 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::TooltipTrigger as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
-use crate::widgets::spinner::Spinner;
+use crate::widgets::{BreathingDot, Spinner};
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -117,6 +117,9 @@ pub(in crate::chat) struct Header {
     pub(in crate::chat) error: Option<String>,
     /// How long the call took, as its harness reports it.
     pub(in crate::chat) elapsed_ms: Option<u64>,
+    /// The call returned while the work it started goes on, which the
+    /// header says in the verb's place.
+    pub(in crate::chat) background: bool,
 }
 
 impl Header {
@@ -135,6 +138,7 @@ impl Header {
             chips: Vec::new(),
             error: None,
             elapsed_ms: None,
+            background: false,
         }
     }
 
@@ -178,10 +182,19 @@ impl Header {
         self
     }
 
+    /// What the header says in the verb's place: the verb in `status`'s
+    /// form, or that the work goes on in the background.
+    pub(in crate::chat) fn verb_text(&self, status: ItemStatus) -> Option<SharedString> {
+        if self.background {
+            return Some(crate::tr!("tools.status.background").into_owned().into());
+        }
+        self.verb.map(|verb| verb.text(status))
+    }
+
     /// The header as one line of words, for assistive technology.
     pub(in crate::chat) fn label(&self, status: ItemStatus) -> String {
         let mut words: Vec<String> = Vec::new();
-        words.extend(self.verb.map(|verb| verb.text(status).to_string()));
+        words.extend(self.verb_text(status).map(|verb| verb.to_string()));
         words.extend(self.subject.as_ref().map(|subject| subject.to_string()));
         words.extend(self.title.as_ref().map(|title| title.to_string()));
         words.extend(self.argument.as_ref().map(|argument| argument.text.clone()));
@@ -464,20 +477,20 @@ fn header_row(
 ) -> Div {
     let theme = cx.theme();
     let muted = theme.muted_foreground;
+    let verb = header.verb_text(status);
     let Header {
         icon,
-        verb,
         shimmer,
         subject,
         title,
         argument,
         chips,
+        background,
         ..
     } = header;
     let mono = theme.mono_font_family.clone();
-    let verb = verb.map(|verb| {
-        let text = verb.text(status);
-        if shimmer && status == ItemStatus::InProgress {
+    let verb = verb.map(|text| {
+        if shimmer && status == ItemStatus::InProgress && !background {
             super::super::components::indicator::shimmer_label(
                 SharedString::from(format!("tool-verb-{key}")),
                 text.to_string().into(),
@@ -499,7 +512,7 @@ fn header_row(
         .when(!compact, |row| row.py_0p5())
         .text_body(false, cx)
         .when_some(fill, |row, fill| row.relative().child(fill))
-        .child(status_glyph(motion, key, icon, status, cx))
+        .child(status_glyph(motion, key, icon, status, background, cx))
         .child(
             h_flex()
                 .min_w_0()
@@ -687,21 +700,25 @@ pub(in crate::chat) fn status_chip(key: &str, status: ItemStatus, cx: &App) -> O
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Glyph {
     Running,
+    Background,
     Settled { failed: bool },
 }
 
-/// The type icon at row scale, or a spinner while the call runs; one
-/// cross-fades into the other. Failure never recolours the glyph — it hangs
-/// a small red X off its corner, on a disc of the row background so the
-/// badge stays legible over whatever it overlaps.
-pub(in crate::chat) fn status_glyph(
+/// The type icon at row scale, a spinner while the turn waits on the call,
+/// or a breathing dot while the work it started goes on in the background;
+/// each cross-fades into the next. Failure never recolours the glyph — it
+/// hangs a small red X off its corner, on a disc of the row background so
+/// the badge stays legible over whatever it overlaps.
+fn status_glyph(
     motion: &crate::motion::owned::Owned,
     key: &str,
     icon: SharedString,
     status: ItemStatus,
+    background: bool,
     cx: &App,
 ) -> AnyElement {
     let glyph = match status {
+        ItemStatus::InProgress if background => Glyph::Background,
         ItemStatus::InProgress => Glyph::Running,
         status => Glyph::Settled {
             failed: status == ItemStatus::Failed,
@@ -722,6 +739,7 @@ pub(in crate::chat) fn status_glyph(
             cx,
             move |glyph, _, _| match glyph {
                 Glyph::Running => Spinner::new().color(primary).into_any_element(),
+                Glyph::Background => BreathingDot::new(primary).into_any_element(),
                 Glyph::Settled { failed } => {
                     let icon = Icon::empty()
                         .path(icon.clone())

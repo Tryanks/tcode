@@ -163,6 +163,14 @@ impl Render for Gallery {
         );
         let subagents = [
             subagent_entry("gallery-s05-subagent-running", ItemStatus::InProgress, None),
+            TimelineEntry {
+                background: true,
+                ..subagent_entry(
+                    "gallery-s05-subagent-background",
+                    ItemStatus::InProgress,
+                    None,
+                )
+            },
             subagent_entry(
                 "gallery-s05-subagent-completed",
                 ItemStatus::Completed,
@@ -302,7 +310,7 @@ impl Render for Gallery {
                 state_row(
                     subagents
                         .iter()
-                        .zip(["RUNNING", "COMPLETED", "FAILED"])
+                        .zip(["RUNNING", "BACKGROUND", "COMPLETED", "FAILED"])
                         .map(|(entry, label)| {
                             state_card(label, gallery_support::activity(entry, false, cx), cx)
                         })
@@ -742,6 +750,7 @@ fn entry(id: &str, content: ItemContent) -> TimelineEntry {
         content: EntryContent::Item(content),
         ts: None,
         finished_ts: None,
+        background: false,
         turn: 0,
     }
 }

@@ -206,7 +206,9 @@ impl StoredEvent {
             AgentEvent::ItemStarted(item)
             | AgentEvent::ItemUpdated(item)
             | AgentEvent::ItemCompleted(item) => Some(&item.id),
-            AgentEvent::Delta { item_id, .. } => Some(item_id),
+            AgentEvent::Delta { item_id, .. } | AgentEvent::ItemBackgrounded { item_id, .. } => {
+                Some(item_id)
+            }
             _ => None,
         }
     }
@@ -236,6 +238,10 @@ pub struct TimelineEntry {
     /// observed before then: an item that arrives already complete took no
     /// time anyone saw.
     pub finished_ts: Option<u64>,
+    /// The call returned to the model while the work it started goes on
+    /// ([`AgentEvent::ItemBackgrounded`]): until its item settles, that work
+    /// runs without the turn waiting on it.
+    pub background: bool,
     /// Index into [`Timeline::turns`] of the turn this entry belongs to.
     pub turn: usize,
 }
@@ -799,6 +805,7 @@ impl Timeline {
                     },
                     ts,
                     finished_ts: None,
+                    background: false,
                     turn,
                 }));
             }
@@ -836,6 +843,7 @@ impl Timeline {
                         },
                         ts,
                         finished_ts: None,
+                        background: false,
                         turn,
                     }));
                 }
@@ -967,6 +975,21 @@ impl Timeline {
                 self.upsert_item(ts, item);
                 self.track_tool_item(ts, item, ToolLifecycle::Updated);
             }
+            AgentEvent::ItemBackgrounded {
+                item_id,
+                parent_item_id,
+            } => {
+                // A child's item is its mirror's, as in `upsert_item`.
+                if parent_item_id.is_none()
+                    && let Some(position) = self.first_entry(item_id)
+                {
+                    Arc::make_mut(&mut self.entries[position]).background = true;
+                    // The turn no longer waits on it.
+                    if self.turn_is_open() {
+                        self.tool_clock.mark(ts, item_id, false);
+                    }
+                }
+            }
             AgentEvent::ItemCompleted(item) => {
                 let observed = self.first_entry(&item.id).is_some();
                 self.upsert_item(ts, item);
@@ -1022,6 +1045,7 @@ impl Timeline {
                         content: EntryContent::Feedback { text: text.clone() },
                         ts,
                         finished_ts: None,
+                        background: false,
                         turn,
                     }));
                 }
@@ -1072,6 +1096,7 @@ impl Timeline {
                     },
                     ts,
                     finished_ts: None,
+                    background: false,
                     turn,
                 }));
             }
@@ -1086,6 +1111,7 @@ impl Timeline {
                     },
                     ts,
                     finished_ts: None,
+                    background: false,
                     turn,
                 }));
             }
@@ -1110,6 +1136,7 @@ impl Timeline {
                     },
                     ts: entry.ts,
                     finished_ts: None,
+                    background: false,
                     turn: entry.turn,
                 });
             }
@@ -1130,6 +1157,7 @@ impl Timeline {
                         },
                         ts,
                         finished_ts: None,
+                        background: false,
                         turn,
                     }));
                 }
@@ -1170,6 +1198,7 @@ impl Timeline {
                     content: EntryContent::ControlAction(action.clone()),
                     ts,
                     finished_ts: None,
+                    background: false,
                     turn,
                 }));
             }
@@ -1197,6 +1226,7 @@ impl Timeline {
                     content: EntryContent::ContextCompacted(compaction.clone()),
                     ts,
                     finished_ts: None,
+                    background: false,
                     turn,
                 }));
             }
@@ -1208,6 +1238,7 @@ impl Timeline {
                     content: EntryContent::ContextWindowChanged { window: *window },
                     ts,
                     finished_ts: None,
+                    background: false,
                     turn,
                 }));
             }
@@ -1239,8 +1270,11 @@ impl Timeline {
             return;
         };
         if self.turn_is_open() {
+            let waited_on = !self
+                .first_entry(&item.id)
+                .is_some_and(|position| self.entries[position].background);
             self.tool_clock
-                .mark(ts, &item.id, tool_is_active(lifecycle, state));
+                .mark(ts, &item.id, waited_on && tool_is_active(lifecycle, state));
         }
     }
 
@@ -1388,6 +1422,7 @@ impl Timeline {
                 content: incoming,
                 ts,
                 finished_ts: None,
+                background: false,
                 turn,
             }));
         }
@@ -1414,6 +1449,7 @@ impl Timeline {
             },
             ts,
             finished_ts: None,
+            background: false,
             turn,
         }));
     }
@@ -1523,6 +1559,7 @@ impl Timeline {
             content,
             ts,
             finished_ts: None,
+            background: false,
             turn,
         }));
     }

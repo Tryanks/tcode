@@ -32,6 +32,7 @@ const INTERJECT: &str = "_x.ai/interject";
 const INTERJECTION: &str = "_x.ai/session/interjection";
 const QUEUE_CHANGED: &str = "_x.ai/queue/changed";
 const TASK_BACKGROUNDED: &str = "_x.ai/task_backgrounded";
+const TASK_COMPLETED: &str = "_x.ai/task_completed";
 const SESSION_NOTIFICATION: &str = "_x.ai/session_notification";
 const FORK: &str = "_x.ai/session/fork";
 
@@ -127,9 +128,10 @@ struct Activity {
     client: Option<String>,
     /// The running prompt Grok started itself; its turn has its id.
     agent: Option<String>,
-    /// Shell tool calls whose command went on in the background. Grok streams
-    /// their later output as running updates and never completes them again.
-    backgrounded: HashSet<String>,
+    /// Shell tool calls whose command went on in the background, by the
+    /// task Grok runs it as. Grok answers such a call at once, streams its
+    /// later output as running updates and reports its end as the task's.
+    backgrounded: HashMap<String, String>,
     background_tasks: usize,
     /// A drop to no background tasks, withheld while a sent turn is open:
     /// Grok follows that turn with one reporting the finished task, and the
@@ -165,6 +167,46 @@ impl Grok {
         self.activity
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// A background task ended: the call that started it settles with the
+    /// task's output and exit code.
+    fn task_completed(&self, state: &mut State, params: &Value) -> Vec<AgentEvent> {
+        let Some(task) = params.pointer("/update/task_snapshot") else {
+            return Vec::new();
+        };
+        let Some(call) = task
+            .get("task_id")
+            .and_then(Value::as_str)
+            .and_then(|task_id| self.activity().backgrounded.remove(task_id))
+        else {
+            return Vec::new();
+        };
+        let exit_code = task.get("exit_code").and_then(Value::as_i64);
+        let status = if exit_code == Some(0) {
+            "completed"
+        } else {
+            "failed"
+        };
+        let output = task
+            .get("output")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let Ok(acp::SessionUpdate::ToolCallUpdate(mut update)) = serde_json::from_value(json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": call,
+            "status": status,
+            "content": [{"type": "content", "content": {"type": "text", "text": output}}],
+            "rawOutput": {"type": "Bash", "exit_code": exit_code},
+        })) else {
+            return Vec::new();
+        };
+        let shell = prepare_tool_update(&mut update);
+        let mut events = state.apply_update(acp::SessionUpdate::ToolCallUpdate(update));
+        if let Some(shell) = shell {
+            events.iter_mut().for_each(|event| shell.render(event));
+        }
+        events
     }
 
     fn steers(&self) -> MutexGuard<'_, VecDeque<(String, String)>> {
@@ -562,16 +604,26 @@ impl Dialect for Grok {
             return Vec::new();
         }
         let mut update = notification.update;
+        let mut launched = None;
         let shell = match &mut update {
             acp::SessionUpdate::ToolCallUpdate(update) => {
-                let output = update.fields.raw_output.as_ref();
-                if output.and_then(|raw| raw.get("type")) == Some(&json!("Bash"))
-                    && self
-                        .activity()
-                        .backgrounded
-                        .contains(update.tool_call_id.0.as_ref())
-                {
-                    update.fields.status = None;
+                let id = update.tool_call_id.0.as_ref();
+                if self.activity().backgrounded.values().any(|call| call == id) {
+                    // The call's own answer only says the task started, and
+                    // its output after that is the task's: it settles when
+                    // the task does.
+                    let raw_type = update
+                        .fields
+                        .raw_output
+                        .as_ref()
+                        .and_then(|raw| raw.get("type"))
+                        .and_then(Value::as_str);
+                    if raw_type == Some("BackgroundTaskStarted") {
+                        launched = Some(id.to_owned());
+                    }
+                    if matches!(raw_type, Some("Bash" | "BackgroundTaskStarted")) {
+                        update.fields.status = Some(acp::ToolCallStatus::InProgress);
+                    }
                 }
                 prepare_tool_update(update)
             }
@@ -581,6 +633,10 @@ impl Dialect for Grok {
         if let Some(shell) = shell {
             events.iter_mut().for_each(|event| shell.render(event));
         }
+        events.extend(launched.map(|item_id| AgentEvent::ItemBackgrounded {
+            item_id,
+            parent_item_id: None,
+        }));
         events
     }
 
@@ -694,14 +750,19 @@ impl Dialect for Grok {
             INTERJECTION => self.steer_accepted(&params),
             QUEUE_CHANGED => self.queue_changed(state, &params),
             TASK_BACKGROUNDED => {
-                if let Some(id) = params
-                    .pointer("/update/tool_call_id")
-                    .and_then(Value::as_str)
-                {
-                    self.activity().backgrounded.insert(id.to_string());
+                if let (Some(call), Some(task)) = (
+                    params
+                        .pointer("/update/tool_call_id")
+                        .and_then(Value::as_str),
+                    params.pointer("/update/task_id").and_then(Value::as_str),
+                ) {
+                    self.activity()
+                        .backgrounded
+                        .insert(task.to_owned(), call.to_owned());
                 }
                 Vec::new()
             }
+            TASK_COMPLETED => self.task_completed(state, &params),
             SESSION_NOTIFICATION => params
                 .get("update")
                 .map(|update| self.session_notification(state, update))
@@ -1363,23 +1424,38 @@ mod tests {
         let drained = at(&|event| matches!(event, AgentEvent::BackgroundTasksChanged { count: 0 }));
         assert!(sent_completed < drained, "{events:#?}");
 
-        // The backgrounded command's later output leaves its card completed.
+        // The backgrounded command's call returns at once, and its card runs
+        // in the background through its later output until the task ends.
+        let backgrounded = at(&|event| {
+            matches!(event, AgentEvent::ItemBackgrounded { item_id, parent_item_id: None }
+                if item_id == "call_68_0")
+        });
+        let settled =
+            at(&|event| matches!(event, AgentEvent::ItemCompleted(item) if item.id == "call_68_0"));
+        assert!(backgrounded < settled, "{events:#?}");
         let background = events
             .iter()
+            .take(settled)
             .filter(|event| {
                 matches!(event, AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item)
                     if item.id == "call_68_0")
             })
-            .skip_while(|event| !matches!(event, AgentEvent::ItemCompleted(_)))
             .collect::<Vec<_>>();
         assert!(
-            background
-                .iter()
-                .all(|event| matches!(event, AgentEvent::ItemCompleted(_))),
+            background.iter().all(|event| matches!(
+                event,
+                AgentEvent::ItemUpdated(ThreadItem {
+                    content: ItemContent::CommandExecution {
+                        status: ItemStatus::InProgress,
+                        ..
+                    },
+                    ..
+                })
+            )),
             "{background:#?}"
         );
         assert!(matches!(completed_last(&events, "call_68_0"),
-            ItemContent::CommandExecution { output, status: ItemStatus::Completed, .. }
+            ItemContent::CommandExecution { output, exit_code: Some(0), status: ItemStatus::Completed, .. }
                 if output == "bgdone\n"));
     }
 }
