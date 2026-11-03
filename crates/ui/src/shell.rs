@@ -195,6 +195,9 @@ struct ShellAttachment {
     /// thread is restored, then a chat, named by the change that brought it
     /// in place ([`Self::thread_generation`]).
     thread_body: crate::motion::Scene<ThreadBody>,
+    /// The body last made current: a chat brought in place stays drawn
+    /// unseen beneath it until it [appears](ChatView::appears).
+    thread_body_shown: Option<ThreadBody>,
     thread_generation: u64,
     /// A thread the compact page left in place (Back from an agent to its
     /// lead), drawn beneath while the lead rises over it.
@@ -1312,6 +1315,7 @@ impl AppShell {
             scene: Default::default(),
             routes: Default::default(),
             thread_body: Default::default(),
+            thread_body_shown: None,
             thread_generation: 0,
             thread_left: None,
             split_handle_held,
@@ -3535,11 +3539,24 @@ impl AppShell {
         let Some(attachment) = &mut self.attachment else {
             return div().into_any_element();
         };
-        let current = if pending {
+        let wanted = if pending {
             ThreadBody::Skeleton
         } else {
             ThreadBody::Chat(attachment.thread_generation)
         };
+        // A chat comes in over what the page shows once it appears; until
+        // then it readies itself unseen beneath, and the page holds still.
+        let chat = attachment.chat(cx);
+        let holding = attachment
+            .thread_body_shown
+            .filter(|shown| *shown != wanted && wanted != ThreadBody::Skeleton)
+            .filter(|_| !chat.read(cx).appears(cx));
+        let current = holding.unwrap_or(wanted);
+        attachment.thread_body_shown = Some(current);
+        chat.update(cx, |chat, cx| chat.set_held(holding.is_some(), cx));
+        if holding.is_some() {
+            window.request_animation_frame();
+        }
         let frame = attachment
             .thread_body
             .sample("compact-thread-body", current, window, cx);
@@ -3569,7 +3586,19 @@ impl AppShell {
                     ),
             })
             .collect();
-        frame.render(layers).into_any_element()
+        frame
+            .render(layers)
+            .when(holding.is_some(), |body| {
+                body.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .opacity(0.)
+                        .child(chat.clone())
+                        .child(crate::motion::shield()),
+                )
+            })
+            .into_any_element()
     }
 
     /// The lead thread of the open agent, when one is open.

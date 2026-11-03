@@ -151,6 +151,11 @@ pub struct ChatView {
     scene_shown: bool,
     /// When the view was bound to what it shows.
     scene_at: Instant,
+    /// A host holds the view unseen and fades it in itself once it
+    /// [appears](Self::appears) (a pane from its waiting hint, the compact
+    /// page over the thread it replaces): the surface takes each state at
+    /// once rather than fading too.
+    held: bool,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -388,6 +393,7 @@ impl ChatView {
             header_scroll: gpui::ScrollHandle::default(),
             motion: Default::default(),
             scene_shown: false,
+            held: false,
             scene_at: cx.background_executor().now(),
             window_state,
             composer,
@@ -494,6 +500,9 @@ impl ChatView {
             .update(cx, |drawer, cx| drawer.set_session(session_id.clone(), cx));
         self.session_id = session_id;
         self.timeline_stale = true;
+        // Not yet shown, for a host asking before the view next renders.
+        self.scene_shown = false;
+        self.scene_at = cx.background_executor().now();
         cx.notify();
     }
 
@@ -668,6 +677,9 @@ impl Render for ChatView {
         if !self.scene_shown {
             self.scene_shown = self.scene_ready(loading, rows_drawn, cx);
         }
+        if self.held {
+            self.motion.forget("chat-surface");
+        }
         let surface = if self.scene_shown {
             surface
         } else if now.saturating_duration_since(self.scene_at) >= SCENE_PATIENCE {
@@ -740,6 +752,26 @@ const SURFACE_NOTHING: usize = 3;
 const SCENE_PATIENCE: Duration = Duration::from_millis(300);
 
 impl ChatView {
+    /// Whether a host fading the view in should start now: what it was
+    /// bound to can be drawn at rest, or has kept the reader waiting long
+    /// enough that its skeleton shows, which the thread then fades in over.
+    pub(crate) fn appears(&self, cx: &App) -> bool {
+        self.scene_shown
+            || cx
+                .background_executor()
+                .now()
+                .saturating_duration_since(self.scene_at)
+                >= SCENE_PATIENCE
+    }
+
+    /// Whether a host holds the view unseen, to fade it in itself.
+    pub(crate) fn set_held(&mut self, held: bool, cx: &mut Context<Self>) {
+        if self.held != held {
+            self.held = held;
+            cx.notify();
+        }
+    }
+
     /// Whether what the view was bound to can be drawn at rest: no thread
     /// once the workspace is known; a thread once its timeline is held whole
     /// (not loading, not catching up), its rows have been drawn (measured, at

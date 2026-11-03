@@ -43,7 +43,13 @@ fn asked(id: &str) -> agent::AgentEvent {
         id: format!("{id}-ask"),
         parent_item_id: None,
         content: agent::ItemContent::UserMessage {
-            text: format!("What is in {id}?"),
+            // The agent's question is long, so its bubble is not where its
+            // lead's is drawn over it.
+            text: if id == "mirror" {
+                "What is in the agent's own thread, which goes on asking? ".repeat(6)
+            } else {
+                format!("What is in {id}?")
+            },
             context_len: None,
             attachments: vec![],
         },
@@ -185,6 +191,7 @@ fn bubble(id: &str) -> &'static str {
     match id {
         "thread-1" => "user-bubble-thread-1-ask",
         "thread-2" => "user-bubble-thread-2-ask",
+        "mirror" => "user-bubble-mirror-ask",
         _ => unreachable!("no bubble for {id}"),
     }
 }
@@ -220,11 +227,12 @@ fn bubble_fill(id: &str, cx: &mut VisualTestContext) -> Option<f32> {
 
 /// One frame of a thread appearing: how far in its question's bubble is
 /// painted against how it is at rest (none while it is not drawn), and
-/// whether a skeleton was drawn.
+/// whether a skeleton and a pane's waiting hint were drawn.
 #[derive(Debug, Clone, Copy)]
 struct Appearing {
     opacity: Option<f32>,
     skeleton: bool,
+    waiting: bool,
 }
 
 impl Appearing {
@@ -237,6 +245,7 @@ fn appearing(id: &str, rest: f32, cx: &mut VisualTestContext) -> Appearing {
     Appearing {
         opacity: bubble_fill(id, cx).map(|fill| fill / rest),
         skeleton: cx.debug_bounds("baseline-loading").is_some(),
+        waiting: cx.debug_bounds("waiting-pane").is_some(),
     }
 }
 
@@ -337,6 +346,39 @@ fn a_thread_slow_to_arrive_fades_in_once_it_has(cx: &mut TestAppContext) {
     assert!(seen.last().is_some_and(|frame| !frame.skeleton));
 }
 
+/// A thread opened into a pane that waited beside another keeps the waiting
+/// hint until it can be drawn, however long its log takes short of the
+/// skeleton's patience, then cross-fades straight from the hint: no frame
+/// shows neither.
+#[gpui::test]
+fn a_waiting_pane_keeps_its_hint_until_its_thread_is_drawn(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx, rest) = mount_finished(cx);
+    cx.simulate_keystrokes("secondary-d");
+    settle_frames(cx);
+    assert!(cx.debug_bounds("waiting-pane").is_some());
+    cx.simulate_keystrokes("secondary-2");
+    arrive(&shell, cx);
+    assert_eq!(
+        pane_threads(&shell, cx),
+        [Some("thread-1".into()), Some("thread-2".into())]
+    );
+    // The log comes past the hint's own fade, short of the skeleton's wait.
+    let mut seen = watch("thread-2", rest, 15, cx);
+    serve_finished(&host, "thread-2");
+    arrive(&shell, cx);
+    seen.extend(watch("thread-2", rest, 40, cx));
+    assert!(
+        seen.iter().all(|frame| frame.waiting || frame.shown() > 0.),
+        "the pane went blank before its thread: {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|frame| !frame.skeleton),
+        "the pane flashed a skeleton: {seen:?}"
+    );
+    assert_appears_once_drawn("thread-2", &seen);
+}
+
 /// With motion reduced, a thread switched to is there at once when it is
 /// ready, and not before.
 #[gpui::test]
@@ -355,6 +397,105 @@ fn a_thread_switched_to_with_motion_reduced_is_there_once_drawn(cx: &mut TestApp
         seen[started..]
             .iter()
             .all(|frame| (frame.shown() - 1.).abs() < 0.01),
+        "{seen:?}"
+    );
+}
+
+/// How many surfaces are painted over the compact page's body, whose
+/// bounds are `body`, and how far in thread-2's question is.
+fn compact_body(
+    body: gpui::Bounds<gpui::ScaledPixels>,
+    rest: f32,
+    cx: &mut VisualTestContext,
+) -> (usize, f32) {
+    let surfaces = cx.update(|window, cx| {
+        let surface = crate::material::content_surface(cx);
+        window
+            .painted_quads()
+            .iter()
+            .filter(|quad| quad.bounds == body)
+            .filter_map(|quad| quad.background.as_solid())
+            .filter(|colour| colour.a > 0. && colour.h == surface.h && colour.l == surface.l)
+            .count()
+    });
+    let shown = bubble_fill("thread-2", cx).map_or(0., |fill| fill / rest);
+    (surfaces, shown)
+}
+
+/// Back from an agent's thread to its lead on the compact page: the lead's
+/// chat rises over the agent's once its rows are drawn, rather than rising
+/// at once, covering the agent's thread with an empty surface while the
+/// lead, not opened before, loads.
+#[gpui::test]
+fn the_compact_page_raises_a_lead_once_it_is_drawn(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx, _) = mount_finished(cx);
+    let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+        unreachable!("panes_index sends a snapshot");
+    };
+    let mut mirror = index.sessions[1].clone();
+    mirror.id = "mirror".into();
+    mirror.title = "mirror".into();
+    mirror.parent_session_id = Some("thread-2".into());
+    index.sessions.push(mirror);
+    send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+    as_mobile(cx);
+    cx.simulate_resize(size(px(393.), px(852.)));
+    serve_finished(&host, "mirror");
+    store_of(&shell, cx).update(cx, |store, cx| store.select_session("mirror".into(), cx));
+    await_restore_update(&shell, cx, |store| {
+        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+            && store.thread_meta("mirror").is_some()
+    });
+    settle_frames(cx);
+    assert!(cx.debug_bounds("compact-thread-page").is_some());
+    let rest = bubble_fill("mirror", cx).expect("the agent's question");
+    // The body: the agent's chat's surface, the nearest beneath its question.
+    let question = cx.debug_bounds(bubble("mirror")).expect("drawn");
+    let body = cx.update(|window, cx| {
+        let surface = crate::material::content_surface(cx);
+        let question = question.scale(window.scale_factor());
+        window
+            .painted_quads()
+            .iter()
+            .filter(|quad| within(&question, &quad.bounds))
+            .filter(|quad| {
+                quad.background
+                    .as_solid()
+                    .is_some_and(|colour| colour.h == surface.h && colour.l == surface.l)
+            })
+            .map(|quad| quad.bounds)
+            .min_by(|a, b| {
+                (a.size.width.0 * a.size.height.0).total_cmp(&(b.size.width.0 * b.size.height.0))
+            })
+            .expect("the chat's surface")
+    });
+    assert!(rest > 0.);
+
+    let (beneath, _) = compact_body(body, rest, cx);
+    shell.update_in(cx, |shell, window, cx| assert!(shell.back(window, cx)));
+    draw(cx);
+    let mut seen = Vec::new();
+    for frame in 0..55 {
+        if frame == 15 {
+            serve_finished(&host, "thread-2");
+            arrive(&shell, cx);
+        }
+        display_frame(cx);
+        seen.push(compact_body(body, rest, cx));
+    }
+    assert!(
+        seen.iter()
+            .all(|(surfaces, shown)| *surfaces <= beneath || *shown > 0.),
+        "the lead rose before it was drawn: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|(_, shown)| *shown > 0.05 && *shown < 0.95),
+        "the lead rose at once: {seen:?}"
+    );
+    assert!(
+        seen.last()
+            .is_some_and(|(_, shown)| (*shown - 1.).abs() < 0.01),
         "{seen:?}"
     );
 }
