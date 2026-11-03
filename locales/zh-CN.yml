@@ -82,6 +82,7 @@ chat:
   rail_agents: "代理"
   rail_screen: "屏幕"
   rail_changes: "更改"
+  rail_goal: "目标"
   copy: "复制"
   copied: "已复制！"
   copy_message: "复制消息"

@@ -8,7 +8,8 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
-fn status_label(status: GoalStatus) -> String {
+/// The word a goal's status reads as.
+pub(crate) fn status_label(status: GoalStatus) -> String {
     match status {
         GoalStatus::Active => crate::tr!("composer.goal_active"),
         GoalStatus::Paused => crate::tr!("composer.goal_paused"),
@@ -20,8 +21,21 @@ fn status_label(status: GoalStatus) -> String {
     .into_owned()
 }
 
+/// The glyph and colour a goal's status shows in.
+pub(crate) fn status_mark(status: GoalStatus, cx: &App) -> (IconName, Hsla) {
+    let theme = cx.theme();
+    match status {
+        GoalStatus::Active => (IconName::CircleDot, theme.primary),
+        GoalStatus::Paused => (IconName::Pause, theme.muted_foreground),
+        GoalStatus::Complete => (IconName::CircleCheck, theme.success),
+        GoalStatus::Blocked | GoalStatus::UsageLimited | GoalStatus::BudgetLimited => {
+            (IconName::TriangleAlert, theme.warning)
+        }
+    }
+}
+
 /// Time, tokens and checks, whichever the harness reports.
-fn usage_line(goal: &Goal) -> String {
+pub(crate) fn usage_line(goal: &Goal) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(secs) = goal.time_used_secs.filter(|secs| *secs > 0) {
         parts.push(crate::chat::model::format_elapsed(secs * 1000));
@@ -70,16 +84,8 @@ impl Composer {
         let goal = goal.clone();
         let control = state.provider.and_then(|provider| provider.caps().goals);
         let enabled = self.interactive(cx) && goal_offered(&state).is_some();
+        let (icon, color) = status_mark(goal.status, cx);
         let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let (icon, color) = match goal.status {
-            GoalStatus::Active => (IconName::CircleDot, theme.primary),
-            GoalStatus::Paused => (IconName::Pause, muted),
-            GoalStatus::Complete => (IconName::CircleCheck, theme.success),
-            GoalStatus::Blocked | GoalStatus::UsageLimited | GoalStatus::BudgetLimited => {
-                (IconName::TriangleAlert, theme.warning)
-            }
-        };
         let pause = match goal.status {
             GoalStatus::Active => Some((GoalStatus::Paused, "composer.goal_pause")),
             GoalStatus::Paused | GoalStatus::Blocked | GoalStatus::UsageLimited => {
