@@ -85,6 +85,21 @@ pub(crate) fn settle_progress(elapsed: std::time::Duration) -> f32 {
         .directed_progress
 }
 
+/// A colour as a glide carries it: mixed over premultiplied alpha
+/// ([`crate::theme::mix`]), so every frame paints between what its ends
+/// paint. gpui-base interpolates `Hsla` channel by channel, which between a
+/// near-opaque fill and a faint tint of another colour (a button at rest and
+/// under the pointer) passes through a colour darker than either; remove
+/// this once gpui-base's colour interpolation is premultiplied.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) struct Colour(pub(crate) gpui::Hsla);
+
+impl gpui_base::motion::Interpolate for Colour {
+    fn interpolate(&self, target: &Self, progress: f32) -> Self {
+        Self(crate::theme::mix(self.0, target.0, progress))
+    }
+}
+
 /// The house spring, for a position that follows the pointer or a reorder
 /// and may be retargeted mid-flight: [`crate::edge_back::SETTLE`], at rest a
 /// quarter pixel away.
@@ -585,12 +600,12 @@ fn hover_fill_over(
     let (hovered, on_hover) = hovered(id.clone(), window, cx);
     let fill = transition(
         child_id(&id, "hover-fill"),
-        if hovered { hover } else { rest },
+        Colour(if hovered { hover } else { rest }),
         settle(),
         window,
         cx,
     );
-    (fill, on_hover)
+    (fill.0, on_hover)
 }
 
 /// Whether the pointer is over the element `id`, as its `on_hover` last
@@ -653,13 +668,15 @@ pub(crate) fn hover_layer_owned(
     let motion = motion.clone();
     Sampled::new(move |window, cx| {
         let (hovered, on_hover) = hovered("hover-layer", window, cx);
-        let fill = motion.transition(
-            format!("{key}/hover-fill"),
-            if hovered { hover } else { rest },
-            &owned::Curve::settle(),
-            window,
-            cx,
-        );
+        let fill = motion
+            .transition(
+                format!("{key}/hover-fill"),
+                Colour(if hovered { hover } else { rest }),
+                &owned::Curve::settle(),
+                window,
+                cx,
+            )
+            .0;
         div()
             .id("hover-layer")
             .absolute()

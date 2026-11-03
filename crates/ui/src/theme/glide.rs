@@ -115,20 +115,27 @@ fn step(generation: u64, window: &mut Window, cx: &mut App) {
 
 /// `from` mixed toward `to` by `progress`, over premultiplied alpha, so a
 /// colour gaining or losing transparency does not flash the hue of its
-/// clear end.
-pub(super) fn mix(from: Hsla, to: Hsla, progress: f32) -> Hsla {
+/// clear end, and what it paints over anything lies between what its ends
+/// paint there.
+pub(crate) fn mix(from: Hsla, to: Hsla, progress: f32) -> Hsla {
     if progress <= 0. {
         return from;
     }
     if progress >= 1. {
         return to;
     }
-    let (a, b) = (from.to_rgb(), to.to_rgb());
     let lerp = |x: f32, y: f32| x + (y - x) * progress;
-    let alpha = lerp(a.a, b.a);
-    if alpha <= 0. {
-        return Hsla { a: 0., ..to };
+    let alpha = lerp(from.a, to.a);
+    // One colour fading, or a clear end, adds no hue: the other end's own
+    // colour at the alpha reached, exactly, where a round trip through RGB
+    // would not keep it.
+    if (from.h, from.s, from.l) == (to.h, to.s, to.l) || from.a <= 0. {
+        return Hsla { a: alpha, ..to };
     }
+    if to.a <= 0. {
+        return Hsla { a: alpha, ..from };
+    }
+    let (a, b) = (from.to_rgb(), to.to_rgb());
     let channel = |x: f32, y: f32| lerp(x * a.a, y * b.a) / alpha;
     Rgba {
         r: channel(a.r, b.r),
