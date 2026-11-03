@@ -314,8 +314,15 @@ impl GroupSection {
             .child(div().flex_none().text_secondary(compact, cx).child(count))
             .into_any_element();
         let leave = group.clone();
-        let (fill, on_hover) =
-            crate::motion::hover_fill("group-leave", cx.theme().list_hover, window, cx);
+        let (fill, on_hover) = crate::motion::hover_fill(
+            crate::motion::Clock::Element,
+            "group-leave",
+            cx.theme().list_hover.opacity(0.),
+            cx.theme().list_hover,
+            &crate::material::HOVER.into(),
+            window,
+            cx,
+        );
         let leave_row = crate::material::accessible_clickable(
             group_row(cx),
             "group-leave",

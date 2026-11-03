@@ -7,46 +7,54 @@
 //! one hovered item, with the fades of the items the pointer just entered or
 //! left: at rest it holds one key, whatever the list's length.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
-
-#[cfg(not(target_family = "wasm"))]
-use std::time::Instant;
-#[cfg(target_family = "wasm")]
-use web_time::Instant;
+use std::{cell::RefCell, collections::HashSet, rc::Rc};
 
 use gpui::{App, SharedString, Window};
+
+use super::{Curve, owned::Owned};
 
 /// The item of a list the pointer is over, owned by the list, and how far
 /// each item's hover reveal (a message's actions, a formula's tools) is in.
 ///
 /// An item hands its `on_hover` to [`ListHover::on_hover`] and draws what it
 /// reveals at [`ListHover::reveal`]. Only the items whose reveal is moving
-/// hold a fade; one at rest is 1 when hovered and 0 otherwise.
+/// hold a fade, on the glide every sampler uses; one at rest is 1 when
+/// hovered and 0 otherwise.
 #[derive(Clone)]
 pub(crate) struct ListHover(Rc<RefCell<Hover>>);
 
-#[derive(Default)]
 struct Hover {
     /// The item the pointer is over, and over how many of its parts: an item
     /// whose part blocks the pointer from the item (its actions over it)
     /// hands those parts the same handler, and the item stays hovered while
     /// the pointer is over any of them, whichever order they hear it in.
     hovered: Option<(SharedString, usize)>,
-    /// Reveals on their way in or out: from where, to where, since when.
-    fading: HashMap<SharedString, (f32, f32, Instant)>,
+    /// The reveals on their way in or out, by item, their glides in `fades`.
+    fading: HashSet<SharedString>,
+    fades: Owned,
+    curve: Curve,
 }
 
 impl ListHover {
-    /// The hover of one list, nothing hovered.
-    pub(crate) fn new() -> Self {
-        Self(Rc::default())
+    /// The hover of one list, nothing hovered, its reveals moving along
+    /// `curve`.
+    pub(crate) fn new(curve: impl Into<Curve>) -> Self {
+        Self(Rc::new(RefCell::new(Hover {
+            hovered: None,
+            fading: HashSet::new(),
+            fades: Owned::default(),
+            curve: curve.into(),
+        })))
     }
 
     /// Nothing hovered and no reveal moving: the list shows other items now
     /// (another thread's), whose keys may match the last ones'. The pointer
     /// gives the hover to an item again as it next comes onto one.
     pub(crate) fn clear(&self) {
-        *self.0.borrow_mut() = Hover::default();
+        let mut hover = self.0.borrow_mut();
+        hover.hovered = None;
+        hover.fading.clear();
+        hover.fades.clear();
     }
 
     /// The handler for the `on_hover` of `item`, or of one of its parts: the
@@ -93,15 +101,14 @@ impl ListHover {
         cx: &mut App,
     ) {
         let now = cx.background_executor().now();
-        let reduce = cx.reduce_motion();
         {
             let mut hover = self.0.borrow_mut();
-            for (item, to) in [(previous, 0f32), (next, 1.)] {
+            for (item, from) in [(previous, 1f32), (next, 0.)] {
                 let Some(item) = item else { continue };
-                let from = hover.sample_toward(&item, 1. - to, now);
-                hover.fading.remove(&item);
-                if !reduce && from != to {
-                    hover.fading.insert(item, (from, to, now));
+                // A reveal at rest starts its glide from where it rests; one
+                // still moving turns from where it is.
+                if hover.fading.insert(item.clone()) {
+                    hover.fades.seed(item, from, now);
                 }
             }
         }
@@ -114,21 +121,32 @@ impl ListHover {
     /// How far `item`'s hover reveal is in, from 0 to 1, keeping frames
     /// coming while it moves.
     pub(crate) fn reveal(&self, item: &str, window: &mut Window, cx: &App) -> f32 {
-        let now = cx.background_executor().now();
         let mut hover = self.0.borrow_mut();
-        let value = hover.sample(item, now);
-        if hover.fading.contains_key(item) {
-            window.request_animation_frame();
+        let target = if hover.hovered.as_ref().is_some_and(|(held, _)| held == item) {
+            1f32
+        } else {
+            0.
+        };
+        if !hover.fading.contains(item) {
+            return target;
+        }
+        let key = SharedString::from(item.to_owned());
+        let (value, settled) = hover
+            .fades
+            .glide(key.clone(), target, &hover.curve, window, cx);
+        if settled {
+            hover.fading.remove(item);
+            hover.fades.forget_exact(key);
         }
         value
     }
 
     /// The hover fill of `item`, for the first child of its frame, under the
-    /// item's content: `fill` painted at the item's reveal, rounded by
-    /// `radius`. It hears the pointer through its own hitbox over the item,
-    /// so the item's own `on_hover` stays the caller's. [`super::hover_layer`]
-    /// for an item of a list: the fill holds no state of its own. The item
-    /// must be positioned.
+    /// item's content: `fill` [blended](super::blend) in at the item's
+    /// reveal, rounded by `radius`. It hears the pointer through its own
+    /// hitbox over the item, so the item's own `on_hover` stays the
+    /// caller's. [`super::hover_layer`] for an item of a list: the fill
+    /// holds no state of its own. The item must be positioned.
     pub(crate) fn layer(
         &self,
         item: impl Into<SharedString>,
@@ -147,40 +165,12 @@ impl ListHover {
                 .absolute()
                 .inset_0()
                 .rounded(radius)
-                .when(reveal > 0., |layer| layer.bg(fill.opacity(reveal)))
+                .when(reveal > 0., |layer| {
+                    layer.bg(super::blend(fill.opacity(0.), fill, reveal))
+                })
                 .on_hover(hover.on_hover(item))
                 .into_any_element()
         })
-    }
-}
-
-impl Hover {
-    /// `item`'s reveal `now`; a fade that has played is let go.
-    fn sample(&mut self, item: &str, now: Instant) -> f32 {
-        let rest = if self.hovered.as_ref().is_some_and(|(held, _)| held == item) {
-            1.
-        } else {
-            0.
-        };
-        self.sample_toward(item, rest, now)
-    }
-
-    /// `item`'s reveal `now`, or `rest` when it is not fading.
-    fn sample_toward(&mut self, item: &str, rest: f32, now: Instant) -> f32 {
-        if let Some(&(from, to, at)) = self.fading.get(item) {
-            // A reveal that turns back part way runs the part it has left.
-            let span = crate::edge_back::SETTLE.mul_f32((to - from).abs().max(0.01));
-            let elapsed = now.saturating_duration_since(at);
-            if elapsed < span {
-                let progress = super::settle_progress(
-                    crate::edge_back::SETTLE.mul_f32(elapsed.as_secs_f32() / span.as_secs_f32()),
-                );
-                return from + (to - from) * progress;
-            }
-            self.fading.remove(item);
-            return to;
-        }
-        rest
     }
 }
 
@@ -255,7 +245,7 @@ mod tests {
         let (_, cx) = cx.add_window_view({
             let drawn = drawn.clone();
             |_, _| Rows {
-                hover: ListHover::new(),
+                hover: ListHover::new(crate::material::HOVER),
                 drawn,
             }
         });
@@ -356,7 +346,7 @@ mod tests {
         let (_, cx) = cx.add_window_view({
             let drawn = drawn.clone();
             |_, _| ListRows {
-                hover: ListHover::new(),
+                hover: ListHover::new(crate::material::HOVER),
                 list: gpui::ListState::new(30, gpui::ListAlignment::Top, px(200.)),
                 drawn,
             }

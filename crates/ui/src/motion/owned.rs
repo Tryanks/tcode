@@ -476,7 +476,7 @@ impl Owned {
             .retain(|held, _| *held != key && !held.starts_with(&channel));
     }
 
-    fn forget_exact(&self, key: SharedString) {
+    pub(super) fn forget_exact(&self, key: SharedString) {
         self.values.borrow_mut().remove(&key);
     }
 
@@ -729,7 +729,12 @@ impl Owned {
 
     /// Starts `key`'s glide at `from` when it has none, so its first target
     /// is glided to rather than taken at once.
-    fn seed<T: Interpolate + PartialEq + 'static>(&self, key: SharedString, from: T, now: Instant) {
+    pub(super) fn seed<T: Interpolate + PartialEq + 'static>(
+        &self,
+        key: SharedString,
+        from: T,
+        now: Instant,
+    ) {
         Self::entry(&mut self.values.borrow_mut(), key, || Glide {
             from: from.clone(),
             target: from,
@@ -739,7 +744,7 @@ impl Owned {
         });
     }
 
-    fn glide<T>(
+    pub(super) fn glide<T>(
         &self,
         key: SharedString,
         target: T,

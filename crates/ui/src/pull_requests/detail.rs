@@ -159,7 +159,7 @@ pub(super) struct ConversationView {
 impl Default for ConversationView {
     fn default() -> Self {
         Self {
-            hover: crate::motion::ListHover::new(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             scroll: crate::motion::ListScroll::default(),
             list: ListState::new(0, ListAlignment::Top, px(200.)),
             rows: Vec::new(),
