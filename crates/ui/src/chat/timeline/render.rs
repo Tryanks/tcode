@@ -1408,8 +1408,6 @@ impl ChatView {
             path,
             ..
         } = activity;
-        // A subagent's window also opens on the way to its thread.
-        let expandable = expandable || tools::subagent::child_thread(self, entry, cx).is_some();
         // Of an output the record holds a preview of, Copy takes the whole.
         let elided = self
             .workspace_store
@@ -1429,20 +1427,43 @@ impl ChatView {
                 },
             )
         });
-        let detail = if !expandable {
+        let child = tools::subagent::child_thread(self, entry, cx);
+        let detail = if child.is_some() {
+            tools::window::Detail::Elsewhere(crate::tr!("tools.open_thread").into_owned().into())
+        } else if !expandable {
             tools::window::Detail::None
         } else {
             match tools::window::fold(&self.motion, &entry.id, expanded, window, cx) {
                 Some(shown) => {
-                    let shows = self.activity_body_key(entry, status, cx);
+                    let shows = self.activity_body_key(entry, status);
                     let body = self.activity_body(entry, cwd, row.images_inline, cx);
                     tools::window::Detail::Fold(shown, body, shows)
                 }
                 None => tools::window::Detail::Shut,
             }
         };
-        let click_key = key;
-        let entry_id = entry.id.clone();
+        let on_click: tools::window::ClickHandler = match child {
+            Some(child) => {
+                let store = self.workspace_store.clone();
+                let lead = self.session_id.clone();
+                Box::new(move |_, window, cx| {
+                    crate::agents_panel::open_agent(
+                        &store,
+                        child.clone(),
+                        lead.as_deref(),
+                        window,
+                        cx,
+                    );
+                })
+            }
+            None => {
+                let click_key = key;
+                let entry_id = entry.id.clone();
+                Box::new(cx.listener(move |this, _, _, cx| {
+                    this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
+                }))
+            }
+        };
         tools::window::tool_window(
             tools::window::WindowSpec {
                 key: entry.id.clone(),
@@ -1458,9 +1479,7 @@ impl ChatView {
                 motion: self.motion.clone(),
             },
             detail,
-            cx.listener(move |this, _, _, cx| {
-                this.toggle_activity_expanded((turn, &entry_id), &click_key, expanded, cx);
-            }),
+            on_click,
             cx,
         )
     }
@@ -1468,13 +1487,10 @@ impl ChatView {
     /// What an open activity window's body shows, as far as its height goes:
     /// whether the call is done, how much of its output this client holds,
     /// and which of its parts the reader opened.
-    fn activity_body_key(&self, entry: &TimelineEntry, status: agent::ItemStatus, cx: &App) -> u64 {
+    fn activity_body_key(&self, entry: &TimelineEntry, status: agent::ItemStatus) -> u64 {
         use std::hash::{Hash as _, Hasher as _};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(&status).hash(&mut hash);
-        tools::subagent::child_thread(self, entry, cx)
-            .is_some()
-            .hash(&mut hash);
         self.full_outputs
             .get(&entry.id)
             .map(std::mem::discriminant)
@@ -1539,15 +1555,6 @@ impl ChatView {
                 .whitespace_normal()
                 .child(text.clone())
                 .into_any_element(),
-            ItemContent::Subagent { .. } => tools::subagent::body(
-                entry,
-                &mut tools::ToolCtx {
-                    chat: self,
-                    cx,
-                    cwd,
-                    images_inline,
-                },
-            ),
             _ => div().into_any_element(),
         }
     }
