@@ -70,12 +70,72 @@ pub(crate) struct AssistantData<'a> {
     pub(crate) markdown: Option<Entity<MarkdownState>>,
     pub(crate) pinned: bool,
     pub(crate) compact: bool,
-    pub(crate) show_actions: bool,
+    pub(crate) actions: MessageActions,
     pub(crate) copied: bool,
     /// The timeline's hover, which reveals the message's actions.
     pub(crate) hover: crate::motion::ListHover,
     /// The chat's motion, which keeps the action row's fold.
     pub(crate) motion: crate::motion::owned::Owned,
+}
+
+/// Where a message's actions are drawn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MessageActions {
+    /// It has none: its turn runs, or a later message of the turn has them.
+    None,
+    /// In a row under the message, for one its turn goes on after.
+    Below,
+    /// On the leading edge of its turn's footer, beside the turn's timing,
+    /// for the message that ends its turn ([`EndingActions`]).
+    InFooter,
+}
+
+/// The hover key of message `id`, which reveals its actions wherever they
+/// are drawn.
+fn hover_key(id: &str) -> SharedString {
+    SharedString::from(format!("assistant-{id}"))
+}
+
+/// The actions of a message that ends its turn, as its turn's footer draws
+/// them: at the message's hover reveal, which the footer takes too.
+#[derive(Clone)]
+pub(crate) struct EndingActions {
+    pub(crate) id: String,
+    pub(crate) copied: bool,
+    pub(crate) pinned: bool,
+    pub(crate) compact: bool,
+}
+
+impl EndingActions {
+    pub(crate) fn render(
+        &self,
+        hover: &crate::motion::ListHover,
+        motion: &crate::motion::owned::Owned,
+        on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &App,
+    ) -> AnyElement {
+        let reveal = if self.pinned || self.compact {
+            1.
+        } else {
+            hover.reveal(&hover_key(&self.id), window, cx)
+        };
+        let key = format!("assistant:{}", self.id);
+        let selector = format!("copy-{key}");
+        let copy = copy_button(&key, self.copied, self.compact, on_copy, cx)
+            .motion(motion)
+            .debug_selector(move || selector);
+        let actions = h_flex().gap(px(2.)).items_center().child(copy);
+        reserve_action_row(actions, reveal, self.pinned, self.compact).into_any_element()
+    }
+
+    /// The footer's `on_hover`, when its actions wait for one.
+    pub(crate) fn on_hover(
+        &self,
+        hover: &crate::motion::ListHover,
+    ) -> Option<impl Fn(&bool, &mut Window, &mut App) + 'static> {
+        (!self.pinned && !self.compact).then(|| hover.on_hover(hover_key(&self.id)))
+    }
 }
 
 /// The message's own context-menu item: the whole text, as the hover Copy
@@ -107,7 +167,7 @@ pub(crate) fn assistant(
         markdown,
         pinned,
         compact,
-        show_actions,
+        actions,
         copied,
         hover,
         motion,
@@ -148,12 +208,13 @@ pub(crate) fn assistant(
 
     // The action row folds in when the turn settles on this message, and out
     // when it moves on.
-    let hover_key = SharedString::from(format!("assistant-{id}"));
+    let hover_key = hover_key(id);
     let fold_id = SharedString::from(format!("assistant-actions-{id}"));
     let key = format!("assistant:{id}");
-    // Only a message whose action row shows takes the timeline's hover, so
-    // a row moving under a still pointer redraws nothing it need not.
-    let reveals = show_actions && !pinned && !compact;
+    let below = actions == MessageActions::Below;
+    // Only a message with actions takes the timeline's hover, so a row
+    // moving under a still pointer redraws nothing it need not.
+    let reveals = actions != MessageActions::None && !pinned && !compact;
     let on_hover = hover.on_hover(hover_key.clone());
     v_flex()
         .id(hover_key.clone())
@@ -162,7 +223,7 @@ pub(crate) fn assistant(
         .when(reveals, |message| message.on_hover(on_hover))
         .child(message)
         .child(crate::motion::Sampled::new(
-            move |window, cx| match motion.shown(fold_id, show_actions.then_some(()), window, cx) {
+            move |window, cx| match motion.shown(fold_id, below.then_some(()), window, cx) {
                 Some(fold) => {
                     let reveal = hover.reveal(&hover_key, window, cx);
                     let actions = h_flex()
@@ -207,12 +268,6 @@ pub(crate) fn reserve_action_row(
         .child(actions)
 }
 
-/// The geometry every message action shares: a 24px icon-only square with a
-/// 6px radius, quiet until hovered. The label lives in the tooltip, so a row of
-/// actions reads as icons, not as a row of little labelled controls.
-///
-/// The icon carries its own muted color because a Ghost button paints
-/// `foreground` over any color set on the button itself.
 #[cfg(test)]
 mod tests {
     use super::MdState;

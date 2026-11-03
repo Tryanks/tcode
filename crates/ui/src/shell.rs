@@ -14802,6 +14802,57 @@ mod tests {
         }
     }
 
+    /// A finished turn that ends on a message draws one footer row: the
+    /// message's Copy on the leading edge and the turn's time, duration and
+    /// cost against the trailing edge, at a wide window and at narrow ones,
+    /// where the timing wraps toward that edge but stays in the row.
+    #[gpui::test]
+    fn a_finished_turns_copy_and_timing_share_one_row(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let (shell, host, cx) = mount_panes(cx);
+        serve_finished_turns(&host, "thread-1", 1, false);
+        await_restore_update(&shell, cx, |store| {
+            store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+        });
+        for width in [2000., 900., 640.] {
+            resize(cx, width);
+            settle_frames(cx);
+            let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
+                cx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} at {width}px"))
+            };
+            let row = bounds("turn-time-row", cx);
+            let copy = bounds("copy-assistant:thread-1-answer-0", cx);
+            let clock = bounds("turn-time-clock", cx);
+            let total = bounds("turn-time-total", cx);
+            assert!(
+                row.contains(&copy.center()),
+                "Copy is in the footer row at {width}px: {row:?}, {copy:?}"
+            );
+            assert!(
+                (copy.left() - row.left()).abs() <= px(1.),
+                "Copy leads the row at {width}px: {row:?}, {copy:?}"
+            );
+            for clause in [clock, total] {
+                assert!(
+                    clause.left() > copy.right() && clause.right() <= row.right(),
+                    "the timing is beside Copy, in the row, at {width}px: \
+                     {row:?}, {copy:?}, {clause:?}"
+                );
+                assert!(
+                    clause.top() < copy.bottom() && clause.bottom() > copy.top(),
+                    "the timing is on Copy's line at {width}px: {copy:?}, {clause:?}"
+                );
+            }
+            assert!(
+                (row.right() - total.right()).abs() <= px(1.),
+                "the timing ends at the row's trailing edge at {width}px: \
+                 {row:?}, {total:?}"
+            );
+        }
+    }
+
     /// Resting on a finished turn's duration shows its breakdown beside the
     /// duration, not centred on the row or the page.
     #[gpui::test]
