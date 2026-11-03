@@ -31,9 +31,8 @@ pub(crate) use zoom::{PaneZoom, Zoom};
 
 use crate::chat::{ChatView, WindowEdges};
 use crate::icon::{Icon, IconName};
-use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
-use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::button::Button;
 
 /// How long a value drawn here takes to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -663,19 +662,12 @@ impl Panel for ThreadPanel {
 /// and raises [`ClosePane`] there, as the pane menu's row does, so the pane
 /// glides out.
 pub(crate) fn close_button(id: &'static str, pane: FocusHandle) -> Button {
-    Button::new(id)
-        .debug_selector(move || id.into())
-        // A press must not arm a header's window drag region.
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .ghost()
-        .small()
-        .compact()
-        .icon(IconName::Close)
-        .tooltip(crate::tr!("panes.close"))
-        .on_click(move |_, window, cx| {
+    crate::widgets::button::close_button(id, crate::tr!("panes.close")).on_click(
+        move |_, window, cx| {
             window.focus(&pane, cx);
             window.dispatch_action(Box::new(ClosePane), cx);
-        })
+        },
+    )
 }
 
 /// Where a thread dragged over the column would land: the slot it would

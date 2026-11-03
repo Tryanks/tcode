@@ -4715,13 +4715,40 @@ impl AppShell {
             cx,
             |title, _, cx| crate::material::bar_title(title.clone(), cx).into_any_element(),
         ));
+        // Closes the route as the sidebar's Machines toggle does; without a
+        // workspace beneath it there is nothing to close to.
+        let close = self
+            .window_state
+            .read(cx)
+            .history()
+            .iter()
+            .any(|destination| destination.route() != Route::Hosts)
+            .then(|| {
+                crate::widgets::button::close_button("hosts-close", crate::tr!("hosts.close"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.window_state.update(cx, |state, cx| {
+                            state.back(cx);
+                        });
+                    }))
+            });
+        // The column is centred in the strip; whatever holds the strip's
+        // right end is kept clear of it.
+        let right_end = if hosts_caption {
+            window_caption::CAPTION_CLUSTER_WIDTH
+        } else {
+            0.
+        } + if close.is_some() {
+            crate::chat::PANE_CLOSE_WIDTH
+        } else {
+            0.
+        };
         window_drag_area(
             "hosts-header-drag",
             crate::settings_rows::content_header(
                 crate::material::bar("hosts-header", crate::material::Bar::Strip, false, cx),
                 cx,
             )
-            .when(hosts_caption, |strip| strip.relative()),
+            .relative(),
             window,
             cx,
         )
@@ -4729,20 +4756,21 @@ impl AppShell {
             crate::settings_rows::content_header_column()
                 .items_center()
                 .gap(gap)
-                .when(hosts_caption, |column| {
-                    column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
-                })
+                .pr(px(right_end))
                 .children(back)
                 .child(window_caption::drag_region(title)),
         )
-        .children(hosts_caption.then(|| {
-            div()
+        .child(
+            h_flex()
                 .absolute()
                 .top_0()
                 .right_0()
                 .h_full()
-                .child(window_caption::caption_controls(window, cx))
-        }))
+                .items_center()
+                .when(!hosts_caption, |end| end.pr(cx.theme().tokens.spacing.sm))
+                .children(close)
+                .children(hosts_caption.then(|| window_caption::caption_controls(window, cx))),
+        )
         .into_any_element()
     }
 
