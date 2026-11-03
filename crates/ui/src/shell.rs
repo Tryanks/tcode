@@ -2241,8 +2241,8 @@ impl AppShell {
     /// The narrowest the chat column can be laid out as `tree`, whose panels
     /// show the threads `session_of` names: its panes' headers at their
     /// narrowest, side by side, and never narrower than a pane alone. Only
-    /// the pane along the column's left edge clears the traffic lights over a
-    /// collapsed sidebar.
+    /// the pane in the column's top-left corner clears the traffic lights
+    /// over a collapsed sidebar.
     fn column_min_width(
         &self,
         tree: &gpui_base::dock::PaneTree,
@@ -10141,6 +10141,49 @@ mod tests {
             assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
             assert!(!store.is_thread_open("draft-1"));
         });
+    }
+
+    /// The window's chrome sits in its top corners, so of two stacked panes
+    /// only the top one's header makes room for it: the lower header clears
+    /// no traffic lights over a collapsed sidebar and hosts no caption
+    /// buttons, its close button ending it.
+    #[gpui::test]
+    fn a_pane_stacked_below_another_leaves_the_window_chrome_to_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("draft-1".into())]
+        );
+
+        let [top, below] = pane_bounds(&shell, cx)[..] else {
+            panic!("two panes");
+        };
+        assert!(below.top() >= top.bottom(), "{top:?} over {below:?}");
+        // The lower pane's header is drawn after the top one's.
+        let toggle = cx
+            .debug_bounds("toggle-sidebar")
+            .expect("the lower header's sidebar toggle");
+        let close = cx
+            .debug_bounds("pane-close")
+            .expect("the lower pane's close button");
+        assert!(
+            below.contains(&toggle.center())
+                && toggle.left() - below.left() < px(crate::window_caption::TRAFFIC_LIGHT_INSET),
+            "no traffic lights to clear: {toggle:?} in {below:?}"
+        );
+        assert!(
+            below.contains(&close.center()) && below.right() - close.right() < px(12.),
+            "no caption buttons after it: {close:?} in {below:?}"
+        );
     }
 
     /// The colour of a pane closed is the next new pane's.

@@ -977,7 +977,8 @@ pub(crate) fn min_width(
             .sum(),
         PaneRef::Split { children, .. } => children
             .iter()
-            .map(|child| min_width(child, edges, pane_min))
+            .enumerate()
+            .map(|(ix, child)| min_width(child, row_edges(edges, ix), pane_min))
             .fold(0., f32::max),
     }
 }
@@ -1083,7 +1084,7 @@ pub(crate) fn edges_of(node: &PaneNode, edges: WindowEdges, panel: PanelId) -> O
             children.iter().enumerate().find_map(|(ix, child)| {
                 let edges = match axis {
                     Axis::Horizontal => column_edges(edges, ix, children.len()),
-                    Axis::Vertical => edges,
+                    Axis::Vertical => row_edges(edges, ix),
                 };
                 edges_of(child, edges, panel)
             })
@@ -1096,6 +1097,15 @@ fn column_edges(edges: WindowEdges, ix: usize, count: usize) -> WindowEdges {
     WindowEdges {
         left: edges.left && ix == 0,
         right: edges.right && ix + 1 == count,
+    }
+}
+
+/// The edges row `ix` of stacked ones keeps: the window's chrome sits in its
+/// top corners, so only the top row's header reaches it.
+fn row_edges(edges: WindowEdges, ix: usize) -> WindowEdges {
+    WindowEdges {
+        left: edges.left && ix == 0,
+        right: edges.right && ix == 0,
     }
 }
 
