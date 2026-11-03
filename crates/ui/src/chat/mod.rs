@@ -31,6 +31,7 @@ use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::copy::CopiedMark;
 use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, open_in_zed};
+use crate::widgets::scrollbar::Scrollbar;
 use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
@@ -43,7 +44,7 @@ use gpui::{
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{ElementExt as _, Scrollbar, StyledExt as _, h_flex, v_flex};
+use gpui_base::{ElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use tcode_core::git::GitAction;
@@ -882,7 +883,11 @@ impl ChatView {
                         ),
                 )
                 .when(!window.is_inspector_picking(cx), |timeline| {
-                    timeline.child(Scrollbar::vertical(&self.list_state).id("timeline-scrollbar"))
+                    timeline.child(
+                        Scrollbar::vertical(&self.list_state)
+                            .id("timeline-scrollbar")
+                            .motion(&self.motion),
+                    )
                 })
                 .into_any_element()
         };

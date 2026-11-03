@@ -370,7 +370,7 @@ pub(crate) fn palette(mode: ThemeMode, cx: &App) -> &Theme {
 /// Make `theme` the one every view reads: Tcode's own and gpui-base's, built
 /// from it.
 fn install(theme: Theme, cx: &mut App) {
-    let radius = theme.tokens.radius;
+    let look = crate::widgets::scrollbar::Look::of(&theme);
     let base_theme = gpui_base::Theme {
         appearance: match theme.mode {
             ThemeMode::Light => ThemeAppearance::Light,
@@ -383,14 +383,6 @@ fn install(theme: Theme, cx: &mut App) {
             } else {
                 ScrollbarMode::Hover
             })
-            // gpui-base keeps a scrollbar's fade and width in a private
-            // `ScrollbarState` under its element path (`Window::use_state`),
-            // with no owner a view could hold instead, so a scrollbar its view
-            // draws under another parent (a page as the window turns compact
-            // or wide, a pane a zoom lifts) starts hidden there rather than
-            // carrying on its fade. Keeping it in the view means a Tcode
-            // `Scrollbar` in place of gpui-base's; until then this gap stands,
-            // and goes once gpui-base keys that state by an owner.
             .with_motion(
                 ScrollbarMotion::default()
                     .with_enter(crate::edge_back::SETTLE)
@@ -399,14 +391,12 @@ fn install(theme: Theme, cx: &mut App) {
             )
             .with_styles(
                 ScrollbarStyles::default()
-                    .track(|style| style.bg(theme.scrollbar))
-                    .track_hover(|style| style.bg(theme.scrollbar))
-                    .track_active(|style| style.bg(theme.scrollbar).border_color(theme.border))
-                    .thumb(|style| style.bg(theme.scrollbar_thumb).radius(radius.full))
-                    .thumb_hover(|style| style.bg(theme.scrollbar_thumb_hover).radius(radius.full))
-                    .thumb_active(|style| {
-                        style.bg(theme.scrollbar_thumb_hover).radius(radius.full)
-                    }),
+                    .track(|style| style.bg(look.track))
+                    .track_hover(|style| style.bg(look.track))
+                    .track_active(|style| style.bg(look.track).border_color(theme.border))
+                    .thumb(|style| style.bg(look.thumb).radius(look.radius))
+                    .thumb_hover(|style| style.bg(look.thumb_hover).radius(look.radius))
+                    .thumb_active(|style| style.bg(look.thumb_hover).radius(look.radius)),
             ),
         resizable: ResizableTheme::default(),
         plot: PlotTheme::default(),
