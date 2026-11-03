@@ -460,6 +460,118 @@ mod tests {
         }
     }
 
+    /// Two controls shown only on hover, as the sidebar's "+" (revealed by
+    /// the keyboard's focus) and a pull request row's menu (by any focus)
+    /// draw theirs: a 20px red square at the opacity focus reveals it to.
+    struct Reveals;
+
+    /// The ids of [`Reveals`]'s controls, and whether each counts only the
+    /// keyboard's focus.
+    const REVEALS: [(&str, bool); 2] = [("keyboard-reveal", true), ("any-reveal", false)];
+
+    impl Render for Reveals {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            use gpui::InteractiveElement as _;
+            let mut root = div().size_full().flex().gap_2();
+            for (id, keyboard) in REVEALS {
+                let (handle, revealed) =
+                    super::focus_reveal(&gpui::ElementId::from(id), keyboard, window, cx);
+                root = root.child(
+                    div()
+                        .id(id)
+                        .debug_selector(move || id.into())
+                        .track_focus(&handle)
+                        .size(px(20.))
+                        .bg(gpui::red())
+                        .opacity(revealed),
+                );
+            }
+            root
+        }
+    }
+
+    /// How far each of [`Reveals`]'s controls is painted in, from 0 to 1.
+    fn revealed(cx: &mut VisualTestContext) -> [f32; 2] {
+        REVEALS.map(|(id, _)| {
+            let bounds = cx.debug_bounds(id).expect("the control is laid out");
+            cx.update(|window, _| {
+                let bounds = bounds.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|quad| quad.bounds == bounds)
+                    .filter_map(|quad| quad.background.as_solid())
+                    .filter(|fill| fill.s > 0.5)
+                    .map(|fill| fill.a)
+                    .fold(0., f32::max)
+            })
+        })
+    }
+
+    /// One display frame later.
+    fn next_frame(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+    }
+
+    /// A control shown only on hover fades in as focus comes onto it and
+    /// out as focus leaves, rather than appearing at once: one revealed by
+    /// the keyboard's focus stays hidden when a click focuses it, one
+    /// revealed by any focus shows for the click too. With motion reduced
+    /// each lands at once.
+    #[gpui::test]
+    fn focus_reveals_a_hidden_control_with_a_fade(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        for reduce in [false, true] {
+            let (_, cx) = cx.add_window_view(|_, _| Reveals);
+            cx.update(|_, cx| cx.set_reduce_motion(reduce));
+            draw_settled(cx);
+            assert_eq!(revealed(cx), [0., 0.], "hidden at rest");
+            for (index, (id, _)) in REVEALS.into_iter().enumerate() {
+                // The keyboard is the last input, as when Tab moves focus.
+                cx.simulate_keystrokes("a");
+                cx.update(|window, cx| window.focus_next(cx));
+                draw(cx);
+                next_frame(cx);
+                let partway = revealed(cx)[index];
+                if reduce {
+                    assert_eq!(partway, 1., "{id}: reduced motion shows it at once");
+                } else {
+                    assert!(
+                        partway > 0. && partway < 1.,
+                        "{id}: the keyboard's focus showed it at once: {partway}"
+                    );
+                }
+                draw_settled(cx);
+                assert_eq!(revealed(cx)[index], 1., "{id}: shown under focus");
+            }
+            cx.update(|window, cx| window.blur(cx));
+            draw(cx);
+            next_frame(cx);
+            if !reduce {
+                let [keyboard, any] = revealed(cx);
+                assert!(any > 0. && any < 1., "blurred at once: {any}");
+                assert_eq!(keyboard, 0., "not focused, so already gone");
+            }
+            draw_settled(cx);
+            assert_eq!(revealed(cx), [0., 0.], "hidden again");
+
+            // A click focuses each: only the one any focus reveals shows.
+            for (index, (id, keyboard)) in REVEALS.into_iter().enumerate() {
+                let bounds = cx.debug_bounds(id).expect("the control is laid out");
+                cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+                draw_settled(cx);
+                let handle_focused = cx.update(|window, cx| window.focused(cx).is_some());
+                assert!(handle_focused, "{id}: the click focused it");
+                let shown = revealed(cx)[index];
+                assert_eq!(shown, if keyboard { 0. } else { 1. }, "{id} after a click");
+            }
+        }
+    }
+
     /// How many frames the window asks for, one display frame apart, until
     /// it rests.
     fn frames(cx: &mut VisualTestContext) -> usize {
