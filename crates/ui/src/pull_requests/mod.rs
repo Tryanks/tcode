@@ -854,6 +854,13 @@ impl PullRequestsPanel {
         }
     }
 
+    /// Keep the panel's motion in `scene`, its host's: the right panel's,
+    /// which shows the focused thread's pull requests.
+    pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch) {
+        self.motion = crate::motion::owned::Owned::in_scene(scene);
+        self.hover = crate::motion::ListHover::new(crate::material::HOVER).in_scene(scene);
+    }
+
     /// The pull request view this list opens into.
     pub fn detail(&self) -> Entity<PullRequestView> {
         self.detail.clone()

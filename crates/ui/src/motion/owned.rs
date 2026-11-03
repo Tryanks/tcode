@@ -398,6 +398,8 @@ pub(crate) struct Owned {
     /// What this handle's keys are kept under: nothing for the store's own,
     /// a part's name for [`Self::scope`]'s.
     prefix: SharedString,
+    /// The scene the store keeps the motion of, when it is a surface's.
+    scene: super::InScene,
 }
 
 struct Entry {
@@ -426,6 +428,26 @@ struct Glide<T> {
 }
 
 impl Owned {
+    /// The store of a surface in `epoch`: what it draws in a new scene
+    /// takes its first target at once, as the first thing a view draws
+    /// does, rather than gliding from what the last scene drew under the
+    /// same key.
+    pub(crate) fn in_scene(epoch: &super::Epoch) -> Self {
+        Self {
+            scene: super::InScene::new(epoch),
+            ..Self::default()
+        }
+    }
+
+    /// Every value, the last scene's forgotten.
+    fn values(&self) -> std::cell::RefMut<'_, HashMap<SharedString, Entry>> {
+        let mut values = self.values.borrow_mut();
+        if self.scene.entered() {
+            values.clear();
+        }
+        values
+    }
+
     /// This store as the clock its samplers keep.
     pub(crate) fn clock(&self) -> Clock<'_> {
         Clock::Owned(self)
@@ -438,6 +460,7 @@ impl Owned {
         Self {
             values: self.values.clone(),
             prefix: format!("{}{}/", self.prefix, part.as_ref()).into(),
+            scene: self.scene.clone(),
         }
     }
 
@@ -448,20 +471,11 @@ impl Owned {
     /// Something drawn again after a sweep starts at rest, as one drawn for
     /// the first time does.
     pub(crate) fn sweep(&self) {
-        self.values.borrow_mut().retain(|_, entry| {
+        self.values().retain(|_, entry| {
             let seen = entry.seen;
             entry.seen = false;
             seen
         });
-    }
-
-    /// Forgets every value, whatever scope keeps it: for a view that starts
-    /// a new scene (a conversation's view showing another thread), where
-    /// what it draws next takes its first target at once, as the first
-    /// thing a view draws does, rather than gliding from what the last
-    /// scene drew under the same key.
-    pub(crate) fn clear(&self) {
-        self.values.borrow_mut().clear();
     }
 
     /// Forgets `key`'s values, every layer's and channel's: what it draws
@@ -471,13 +485,12 @@ impl Owned {
     pub(crate) fn forget(&self, key: impl Into<SharedString>) {
         let key = self.key(key.into());
         let channel = format!("{key}-");
-        self.values
-            .borrow_mut()
+        self.values()
             .retain(|held, _| *held != key && !held.starts_with(&channel));
     }
 
     pub(super) fn forget_exact(&self, key: SharedString) {
-        self.values.borrow_mut().remove(&key);
+        self.values().remove(&key);
     }
 
     /// The key `id` is kept under in this handle's scope.
@@ -604,7 +617,7 @@ impl Owned {
     }
 
     fn kept<T: Clone + Default + 'static>(&self, key: SharedString) -> T {
-        let mut values = self.values.borrow_mut();
+        let mut values = self.values();
         let entry = Self::entry(&mut values, key, T::default);
         if !entry.is::<T>() {
             *entry = Box::new(T::default());
@@ -681,7 +694,7 @@ impl Owned {
         cx: &App,
     ) -> f32 {
         let now = cx.background_executor().now();
-        let mut values = self.values.borrow_mut();
+        let mut values = self.values();
         let at_rest = |target: f32| Follow {
             state: gpui::SpringState {
                 position: target,
@@ -741,7 +754,7 @@ impl Owned {
         from: T,
         now: Instant,
     ) {
-        Self::entry(&mut self.values.borrow_mut(), key, || Glide {
+        Self::entry(&mut self.values(), key, || Glide {
             from: from.clone(),
             target: from,
             started_at: now,
@@ -762,7 +775,7 @@ impl Owned {
         T: Interpolate + PartialEq + 'static,
     {
         let now = cx.background_executor().now();
-        let mut values = self.values.borrow_mut();
+        let mut values = self.values();
         let at_rest = |target: &T| Glide {
             from: target.clone(),
             target: target.clone(),

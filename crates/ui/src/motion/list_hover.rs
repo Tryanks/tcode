@@ -21,7 +21,13 @@ use super::{Curve, owned::Owned};
 /// hold a fade, on the glide every sampler uses; one at rest is 1 when
 /// hovered and 0 otherwise.
 #[derive(Clone)]
-pub(crate) struct ListHover(Rc<RefCell<Hover>>);
+pub(crate) struct ListHover {
+    hover: Rc<RefCell<Hover>>,
+    /// The scene of the list's surface: a new one's items, whose keys may
+    /// match the last one's, start with no reveal moving. The pointer gives
+    /// the hover to an item again as it next comes onto one.
+    scene: super::InScene,
+}
 
 struct Hover {
     /// The item the pointer is over, and over how many of its parts: an item
@@ -39,22 +45,32 @@ impl ListHover {
     /// The hover of one list, nothing hovered, its reveals moving along
     /// `curve`.
     pub(crate) fn new(curve: impl Into<Curve>) -> Self {
-        Self(Rc::new(RefCell::new(Hover {
-            hovered: None,
-            fading: HashSet::new(),
-            fades: Owned::default(),
-            curve: curve.into(),
-        })))
+        Self {
+            hover: Rc::new(RefCell::new(Hover {
+                hovered: None,
+                fading: HashSet::new(),
+                fades: Owned::default(),
+                curve: curve.into(),
+            })),
+            scene: Default::default(),
+        }
     }
 
-    /// Nothing hovered and no reveal moving: the list shows other items now
-    /// (another thread's), whose keys may match the last ones'. The pointer
-    /// gives the hover to an item again as it next comes onto one.
-    pub(crate) fn clear(&self) {
-        let mut hover = self.0.borrow_mut();
-        hover.hovered = None;
-        hover.fading.clear();
-        hover.fades.clear();
+    /// The list's hover in `epoch`'s scene.
+    pub(crate) fn in_scene(mut self, epoch: &super::Epoch) -> Self {
+        self.scene = super::InScene::new(epoch);
+        self
+    }
+
+    /// The hover, the last scene's forgotten.
+    fn hover(&self) -> std::cell::RefMut<'_, Hover> {
+        let mut hover = self.hover.borrow_mut();
+        if self.scene.entered() {
+            hover.hovered = None;
+            hover.fading.clear();
+            hover.fades = Owned::default();
+        }
+        hover
     }
 
     /// The handler for the `on_hover` of `item`, or of one of its parts: the
@@ -68,7 +84,7 @@ impl ListHover {
         let (hover, item) = (self.clone(), item.into());
         super::pointer_hover(move |entered, window, cx| {
             let (previous, next) = {
-                let mut hover = hover.0.borrow_mut();
+                let mut hover = hover.hover();
                 let previous = hover.hovered.as_ref().map(|(item, _)| item.clone());
                 hover.hovered = match hover.hovered.take() {
                     Some((held, parts)) if held == item => {
@@ -102,7 +118,7 @@ impl ListHover {
     ) {
         let now = cx.background_executor().now();
         {
-            let mut hover = self.0.borrow_mut();
+            let mut hover = self.hover();
             for (item, from) in [(previous, 1f32), (next, 0.)] {
                 let Some(item) = item else { continue };
                 // A reveal at rest starts its glide from where it rests; one
@@ -121,7 +137,7 @@ impl ListHover {
     /// How far `item`'s hover reveal is in, from 0 to 1, keeping frames
     /// coming while it moves.
     pub(crate) fn reveal(&self, item: &str, window: &mut Window, cx: &App) -> f32 {
-        let mut hover = self.0.borrow_mut();
+        let mut hover = self.hover();
         let target = if hover.hovered.as_ref().is_some_and(|(held, _)| held == item) {
             1f32
         } else {

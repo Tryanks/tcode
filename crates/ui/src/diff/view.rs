@@ -267,6 +267,14 @@ impl DiffPanel {
         }
     }
 
+    /// Keep the panel's motion in `scene`, the right panel's, which shows
+    /// the focused thread's tabs.
+    pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch, cx: &mut Context<Self>) {
+        self.motion = crate::motion::owned::Owned::in_scene(scene);
+        self.pull_requests
+            .update(cx, |pull_requests, _| pull_requests.share_scene(scene));
+    }
+
     fn selected_scope(&self, session: &str, cx: &App) -> Option<DiffScope> {
         self.scopes
             .get(session)
@@ -1815,6 +1823,7 @@ impl Render for DiffPanel {
             layers.push((
                 0,
                 body()
+                    .debug_selector(|| "diff-tab-body".into())
                     .child({
                         // The overflow menu and the four toggles trade places
                         // as the window turns.
