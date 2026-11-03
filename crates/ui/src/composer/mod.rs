@@ -149,6 +149,9 @@ pub struct Composer {
     /// How far right of the page inset the column keeps clear, for the
     /// chat's side rail ([`Self::set_column_shift`]).
     column_shift: Pixels,
+    /// How far the card's bottom is above the composer's, as last laid out:
+    /// what the column keeps under the card, and the inset under that.
+    below_card: Rc<Cell<Pixels>>,
     workspace_store: Entity<WorkspaceStore>,
     /// The thread this composer writes to.
     session_id: Option<String>,
@@ -365,6 +368,13 @@ impl Composer {
         }
     }
 
+    /// How far its card's bottom is above the composer's bottom, as its
+    /// layout put it this frame, or the last frame it was laid out in: read
+    /// only once the composer is laid out and prepainted.
+    pub(crate) fn below_card(&self) -> Rc<Cell<Pixels>> {
+        self.below_card.clone()
+    }
+
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window: &mut Window,
@@ -449,6 +459,7 @@ impl Composer {
         Self {
             compact,
             column_shift: px(0.),
+            below_card: Rc::default(),
             session_id,
             workspace_store,
             input,
@@ -2138,6 +2149,28 @@ impl Render for Composer {
         } else {
             crate::chat::CONTENT_MIN_PADDING
         });
+        // Where the card ends, measured from the composer's bottom once both
+        // are laid out: the line under the card, then the composer's whole
+        // extent, which comes after it.
+        let card_bottom = Rc::new(Cell::new(px(0.)));
+        let under_card = gpui::canvas(
+            {
+                let card_bottom = card_bottom.clone();
+                move |bounds, _, _| card_bottom.set(bounds.top())
+            },
+            |_, _, _, _| {},
+        )
+        .w_full()
+        .h_0();
+        let extent = gpui::canvas(
+            {
+                let below_card = self.below_card.clone();
+                move |bounds, _, _| below_card.set(bounds.bottom() - card_bottom.get())
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
         v_flex()
             .id(self.scene.id("composer"))
             .relative()
@@ -2154,9 +2187,16 @@ impl Render for Composer {
                     .w_full()
                     .max_w(px(crate::chat::CONTENT_MAX_WIDTH))
                     .children(panels)
-                    .child(v_flex().w_full().child(card).children(drawer))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .child(card)
+                            .child(under_card)
+                            .children(drawer),
+                    )
                     .children(checkout),
             )
+            .child(extent)
     }
 }
 

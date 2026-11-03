@@ -452,6 +452,13 @@ impl ChatView {
             .child(
                 crate::material::card_raised(cx)
                     .debug_selector(|| "chat-side-card".into())
+                    // The agent's timeline takes the wheel over the card,
+                    // not the lead's under it. gpui-base's page viewport
+                    // gives a wheel to the innermost one under the pointer,
+                    // but the lead's does not hold the card: drawn before
+                    // it, it would scroll before the agent's claims the
+                    // wheel, had the card not blocked it.
+                    .occlude()
                     .p_0()
                     .gap_0()
                     .size_full()
