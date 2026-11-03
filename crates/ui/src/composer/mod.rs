@@ -256,12 +256,6 @@ impl Composer {
         self.model_search.read(cx).focus_handle(cx)
     }
 
-    /// How many values the composer's motion holds.
-    #[cfg(test)]
-    pub(crate) fn motion_len(&self) -> usize {
-        self.motion.len()
-    }
-
     #[cfg(test)]
     pub(crate) fn draft(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()

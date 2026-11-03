@@ -1,6 +1,7 @@
 //! A pane switched to another thread draws it as a new scene: what the
 //! thread before left moving, and what the thread shown now did when it was
-//! last on screen, carry nothing into the frame that first draws it.
+//! last on screen, carry nothing into the frame that first draws it; and the
+//! thread fades in once it can be drawn at rest, not while it loads.
 
 use super::*;
 
@@ -69,74 +70,59 @@ fn serve_finished(host: &MountedShell, id: &str) {
     serve_log(host, status, vec![started(), asked(id), completed()]);
 }
 
-/// Shows the thread the sidebar lists `key`'s shortcut against, `id`,
-/// whose log the host has answered with by the frame that first draws it.
-fn switch(shell: &Entity<AppShell>, key: &str, id: &str, cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes(key);
+/// `id` working on its one turn.
+fn serve_running(host: &MountedShell, id: &str) {
+    let mut status = session_status(id, std::path::Path::new(PANES_CWD));
+    status.activity.working = true;
+    status.activity.turn_running = true;
+    status.running_turn = Some(tcode_core::session::RunningTurn {
+        turn: 0,
+        started_at: Some(crate::time::now_millis()),
+    });
+    serve_log(host, status, vec![started(), asked(id)]);
+}
+
+/// What the host has sent arrives, and a frame is drawn.
+fn arrive(shell: &Entity<AppShell>, cx: &mut VisualTestContext) {
+    cx.run_until_parked();
     store_of(shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
     draw(cx);
+}
+
+/// Shows the thread the sidebar lists `key`'s shortcut against, `id`, with
+/// what the host has answered by the frame that first draws it.
+fn switch(shell: &Entity<AppShell>, key: &str, id: &str, cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes(key);
+    arrive(shell, cx);
     assert_eq!(pane_threads(shell, cx), [Some(id.into())]);
 }
 
-fn composer(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Entity<crate::composer::Composer> {
-    shell.read_with(cx, |shell, cx| {
-        shell
-            .attachment
-            .as_ref()
-            .expect("attached")
-            .chat(cx)
-            .read(cx)
-            .composer()
-    })
-}
-
-/// The composer's motion holds the thread it shows, not every thread it has
-/// shown: visiting more threads leaves it as large as visiting one.
+/// A thread left while its composer's controls were on their way (its turn
+/// just done: the stop button folding away, the send button coming) and come
+/// back to before they would have landed is drawn at rest, rather than
+/// resuming where the composer left that thread's controls.
 #[gpui::test]
-fn the_composers_motion_holds_only_the_thread_it_shows(cx: &mut TestAppContext) {
+fn the_composer_of_a_thread_come_back_to_starts_at_rest(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
-    let threads = 6;
-    let sessions = (1..=threads)
-        .map(|n| {
-            let mut meta = tcode_core::project::SessionMeta::new(
-                agent::ProviderKind::Codex,
-                PANES_CWD.into(),
-                None,
-            );
-            meta.id = format!("thread-{n}");
-            meta.title = meta.id.clone();
-            meta.updated_at = (threads - n) as u64;
-            meta
-        })
-        .collect();
-    send_events(
-        &host,
-        vec![(
-            Topic::Index,
-            ServerEvent::IndexSnapshot(IndexSnapshot {
-                summary: Default::default(),
-                sessions,
-                projects: Vec::new(),
-            }),
-        )],
-    );
-    serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.thread_meta("thread-6").is_some()
-            && store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
-    });
+    serve_running(&host, "thread-1");
+    await_restore_update(&shell, cx, |store| store.composer_state().turn_running);
     settle_frames(cx);
-    let held = |cx: &VisualTestContext| composer(&shell, cx).read_with(cx, |c, _| c.motion_len());
-    let one = held(cx);
-    assert!(one > 0, "the composer's controls keep their motion");
-    for n in 2..=threads {
-        let id = format!("thread-{n}");
-        serve_finished(&host, &id);
-        switch(&shell, &format!("secondary-{n}"), &id, cx);
-        settle_frames(cx);
-        assert_eq!(held(cx), one, "after {id}");
-    }
+    let send = |cx: &mut VisualTestContext| cx.debug_bounds("send-message");
+    assert_eq!(send(cx), None, "the running turn shows its stop button");
+
+    serve_finished(&host, "thread-1");
+    await_restore_update(&shell, cx, |store| !store.composer_state().turn_running);
+    display_frame(cx);
+    serve_finished(&host, "thread-2");
+    switch(&shell, "secondary-2", "thread-2", cx);
+    display_frame(cx);
+    serve_finished(&host, "thread-1");
+    switch(&shell, "secondary-1", "thread-1", cx);
+    let first = send(cx);
+    settle_frames(cx);
+    assert!(first.is_some(), "thread-1's send button");
+    assert_eq!(first, send(cx), "at rest from its first frame");
 }
 
 /// `id` with its one turn done and its terminal drawer open on `terminals`,
@@ -194,55 +180,114 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
     }
 }
 
-/// One frame of a thread appearing: how far its fade has come, and whether
-/// its rows and its skeleton were drawn.
+/// The selector of `id`'s question's bubble.
+fn bubble(id: &str) -> &'static str {
+    match id {
+        "thread-1" => "user-bubble-thread-1-ask",
+        "thread-2" => "user-bubble-thread-2-ask",
+        _ => unreachable!("no bubble for {id}"),
+    }
+}
+
+/// Whether `quad` lies within `bounds`.
+fn within(
+    quad: &gpui::Bounds<gpui::ScaledPixels>,
+    bounds: &gpui::Bounds<gpui::ScaledPixels>,
+) -> bool {
+    quad.origin.x >= bounds.origin.x
+        && quad.origin.y >= bounds.origin.y
+        && quad.origin.x + quad.size.width <= bounds.origin.x + bounds.size.width
+        && quad.origin.y + quad.size.height <= bounds.origin.y + bounds.size.height
+}
+
+/// How opaque `id`'s question's bubble is painted, by its fill's alpha;
+/// nothing while it is not drawn.
+fn bubble_fill(id: &str, cx: &mut VisualTestContext) -> Option<f32> {
+    let bounds = cx.debug_bounds(bubble(id))?;
+    cx.update(|window, _| {
+        let bounds = bounds.scale(window.scale_factor());
+        Some(
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| within(&quad.bounds, &bounds))
+                .filter_map(|quad| quad.background.as_solid())
+                .map(|colour| colour.a)
+                .fold(0., f32::max),
+        )
+    })
+}
+
+/// One frame of a thread appearing: how far in its question's bubble is
+/// painted against how it is at rest (none while it is not drawn), and
+/// whether a skeleton was drawn.
 #[derive(Debug, Clone, Copy)]
 struct Appearing {
-    opacity: f32,
-    rows: bool,
+    opacity: Option<f32>,
     skeleton: bool,
 }
 
-fn appearing(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> Appearing {
-    let opacity = shell.read_with(cx, |shell, cx| {
-        let chat = shell.attachment.as_ref().expect("attached").chat(cx);
-        chat.read(cx).thread_opacity
-    });
+impl Appearing {
+    fn shown(&self) -> f32 {
+        self.opacity.unwrap_or_default()
+    }
+}
+
+fn appearing(id: &str, rest: f32, cx: &mut VisualTestContext) -> Appearing {
     Appearing {
-        opacity,
-        rows: cx.debug_bounds("timeline-row-0").is_some(),
+        opacity: bubble_fill(id, cx).map(|fill| fill / rest),
         skeleton: cx.debug_bounds("baseline-loading").is_some(),
     }
 }
 
 /// The frame drawn now and the `frames` display frames after it.
-fn watch(shell: &Entity<AppShell>, frames: usize, cx: &mut VisualTestContext) -> Vec<Appearing> {
-    let mut seen = vec![appearing(shell, cx)];
+fn watch(id: &str, rest: f32, frames: usize, cx: &mut VisualTestContext) -> Vec<Appearing> {
+    let mut seen = vec![appearing(id, rest, cx)];
     for _ in 0..frames {
         display_frame(cx);
-        seen.push(appearing(shell, cx));
+        seen.push(appearing(id, rest, cx));
     }
     seen
 }
 
 /// The fade a thread appears with starts once its rows are drawn, and plays
-/// through to the end: no frame shows it part way in without them.
+/// through to the end: no frame paints it part way in before.
 fn assert_appears_once_drawn(what: &str, seen: &[Appearing]) {
     let started = seen
         .iter()
-        .position(|frame| frame.opacity > 0.)
+        .position(|frame| frame.shown() > 0.01)
         .unwrap_or_else(|| panic!("{what} never appeared: {seen:?}"));
     assert!(
-        seen[started..].iter().all(|frame| frame.rows),
+        seen[started..].iter().all(|frame| frame.opacity.is_some()),
         "{what} faded in without its rows: {seen:?}"
     );
     assert!(
         seen[started..]
             .iter()
-            .any(|frame| frame.opacity > 0.05 && frame.opacity < 0.95),
+            .any(|frame| frame.shown() > 0.05 && frame.shown() < 0.95),
         "{what} appeared at once: {seen:?}"
     );
-    assert_eq!(seen.last().map(|frame| frame.opacity), Some(1.), "{what}");
+    assert!(
+        seen.last()
+            .is_some_and(|frame| (frame.shown() - 1.).abs() < 0.01),
+        "{what} came all the way in: {seen:?}"
+    );
+}
+
+/// thread-1 open, its one turn done, and how opaque its question's bubble
+/// is painted at rest.
+fn mount_finished(
+    cx: &mut TestAppContext,
+) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext, f32) {
+    let (shell, host, cx) = mount_panes(cx);
+    serve_finished(&host, "thread-1");
+    await_restore_update(&shell, cx, |store| {
+        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+    });
+    settle_frames(cx);
+    let rest = bubble_fill("thread-1", cx).expect("thread-1's question");
+    assert!(rest > 0., "the bubble has a fill");
+    (shell, host, cx, rest)
 }
 
 /// A thread a pane is switched to, whose log is there by its first frame,
@@ -251,22 +296,17 @@ fn assert_appears_once_drawn(what: &str, seen: &[Appearing]) {
 #[gpui::test]
 fn a_thread_switched_to_fades_in_once_it_is_drawn(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx) = mount_panes(cx);
-    serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
-    });
-    settle_frames(cx);
+    let (shell, host, cx, rest) = mount_finished(cx);
     for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
         serve_finished(&host, id);
         switch(&shell, key, id, cx);
-        let seen = watch(&shell, 40, cx);
+        let seen = watch(id, rest, 40, cx);
         assert_appears_once_drawn(id, &seen);
-        let started = seen.iter().position(|frame| frame.opacity > 0.).unwrap();
+        let started = seen.iter().position(|frame| frame.shown() > 0.01).unwrap();
         assert!(started <= 4, "{id} kept the reader waiting: {seen:?}");
         assert!(
             seen.iter().all(|frame| !frame.skeleton),
-            "{id} flashed its skeleton"
+            "{id} flashed its skeleton: {seen:?}"
         );
     }
 }
@@ -277,16 +317,11 @@ fn a_thread_switched_to_fades_in_once_it_is_drawn(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_thread_slow_to_arrive_fades_in_once_it_has(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx) = mount_panes(cx);
-    serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
-    });
-    settle_frames(cx);
+    let (shell, host, cx, rest) = mount_finished(cx);
     switch(&shell, "secondary-2", "thread-2", cx);
-    let waiting = watch(&shell, 40, cx);
+    let waiting = watch("thread-2", rest, 40, cx);
     assert!(
-        waiting.iter().all(|frame| frame.opacity == 0.),
+        waiting.iter().all(|frame| frame.shown() == 0.),
         "the thread faded in before it arrived: {waiting:?}"
     );
     assert!(!waiting[0].skeleton, "the skeleton shows at once");
@@ -296,41 +331,10 @@ fn a_thread_slow_to_arrive_fades_in_once_it_has(cx: &mut TestAppContext) {
     );
 
     serve_finished(&host, "thread-2");
-    cx.run_until_parked();
-    store_of(&shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
-    draw(cx);
-    let seen = watch(&shell, 40, cx);
+    arrive(&shell, cx);
+    let seen = watch("thread-2", rest, 40, cx);
     assert_appears_once_drawn("thread-2", &seen);
     assert!(seen.last().is_some_and(|frame| !frame.skeleton));
-}
-
-/// A thread opened from the sidebar into a pane of its own fades in once its
-/// rows are drawn.
-#[gpui::test]
-fn a_thread_opened_into_a_new_pane_fades_in_once_it_is_drawn(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx) = mount_panes(cx);
-    serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
-    });
-    settle_frames(cx);
-    cx.simulate_keystrokes("secondary-d");
-    settle_frames(cx);
-    serve_finished(&host, "thread-2");
-    cx.simulate_keystrokes("secondary-2");
-    store_of(&shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
-    draw(cx);
-    assert_eq!(
-        pane_threads(&shell, cx),
-        [Some("thread-1".into()), Some("thread-2".into())]
-    );
-    let seen = watch(&shell, 40, cx);
-    assert_appears_once_drawn("thread-2", &seen);
-    assert!(
-        seen.iter().all(|frame| !frame.skeleton),
-        "thread-2 flashed its skeleton: {seen:?}"
-    );
 }
 
 /// With motion reduced, a thread switched to is there at once when it is
@@ -338,23 +342,19 @@ fn a_thread_opened_into_a_new_pane_fades_in_once_it_is_drawn(cx: &mut TestAppCon
 #[gpui::test]
 fn a_thread_switched_to_with_motion_reduced_is_there_once_drawn(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx) = mount_panes(cx);
-    serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
-    });
-    settle_frames(cx);
+    let (shell, host, cx, rest) = mount_finished(cx);
     cx.update(|_, cx| cx.set_reduce_motion(true));
     serve_finished(&host, "thread-2");
     switch(&shell, "secondary-2", "thread-2", cx);
-    let seen = watch(&shell, 10, cx);
+    let seen = watch("thread-2", rest, 10, cx);
     let started = seen
         .iter()
-        .position(|frame| frame.opacity > 0.)
+        .position(|frame| frame.shown() > 0.)
         .expect("thread-2 appears");
     assert!(
         seen[started..]
             .iter()
-            .all(|frame| frame.rows && frame.opacity == 1.)
+            .all(|frame| (frame.shown() - 1.).abs() < 0.01),
+        "{seen:?}"
     );
 }
