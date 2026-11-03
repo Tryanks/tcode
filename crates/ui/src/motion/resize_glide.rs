@@ -383,14 +383,6 @@ impl ResizeFrame {
         }
     }
 
-    /// The size panel `ix` is held at this frame, if it glides and has one.
-    pub(crate) fn size(&self, ix: usize) -> Option<Pixels> {
-        match self.pins.get(ix) {
-            Some(Pin::Sized { size, .. }) => Some(*size),
-            _ => None,
-        }
-    }
-
     /// The `size_range` panel `ix` is given this frame, for the range it has
     /// at rest.
     pub(crate) fn range(&self, ix: usize, rest: Range<Pixels>) -> Range<Pixels> {

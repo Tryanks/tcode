@@ -504,7 +504,7 @@ fn compact(text: &str) -> String {
 }
 
 /// Open a thread reached from its lead: beside the lead in the lead's own
-/// chat on the desktop; in the lead's place in the compact layout, which has
+/// chat on the desktop, the lead's right panel shut; in the lead's place in the compact layout, which has
 /// no room beside it and goes back with its navigation. A thread a pane
 /// already shows takes the keyboard there instead. An archived agent is
 /// reached the way Settings → Archived Threads reaches every archived
@@ -529,7 +529,14 @@ pub(crate) fn open_agent(
         .filter(|_| !crate::shell::shown_in_pane(&id, cx))
         .and_then(|lead| crate::shell::side_host_for(lead, cx));
     match host {
-        Some(host) => host.update(cx, |chat, cx| chat.open_side(id, window, cx)),
+        Some(host) => {
+            // The lead's right panel lies over the chat, where the agent
+            // would show beneath it.
+            if let Some(lead) = lead {
+                store.update(cx, |store, cx| store.close_right_panel_for(Some(lead), cx));
+            }
+            host.update(cx, |chat, cx| chat.open_side(id, window, cx));
+        }
         None => store.update(cx, |store, cx| store.select_session(id, cx)),
     }
 }

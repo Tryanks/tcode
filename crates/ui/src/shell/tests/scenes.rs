@@ -187,10 +187,9 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
 }
 
 /// The right panel shows a thread switched to as that thread left it: open
-/// or shut from the first frame, docked beside the chat or floating over a
-/// narrow one, rather than gliding shut as if the reader had closed it on
-/// leaving a thread that had it open, or open on coming back; and so again
-/// switching back.
+/// or shut from the first frame, over a wide chat or a narrow one, rather
+/// than sliding shut as if the reader had closed it on leaving a thread that
+/// had it open, or open on coming back; and so again switching back.
 #[gpui::test]
 fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -201,24 +200,15 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
     });
     store_of(&shell, cx).update(cx, |store, cx| store.toggle_diff_panel(cx));
     settle_frames(cx);
-    let panel = |cx: &mut VisualTestContext| {
-        (
-            cx.debug_bounds("right-panel"),
-            cx.debug_bounds("right-panel-overlay"),
-        )
-    };
+    let panel = |cx: &mut VisualTestContext| cx.debug_bounds("right-panel");
 
-    for (width, docked) in [(2000., true), (900., false)] {
+    for width in [2000., 900.] {
         resize(cx, width);
         settle_frames(cx);
         let open = panel(cx);
-        assert_eq!(
-            (open.0.is_some(), open.1.is_some()),
-            (docked, !docked),
-            "thread-1's panel at {width}px"
-        );
+        assert!(open.is_some(), "thread-1's panel at {width}px");
         for (key, id, shown) in [
-            ("secondary-2", "thread-2", (None, None)),
+            ("secondary-2", "thread-2", None),
             ("secondary-1", "thread-1", open),
         ] {
             serve_finished(&host, id);

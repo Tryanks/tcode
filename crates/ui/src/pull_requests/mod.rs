@@ -916,6 +916,11 @@ impl PullRequestsPanel {
             .update(cx, |detail, _| detail.share_scene(scene));
     }
 
+    /// Let go of the pull requests' rendered pages ([`PullRequestView::release`]).
+    pub(crate) fn release(&mut self, cx: &mut App) {
+        self.detail.update(cx, |detail, _| detail.release());
+    }
+
     /// The pull request view this list opens into.
     pub fn detail(&self) -> Entity<PullRequestView> {
         self.detail.clone()

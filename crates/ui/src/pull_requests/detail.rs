@@ -265,6 +265,23 @@ impl PullRequestView {
         self.motion = crate::motion::owned::Owned::in_scene(scene);
     }
 
+    /// Let go of what was built to draw the pull requests read here — each
+    /// one's rendered files and its comments' laid-out text — and of the
+    /// timer for the next read, once the right panel has taken the view down.
+    /// What the host answered, and what the reader is writing or has marked,
+    /// stay; the next draw renders again and reads what has expired.
+    pub(crate) fn release(&mut self) {
+        self.wake = None;
+        for page in self.pages.values_mut() {
+            // A render under way lands its list as it would have.
+            if !page.files_view.rendering {
+                page.files_view.list = None;
+                page.files_view.rendered = None;
+            }
+            page.conversation_view.markdown.get_mut().clear();
+        }
+    }
+
     /// The open pull request's host as a person reads it.
     pub(super) fn host_name(&self, cx: &App) -> String {
         self.current
