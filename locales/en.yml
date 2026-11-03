@@ -1086,6 +1086,8 @@ diff:
   layout_soon: "Panel layout: coming soon"
   close: "Close diff panel"
   turn: "Turn %{count}"
+  files_changed: "%{count} files"
+  files_changed_one: "1 file"
   no_changes: "No changes"
   working_tree: "Working tree"
   branch_changes: "Branch changes"
@@ -1115,6 +1117,7 @@ tasks:
   steps: "Steps"
   empty_title: "No tasks yet."
   empty_desc: "Tasks will appear here when the agent reports them."
+  progress: "%{done} of %{total}"
 userinput:
   question_count: "%{index}/%{total}"
   custom_placeholder: "Type your own answer…"

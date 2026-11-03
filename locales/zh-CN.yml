@@ -1079,6 +1079,8 @@ diff:
   layout_soon: "面板布局功能即将推出"
   close: "关闭 diff 面板"
   turn: "第 %{count} 轮"
+  files_changed: "%{count} 个文件"
+  files_changed_one: "1 个文件"
   no_changes: "没有更改"
   working_tree: "工作树"
   branch_changes: "分支更改"
@@ -1108,6 +1110,7 @@ tasks:
   steps: "步骤"
   empty_title: "暂无任务。"
   empty_desc: "代理报告的任务将显示在这里。"
+  progress: "%{done}/%{total}"
 userinput:
   question_count: "%{index}/%{total}"
   custom_placeholder: "输入自定义答案…"

@@ -3763,6 +3763,10 @@ impl WorkspaceStore {
         self.focused_thread()?.plan.as_ref()
     }
 
+    pub fn session_plan_for(&self, session_id: Option<&str>) -> Option<&SessionPlan> {
+        self.thread(session_id)?.plan.as_ref()
+    }
+
     pub fn session_status(&self) -> Option<&SessionStatus> {
         self.focused_status()
     }

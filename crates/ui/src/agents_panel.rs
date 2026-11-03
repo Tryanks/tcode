@@ -119,7 +119,7 @@ impl Agents {
         let live = store.sidebar_sessions();
         let parent = live.iter().find(|meta| meta.id == parent_id);
         let mut native = Vec::new();
-        store.with_active_timeline(|timeline| {
+        store.with_timeline_for(Some(parent_id), |timeline| {
             for entry in &timeline.entries {
                 let EntryContent::Item(ItemContent::Subagent {
                     agent_type,
@@ -222,9 +222,9 @@ impl Agents {
 
     /// Add each dispatched agent's result: the report its latest callback
     /// delivered to the lead, as the child wrote it.
-    fn with_results(mut self, store: &WorkspaceStore) -> Self {
+    fn with_results(mut self, store: &WorkspaceStore, parent_id: &str) -> Self {
         let mut results = std::collections::HashMap::new();
-        store.with_active_timeline(|timeline| {
+        store.with_timeline_for(Some(parent_id), |timeline| {
             for entry in &timeline.entries {
                 let Some(HostNotice::Orchestrate(callbacks)) =
                     crate::chat::model::user_notice(&entry.content)
@@ -281,7 +281,31 @@ impl Agents {
         }
     }
 
-    fn summary(&self) -> Option<String> {
+    /// Every agent as one line each, in the panel's order: those awaiting
+    /// settle, the running ones, the provider's own, then the finished ones.
+    pub(crate) fn lines(&self) -> Vec<AgentLine> {
+        self.needs_settle
+            .iter()
+            .chain(&self.running)
+            .chain(&self.native)
+            .chain(&self.done)
+            .map(|row| {
+                let running = row.execution.is_some_and(AgentExecution::running);
+                AgentLine {
+                    key: row.key.clone(),
+                    title: row.title.clone(),
+                    execution: row.execution,
+                    running_since: row.started_at.filter(|started| {
+                        running && !row.ended_at.is_some_and(|ended| ended >= *started)
+                    }),
+                    elapsed: row.elapsed().filter(|_| !running),
+                    open: row.open.clone(),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn summary(&self) -> Option<String> {
         let mut parts = Vec::new();
         match self.running.len() {
             0 => {}
@@ -295,6 +319,20 @@ impl Agents {
         }
         (!parts.is_empty()).then(|| parts.join(" · "))
     }
+}
+
+/// One of a lead's agents, as a list beside its thread names it.
+#[derive(Clone, PartialEq)]
+pub(crate) struct AgentLine {
+    pub(crate) key: String,
+    pub(crate) title: String,
+    pub(crate) execution: Option<AgentExecution>,
+    /// When the run under way started, while it runs.
+    pub(crate) running_since: Option<u64>,
+    /// How long its last run took, once it has finished.
+    pub(crate) elapsed: Option<String>,
+    /// The thread that shows it.
+    pub(crate) open: Option<String>,
 }
 
 fn compact(text: &str) -> String {
@@ -357,7 +395,7 @@ enum BadgeStyle {
     Danger,
 }
 
-fn execution_color(execution: AgentExecution, cx: &App) -> Hsla {
+pub(crate) fn execution_color(execution: AgentExecution, cx: &App) -> Hsla {
     match execution {
         AgentExecution::Working => cx.theme().primary,
         AgentExecution::Waiting => cx.theme().warning,
@@ -367,7 +405,7 @@ fn execution_color(execution: AgentExecution, cx: &App) -> Hsla {
     }
 }
 
-fn execution_label(execution: AgentExecution) -> SharedString {
+pub(crate) fn execution_label(execution: AgentExecution) -> SharedString {
     crate::tr!(match execution {
         AgentExecution::Working => "agents.state_working",
         AgentExecution::Waiting => "agents.state_waiting",
@@ -378,6 +416,42 @@ fn execution_label(execution: AgentExecution) -> SharedString {
     })
     .into_owned()
     .into()
+}
+
+/// The spinner while the agent `key` works, a dot in its state's colour
+/// otherwise: one cross-fades into the other and the dot's colour glides.
+pub(crate) fn status_mark(
+    key: &str,
+    execution: Option<AgentExecution>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let working = execution == Some(AgentExecution::Working);
+    let color = gpui_base::motion::transition(
+        SharedString::from(format!("agent-status-color-{key}")),
+        execution
+            .filter(|_| !working)
+            .map_or(cx.theme().muted_foreground, |execution| {
+                execution_color(execution, cx)
+            }),
+        gpui_base::motion::Transition::new(GLIDE),
+        window,
+        cx,
+    );
+    crate::motion::cross_fade_part(
+        SharedString::from(format!("agent-status-{key}")),
+        working,
+        CHANGE,
+        window,
+        cx,
+        move |working, _, cx| {
+            if *working {
+                Spinner::new().color(cx.theme().primary).into_any_element()
+            } else {
+                crate::material::status_dot(color).into_any_element()
+            }
+        },
+    )
 }
 
 pub struct AgentsPanel {
@@ -618,37 +692,6 @@ impl AgentsPanel {
         badges
     }
 
-    /// The spinner while the agent works, a dot in its state's colour
-    /// otherwise: one cross-fades into the other and the dot's colour glides.
-    fn status_mark(row: &AgentRow, window: &mut Window, cx: &mut App) -> AnyElement {
-        let working = row.execution == Some(AgentExecution::Working);
-        let color = gpui_base::motion::transition(
-            SharedString::from(format!("agent-status-color-{}", row.key)),
-            row.execution
-                .filter(|_| !working)
-                .map_or(cx.theme().muted_foreground, |execution| {
-                    execution_color(execution, cx)
-                }),
-            gpui_base::motion::Transition::new(GLIDE),
-            window,
-            cx,
-        );
-        crate::motion::cross_fade_part(
-            SharedString::from(format!("agent-status-{}", row.key)),
-            working,
-            CHANGE,
-            window,
-            cx,
-            move |working, _, cx| {
-                if *working {
-                    Spinner::new().color(cx.theme().primary).into_any_element()
-                } else {
-                    crate::material::status_dot(color).into_any_element()
-                }
-            },
-        )
-    }
-
     fn render_row(
         &self,
         row: &AgentRow,
@@ -781,7 +824,7 @@ impl AgentsPanel {
             .min_w_0()
             .items_center()
             .text_body(compact, cx)
-            .child(Self::status_mark(row, window, cx))
+            .child(status_mark(&row.key, row.execution, window, cx))
             .child(
                 div()
                     .flex_1()
@@ -930,7 +973,7 @@ impl Render for AgentsPanel {
             let store = self.store.read(cx);
             store
                 .active_session_id()
-                .map(|id| Agents::of(store, &id).with_results(store))
+                .map(|id| Agents::of(store, &id).with_results(store, &id))
                 .unwrap_or_default()
         };
         self.live = agents.any_running();
