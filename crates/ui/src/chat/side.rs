@@ -14,14 +14,13 @@ use gpui::{
     ParentElement as _, Pixels, SharedString, Styled as _, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px, relative,
 };
-use gpui_base::{ResizableState, h_flex};
+use gpui_base::ResizableState;
 
 use super::ChatView;
 use crate::icon::IconName;
 use crate::motion::resize_glide::{Panel, ResizeGlide};
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
-use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
@@ -47,9 +46,6 @@ const SWAP: Duration = Duration::from_millis(200);
 /// How long what the side header shows only some of the time takes to come
 /// in or go.
 const SHOW: Duration = Duration::from_millis(200);
-
-/// How long the agent's status label takes to cross-fade to another.
-const CHANGE: Duration = Duration::from_millis(200);
 
 /// Where an agent beside its lead is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -484,8 +480,8 @@ impl ChatView {
     }
 
     /// An agent's own header beside its lead: Back at its start while it
-    /// covers the lead, its state, title and provider, and Close at its end
-    /// while it sits beside the lead.
+    /// covers the lead, its state and title, and Close at its end while it
+    /// sits beside the lead.
     pub(super) fn render_side_header(
         &self,
         window: &mut Window,
@@ -493,22 +489,13 @@ impl ChatView {
     ) -> Option<AnyElement> {
         let of = self.side_of.as_ref()?;
         let session = self.session_id.clone()?;
-        let (heading, meta_title, meta_detail, lead_title) = {
+        let (heading, meta_title, lead_title) = {
             let store = self.workspace_store.read(cx);
             let heading =
                 crate::agents_panel::Agents::of(store, &of.lead_session).heading(&session);
-            let meta = store.thread_meta(&session);
-            let detail = meta.map(|meta| {
-                [Some(meta.provider.display_name()), meta.model.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" · ")
-            });
             (
                 heading,
-                meta.map(|meta| meta.title.clone()),
-                detail,
+                store.thread_meta(&session).map(|meta| meta.title.clone()),
                 store
                     .thread_meta(&of.lead_session)
                     .map(|meta| meta.title.clone())
@@ -521,11 +508,6 @@ impl ChatView {
             .or(meta_title)
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| crate::tr!("agents.untitled").into_owned());
-        let detail = heading
-            .as_ref()
-            .map(|heading| heading.detail.clone())
-            .or(meta_detail)
-            .unwrap_or_default();
         let execution = heading.as_ref().and_then(|heading| heading.execution);
         let key = heading.map_or_else(|| session.clone(), |heading| heading.key);
 
@@ -585,22 +567,6 @@ impl ChatView {
                         .on_click(close),
                 )
             });
-        let status = execution.map(|execution| {
-            self.motion.cross_fade_part(
-                "side-status",
-                execution,
-                CHANGE,
-                window,
-                cx,
-                move |execution, _, cx| {
-                    div()
-                        .text_color(crate::agents_panel::execution_color(*execution, cx))
-                        .child(crate::agents_panel::execution_label(*execution))
-                        .into_any_element()
-                },
-            )
-        });
-        let muted = cx.theme().muted_foreground;
         Some(
             crate::material::bar("chat-side-header", crate::material::Bar::Toolbar, false, cx)
                 .debug_selector(|| "chat-side-header".into())
@@ -616,25 +582,6 @@ impl ChatView {
                         .overflow_hidden()
                         .text_body(false, cx)
                         .child(crate::widgets::fade_text(title)),
-                )
-                .child(
-                    h_flex()
-                        .min_w_0()
-                        .max_w(relative(0.5))
-                        .gap_1()
-                        .items_center()
-                        .text_secondary(false, cx)
-                        .text_color(muted)
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .child(crate::widgets::fade_text(detail)),
-                        )
-                        .when_some(status, |line, status| {
-                            line.child(div().flex_none().child("·"))
-                                .child(div().flex_none().child(status))
-                        }),
                 )
                 .children(close)
                 .into_any_element(),
