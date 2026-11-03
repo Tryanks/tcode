@@ -10762,9 +10762,9 @@ mod tests {
     }
 
     /// The compact palette opens from the threads page and a thread as a
-    /// sheet inside the window's seam, which the page beneath and the sheet
-    /// glide onto as the status bar and the keyboard come; Back dismisses the
-    /// keyboard before the sheet.
+    /// sheet on the window's bottom edge; the page beneath and what the sheet
+    /// holds glide onto the window's seam as the status bar and the keyboard
+    /// come; Back dismisses the keyboard before the sheet.
     #[gpui::test]
     fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -10847,20 +10847,21 @@ mod tests {
                 "the page's top",
             );
             gliding(
-                cx.debug_bounds("palette-card").unwrap().bottom(),
+                cx.debug_bounds("palette-list").unwrap().bottom(),
                 px(852.),
                 px(452.),
-                "the sheet's bottom",
+                "the list's bottom",
             );
             cx.executor().advance_clock(crate::edge_back::SETTLE);
             draw(cx);
             assert_eq!(page_top(cx), uncovered + px(47.));
             let card = cx.debug_bounds("palette-card").unwrap();
             assert_eq!(card.top(), px(99.));
-            assert_eq!(card.bottom(), px(452.));
+            assert_eq!(card.bottom(), px(852.), "the sheet reaches the edge");
             assert_eq!(card.size.width, px(393.));
             let list = cx.debug_bounds("palette-list").unwrap();
-            assert!(list.size.height > px(0.) && list.bottom() <= card.bottom());
+            assert!(list.size.height > px(0.));
+            assert_eq!(list.bottom(), px(452.), "the list stays above the keyboard");
             cx.update(|window, cx| {
                 shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
                 assert!(
