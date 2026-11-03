@@ -267,11 +267,13 @@ impl ChatView {
                     &self.expanded,
                     continuity,
                 );
+                self.screen.sync(&timeline.entries);
                 let activity_snapshot_keys = awaiting_activity_snapshot
                     .then(|| auto_activity_snapshot_keys(&timeline.entries));
                 (list_sync, activity_snapshot_keys)
             })
             .unwrap_or_else(|| {
+                self.screen.sync(&[]);
                 let list_sync = self.turn_index_cache.sync(
                     &mut self.rows,
                     &[],

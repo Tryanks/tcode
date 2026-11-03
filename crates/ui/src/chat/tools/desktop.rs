@@ -142,6 +142,23 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
     Some(Box::new(Desktop { tool }))
 }
 
+/// Whether `call` observes a window: the one call whose result carries the
+/// screenshot the server read back.
+pub(in crate::chat) fn is_observation(call: &Call<'_>) -> bool {
+    call.served(SERVER, &["observe_ui"], true)
+}
+
+/// The app and the window title of the root an observation's `output`
+/// reports; a title that is empty or only repeats the app is none.
+pub(in crate::chat) fn observed_root(output: &str) -> (Option<String>, Option<String>) {
+    let root = fact(output, "root");
+    let app = root.and_then(|root| attribute(&format!(" {root}"), "app"));
+    let title = root
+        .and_then(|root| attribute(&format!(" {root}"), "title"))
+        .filter(|title| !title.is_empty() && Some(title) != app.as_ref());
+    (app, title)
+}
+
 struct Desktop<'a> {
     tool: Tool<'a>,
 }
@@ -314,11 +331,7 @@ impl Desktop<'_> {
                     )
             }
             Tool::Observe(input) => {
-                let root = fact(output, "root");
-                let app = root.and_then(|root| attribute(&format!(" {root}"), "app"));
-                let title = root
-                    .and_then(|root| attribute(&format!(" {root}"), "title"))
-                    .filter(|title| !title.is_empty() && Some(title) != app.as_ref());
+                let (app, title) = observed_root(output);
                 let argument = match app {
                     Some(app) => Argument::plain(app).map(|argument| argument.detail(title)),
                     None => input.root.and_then(Argument::mono),

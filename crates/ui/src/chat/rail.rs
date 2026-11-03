@@ -4,7 +4,7 @@
 mod agents;
 mod changes;
 mod plan;
-mod screen;
+pub(super) mod screen;
 
 use std::borrow::Cow;
 use std::time::Duration;

@@ -2,8 +2,9 @@ use std::path::{Path, PathBuf};
 
 use agent::ItemContent;
 use gpui::{
-    AnyElement, App, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, img, px,
+    AnyElement, App, ImageSource, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Window, img, px,
 };
 use gpui_base::h_flex;
 use tcode_core::session::{EntryContent, TimelineEntry};
@@ -163,11 +164,6 @@ pub(crate) fn item_tile(
         title,
         path,
     } = tile;
-    let source = tcode_protocol::OriginalTarget::Item {
-        session_id: session_id.into(),
-        item_id: entry_id.clone(),
-        image_index: index,
-    };
     let preview =
         || crate::store::item_image_preview(session_id.into(), entry_id.clone(), index, 120., 80.);
     let viewer_preview = preview();
@@ -214,13 +210,20 @@ pub(crate) fn item_tile(
         let selector = format!("image-read-{entry_id}-{index}");
         move || selector.clone()
     })
-    .on_click(move |_, window, cx| {
-        crate::image_viewer::open(
-            crate::image_viewer::ViewerSource::original(source.clone(), viewer_preview.clone()),
-            title.clone(),
-            window,
-            cx,
-        );
+    .on_click({
+        let session_id = session_id.to_owned();
+        let entry_id = entry_id.clone();
+        move |_, window, cx| {
+            open_item_image(
+                &session_id,
+                &entry_id,
+                index,
+                viewer_preview.clone(),
+                title.clone(),
+                window,
+                cx,
+            );
+        }
     })
     .context_menu(move |mut menu, _, _| {
         if let Some(path) = &path {
@@ -234,4 +237,28 @@ pub(crate) fn item_tile(
             })
     })
     .into_any_element()
+}
+
+/// Opens the image viewer on the original of the `index`th image item
+/// `entry_id` read, read from the host, showing `preview` until it arrives.
+pub(crate) fn open_item_image(
+    session_id: &str,
+    entry_id: &str,
+    index: usize,
+    preview: ImageSource,
+    title: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let source = tcode_protocol::OriginalTarget::Item {
+        session_id: session_id.into(),
+        item_id: entry_id.into(),
+        image_index: index,
+    };
+    crate::image_viewer::open(
+        crate::image_viewer::ViewerSource::original(source, preview),
+        title,
+        window,
+        cx,
+    );
 }
