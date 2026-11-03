@@ -349,6 +349,7 @@ impl ChatView {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
                             this.mark_copied(mark.clone(), cx);
                         }),
+                        &self.motion,
                         cx,
                     ));
                 }
@@ -641,6 +642,7 @@ impl ChatView {
                 menu,
                 self.window_state.read(cx).compact,
                 handlers,
+                &self.motion,
                 cx,
             )
         });
@@ -815,6 +817,7 @@ impl ChatView {
                         enabled,
                         on_choose,
                     }),
+                motion: self.motion.clone(),
             },
             cx.listener(move |this, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_text.to_string()));

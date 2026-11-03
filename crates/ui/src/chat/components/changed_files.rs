@@ -85,6 +85,7 @@ pub(crate) fn changed_files(
                 view_diff,
                 cx,
             )
+            .motion(motion)
             .tooltip(crate::tr!("chat.view_diff_tooltip").into_owned()),
         );
 
@@ -156,7 +157,7 @@ pub(crate) fn changed_files(
                 let on_click = handlers
                     .remove(key)
                     .unwrap_or_else(|| Box::new(|_, _, _| {}));
-                chip_element(index, &cwd, key, chip, on_click, cx)
+                chip_element(index, &cwd, key, chip, on_click, &motion, cx)
             },
         )
         .render(h_flex().w_full().px_1().gap_1p5().flex_wrap());
@@ -189,6 +190,7 @@ fn chip_element(
     key: &SharedString,
     chip: &Chip,
     on_click: ClickHandler,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     match chip {
@@ -201,6 +203,7 @@ fn chip_element(
         } => Button::new(SharedString::from(format!(
             "changed-file-chip-{index}-{key}"
         )))
+        .motion(motion)
         .ghost()
         .outline()
         .chip()
@@ -237,6 +240,7 @@ fn chip_element(
         .into_any_element(),
         Chip::More(label) => {
             quiet_control(("changed-files-more", index), label.clone(), on_click, cx)
+                .motion(motion)
                 .font_family(cx.theme().mono_font_family.clone())
                 .into_any_element()
         }

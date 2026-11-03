@@ -944,6 +944,7 @@ impl ChatView {
                             .gap_2()
                             .child(
                                 Button::new(SharedString::from(format!("retry-{key}")))
+                                    .motion(&motion)
                                     .ghost()
                                     .small()
                                     .debug_selector(|| "retry-delivery".into())
@@ -955,6 +956,7 @@ impl ChatView {
                             )
                             .child(
                                 Button::new(SharedString::from(format!("discard-{key}")))
+                                    .motion(&motion)
                                     .ghost()
                                     .small()
                                     .debug_selector(|| "discard-delivery".into())

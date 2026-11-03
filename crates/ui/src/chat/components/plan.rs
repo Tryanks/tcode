@@ -38,6 +38,8 @@ pub(crate) struct PlanData<'a> {
     pub(crate) compact: bool,
     pub(crate) copied: bool,
     pub(crate) decision: Option<PlanDecision<'a>>,
+    /// The chat's motion, which keeps the plan's buttons' clocks.
+    pub(crate) motion: crate::motion::owned::Owned,
 }
 
 /// A plan the harness proposed, set apart from the prose around it as a
@@ -57,6 +59,7 @@ pub(crate) fn plan_block(
         compact,
         copied,
         decision,
+        motion,
     } = data;
     let theme = cx.theme();
     let radius = crate::material::radius_card(cx);
@@ -95,19 +98,14 @@ pub(crate) fn plan_block(
                 .text_color(theme.muted_foreground)
                 .child(crate::tr!("chat.plan_title").into_owned()),
         )
-        .child(copy_button(
-            &format!("plan:{id}"),
-            copied,
-            compact,
-            on_copy,
-            cx,
-        ));
+        .child(copy_button(&format!("plan:{id}"), copied, compact, on_copy, cx).motion(&motion));
     let footer = decision.map(|decision| {
         let mut choices = h_flex().gap_2().items_center().flex_wrap();
         for option in decision.options {
             let on_choose = decision.on_choose.clone();
             let option_id = option.id.clone();
             let button = Button::new(SharedString::from(format!("plan-option-{}", option.id)))
+                .motion(&motion)
                 .chip()
                 .touch(compact)
                 .disabled(!decision.enabled)

@@ -113,6 +113,7 @@ pub(crate) fn native_rewind_button(
     menu: RewindMenu,
     compact: bool,
     handlers: Vec<SharedClickHandler>,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let RewindMenu {
@@ -133,6 +134,7 @@ pub(crate) fn native_rewind_button(
     )
     .disabled(disabled)
     .touch(compact)
+    .motion(motion)
     .debug_selector(move || format!("rewind-{turn}"));
     crate::material::overlay_popover(("rewind-menu", turn), cx)
         .anchor(Anchor::TopRight)
@@ -232,8 +234,9 @@ pub(crate) fn user_bubble(
     } else {
         1.
     };
-    let copy = (!visible.trim().is_empty())
-        .then(|| copy_button(&format!("user:{entry_id}"), copied, compact, copy, cx));
+    let copy = (!visible.trim().is_empty()).then(|| {
+        copy_button(&format!("user:{entry_id}"), copied, compact, copy, cx).motion(&motion)
+    });
     // The rewind comes into the row beside Copy once the harness offers it,
     // and goes as it was, inert, when it stops.
     let rewind_id = SharedString::from(format!("rewind-fold-{entry_id}"));
@@ -246,7 +249,9 @@ pub(crate) fn user_bubble(
             let rewind = motion.shown(rewind_id, offered, window, cx).map(|shown| {
                 let button = match rewind.take() {
                     Some(button) if !shown.leaving() => button,
-                    _ => native_rewind_button(shown.value.clone(), compact, Vec::new(), cx),
+                    _ => {
+                        native_rewind_button(shown.value.clone(), compact, Vec::new(), &motion, cx)
+                    }
                 };
                 shown.fold_across_gap(gap, button)
             });

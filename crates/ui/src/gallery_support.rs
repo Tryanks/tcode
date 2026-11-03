@@ -174,6 +174,7 @@ pub fn plan(
                 enabled: true,
                 on_choose: std::rc::Rc::new(|_, _, _| {}),
             }),
+            motion: Default::default(),
         },
         |_, _, _| {},
         cx,
@@ -181,7 +182,15 @@ pub fn plan(
 }
 
 pub fn error_card(id: &str, message: &str, cx: &App) -> AnyElement {
-    error_card::error_card(id, message, false, None, |_, _, _| {}, cx)
+    error_card::error_card(
+        id,
+        message,
+        false,
+        None,
+        |_, _, _| {},
+        &Default::default(),
+        cx,
+    )
 }
 
 pub fn relay_divider(id: &str, cx: &App) -> AnyElement {

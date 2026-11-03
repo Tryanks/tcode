@@ -177,6 +177,7 @@ fn disclosure_with(
         // The label is a child rather than `.label()`: the divider grammar keeps it
         // muted, and `Button` paints its label in the variant's foreground.
         let toggle = Button::new(SharedString::from(format!("disclosure-{key}")))
+            .motion(&motion)
             .ghost()
             .small()
             .aria_label(match &suffix {

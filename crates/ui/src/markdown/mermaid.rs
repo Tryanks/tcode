@@ -789,6 +789,7 @@ pub(super) fn block(
 
     let compact = crate::window_seam::window_is_compact(window, cx);
     let hover = view.read(cx).hover.clone();
+    let buttons = view.read(cx).motion();
     let hover_key = SharedString::from(format!("markdown-mermaid-group-{path}"));
     let reveal = hover.reveal(&hover_key, window, cx);
     let drawing = (layer == Layer::Source && shown.is_none() && failed.is_none() && streaming)
@@ -823,6 +824,7 @@ pub(super) fn block(
             cx,
         )
         .touch(compact)
+        .motion(&buttons)
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             view.update(cx, |state, cx| {
@@ -847,6 +849,7 @@ pub(super) fn block(
             },
             cx,
         )
+        .motion(&buttons)
     };
     // Revealed on hover over a diagram, as a formula's actions are, and pinned
     // over code, where there is no hover, and while the diagram is building.

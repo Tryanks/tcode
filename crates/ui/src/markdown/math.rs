@@ -91,6 +91,7 @@ pub(super) fn block(
     let compact = crate::window_seam::window_is_compact(window, cx);
     let latex = source.strip_suffix('\n').unwrap_or(source).to_string();
     let hover = view.read(cx).hover.clone();
+    let buttons = view.read(cx).motion();
     let hover_key = SharedString::from(format!("math-block-{path}"));
     let reveal = hover.reveal(&hover_key, window, cx);
 
@@ -105,6 +106,7 @@ pub(super) fn block(
         let selector = format!("markdown-math-toggle-{path}");
         let button = action_button(format!("math-toggle-{path}"), icon, label.into_owned(), cx)
             .touch(compact)
+            .motion(&buttons)
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 view.update(cx, |state, cx| {
@@ -129,6 +131,7 @@ pub(super) fn block(
             },
             cx,
         )
+        .motion(&buttons)
     };
     // Revealed on hover like the message actions, and pinned where there is
     // no hover or while the source shows. Faded rather than hidden: over its

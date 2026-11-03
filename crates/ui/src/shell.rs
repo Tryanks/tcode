@@ -14428,6 +14428,71 @@ mod tests {
         );
     }
 
+    /// How opaque the fill of the button `selector` is painted: none when
+    /// it paints no fill.
+    fn button_fill(selector: &'static str, cx: &mut VisualTestContext) -> f32 {
+        let button = cx.debug_bounds(selector).expect("the button");
+        cx.update(|window, _| {
+            let button = button.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| {
+                    quad.bounds.contains(&button.center())
+                        && (quad.bounds.size.width.0 - button.size.width.0).abs() < 1.
+                        && (quad.bounds.size.height.0 - button.size.height.0).abs() < 1.
+                })
+                .filter_map(|quad| quad.background.as_solid().map(|fill| fill.a))
+                .fold(0., f32::max)
+        })
+    }
+
+    /// A header toggle's fill glides in as its panel opens. A split part
+    /// way draws the pane's group under another parent: the fill carries on
+    /// from where it was, on the chat's clock (`Button::motion`), rather
+    /// than starting over at its end.
+    #[gpui::test]
+    fn a_header_toggles_fill_carries_on_when_its_pane_is_split(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        settle_frames(cx);
+        let _ = sent(&host);
+        let toggle = |cx: &mut VisualTestContext| {
+            store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        };
+        let off = button_fill("diff-panel", cx);
+        toggle(cx);
+        settle_frames(cx);
+        let on = button_fill("diff-panel", cx);
+        assert!(off + 0.02 < on, "the toggle's fill came: {off} -> {on}");
+        toggle(cx);
+        settle_frames(cx);
+        assert_eq!(button_fill("diff-panel", cx), off);
+
+        toggle(cx);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        display_frame(cx);
+        let partway = button_fill("diff-panel", cx);
+        // In thousandths, for the half-point margin the comparison allows.
+        assert_between(
+            "the diff toggle's fill",
+            px(off * 1000.),
+            px(on * 1000.),
+            px(partway * 1000.),
+        );
+        settle_frames(cx);
+        assert_eq!(button_fill("diff-panel", cx), on, "it comes to rest lit");
+    }
+
     /// A tablet turning compact draws the conversation on the compact
     /// thread page, under another parent than the wide layout's pane: the
     /// command opening and its output growing carry on from where they were.

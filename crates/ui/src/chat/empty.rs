@@ -76,6 +76,7 @@ impl ChatView {
         let sessions = self.workspace_store.read(cx).sidebar_sessions();
         let hub_projects = start_hub_projects(&projects, &sessions);
         let add_project = Button::new("add-project-empty")
+            .motion(&self.motion)
             .ghost()
             .small()
             .icon(
@@ -98,6 +99,7 @@ impl ChatView {
             .child(
                 h_flex().gap_2().child(add_project).child(
                     Button::new("quick-chat-empty")
+                        .motion(&self.motion)
                         .small()
                         .label(crate::tr!("sidebar.quick_chat"))
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -221,6 +223,7 @@ impl ChatView {
         // insets; span the region and center with flex instead.
         let pill = floating_backing(crate::material::radius_button(cx), cx).child(
             Button::new("scroll-to-end")
+                .motion(&self.motion)
                 .debug_selector(|| "scroll-to-end".into())
                 .outline()
                 .small()

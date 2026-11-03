@@ -40,10 +40,12 @@ pub(crate) fn error_card(
     copied: bool,
     resume: Option<LimitResume>,
     on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let danger = cx.theme().danger;
     let copy = Button::new(SharedString::from(format!("copy-error:{id}")))
+        .motion(motion)
         .ghost()
         .xsmall()
         .icon(if copied {
@@ -67,6 +69,7 @@ pub(crate) fn error_card(
             .items_center()
             .child(
                 Button::new(SharedString::from(format!("retry-turn:{id}")))
+                    .motion(motion)
                     .outline()
                     .xsmall()
                     .label(match remaining_secs {
@@ -80,6 +83,7 @@ pub(crate) fn error_card(
             .when(remaining_secs.is_some(), |row| {
                 row.child(
                     Button::new(SharedString::from(format!("cancel-retry:{id}")))
+                        .motion(motion)
                         .ghost()
                         .xsmall()
                         .label(crate::tr!("chat.limit_resume.cancel"))
@@ -92,6 +96,7 @@ pub(crate) fn error_card(
             .items_center()
             .child(
                 Button::new(SharedString::from(format!("schedule-limit-resume:{id}")))
+                    .motion(motion)
                     .outline()
                     .xsmall()
                     .icon(IconName::ArrowUp)
@@ -104,6 +109,7 @@ pub(crate) fn error_card(
             .items_center()
             .child(
                 Button::new(SharedString::from(format!("continue-limit-resume:{id}")))
+                    .motion(motion)
                     .outline()
                     .xsmall()
                     .icon(IconName::ArrowUp)
@@ -129,6 +135,7 @@ pub(crate) fn error_card(
             .child(div().flex_1())
             .child(
                 Button::new(SharedString::from(format!("cancel-limit-resume:{id}")))
+                    .motion(motion)
                     .ghost()
                     .xsmall()
                     .icon(IconName::Close)

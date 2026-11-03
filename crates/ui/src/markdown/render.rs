@@ -1601,6 +1601,7 @@ fn render_code_block(
     let copy = (first && !is_math).then(|| {
         let copied = view.read(cx).copied.is(&options.path);
         let compact = crate::window_seam::window_is_compact(window, cx);
+        let buttons = view.read(cx).motion();
         let (view, path, code) = (view.clone(), options.path.clone(), whole_code.clone());
         let button = copy_button(
             &format!("code-{}", options.path),
@@ -1617,7 +1618,8 @@ fn render_code_block(
                 });
             },
             cx,
-        );
+        )
+        .motion(&buttons);
         let corner = div()
             .absolute()
             .block_mouse_except_scroll()
