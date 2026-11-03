@@ -114,7 +114,8 @@ fn open_child_link(
         SharedString::from(crate::tr!("agents.open").into_owned()),
         cx,
     )
-    .on_hover(hover.on_hover(id))
+    .relative()
+    .child(hover.hitbox(id))
     .when(reveal > 0., |link| {
         link.underline()
             .text_decoration_color(primary.opacity(reveal))
