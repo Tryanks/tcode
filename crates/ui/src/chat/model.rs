@@ -554,6 +554,8 @@ pub(crate) struct TurnTimeClause {
     pub(crate) text: String,
     pub(crate) selector: &'static str,
     pub(crate) warning: bool,
+    /// What the clause shows on hover: the total's breakdown.
+    pub(crate) tooltip: Option<String>,
 }
 
 pub(crate) fn turn_time_clauses(
@@ -572,6 +574,9 @@ pub(crate) fn turn_time_clauses(
             text,
             selector,
             warning: false,
+            tooltip: (selector == "turn-time-total")
+                .then(|| turn_time_breakdown(timing))
+                .flatten(),
         })
         .collect::<Vec<_>>();
     if let Some(cost) = cost_usd {
@@ -579,6 +584,7 @@ pub(crate) fn turn_time_clauses(
             text: format_cost_usd(cost),
             selector: "turn-time-cost",
             warning: false,
+            tooltip: None,
         });
     }
     if let Some(served) = divergent_served_model(served_model, requested_model) {
@@ -590,6 +596,7 @@ pub(crate) fn turn_time_clauses(
             text: format!("{warning_mark} {served}"),
             selector: "turn-time-model",
             warning: true,
+            tooltip: None,
         });
     }
     clauses

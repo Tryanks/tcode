@@ -14802,6 +14802,34 @@ mod tests {
         }
     }
 
+    /// Resting on a finished turn's duration shows its breakdown beside the
+    /// duration, not centred on the row or the page.
+    #[gpui::test]
+    fn a_turns_duration_shows_its_breakdown_beside_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let (shell, host, cx) = mount_panes(cx);
+        serve_finished_turns(&host, "thread-1", 1, false);
+        await_restore_update(&shell, cx, |store| {
+            store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+        });
+        settle_frames(cx);
+        let total = cx
+            .debug_bounds("turn-time-total")
+            .expect("the turn's duration");
+        cx.simulate_mouse_move(total.center(), None, gpui::Modifiers::none());
+        draw(cx);
+        let delay = cx.update(|_, cx| gpui_base::TooltipDefaults::global(cx).show_delay());
+        cx.executor().advance_clock(delay);
+        settle_frames(cx);
+        let tooltip = cx.debug_bounds("tcode-tooltip").expect("the breakdown");
+        assert!(
+            (tooltip.center().x - total.center().x).abs() <= px(1.),
+            "the breakdown is centred over or under the duration: \
+             duration {total:?}, tooltip {tooltip:?}"
+        );
+    }
+
     /// As the window narrows past where the header's labels fit, its split
     /// buttons and the way back to the parent drop their labels; past where
     /// its toggles fit they give way to the overflow button. Each change
