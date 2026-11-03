@@ -149,10 +149,11 @@ pub(super) fn summary(chat: &ChatView, _cx: &App) -> Option<SharedString> {
     )
 }
 
-/// What the card shows below its header, laid out at the rail's width: a row for each
-/// command, running ones first, each with how it stands, bringing its place
-/// in the timeline into view on a click; past [`SHOWN`], how many more.
-/// Commands that leave the list fold away as they stood.
+/// What the card shows below its header, laid out at the rail's width: a
+/// row for each command, running ones first, each with how it stands at its
+/// right, bringing its place in the timeline into view on a click; past
+/// [`SHOWN`], how many more. Commands that leave the list fold away as they
+/// stood.
 pub(super) fn body(
     chat: &ChatView,
     window: &mut Window,
@@ -258,7 +259,6 @@ fn row(
     .rounded(radius)
     .cursor_pointer()
     .child(crate::material::row_hover(radius, cx))
-    .child(div().flex_none().child(mark))
     .child(
         div()
             .flex_1()
@@ -267,13 +267,16 @@ fn row(
             .text_meta_mono(false, cx)
             .child(crate::widgets::fade_text(line.command.clone())),
     )
-    .children(trailing.map(|trailing| {
-        div()
+    .child(
+        h_flex()
             .flex_none()
+            .gap_1()
+            .items_center()
             .whitespace_nowrap()
             .text_secondary(false, cx)
-            .child(trailing)
-    }))
+            .children(trailing)
+            .child(mark),
+    )
     .on_click(cx.listener(move |chat, _, _, cx| {
         chat.scroll_to_activity(turn, &entry_id, cx);
     }))
