@@ -1221,7 +1221,7 @@ impl WorkspaceStore {
                 self.close_unshown_pull_requests();
             }
             (Topic::Index, ServerEvent::IndexUpsertProject(project)) => {
-                images::invalidate_project_icon(project, cx);
+                images::invalidate_project_icon(project, images::IconReset::Changed, cx);
                 match self
                     .index_replica
                     .1
@@ -1270,14 +1270,15 @@ impl WorkspaceStore {
                 self.index_hydrated = true;
                 let fresh_baseline = self.baseline_topics.insert(index_topic.clone());
                 for project in &snapshot.projects {
-                    if fresh_baseline
-                        || self
-                            .index_replica
-                            .1
-                            .iter()
-                            .any(|old| old.id == project.id && old.icon_path != project.icon_path)
-                    {
-                        images::invalidate_project_icon(project, cx);
+                    let changed = self
+                        .index_replica
+                        .1
+                        .iter()
+                        .any(|old| old.id == project.id && old.icon_path != project.icon_path);
+                    if changed {
+                        images::invalidate_project_icon(project, images::IconReset::Changed, cx);
+                    } else if fresh_baseline {
+                        images::invalidate_project_icon(project, images::IconReset::Baseline, cx);
                     }
                 }
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
@@ -1315,7 +1316,11 @@ impl WorkspaceStore {
                     self.index_summary.archived_revision = *archived_revision;
                     if self.baseline_topics.insert(index_topic.clone()) {
                         for project in &self.index_replica.1 {
-                            images::invalidate_project_icon(project, cx);
+                            images::invalidate_project_icon(
+                                project,
+                                images::IconReset::Baseline,
+                                cx,
+                            );
                         }
                     }
                     self.restore_index_selection(cx);
