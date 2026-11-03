@@ -36,10 +36,10 @@ use web_time::Instant;
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Context, Element, ElementId, Entity, GlobalElementId,
-    ImageSource, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, MouseButton,
-    ObjectFit, ParentElement as _, Pixels, RenderImage, Role, SharedString,
-    StatefulInteractiveElement as _, Style, Styled, StyledImage as _, SvgRenderer, Task, Window,
-    div, img, prelude::FluentBuilder as _, px, relative, rems, size,
+    InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, MouseButton, ObjectFit,
+    ParentElement as _, Pixels, RenderImage, Role, SharedString, StatefulInteractiveElement as _,
+    Style, Styled, StyledImage as _, SvgRenderer, Task, Window, div, img,
+    prelude::FluentBuilder as _, px, relative, rems, size,
 };
 use gpui_base::h_flex;
 use mermaid_rs_renderer::{
@@ -153,33 +153,24 @@ fn draw(source: &str, dark: bool, whole: bool, renderer: &SvgRenderer) -> Raster
 }
 
 thread_local! {
-    /// Pictures no longer held anywhere, whose sprites the next chance to
-    /// reach the app drops from the atlas.
-    static RETIRED: RefCell<Vec<Arc<RenderImage>>> = const { RefCell::new(Vec::new()) };
     static FINALS: RefCell<Finals> = RefCell::new(Finals::default());
 }
 
-/// A rasterized diagram. When the last holder lets it go, its sprite leaves
-/// the atlas.
+/// A rasterized diagram.
 #[derive(Clone)]
 pub(super) struct Picture(Rc<PictureData>);
 
 struct PictureData {
-    image: Arc<RenderImage>,
+    image: crate::store::images::Owned,
     size: gpui::Size<Pixels>,
 }
 
-impl Drop for PictureData {
-    fn drop(&mut self) {
-        let image = self.image.clone();
-        // The thread's own teardown drops the cache after the queue.
-        let _ = RETIRED.try_with(|retired| retired.borrow_mut().push(image));
-    }
-}
-
 impl Picture {
-    fn new(image: Arc<RenderImage>, size: gpui::Size<Pixels>) -> Self {
-        Self(Rc::new(PictureData { image, size }))
+    fn new(image: Arc<RenderImage>, size: gpui::Size<Pixels>, cx: &mut App) -> Self {
+        Self(Rc::new(PictureData {
+            image: crate::store::images::Owned::new(image, cx),
+            size,
+        }))
     }
 
     fn size(&self) -> gpui::Size<Pixels> {
@@ -187,24 +178,9 @@ impl Picture {
     }
 
     fn bytes(&self) -> usize {
-        let device = self.0.image.size(0);
+        let device = self.0.image.image().size(0);
         device.width.0.max(0) as usize * device.height.0.max(0) as usize * 4
     }
-}
-
-/// Drop from the atlas the sprites of the pictures nothing holds anymore.
-pub(super) fn release_retired(cx: &mut App) {
-    let retired = RETIRED.with(|retired| std::mem::take(&mut *retired.borrow_mut()));
-    if retired.is_empty() {
-        return;
-    }
-    // A window that is drawing is out of the app's list; dropping after the
-    // frame reaches every window.
-    cx.defer(move |cx| {
-        for image in retired {
-            cx.drop_image(image, None);
-        }
-    });
 }
 
 #[derive(Clone)]
@@ -214,10 +190,10 @@ enum Outcome {
     Failed(Option<SharedString>),
 }
 
-impl From<Raster> for Outcome {
-    fn from(raster: Raster) -> Self {
+impl Outcome {
+    fn new(raster: Raster, cx: &mut App) -> Self {
         match raster {
-            Raster::Drawn(image, size) => Self::Drawn(Picture::new(image, size)),
+            Raster::Drawn(image, size) => Self::Drawn(Picture::new(image, size, cx)),
             Raster::Empty => Self::Empty,
             Raster::Failed(message) => Self::Failed(message.map(Into::into)),
         }
@@ -432,12 +408,15 @@ impl Slot {
                             .with(|finals| finals.borrow_mut().get(&key))
                             .or_else(|| {
                                 (!self.built).then(|| {
-                                    let outcome = Outcome::from(draw(
-                                        &attempt.source,
-                                        attempt.dark,
-                                        true,
-                                        &cx.svg_renderer(),
-                                    ));
+                                    let outcome = Outcome::new(
+                                        draw(
+                                            &attempt.source,
+                                            attempt.dark,
+                                            true,
+                                            &cx.svg_renderer(),
+                                        ),
+                                        cx,
+                                    );
                                     FINALS.with(|finals| {
                                         finals.borrow_mut().insert(key, outcome.clone())
                                     });
@@ -640,7 +619,7 @@ impl Diagrams {
         snap: bool,
         cx: &mut Context<MarkdownState>,
     ) {
-        let outcome = Outcome::from(raster);
+        let outcome = Outcome::new(raster, cx);
         if attempt.whole {
             let key = (attempt.source.clone(), attempt.dark);
             FINALS.with(|finals| finals.borrow_mut().insert(key, outcome.clone()));
@@ -651,7 +630,6 @@ impl Diagrams {
             slot.in_flight = None;
             slot.accept(attempt, outcome, snap);
         }
-        release_retired(cx);
         cx.notify();
     }
 
@@ -924,7 +902,7 @@ fn picture(
     cx: &mut App,
 ) -> AnyElement {
     let label: SharedString = crate::tr!("markdown.mermaid_diagram").into_owned().into();
-    let source = ImageSource::Render(picture.0.image.clone());
+    let source = picture.0.image.source();
     let viewer = source.clone();
     let viewer_label = label.clone();
     let image = crate::material::accessible_clickable(
@@ -1567,7 +1545,7 @@ mod tests {
                     state.diagrams.slots.get("root-0").and_then(|slot| {
                         slot.shown
                             .as_ref()
-                            .map(|shown| shown.picture.0.image.clone())
+                            .map(|shown| shown.picture.0.image.image().clone())
                     })
                 });
                 if let Some(shown) = shown

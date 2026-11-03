@@ -2,12 +2,11 @@
 //!
 //! GPUI's `img` decodes asynchronously and draws nothing (or its loading
 //! element) until the decode lands, then the picture at once; it tells its
-//! caller nothing about where it stands. The state it reads lives in GPUI's
-//! asset system, keyed by the source, so [`image_load`] asks the same assets
-//! `img` will ask (the window's assets: Tcode draws no `img` under an
-//! `image_cache` element), and [`image_arrival`] turns the answer into an
-//! opacity that rises once it lands. Asking first starts the decode `img`
-//! would have started; it is the same asset, decoded once.
+//! caller nothing about where it stands. Every source Tcode draws is a
+//! `store::images` reader, so [`image_load`] asks the same reader `img` will
+//! ask, and [`image_arrival`] turns the answer into an opacity that rises
+//! once it lands. Asking first starts the read `img` would have started; it
+//! is the same read, decoded once.
 
 use std::sync::Arc;
 
@@ -47,12 +46,11 @@ impl ImageLoad {
 /// Where `source`'s decode stands, as `img` will find it this frame.
 pub(crate) fn image_load(source: &ImageSource, window: &mut Window, cx: &mut App) -> ImageLoad {
     let decoded: Option<Result<Arc<RenderImage>, ImageCacheError>> = match source {
-        ImageSource::Resource(resource) => {
-            window.use_asset::<gpui::ImgResourceLoader>(resource, cx)
-        }
         ImageSource::Custom(load) => load(window, cx),
         ImageSource::Render(image) => Some(Ok(image.clone())),
-        ImageSource::Image(image) => image.clone().use_render_image(window, cx).map(Ok),
+        // GPUI's memo would keep such a read for the session; `store::images` reads every
+        // picture Tcode draws, so none is ever built.
+        ImageSource::Resource(_) | ImageSource::Image(_) => None,
     };
     match decoded {
         None => ImageLoad::Loading,

@@ -43,7 +43,7 @@ mod intents;
 mod thread;
 pub(crate) use images::{
     MAX_PREVIEW_PIXELS, MediaState, image_preview, item_image_preview, pull_request_media,
-    pull_request_media_state, retry_failed_pull_request_media,
+    pull_request_media_state, remote_image, retry_failed_pull_request_media,
 };
 use thread::ThreadReplica;
 mod snapshots;
