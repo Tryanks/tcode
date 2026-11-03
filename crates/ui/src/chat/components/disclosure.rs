@@ -66,7 +66,7 @@ pub(crate) fn callback_row(
     callback: &OrchestrateCallback,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_open: Option<super::subagent::ClickHandler>,
+    on_open: Option<super::changed_files::ClickHandler>,
     hover: crate::motion::ListHover,
     motion: &crate::motion::owned::Owned,
     cx: &App,
@@ -97,7 +97,7 @@ pub(crate) fn callback_row(
 /// fades.
 fn open_child_link(
     key: &str,
-    on_open: Option<super::subagent::ClickHandler>,
+    on_open: Option<super::changed_files::ClickHandler>,
     hover: &crate::motion::ListHover,
     reveal: f32,
     cx: &App,
@@ -164,7 +164,7 @@ fn disclosure_with(
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     open: Option<(
-        Option<super::subagent::ClickHandler>,
+        Option<super::changed_files::ClickHandler>,
         crate::motion::ListHover,
     )>,
     motion: &crate::motion::owned::Owned,

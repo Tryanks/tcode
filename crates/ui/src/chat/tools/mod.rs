@@ -23,6 +23,7 @@ pub(in crate::chat) mod run;
 pub(in crate::chat) mod script;
 pub(in crate::chat) mod search;
 pub(in crate::chat) mod shell;
+pub(in crate::chat) mod subagent;
 pub(in crate::chat) mod threads;
 pub(in crate::chat) mod todo;
 pub(in crate::chat) mod web;
@@ -235,9 +236,9 @@ impl Activity {
     }
 }
 
-/// The window of one Work Log activity other than a file change or a
-/// subagent: dispatched on its item kind, then for a tool call on the
-/// family that claims it.
+/// The window of one Work Log activity other than a file change:
+/// dispatched on its item kind, then for a tool call on the family that
+/// claims it.
 pub(in crate::chat) fn activity(
     entry: &TimelineEntry,
     live_reasoning: bool,
@@ -307,6 +308,21 @@ pub(in crate::chat) fn activity(
         } => settled(
             other::header(provider_kind, summary, cwd),
             other::copy_items(provider_kind, summary),
+        ),
+        ItemContent::Subagent {
+            agent_type,
+            description,
+            status,
+            summary,
+            model,
+            effort,
+        } => subagent::activity(
+            agent_type,
+            description,
+            *status,
+            summary.as_deref(),
+            model.as_deref(),
+            effort.as_deref(),
         ),
         _ => settled(Header::bare(crate::icon::IconName::Info), Vec::new()),
     }

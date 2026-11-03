@@ -72,7 +72,8 @@ impl Argument {
     }
 }
 
-/// A fact about the result, beside the argument: a count, an exit code.
+/// A fact beside the argument: about the result — a count, an exit code —
+/// or about how the call ran.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::chat) enum Chip {
     Count(String),
@@ -84,6 +85,9 @@ pub(in crate::chat) enum Chip {
     /// An outcome the call itself reports short of success, in its words: a
     /// wait that timed out, an action that did not work.
     Warning(String),
+    /// What the call ran with, verbatim: the model an agent ran on, its
+    /// effort.
+    Tag(String),
 }
 
 /// The header of one window.
@@ -593,6 +597,14 @@ fn chip_element(key: &str, chip: Chip, cx: &App) -> AnyElement {
             crate::material::semantic_chip(text, theme.warning.opacity(0.12), theme.warning, cx)
                 .into_any_element()
         }
+        Chip::Tag(text) => crate::material::semantic_chip(
+            text,
+            theme.muted.opacity(0.4),
+            theme.muted_foreground,
+            cx,
+        )
+        .font_family(mono)
+        .into_any_element(),
     };
     div()
         .flex_none()

@@ -297,13 +297,13 @@ impl Render for Gallery {
             ),
             section(
                 5,
-                "Subagent capsule",
+                "Subagent window",
                 state_row(
                     subagents
                         .iter()
                         .zip(["RUNNING", "COMPLETED", "FAILED"])
                         .map(|(entry, label)| {
-                            state_card(label, gallery_support::subagent(entry, cx), cx)
+                            state_card(label, gallery_support::activity(entry, false, cx), cx)
                         })
                         .collect(),
                 ),
