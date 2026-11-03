@@ -5798,7 +5798,7 @@ pub(crate) mod tests {
         ));
         workspace.update(cx, |store, cx| {
             assert!(store.history_loading_for(store.active_session_id().as_deref()));
-            store.load_earlier_messages(cx);
+            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx);
         });
         cx.run_until_parked();
         assert!(
@@ -5821,11 +5821,13 @@ pub(crate) mod tests {
                 !store.history_loading_for(store.active_session_id().as_deref()),
                 "failed pages hide activity"
             );
-            store.load_earlier_messages(cx);
+            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx);
         });
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(4));
-        workspace.update(cx, |store, cx| store.load_earlier_messages(cx));
+        workspace.update(cx, |store, cx| {
+            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx)
+        });
         cx.run_until_parked();
         assert!(
             outgoing.try_recv().is_err(),
@@ -5834,7 +5836,9 @@ pub(crate) mod tests {
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
-        workspace.update(cx, |store, cx| store.load_earlier_messages(cx));
+        workspace.update(cx, |store, cx| {
+            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx)
+        });
         cx.run_until_parked();
         let retry = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
         assert_eq!(
@@ -5844,7 +5848,7 @@ pub(crate) mod tests {
         request = retry;
         workspace.update(cx, |store, cx| {
             assert!(store.history_loading_for(store.active_session_id().as_deref()));
-            store.load_earlier_messages(cx);
+            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx);
         });
         cx.run_until_parked();
         assert!(

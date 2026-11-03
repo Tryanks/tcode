@@ -304,13 +304,6 @@ impl WorkspaceStore {
         thread.adopt_fold(timeline);
     }
 
-    #[cfg(test)]
-    pub(crate) fn load_earlier_messages(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.focused_session_id.clone() {
-            self.load_history_pages(&session_id, false, cx);
-        }
-    }
-
     fn history_page_loadable(&self, session_id: &str) -> bool {
         self.threads.get(session_id).is_some_and(|thread| {
             thread.history_task.is_none()
