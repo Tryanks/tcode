@@ -73,6 +73,7 @@ pub(super) fn body(
     }
     let store = chat.workspace_store.clone();
     let lead = chat.session_id.clone();
+    let origins = chat.side_origins().clone();
     let rows = lines
         .into_iter()
         .map(|line| (SharedString::from(line.key.clone()), line));
@@ -83,7 +84,7 @@ pub(super) fn body(
             ROWS,
             window,
             cx,
-            |_, line, window, cx| row(line, &store, lead.clone(), window, cx),
+            |_, line, window, cx| row(line, &store, lead.clone(), &origins, window, cx),
         )
         .render(gpui_base::v_flex().w_full().min_w_0())
         .into_any_element(),
@@ -94,6 +95,7 @@ fn row(
     line: &AgentLine,
     store: &Entity<crate::store::WorkspaceStore>,
     lead: Option<String>,
+    origins: &crate::motion::expand::Origins,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -216,7 +218,8 @@ fn row(
         )
     });
     let key = line.key.clone();
-    crate::material::accessible_clickable(
+    let origin = SharedString::from(format!("rail-agent-{}", line.key));
+    let row = crate::material::accessible_clickable(
         v_flex(),
         SharedString::from(format!("rail-agent-{}", line.key)),
         Role::Button,
@@ -236,9 +239,17 @@ fn row(
     .children(result)
     .when_some(line.open.clone(), |row, id| {
         let store = store.clone();
+        let origin = origin.clone();
         row.cursor_pointer().on_click(move |_, window, cx| {
-            crate::agents_panel::open_agent(&store, id.clone(), lead.as_deref(), window, cx);
+            crate::agents_panel::open_agent(
+                &store,
+                id.clone(),
+                lead.as_deref(),
+                Some(origin.clone()),
+                window,
+                cx,
+            );
         })
-    })
-    .into_any_element()
+    });
+    origins.mark(origin, radius, row).into_any_element()
 }

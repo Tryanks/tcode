@@ -499,6 +499,11 @@ pub(crate) struct AgentLine {
     pub(crate) open: Option<String>,
 }
 
+/// The key the panel's row opening `id` has among the lead's origins.
+fn panel_origin(id: String) -> SharedString {
+    format!("agents-panel-{id}").into()
+}
+
 fn compact(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -508,11 +513,14 @@ fn compact(text: &str) -> String {
 /// no room beside it and goes back with its navigation. A thread a pane
 /// already shows takes the keyboard there instead. An archived agent is
 /// reached the way Settings → Archived Threads reaches every archived
-/// thread: unarchived.
+/// thread: unarchived. Beside the lead, it comes out of `origin`, what was
+/// pressed to open it, as the lead's chat records it
+/// ([`crate::chat::ChatView::side_origins`]).
 pub(crate) fn open_agent(
     store: &Entity<WorkspaceStore>,
     id: String,
     lead: Option<&str>,
+    origin: Option<SharedString>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -535,7 +543,7 @@ pub(crate) fn open_agent(
             if let Some(lead) = lead {
                 store.update(cx, |store, cx| store.close_right_panel_for(Some(lead), cx));
             }
-            host.update(cx, |chat, cx| chat.open_side(id, window, cx));
+            host.update(cx, |chat, cx| chat.open_side(id, origin, window, cx));
         }
         None => store.update(cx, |store, cx| store.select_session(id, cx)),
     }
@@ -726,7 +734,14 @@ impl AgentsPanel {
             sheet.update(cx, |sheet, cx| sheet.dismiss(window, cx));
         }
         let lead = self.store.read(cx).active_session_id();
-        open_agent(&self.store, action.0.clone(), lead.as_deref(), window, cx);
+        open_agent(
+            &self.store,
+            action.0.clone(),
+            lead.as_deref(),
+            Some(panel_origin(action.0.clone())),
+            window,
+            cx,
+        );
     }
 
     fn on_stop(&mut self, action: &AgentStop, _: &mut Window, cx: &mut Context<Self>) {
@@ -1098,7 +1113,17 @@ impl AgentsPanel {
                 }),
             )
         });
-        base.group(group)
+        // What the agent beside the lead grows out of: the lead's chat
+        // records where the row is.
+        let origins = self
+            .store
+            .read(cx)
+            .active_session_id()
+            .and_then(|lead| crate::shell::side_host_for(&lead, cx))
+            .map(|chat| chat.read(cx).side_origins().clone());
+        let origin = open.clone().map(panel_origin);
+        let row_el = base
+            .group(group)
             .debug_selector({
                 let key = row.key.clone();
                 move || format!("agent-row-{key}")
@@ -1111,7 +1136,13 @@ impl AgentsPanel {
             .when_some(readonly, |row_el, text| {
                 row_el.with_tooltip(move |_, _| Tooltip::new(text.clone()))
             })
-            .into_any_element()
+            .into_any_element();
+        match (origins, origin) {
+            (Some(origins), Some(origin)) => origins
+                .mark(origin, material::radius_card(cx), row_el)
+                .into_any_element(),
+            _ => row_el,
+        }
     }
 
     fn render_empty(cx: &App) -> AnyElement {

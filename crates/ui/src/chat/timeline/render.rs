@@ -1038,19 +1038,23 @@ impl ChatView {
         };
         let store = self.workspace_store.clone();
         let lead = self.session_id.clone();
+        // The row that opens the agent is what its card grows out of.
+        let origin = SharedString::from(format!("callback-{key}"));
         let on_open = exists.then(|| {
+            let origin = origin.clone();
             Box::new(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                 crate::agents_panel::open_agent(
                     &store,
                     child_id.clone(),
                     lead.as_deref(),
+                    Some(origin.clone()),
                     window,
                     cx,
                 );
             }) as components::changed_files::ClickHandler
         });
         let toggle_key = key.clone();
-        components::disclosure::callback_row(
+        let row = components::disclosure::callback_row(
             &key,
             event,
             callback,
@@ -1062,7 +1066,14 @@ impl ChatView {
             self.hover.clone(),
             &self.motion,
             cx,
-        )
+        );
+        if exists {
+            self.side_origins
+                .mark(origin, crate::material::radius_card(cx), row)
+                .into_any_element()
+        } else {
+            row
+        }
     }
 
     fn compose_disclosure(
@@ -1459,15 +1470,21 @@ impl ChatView {
                 None => tools::window::Detail::Shut,
             }
         };
+        // A window that opens an agent is what the agent's card grows out of.
+        let origin = child
+            .as_ref()
+            .map(|_| SharedString::from(format!("activity-window-{}", entry.id)));
         let on_click: tools::window::ClickHandler = match child {
             Some(child) => {
                 let store = self.workspace_store.clone();
                 let lead = self.session_id.clone();
+                let origin = origin.clone();
                 Box::new(move |_, window, cx| {
                     crate::agents_panel::open_agent(
                         &store,
                         child.clone(),
                         lead.as_deref(),
+                        origin.clone(),
                         window,
                         cx,
                     );
@@ -1481,7 +1498,7 @@ impl ChatView {
                 }))
             }
         };
-        tools::window::tool_window(
+        let tool = tools::window::tool_window(
             tools::window::WindowSpec {
                 key: entry.id.clone(),
                 header,
@@ -1498,7 +1515,14 @@ impl ChatView {
             detail,
             on_click,
             cx,
-        )
+        );
+        match origin {
+            Some(origin) => self
+                .side_origins
+                .mark(origin, crate::material::radius_card(cx), tool)
+                .into_any_element(),
+            None => tool,
+        }
     }
 
     /// What an open activity window's body shows, as far as its height goes:
