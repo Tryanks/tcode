@@ -158,7 +158,7 @@ impl MarkdownState {
             base_dir: None,
             image_resolver: None,
             link_targets: LinkTargetCache::default(),
-            hover: crate::motion::ListHover::new(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             pending_context: None,
             copied: CopiedMark::default(),
             math_sources: Default::default(),

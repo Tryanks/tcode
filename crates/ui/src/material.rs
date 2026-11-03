@@ -31,6 +31,10 @@ pub(crate) const CARD_INSET: f32 = 12.;
 /// The smallest square a finger can reliably hit. gpui-base carries no
 /// control-height token (its `TouchHandle::HIT_SIZE` is text selection's own).
 pub(crate) const TOUCH_TARGET: f32 = 44.;
+
+/// How long a list row's or a menu item's hover fill, or a list's hover
+/// reveal, takes to come in or go.
+pub(crate) const HOVER: std::time::Duration = std::time::Duration::from_millis(200);
 /// Width of numeric form fields, including their step controls.
 pub(crate) const NUMBER_INPUT_WIDTH: f32 = 96.;
 
@@ -397,7 +401,7 @@ impl ItemFill {
 /// row's first child; the row must be positioned and have an id.
 pub(crate) fn row_hover(radius: Pixels, cx: &App) -> crate::motion::Sampled {
     let hover = cx.theme().list_hover;
-    crate::motion::hover_layer(hover.opacity(0.), hover, radius)
+    crate::motion::hover_layer(None, hover.opacity(0.), hover, radius, HOVER.into())
 }
 
 /// One item of a menu or a menu-like picker: its inset, gap, radius and, on a
@@ -417,12 +421,20 @@ pub fn menu_item_frame(touch: bool, fill: ItemFill, cx: &App) -> Div {
         .rounded(radius)
         .map(|item| match fill {
             ItemFill::Inert => item,
-            ItemFill::Hover => {
-                item.child(crate::motion::hover_layer(hover.opacity(0.), hover, radius))
-            }
-            ItemFill::Highlight(rest) => {
-                item.child(crate::motion::hover_layer(rest, hover, radius))
-            }
+            ItemFill::Hover => item.child(crate::motion::hover_layer(
+                None,
+                hover.opacity(0.),
+                hover,
+                radius,
+                HOVER.into(),
+            )),
+            ItemFill::Highlight(rest) => item.child(crate::motion::hover_layer(
+                None,
+                rest,
+                hover,
+                radius,
+                HOVER.into(),
+            )),
         })
 }
 
@@ -653,12 +665,7 @@ where
                 hover.opacity(0.),
                 if selected { hover.opacity(0.) } else { hover },
             );
-            match owned {
-                Some((motion, key)) => {
-                    crate::motion::hover_layer_owned(motion, key, rest, hover, radius)
-                }
-                None => crate::motion::hover_layer(rest, hover, radius),
-            }
+            crate::motion::hover_layer(owned, rest, hover, radius, HOVER.into())
         })
 }
 

@@ -326,8 +326,11 @@ pub fn sidebar_badge(
                     let (store, id, open) = (hover_store.clone(), hover_id.clone(), (*key).clone());
                     // The pointer over a row fills it gradually.
                     let (fill, on_hover) = crate::motion::hover_fill(
+                        crate::motion::Clock::Element,
                         SharedString::from(format!("pr-mini-row-{index}")),
+                        list_hover.opacity(0.),
                         list_hover,
+                        &crate::material::HOVER.into(),
                         window,
                         cx,
                     );
@@ -828,7 +831,7 @@ impl PullRequestsPanel {
             window_state,
             scroll: ScrollHandle::new(),
             eye_hovered: None,
-            hover: crate::motion::ListHover::new(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             agent_tools_open: false,
             agent_tools_closed: Default::default(),
             motion: Default::default(),

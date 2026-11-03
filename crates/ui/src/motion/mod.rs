@@ -2,8 +2,8 @@ use std::borrow::BorrowMut;
 
 use gpui::{
     AnyElement, App, Axis, Div, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Pixels, Size, Stateful, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::{PresenceSample, Transition, TransitionId, transition};
 
@@ -16,6 +16,7 @@ pub(crate) mod shared;
 pub(crate) mod focus_ring;
 
 pub(crate) mod drag_ghost;
+mod hover;
 mod image_fade;
 pub(crate) mod keyed;
 mod list_flip;
@@ -24,6 +25,7 @@ pub(crate) mod list_rows;
 mod list_scroll;
 mod size_glide;
 
+pub(crate) use hover::{blend, hover_fill, hover_layer, hovered};
 pub(crate) use image_fade::{image_arrival, image_load};
 pub(crate) use keyed::{keyed, keyed_across};
 pub(crate) use list_flip::ListFlip;
@@ -549,119 +551,6 @@ fn draw_change(
             )
         })
         .into_any_element()
-}
-
-/// A hover fill that glides over `SETTLE`: the fill to paint now, and the
-/// handler for the element's `on_hover` that moves it. Pressing has no
-/// fill and stays immediate.
-pub(crate) fn hover_fill(
-    id: impl Into<ElementId>,
-    hover: gpui::Hsla,
-    window: &mut Window,
-    cx: &mut App,
-) -> (gpui::Hsla, impl Fn(&bool, &mut Window, &mut App) + 'static) {
-    hover_fill_over(id, hover.opacity(0.), hover, window, cx)
-}
-
-/// [`hover_fill`] from `rest`, the fill the element has while the pointer
-/// is away (a highlight, or nothing); a change of `rest` glides too.
-fn hover_fill_over(
-    id: impl Into<ElementId>,
-    rest: gpui::Hsla,
-    hover: gpui::Hsla,
-    window: &mut Window,
-    cx: &mut App,
-) -> (gpui::Hsla, impl Fn(&bool, &mut Window, &mut App) + 'static) {
-    let id = id.into();
-    let (hovered, on_hover) = hovered(id.clone(), window, cx);
-    let fill = Clock::Element.transition(
-        child_id(&id, "hover-fill"),
-        Colour(if hovered { hover } else { rest }),
-        &Curve::settle(),
-        window,
-        cx,
-    );
-    (fill.0, on_hover)
-}
-
-/// Whether the pointer is over the element `id`, as its `on_hover` last
-/// heard, and that handler: for an element whose hover moves more than a
-/// fill (a label's colour too), each part gliding to its hovered value.
-pub(crate) fn hovered<I: Into<ElementId>>(
-    id: I,
-    window: &mut Window,
-    cx: &mut App,
-) -> (
-    bool,
-    impl Fn(&bool, &mut Window, &mut App) + 'static + use<I>,
-) {
-    let hovered = window.use_keyed_state(child_id(&id.into(), "hovered"), cx, |_, _| false);
-    let now = *hovered.read(cx);
-    let on_hover = move |is_hovered: &bool, _: &mut Window, cx: &mut App| {
-        hovered.update(cx, |hovered, cx| {
-            if *hovered != *is_hovered {
-                *hovered = *is_hovered;
-                cx.notify();
-            }
-        });
-    };
-    (now, on_hover)
-}
-
-/// The fill of an item built with `&App` only (a menu item, a selectable
-/// row), for its frame's first child, under the item's content: [`hover_fill`]
-/// over `rest`, rounded by `radius`, sampled when the item renders and kept
-/// under the item's id. It hears the pointer through its own hitbox, which
-/// covers the item and leaves the pointer to the item and its content, so
-/// the item's own `on_hover` stays the caller's. The item must be
-/// positioned and have an id.
-pub(crate) fn hover_layer(rest: gpui::Hsla, hover: gpui::Hsla, radius: Pixels) -> Sampled {
-    Sampled::new(move |window, cx| {
-        let (fill, on_hover) = hover_fill_over("hover-layer", rest, hover, window, cx);
-        div()
-            .id("hover-layer")
-            .absolute()
-            .inset_0()
-            .rounded(radius)
-            .bg(fill)
-            .on_hover(on_hover)
-            .into_any_element()
-    })
-}
-
-/// [`hover_layer`] with its fill's clock kept by `motion` under `key`, for
-/// an item its view draws under another parent (a list on a page the window
-/// re-parents as it turns compact or wide), whose fill would otherwise start
-/// over there. Whether the pointer is over it is still heard where it is
-/// drawn: the pointer moving is what says so.
-pub(crate) fn hover_layer_owned(
-    motion: &owned::Owned,
-    key: gpui::SharedString,
-    rest: gpui::Hsla,
-    hover: gpui::Hsla,
-    radius: Pixels,
-) -> Sampled {
-    let motion = motion.clone();
-    Sampled::new(move |window, cx| {
-        let (hovered, on_hover) = hovered("hover-layer", window, cx);
-        let fill = motion
-            .transition(
-                format!("{key}/hover-fill"),
-                Colour(if hovered { hover } else { rest }),
-                &Curve::settle(),
-                window,
-                cx,
-            )
-            .0;
-        div()
-            .id("hover-layer")
-            .absolute()
-            .inset_0()
-            .rounded(radius)
-            .bg(fill)
-            .on_hover(on_hover)
-            .into_any_element()
-    })
 }
 
 /// Mutually exclusive states of one region (loading, loaded, failed) that

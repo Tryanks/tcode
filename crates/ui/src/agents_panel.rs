@@ -434,7 +434,7 @@ impl AgentsPanel {
             store,
             shown: false,
             done_expanded: false,
-            hover: crate::motion::ListHover::new(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             sheet: None,
             vscroll: ScrollHandle::new(),
             live: false,

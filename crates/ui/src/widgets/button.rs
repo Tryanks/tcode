@@ -294,9 +294,8 @@ impl StatefulInteractiveElement for Button {
 impl RenderOnce for Button {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         // Hover is read at render, rather than left to a hover style, so its
-        // colour can glide; pressing has no style and stays immediate.
-        let hovered = window.use_keyed_state((self.id.clone(), "hovered"), cx, |_, _| false);
-        let is_hovered = *hovered.read(cx);
+        // colour can glide. A button gives pressing no look of its own.
+        let (is_hovered, hovered) = crate::motion::hovered(self.id.clone(), window, cx);
         let clocks = Clocks {
             id: self.id.clone(),
             motion: self.motion.take(),
@@ -530,12 +529,7 @@ impl RenderOnce for Button {
             .on_hover({
                 let on_hover = self.on_hover;
                 move |is_hovered, window, cx| {
-                    hovered.update(cx, |hovered, cx| {
-                        if *hovered != *is_hovered {
-                            *hovered = *is_hovered;
-                            cx.notify();
-                        }
-                    });
+                    hovered(is_hovered, window, cx);
                     if let Some(handler) = &on_hover {
                         handler(is_hovered, window, cx);
                     }

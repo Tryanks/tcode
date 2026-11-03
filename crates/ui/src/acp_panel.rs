@@ -761,8 +761,17 @@ impl AcpPanel {
          -> AnyElement {
             let enabled = open.is_some();
             let muted = cx.theme().muted_foreground;
-            let hover =
-                enabled.then(|| crate::motion::hover_fill(id, cx.theme().list_hover, window, cx));
+            let hover = enabled.then(|| {
+                crate::motion::hover_fill(
+                    crate::motion::Clock::Element,
+                    id,
+                    cx.theme().list_hover.opacity(0.),
+                    cx.theme().list_hover,
+                    &crate::material::HOVER.into(),
+                    window,
+                    cx,
+                )
+            });
             let (fill, on_hover) = hover.unzip();
             let row = material::card(cx)
                 .flex_row()

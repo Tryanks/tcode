@@ -294,8 +294,15 @@ impl Picker {
             window,
             cx,
         );
-        let (hover, on_hover) =
-            crate::motion::hover_fill(id.clone(), cx.theme().accent, window, cx);
+        let (hover, on_hover) = crate::motion::hover_fill(
+            crate::motion::Clock::Element,
+            id.clone(),
+            cx.theme().accent.opacity(0.),
+            cx.theme().accent,
+            &crate::material::HOVER.into(),
+            window,
+            cx,
+        );
         crate::material::accessible_clickable(v_flex(), id, Role::Button, entry.name.clone(), cx)
             .aria_selected(is_selected)
             .debug_selector({

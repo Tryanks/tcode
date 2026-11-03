@@ -19,7 +19,7 @@ fn click() -> changed_files::ClickHandler {
 /// The gallery's one list hover, which its rows' hover fills follow.
 fn hover() -> crate::motion::ListHover {
     thread_local! {
-        static HOVER: crate::motion::ListHover = crate::motion::ListHover::new();
+        static HOVER: crate::motion::ListHover = crate::motion::ListHover::new(crate::material::HOVER);
     }
     HOVER.with(Clone::clone)
 }
@@ -54,7 +54,7 @@ pub fn user_bubble(
             markdown: None,
             rewind: None,
             rewind_menu: None,
-            hover: crate::motion::ListHover::new(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             motion: Default::default(),
         },
         bubble::BubbleHandlers {
@@ -132,7 +132,7 @@ pub fn assistant(
             pinned: true,
             actions: assistant::MessageActions::Below,
             copied: false,
-            hover: crate::motion::ListHover::new(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             motion: Default::default(),
         },
         |_, _, _| {},

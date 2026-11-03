@@ -611,8 +611,15 @@ impl PullRequestView {
             .unwrap_or_default();
         let id = thread.id.clone();
         let row_id = SharedString::from(format!("pr-off-diff-{}", thread.id));
-        let (fill, on_hover) =
-            crate::motion::hover_fill(row_id.clone(), cx.theme().list_hover, window, cx);
+        let (fill, on_hover) = crate::motion::hover_fill(
+            crate::motion::Clock::Element,
+            row_id.clone(),
+            cx.theme().list_hover.opacity(0.),
+            cx.theme().list_hover,
+            &crate::material::HOVER.into(),
+            window,
+            cx,
+        );
         material::accessible_clickable(
             material::card_header_row(cx),
             row_id,

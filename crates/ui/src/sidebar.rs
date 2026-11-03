@@ -1072,7 +1072,7 @@ impl SessionsSidebar {
             project_filter: None,
             settled_scope: None,
             renaming: None,
-            hover: crate::motion::ListHover::new(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             folds: HashMap::new(),
             folding: false,
             fold_scope: None,

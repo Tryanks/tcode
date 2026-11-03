@@ -1118,9 +1118,13 @@ mod section {
                     cx,
                 ))
             });
+            let list_hover = cx.theme().list_hover;
             let (fill, on_hover) = crate::motion::hover_fill(
+                crate::motion::Clock::Element,
                 SharedString::from(format!("space-row-{id}")),
-                cx.theme().list_hover,
+                list_hover.opacity(0.),
+                list_hover,
+                &crate::material::HOVER.into(),
                 window,
                 cx,
             );

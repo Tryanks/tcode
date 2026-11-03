@@ -448,7 +448,7 @@ impl ChatView {
             inline_diffs: InlineDiffCache::new(),
             full_outputs: HashMap::new(),
             copy_when_loaded: None,
-            hover: crate::motion::ListHover::new(),
+            hover: crate::motion::ListHover::new(crate::material::HOVER),
             list_scroll,
             session_key: None,
             highlighted_turn: None,
