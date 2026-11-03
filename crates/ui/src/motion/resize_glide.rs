@@ -73,6 +73,10 @@ impl Panel {
 /// Only a change of which panels are shown glides; a size that changes
 /// while they stay the same (a window resize, a drag) is followed at once,
 /// and a glide under way turns toward it.
+///
+/// The chat column's dock glides its splits with [`crate::panes::Glides`]
+/// instead: its slots take no `size_range` from the caller, so that one
+/// writes the sizes into the dock's tree on every frame.
 pub(crate) struct ResizeGlide {
     id: ElementId,
     axis: Axis,
