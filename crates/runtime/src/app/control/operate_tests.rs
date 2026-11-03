@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::test_support::*;
 use crate::app::{ProviderLauncher, active_session::Runtime};
-use control_mcp::{ControlOp, MoveThreadParams, ReferenceParams};
+use control_mcp::{ControlOp, MoveThreadParams, ReferenceParams, Workspace};
 use tcode_core::control::{ControlScope, ControlTier, ReferenceOrigin};
 
 /// Providers that never come up, so what a call queued stays observable.
@@ -44,9 +44,10 @@ fn park(state: &mut AppState, session: ActiveSession) {
 
 fn start(project_id: &str) -> ControlOp {
     ControlOp::StartThread(StartThreadParams {
-        project_id: project_id.into(),
+        project_id: Some(project_id.into()),
         cwd: None,
         workspace: None,
+        subagent: None,
         provider: "codex".into(),
         model: None,
         profile: None,
@@ -215,6 +216,122 @@ fn start_thread_makes_one_ordinary_thread_across_retries_and_restarts() {
     assert_eq!(after_restart["created"], false);
     assert_eq!(after_restart["thread_id"], id.as_str());
     restarted.read(|state| assert_eq!(started(state).len(), 1));
+}
+
+/// `subagent: true` makes the thread the caller's child: it works in the caller's directory,
+/// runs with the permission the child-approval setting chooses rather than the project's
+/// default, carries the report contract and owes the caller a report. A worktree is only for a
+/// subagent, and one that cannot be made falls back to the plain directory with a warning.
+#[test]
+fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
+    use tcode_core::settings::ChildApprovalMode;
+    use tcode_core::settlement::AgentReport;
+
+    let store = TestStore::new("tcode-control-start-subagent");
+    let root = store.root().join("project");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    let cx = &mut TestAppContext::default();
+    let state = host(&store, cx);
+    let project_id = state.update(cx, |state, cx| {
+        let project_id = state.create_project(root.clone(), cx).unwrap();
+        let mut caller = thread("caller", &project_id, ProviderKind::ClaudeCode);
+        caller.cwd = root.join("sub");
+        state.persist_meta(&caller, cx);
+        let project = state
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .unwrap();
+        project
+            .permission_defaults
+            .insert("codex".into(), "read_only".into());
+        project_id
+    });
+    let with = |request_id: &str, edit: &dyn Fn(&mut StartThreadParams)| {
+        let ControlOp::StartThread(mut params) = start(&project_id) else {
+            unreachable!()
+        };
+        params.request_id = request_id.into();
+        params.subagent = Some(true);
+        edit(&mut params);
+        ControlOp::StartThread(params)
+    };
+
+    let refused = state
+        .update(cx, |state, cx| {
+            call(
+                state,
+                cx,
+                "caller",
+                with("ordinary-worktree", &|p| {
+                    p.subagent = None;
+                    p.workspace = Some(Workspace::Worktree);
+                }),
+            )
+        })
+        .unwrap_err();
+    assert!(
+        refused.contains("worktree is only for a subagent"),
+        "{refused}"
+    );
+
+    for (n, (mode, permission)) in [
+        (ChildApprovalMode::Orchestrator, "ask"),
+        (ChildApprovalMode::Auto, "auto_review"),
+        (ChildApprovalMode::AlwaysAllow, "full_access"),
+        (ChildApprovalMode::Manual, "ask"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let started = state
+            .update(cx, |state, cx| {
+                state.settings.orchestrate.child_approval = mode;
+                state.settings.orchestrate.child_worktrees = false;
+                call(state, cx, "caller", with(&format!("child-{n}"), &|_| {}))
+            })
+            .unwrap();
+        assert_eq!(started["subagent"], true, "{started}");
+        let id = started["thread_id"].as_str().unwrap().to_owned();
+        state.read(|state| {
+            let meta = state.find_meta(&id).unwrap();
+            assert_eq!(meta.parent_session_id.as_deref(), Some("caller"));
+            assert_eq!(meta.cwd, root.join("sub"), "the caller's own directory");
+            assert_eq!(meta.report(), AgentReport::Expected);
+            assert!(
+                meta.option_selections
+                    .iter()
+                    .any(|selection| selection.id == "permissions"
+                        && selection.value == serde_json::json!(permission)),
+                "{mode:?}: {:?}",
+                meta.option_selections
+            );
+            let message = &state.resident(&id).unwrap().queue[0].text;
+            assert!(message.starts_with("Find out why the sync test flakes"));
+            assert!(message.ends_with(crate::app::orchestrate::CHILD_REPORT_FOOTER));
+        });
+    }
+
+    // The setting isolates a subagent by default; the project root is not a Git repository.
+    let (reply, response) = smol::channel::bounded(1);
+    state.update(cx, |state, cx| {
+        state.settings.orchestrate.child_worktrees = true;
+        let ControlOp::StartThread(params) = with("isolated", &|p| p.cwd = Some(".".into())) else {
+            unreachable!()
+        };
+        state.handle_control_op("caller".into(), ControlOp::StartThread(params), reply, cx);
+    });
+    cx.run_until(|_| !response.is_empty());
+    let isolated = response.try_recv().unwrap().unwrap();
+    assert!(
+        isolated["warning"]
+            .as_str()
+            .unwrap()
+            .contains("is not a Git repository root"),
+        "{isolated}"
+    );
+    assert_eq!(isolated["cwd"], root.display().to_string());
+    assert!(isolated.get("worktree_branch").is_none());
 }
 
 /// An untitled `start_thread` thread is titled from its first message once the provider

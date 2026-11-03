@@ -112,6 +112,15 @@ struct QueueCounts {
 struct PendingApproval {
     id: String,
     kind: &'static str,
+    /// The native choices, by the id `respond_approval` takes.
+    options: Vec<ApprovalChoice>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApprovalChoice {
+    id: String,
+    label: String,
+    kind: agent::ApprovalOptionKind,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,6 +155,10 @@ struct ThreadDetail {
     pending_input: Option<PendingInput>,
     control: Option<tcode_protocol::ControlStatus>,
     lineage: Lineage,
+    /// What a subagent owes the thread that started it for that thread's latest message;
+    /// its delivery is in `activity.agent`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report: Option<tcode_core::settlement::AgentReport>,
     terminals: Vec<TerminalRow>,
     omitted: Vec<String>,
 }
@@ -848,6 +861,15 @@ impl AppState {
                 .map(|approval| PendingApproval {
                     id: approval.id.clone(),
                     kind: approval_kind(&approval.kind),
+                    options: approval
+                        .options
+                        .iter()
+                        .map(|option| ApprovalChoice {
+                            id: option.id.clone(),
+                            label: option.label.clone(),
+                            kind: option.kind,
+                        })
+                        .collect(),
                 })
                 .collect(),
             pending_input: resident
@@ -869,6 +891,7 @@ impl AppState {
                 imported_from: meta.imported_from.clone(),
                 native_subagent: meta.native_subagent.is_some(),
             },
+            report: meta.is_dispatched().then(|| meta.report()),
             terminals,
             omitted: vec![
                 "worktree.dirty: read it live with get_git or list_threads include_worktree".into(),

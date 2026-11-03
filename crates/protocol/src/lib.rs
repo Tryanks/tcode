@@ -251,6 +251,10 @@ pub use wire::{
 // provider (output, image_reads, Codex sleep and image_generation, Grok's
 // server/tool names) stored with item_version 1; a session plan's
 // explanation; and the item_backgrounded event.
+//
+// Unreleased: SessionMeta drops orchestrate_enabled and result_max_chars;
+// subagents start through tcode_control rather than a tcode_orchestrate
+// server.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

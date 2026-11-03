@@ -332,7 +332,8 @@ crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, pi.
 crates/term              terminal implementation (PTY, host-side emulator)
 crates/mcp-host          shared authenticated loopback host for in-process MCP servers
 crates/preview-mcp       MCP server exposing the preview browser to the agent
-crates/orchestrate-mcp   MCP server for orchestration tools
+crates/control-mcp       MCP server through which a thread observes and operates Tcode,
+                         subagents included
 crates/computer-use-mcp  MCP server for desktop automation (macOS, Windows)
 ```
 

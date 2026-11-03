@@ -1,6 +1,8 @@
 //! The thread windows: calls an agent made to Tcode about its threads —
-//! `tcode_control` (outline, read, search, message, start, update, notify),
-//! `tcode_orchestrate` (dispatch, send, result, settle) and `tcode_report`.
+//! `tcode_control` (outline, read, search, message, start, update, notify,
+//! approve, report), and the `tcode_orchestrate` (dispatch, send, result,
+//! settle) and `tcode_report` calls transcripts recorded before those moved
+//! into `tcode_control`.
 //! Each reads as what it did to which thread; the threads and entries it
 //! names are links that open them, as a cited anchor does.
 
@@ -91,9 +93,9 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
         Kind::Archive
     } else if orchestrate(&["cancel"]) {
         Kind::Cancel
-    } else if orchestrate(&["approve"]) {
+    } else if control(&["respond_approval"]) || orchestrate(&["approve"]) {
         Kind::Approve
-    } else if call.served(REPORT, &["report_result"], false) {
+    } else if control(&["report_result"]) || call.served(REPORT, &["report_result"], false) {
         Kind::Report
     } else {
         return None;
@@ -423,7 +425,14 @@ impl Threads {
                     .join(" · ");
                 Argument::plain(scope)
             }
-            Kind::Approve => Argument::plain(string(input, "decision").unwrap_or_default()),
+            Kind::Approve => Argument::plain(
+                string(input, "option")
+                    .or_else(|| {
+                        (input.get("cancel") == Some(&Value::Bool(true))).then_some("cancel")
+                    })
+                    .or_else(|| string(input, "decision"))
+                    .unwrap_or_default(),
+            ),
             Kind::Report => Argument::plain(
                 string(input, "text")
                     .and_then(super::window::first_line)

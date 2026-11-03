@@ -1463,7 +1463,6 @@ impl AppState {
             self.drop_background(id, cx);
             self.revoke_preview_registration(id);
             self.revoke_pull_request_registration(id);
-            self.revoke_orchestrate_child_registration(id);
             self.revoke_control_registration(id);
         }
         for id in &ids {
@@ -1626,7 +1625,6 @@ impl AppState {
             self.drop_background(id, cx);
             self.terminal_workspaces
                 .remove(&ConversationDestination::Thread(id.clone()));
-            self.revoke_orchestrate_child_registration(id);
             self.close_orchestrator_children(id, cx);
             self.settings.last_visited.remove(id);
         }

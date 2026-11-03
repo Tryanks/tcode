@@ -113,8 +113,6 @@ impl AppState {
         let instructions = pull_request_registration
             .is_some()
             .then(|| self.pull_request_instructions(&meta.id));
-        let orchestrate_registration = self.orchestrate_registration_for(&meta);
-        let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
         let computer_use_registration = if computer_use_attaches(meta.provider, &self.settings) {
             self.computer_use_registration_for(&meta)
         } else {
@@ -143,8 +141,6 @@ impl AppState {
                     launch_env,
                     McpServers {
                         preview: preview_registration,
-                        orchestrate: orchestrate_registration,
-                        orchestrate_report: orchestrate_report_registration,
                         computer_use: computer_use_registration,
                         control: control_registration,
                     },
@@ -647,18 +643,12 @@ impl AppState {
             self.drop_background(&child_id, cx);
             self.revoke_preview_registration(&child_id);
             self.revoke_pull_request_registration(&child_id);
-            self.revoke_orchestrate_child_registration(&child_id);
             self.revoke_control_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
         self.revoke_pull_request_registration(parent_id);
         self.revoke_computer_use_registration(parent_id);
         self.revoke_control_registration(parent_id);
-        if let Some(registration) = self.mcp.orchestrate_registrations.remove(parent_id)
-            && let Some(tokens) = &self.mcp.orchestrate_tokens
-        {
-            tokens.revoke(&registration.bearer_token);
-        }
     }
 
     pub(super) fn revoke_preview_registration(&mut self, session_id: &str) {

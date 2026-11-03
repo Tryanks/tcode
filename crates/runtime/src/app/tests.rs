@@ -155,10 +155,6 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
                 ..
             }) if summary == "routing verified"
         ));
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_status("parent".into(), None, reply, cx);
-        assert_eq!(response.try_recv().unwrap().unwrap(), serde_json::json!([]));
     });
     cx.run_until_parked();
 
@@ -1602,7 +1598,6 @@ fn title_session_uses_configured_model_with_low_effort() {
     assert_eq!(custom.provider, ProviderKind::ClaudeCode);
     assert_eq!(custom.model.as_deref(), Some("claude-haiku-4-5"));
     assert_eq!(custom.profile_id.as_deref(), Some("work-claude"));
-    assert!(!custom.orchestrate_enabled);
     assert_eq!(
         title_turn_options().effort.as_deref(),
         Some(AI_TITLE_REASONING_EFFORT)
@@ -2200,16 +2195,18 @@ fn marketplace_items_are_runtime_owned_views() {
 #[test]
 fn orchestrate_guidance_and_current_configuration_are_composed() {
     let mut settings = OrchestrateSettings::default();
+    settings.child_models[0].fast = true;
     let first = compose_orchestrate_text(&settings, "Ship it", None, &HashMap::new());
     assert!(first.starts_with(ORCHESTRATE_GUIDANCE.trim()));
-    assert!(first.contains("### Collaboration models — `collaborate`"));
-    assert!(first.contains("#### `codex` / `gpt-6-astra` — available `effort`: `medium`, `high`"));
-    assert!(
-        first.contains("#### `claude` / `claude-fable-5-1` — available `effort`: `medium`, `high`")
-    );
-    assert!(first.contains("### Execution models — `dispatch`"));
+    assert!(first.contains("### Collaboration models"));
     assert!(first.contains(
-        "#### `codex` / `gpt-6.1-sol` — available `effort`: `low`, `medium`, `high`, `xhigh`, `max`"
+        "#### `codex` / `gpt-6-astra`\n\nstart_thread: `{\"provider\":\"codex\",\"model\":\"gpt-6-astra\"}`; reasoningEffort: `low`, `medium`, `high`"
+    ));
+    assert!(first.contains("#### `claude` / `claude-fable-5-1`"));
+    assert!(first.contains("### Execution models"));
+    // A profile configured for fast mode names the option that turns it on.
+    assert!(first.contains(
+        "#### `codex` / `gpt-6.1-sol`\n\nstart_thread: `{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"options\":{\"serviceTier\":\"fast\"}}`; reasoningEffort: `low`, `medium`, `high`, `xhigh`, `max`"
     ));
     assert!(first.ends_with("\n\nShip it"));
     settings.decision_models[0].enabled = false;
@@ -2218,12 +2215,12 @@ fn orchestrate_guidance_and_current_configuration_are_composed() {
     assert!(follow_up.starts_with(ORCHESTRATE_GUIDANCE.trim()));
     assert!(follow_up.contains("## Current orchestrator configuration"));
     assert!(!follow_up.contains("#### `codex` / `gpt-6-astra`"));
-    assert!(follow_up.contains("`dispatch` is unavailable"));
+    assert!(follow_up.contains("### Execution models\n\nExecutors for concrete work. The description under each executor guides your choice and effort.\nNo enabled models in this list."));
     assert!(follow_up.ends_with("\n\nFollow up"));
 }
 
 #[test]
-fn lead_sees_only_other_peers_and_each_peer_receives_its_own_guidance() {
+fn lead_sees_only_other_peers() {
     let settings = OrchestrateSettings::default();
     for (index, name, other_name) in [(0, "Astra", "Fable 5.1"), (1, "Fable 5.1", "Astra")] {
         let peer = &settings.decision_models[index];
@@ -2235,15 +2232,6 @@ fn lead_sees_only_other_peers_and_each_peer_receives_its_own_guidance() {
         );
         assert!(!composed.contains(&format!("You are {name},")));
         assert!(composed.contains(&format!("You are {other_name},")));
-        let brief = compose_collaboration_brief(
-            &settings,
-            peer.provider,
-            &peer.model,
-            "An independent view",
-        );
-        assert!(brief.contains(&format!("You are {name},")));
-        assert!(!brief.contains(&format!("You are {other_name},")));
-        assert!(brief.ends_with("An independent view"));
     }
     let unknown = compose_orchestrate_text(
         &settings,
@@ -2256,7 +2244,7 @@ fn lead_sees_only_other_peers_and_each_peer_receives_its_own_guidance() {
 }
 
 #[test]
-fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
+fn configuration_lists_live_efforts_instead_of_bundled_fallback() {
     let settings = OrchestrateSettings::default();
     let catalogs = HashMap::from([(
         ProviderKind::Codex,
@@ -2284,20 +2272,8 @@ fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
             }],
         }],
     )]);
-    assert_eq!(
-        resolve_orchestrate_dispatch(&settings, "codex", None, Some("deep"), None, &catalogs)
-            .unwrap()
-            .2
-            .as_deref(),
-        Some("deep")
-    );
-    assert!(
-        resolve_orchestrate_dispatch(&settings, "codex", None, Some("max"), None, &catalogs)
-            .unwrap_err()
-            .contains("unsupported effort max")
-    );
     let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
-    assert!(configuration.contains("`gpt-6.1-sol` — available `effort`: `medium`, `high`, `deep`"));
+    assert!(configuration.contains("reasoningEffort: `medium`, `high`, `deep`."));
 }
 
 #[test]
@@ -2312,32 +2288,6 @@ fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
             options: Vec::new(),
         }],
     )]);
-    let expected = "model `gpt-6-astra` is unavailable for provider `codex`: not present in the loaded catalog";
-
-    assert_eq!(
-        resolve_orchestrate_dispatch(
-            &settings,
-            "codex",
-            Some("gpt-6.1-sol"),
-            Some("low"),
-            None,
-            &catalogs
-        )
-        .unwrap_err(),
-        expected.replace("gpt-6-astra", "gpt-6.1-sol")
-    );
-    assert_eq!(
-        resolve_orchestrate_collaboration(
-            &settings,
-            "codex",
-            Some("gpt-6-astra"),
-            Some("medium"),
-            None,
-            &catalogs
-        )
-        .unwrap_err(),
-        expected
-    );
     let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
     assert!(configuration.contains("#### `codex` / `gpt-6-astra` — unavailable"));
     assert!(configuration.contains("#### `codex` / `gpt-6.1-sol` — unavailable"));
@@ -2347,185 +2297,6 @@ fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
     assert!(configuration.contains(
         "Unavailable: model `gpt-6.1-sol` is not present in the loaded `codex` catalog."
     ));
-}
-
-#[test]
-fn collaboration_and_execution_resolve_separate_profile_lists() {
-    let mut settings = OrchestrateSettings::default();
-    assert_eq!(
-        resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
-            .unwrap()
-            .1,
-        "gpt-6-astra"
-    );
-    assert_eq!(
-        resolve_orchestrate_collaboration(&settings, "claude", None, None, None, &HashMap::new())
-            .unwrap()
-            .1,
-        "claude-fable-5-1"
-    );
-    assert!(
-        resolve_orchestrate_collaboration(
-            &settings,
-            "codex",
-            Some("gpt-6-astra"),
-            Some("high"),
-            None,
-            &HashMap::new()
-        )
-        .is_ok()
-    );
-    assert_eq!(
-        resolve_orchestrate_dispatch(
-            &settings,
-            "codex",
-            Some("gpt-6.1-sol"),
-            Some("low"),
-            None,
-            &HashMap::new()
-        )
-        .unwrap()
-        .2
-        .as_deref(),
-        Some("low")
-    );
-    assert!(
-        resolve_orchestrate_dispatch(
-            &settings,
-            "claude",
-            Some("claude-fable-5-1"),
-            None,
-            None,
-            &HashMap::new()
-        )
-        .is_err()
-    );
-    settings.decision_models[0].enabled = false;
-    assert!(
-        resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
-            .is_err()
-    );
-    // Disabling one role leaves the other role's row untouched.
-    assert_eq!(
-        resolve_orchestrate_dispatch(
-            &settings,
-            "codex",
-            Some("gpt-6.1-sol"),
-            Some("low"),
-            None,
-            &HashMap::new()
-        )
-        .unwrap()
-        .1,
-        "gpt-6.1-sol"
-    );
-    settings.decision_models[0].enabled = true;
-    settings.child_models[0].enabled = false;
-    assert!(
-        resolve_orchestrate_dispatch(&settings, "codex", None, None, None, &HashMap::new())
-            .is_err()
-    );
-    assert!(
-        resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
-            .is_ok()
-    );
-    settings.child_models[0].enabled = true;
-    settings.decision_models[0].profile_id = Some("custom".into());
-    assert!(
-        resolve_orchestrate_collaboration(
-            &settings,
-            "codex",
-            None,
-            Some("max"),
-            Some("custom"),
-            &HashMap::new()
-        )
-        .is_err()
-    );
-    assert_eq!(
-        resolve_orchestrate_collaboration(
-            &settings,
-            "codex",
-            None,
-            Some("high"),
-            Some("custom"),
-            &HashMap::new()
-        )
-        .unwrap()
-        .4
-        .as_deref(),
-        Some("custom")
-    );
-}
-
-#[test]
-fn collaboration_starts_a_peer_discussion_with_native_permission() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-peer-collaboration-test");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    state.update(cx, |state, cx| {
-        let mut parent = SessionMeta::new(
-            ProviderKind::ClaudeCode,
-            PathBuf::from("/workspace"),
-            Some("claude-fable-5-1".into()),
-        );
-        tcode_core::pull_request::link_pull_request(
-            &mut parent.pull_requests,
-            tcode_core::pull_request::PullRequestKey::new("github.com", "sample/project", 1),
-            "https://github.com/sample/project/pull/1".into(),
-            tcode_core::pull_request::PullRequestSource::Agent,
-            1,
-            true,
-        );
-        let parent_id = parent.id.clone();
-        state.sessions.push(parent);
-        state.settings.orchestrate.child_worktrees = true;
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Dispatch {
-                purpose: orchestrate_mcp::ThreadPurpose::Collaboration,
-                parent_id: parent_id.clone(),
-                provider: "codex".into(),
-                model: None,
-                effort: None,
-                profile: None,
-                permission: Some("auto_review".into()),
-                title: "Compare architectures".into(),
-                brief: "Challenge these alternatives".into(),
-                cwd: None,
-                worktree: Some(true),
-                result_max_chars: Some(0),
-                fast: None,
-            },
-            reply,
-            cx,
-        );
-        let result = response.try_recv().unwrap().unwrap();
-        let id = result["thread_id"].as_str().unwrap();
-        assert_eq!(result["permission"], "auto_review");
-        let child = state.resident(id).unwrap();
-        assert!(child.meta.pull_requests.is_empty());
-        assert_eq!(child.meta.model.as_deref(), Some("gpt-6-astra"));
-        assert_eq!(
-            child.meta.parent_session_id.as_deref(),
-            Some(parent_id.as_str())
-        );
-        assert!(child.meta.worktree.is_none());
-        assert!(!child.meta.orchestrate_enabled);
-        assert!(
-            child.queue[0]
-                .text
-                .starts_with(COLLABORATION_GUIDANCE.trim())
-        );
-        assert!(child.queue[0].text.contains("Challenge these alternatives"));
-        assert!(
-            child.queue[0]
-                .text
-                .contains("You are Astra, a peer collaborator")
-        );
-        assert!(!child.queue[0].text.contains("You are Fable"));
-        assert!(child.queue[0].text.ends_with(CHILD_REPORT_FOOTER));
-    });
 }
 
 #[test]
@@ -2615,7 +2386,7 @@ fn send_turn_assembles_draft_context_and_attachment_paths() {
 }
 
 #[test]
-fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
+fn orchestrate_turn_records_its_context_split() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-split-test");
     let store = (*test_store).clone();
@@ -2627,34 +2398,6 @@ fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
         let mut active = live_session(ProviderKind::Codex, commands);
         active.meta.id = "orchestrator".into();
         active.meta.model = Some("gpt-6-astra".into());
-        active.meta.orchestrate_enabled = true;
-        // Disabling every peer (including Astra itself) must only block
-        // consultation. Astra remains the lead and can dispatch execution.
-        for peer in &mut state.settings.orchestrate.decision_models {
-            peer.enabled = false;
-        }
-        assert!(
-            resolve_orchestrate_collaboration(
-                &state.settings.orchestrate,
-                "codex",
-                None,
-                None,
-                None,
-                &state.providers.model_catalogs
-            )
-            .is_err()
-        );
-        assert!(
-            resolve_orchestrate_dispatch(
-                &state.settings.orchestrate,
-                "codex",
-                None,
-                None,
-                None,
-                &state.providers.model_catalogs
-            )
-            .is_ok()
-        );
         // Match the live launch state so the send is an ordinary turn rather
         // than a restart (which would flush through a different path).
         active.live_model = active.meta.model.clone();
@@ -2752,7 +2495,6 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
         state.update(cx, |state, cx| {
             let mut active = live_session(ProviderKind::Codex, commands);
             active.meta.id = "orchestrator-title".into();
-            active.meta.orchestrate_enabled = true;
             active.live_model = active.meta.model.clone();
             state.install_selected(active);
 
@@ -2821,164 +2563,6 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
                 .contains("orchestrator-title")
         });
     }
-}
-
-#[test]
-fn orchestrate_dispatch_distinguishes_model_from_provider_profile() {
-    let settings = OrchestrateSettings::default();
-    for (model, effort) in [
-        (None, Some("high")),
-        (Some("gpt-6.1-sol"), Some("high")),
-        (None, None),
-    ] {
-        let error = resolve_orchestrate_dispatch(
-            &settings,
-            "codex",
-            model,
-            effort,
-            Some("gpt-6.1-sol"),
-            &HashMap::new(),
-        )
-        .unwrap_err();
-        assert!(error.contains("no enabled profile matches"));
-        assert!(
-            error.contains("model=gpt-6.1-sol (built-in endpoint; omit profile)"),
-            "{error}"
-        );
-        assert!(
-            error.contains("profile selects a provider endpoint, not a model"),
-            "{error}"
-        );
-    }
-    for effort in [None, Some("high")] {
-        let resolved = resolve_orchestrate_dispatch(
-            &settings,
-            "codex",
-            Some("gpt-6.1-sol"),
-            effort,
-            None,
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(resolved.2.as_deref(), Some(effort.unwrap_or("medium")));
-        assert_eq!(resolved.4, None);
-    }
-}
-
-#[test]
-fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
-    let mut settings = OrchestrateSettings::default();
-    assert_eq!(
-        resolve_orchestrate_dispatch(
-            &settings,
-            "codex",
-            Some("gpt-6.1-sol"),
-            Some("low"),
-            None,
-            &HashMap::new()
-        )
-        .unwrap(),
-        (
-            ProviderKind::Codex,
-            "gpt-6.1-sol".into(),
-            Some("low".into()),
-            false,
-            None
-        )
-    );
-    settings.child_models[0].profile_id = Some("kimi".into());
-    assert_eq!(
-        resolve_orchestrate_dispatch(
-            &settings,
-            "codex",
-            Some("gpt-6.1-sol"),
-            Some("medium"),
-            Some("KIMI"),
-            &HashMap::new()
-        )
-        .unwrap(),
-        (
-            ProviderKind::Codex,
-            "gpt-6.1-sol".into(),
-            Some("medium".into()),
-            false,
-            Some("kimi".into()),
-        )
-    );
-    let unknown_profile = resolve_orchestrate_dispatch(
-        &settings,
-        "codex",
-        Some("gpt-6.1-sol"),
-        Some("medium"),
-        Some("missing"),
-        &HashMap::new(),
-    )
-    .unwrap_err();
-    assert!(unknown_profile.contains("profile missing"));
-    assert!(unknown_profile.contains("profile kimi"));
-    assert_eq!(
-        resolve_orchestrate_dispatch(
-            &settings,
-            "claude_code",
-            Some("claude-opus-5-5"),
-            Some(" HIGH "),
-            None,
-            &HashMap::new()
-        )
-        .unwrap(),
-        (
-            ProviderKind::ClaudeCode,
-            "claude-opus-5-5".into(),
-            Some("high".into()),
-            false,
-            None
-        )
-    );
-    for effort in ["low", "medium", "high", "xhigh", "max"] {
-        assert_eq!(
-            resolve_orchestrate_dispatch(
-                &settings,
-                "codex",
-                Some("gpt-6.1-sol"),
-                Some(effort),
-                None,
-                &HashMap::new()
-            )
-            .unwrap()
-            .2
-            .as_deref(),
-            Some(effort)
-        );
-    }
-    let wrong_effort = resolve_orchestrate_dispatch(
-        &settings,
-        "codex",
-        Some("gpt-6.1-sol"),
-        Some("imaginary"),
-        None,
-        &HashMap::new(),
-    )
-    .unwrap_err();
-    assert!(wrong_effort.contains("unsupported effort imaginary"));
-    assert!(wrong_effort.contains("low, medium, high, xhigh, max"));
-    let denied = resolve_orchestrate_dispatch(
-        &settings,
-        "claude",
-        Some("claude-haiku-4-5"),
-        None,
-        None,
-        &HashMap::new(),
-    )
-    .unwrap_err();
-    assert!(denied.contains("no enabled profile matches"));
-
-    let mut empty = settings;
-    empty.child_models.clear();
-    assert!(
-        resolve_orchestrate_dispatch(&empty, "codex", None, None, None, &HashMap::new())
-            .unwrap_err()
-            .contains("enabled model/endpoint combinations: none")
-    );
 }
 
 /// A remote client on a bad network can queue a thread's subscription and its
@@ -3549,8 +3133,6 @@ fn session_launch_scopes_mcp_registrations() {
         bearer_token: format!("{name}-token"),
     };
     let preview = registration(agent::McpRegistration::SERVER_NAME_PREVIEW, 7);
-    let orchestrate = registration(agent::McpRegistration::SERVER_NAME_ORCHESTRATE, 8);
-    let report = registration("child-report", 9);
     let computer = registration(agent::McpRegistration::SERVER_NAME_COMPUTER_USE, 10);
     let control = registration(agent::McpRegistration::SERVER_NAME_CONTROL, 11);
     for (provider, preview_supported, computer_supported) in [
@@ -3559,25 +3141,15 @@ fn session_launch_scopes_mcp_registrations() {
         (ProviderKind::Pi, false, true),
     ] {
         let mut settings = Settings::default();
-        for (lead, child, computer_enabled) in [
-            (false, false, false),
-            (true, false, false),
-            (false, true, true),
-            (true, true, true),
-            (false, false, true),
-        ] {
+        for computer_enabled in [false, true] {
             settings.computer_use.enabled = computer_enabled;
-            let mut meta = SessionMeta::new(provider, PathBuf::from("/x"), None);
-            meta.orchestrate_enabled = lead;
-            meta.parent_session_id = child.then(|| "parent".into());
+            let meta = SessionMeta::new(provider, PathBuf::from("/x"), None);
             let options = session_options(
                 &meta,
                 &settings,
                 LaunchEnv::default(),
                 McpServers {
                     preview: Some(preview.clone()),
-                    orchestrate: Some(orchestrate.clone()),
-                    orchestrate_report: Some(report.clone()),
                     computer_use: Some(computer.clone()),
                     control: Some(control.clone()),
                 },
@@ -3585,8 +3157,6 @@ fn session_launch_scopes_mcp_registrations() {
             let mut expected = Vec::new();
             for (enabled, reg) in [
                 (preview_supported, &preview),
-                (lead, &orchestrate),
-                (child, &report),
                 (computer_enabled && computer_supported, &computer),
                 (preview_supported, &control),
             ] {
@@ -3643,24 +3213,18 @@ fn report_callbacks_carry_the_report_verbatim_and_label_fallbacks() {
         "the lead's view shows the report alone"
     );
 
-    // A fallback is labelled as such and bounded by the dispatch's cap.
-    for (output, cap, expected_tail, truncated) in [
-        (String::new(), None, "(no assistant output)".into(), false),
-        ("done".into(), None, "done".into(), false),
-        ("界".repeat(1200), None, "界".repeat(1200), false),
-        ("界".repeat(1201), None, "界".repeat(600), true),
-        ("start".repeat(1000) + "尾", Some(1), "尾".into(), true),
-        ("界".repeat(5000), Some(300), "界".repeat(300), true),
-        ("界".repeat(5000), Some(0), "界".repeat(5000), false),
+    // A fallback is labelled as such and bounded.
+    for (output, expected_tail, truncated) in [
+        (String::new(), "(no assistant output)".into(), false),
+        ("done".into(), "done".into(), false),
+        ("界".repeat(1200), "界".repeat(1200), false),
+        ("界".repeat(1201), "界".repeat(600), true),
     ] {
         let text = assemble_report_callback(
             "child",
             "Title",
             "unreported",
-            CallbackBody::Fallback {
-                final_message: &output,
-                max_chars: cap,
-            },
+            CallbackBody::Fallback(&output),
             None,
         );
         assert!(text.starts_with(&format!(
@@ -3740,28 +3304,16 @@ fn only_report_result_reaches_the_lead_and_a_silent_child_is_reminded_then_falle
             state.residents.parked.insert(child.meta.id.clone(), child);
         }
 
-        // A report from a session that is not an orchestrated child is refused.
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::ReportResult {
-                child_id: "parent".into(),
-                text: "nope".into(),
-            },
-            reply,
-            cx,
-        );
-        assert!(response.try_recv().unwrap().is_err());
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::ReportResult {
-                child_id: "reporter".into(),
-                text: "the full reported RESULT".into(),
-            },
-            reply,
-            cx,
-        );
+        // A report from a thread no other thread started as its subagent is refused.
+        let report = |text: &str| {
+            control_mcp::ControlOp::ReportResult(control_mcp::ReportResultParams {
+                text: text.into(),
+            })
+        };
+        assert!(control_call(state, cx, "parent", report("nope")).is_err());
         assert_eq!(
-            response.try_recv().unwrap().unwrap()["delivered_when"],
+            control_call(state, cx, "reporter", report("the full reported RESULT")).unwrap()
+                ["delivered_when"],
             "turn_ends"
         );
 
@@ -3887,6 +3439,18 @@ fn only_report_result_reaches_the_lead_and_a_silent_child_is_reminded_then_falle
     assert!(delivered[0].contains(&format!("reported.\n{ORCHESTRATE_REPORT_LABEL}late report")));
 }
 
+/// One `tcode_control` call by `caller`, answered on the host thread.
+fn control_call(
+    state: &mut AppState,
+    cx: &mut HostCx,
+    caller: &str,
+    op: control_mcp::ControlOp,
+) -> Result<serde_json::Value, String> {
+    let (reply, response) = smol::channel::bounded(1);
+    state.handle_control_op(caller.into(), op, reply, cx);
+    response.try_recv().unwrap()
+}
+
 /// The child's `report_result` call as its transcript records it.
 fn report_result_event(id: &str, text: &str) -> AgentEvent {
     AgentEvent::ItemCompleted(ThreadItem {
@@ -3894,7 +3458,7 @@ fn report_result_event(id: &str, text: &str) -> AgentEvent {
         parent_item_id: None,
         content: ItemContent::ToolCall {
             image_reads: Vec::new(),
-            name: "mcp__tcode_report__report_result".into(),
+            name: "mcp__tcode_control__report_result".into(),
             input: serde_json::json!({ "text": text }),
             output: Some("{\"ok\":true}".into()),
             status: ItemStatus::Completed,
@@ -4016,46 +3580,87 @@ fn a_child_waking_itself_reports_to_its_lead_once() {
     });
 }
 
+/// A follow-up to a subagent whose log is not loaded yet is owed a new report: the report
+/// the subagent made for the previous message is not delivered again as its answer.
 #[test]
-fn orchestrate_send_revives_only_its_archived_child() {
+fn a_follow_up_to_an_unloaded_subagent_is_not_answered_by_its_earlier_report() {
+    use tcode_core::settlement::AgentReport;
+
     let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-orchestrate-send-unarchive-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, _receiver) = smol::channel::unbounded();
+    let store = TestStore::new("tcode-subagent-follow-up-unloaded");
+    let mut child = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+    child.id = "child".into();
+    child.parent_session_id = Some("parent".into());
+    child.expectation = Some(ChildExpectation {
+        state: AgentReport::Reported,
+        delivered_item: Some("rep-old".into()),
+        ..ChildExpectation::opened(1)
+    });
+    store.upsert_meta(&child).unwrap();
+    let earlier = now_millis() - 60_000;
+    for event in [
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        },
+        report_result_event("rep-old", "the earlier report"),
+        completed_turn("turn-1"),
+    ] {
+        store.append_event("child", earlier, &event).unwrap();
+    }
+    let scripted = scripted_provider(ProviderKind::Codex);
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.set_provider_launcher_for_test(scripted.launcher);
+        state
+    });
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
 
     state.update(cx, |state, cx| {
-        let mut child = live_session(ProviderKind::Codex, commands);
-        child.meta.id = "child".into();
-        child.meta.parent_session_id = Some("parent".into());
-        child.meta.archived_at = Some(1);
-        child.meta.settled_at = Some(1);
-        let mut parent = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
-        parent.id = "parent".into();
-        parent.settled_at = Some(1);
-        state.sessions.push(parent);
-        child.turn_in_flight = true;
-        state.sessions.push(child.meta.clone());
-        state.residents.parked.insert(child.meta.id.clone(), child);
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Send {
-                parent_id: "parent".into(),
-                thread_id: "child".into(),
-                message: "retry with the failing test".into(),
-                fast: None,
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        state.sessions.push(parent.meta.clone());
+        state.residents.parked.insert("parent".into(), parent);
+        assert!(state.resident("child").is_none());
+        let sent = control_call(
+            state,
+            cx,
+            "parent",
+            control_mcp::ControlOp::SendMessage(control_mcp::SendMessageParams {
+                thread_ids: vec!["child".into()],
+                text: "One more check".into(),
+                mode: control_mcp::SendMode::Queue,
+                attachments: None,
+                request_id: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(sent["results"][0]["outcome"], "applied", "{sent}");
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "child",
+            AgentEvent::TurnStarted {
+                turn_id: "turn-2".into(),
             },
-            reply,
             cx,
         );
-        assert!(response.try_recv().unwrap().is_ok());
-        assert!(state.find_meta("child").unwrap().settled_at.is_none());
-        assert_eq!(state.find_meta("parent").unwrap().settled_at, Some(1));
-        assert!(
-            state.find_meta("child").unwrap().archived_at.is_none(),
-            "send should revive an archived child"
-        );
+        state.on_event("child", persisted_assistant_event("checked, no report"), cx);
+        state.on_event("child", completed_turn("turn-2"), cx);
+    });
+    cx.run_until_parked();
+
+    let callbacks: Vec<_> = std::iter::from_fn(|| parent_receiver.try_recv().ok())
+        .filter_map(|command| match command {
+            SessionCommand::Steer { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert!(callbacks.is_empty(), "{callbacks:?}");
+    state.read(|state| {
+        let child = state.find_meta("child").unwrap();
+        assert_eq!(child.report(), AgentReport::Expected);
     });
 }
 
@@ -4075,6 +3680,7 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
     state.update(cx, |state, cx| {
         let mut parent = live_session(ProviderKind::Codex, parent_commands);
         parent.meta.id = "parent".into();
+        parent.meta.project_id = Some("project".into());
         parent.turn_in_flight = true;
         state.sessions.push(parent.meta.clone());
         state
@@ -4103,18 +3709,20 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
 
     state.update(cx, |state, cx| {
         state.resident_mut("child").unwrap().shutdown_to_idle();
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Send {
-                parent_id: "parent".into(),
-                thread_id: "child".into(),
-                message: "continue".into(),
-                fast: None,
-            },
-            reply,
+        let sent = control_call(
+            state,
             cx,
-        );
-        assert!(response.try_recv().unwrap().is_ok());
+            "parent",
+            control_mcp::ControlOp::SendMessage(control_mcp::SendMessageParams {
+                thread_ids: vec!["child".into()],
+                text: "continue".into(),
+                mode: control_mcp::SendMode::Queue,
+                attachments: None,
+                request_id: None,
+            }),
+        )
+        .unwrap();
+        assert_eq!(sent["results"][0]["outcome"], "applied", "{sent}");
     });
     cx.run_until(|_| !parent_receiver.is_empty());
     assert!(
@@ -4143,285 +3751,21 @@ fn send_to_child_whose_cwd_was_removed_reports_the_start_failure() {
     );
 
     state.update(cx, |state, cx| {
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Status {
-                parent_id: "parent".into(),
-                thread_id: Some("child".into()),
-            },
-            reply,
+        let thread = control_call(
+            state,
             cx,
-        );
-        let status = response.try_recv().unwrap().unwrap();
-        assert_eq!(status[0]["state"], "failed");
-        assert!(
-            status[0]["start_error"]
-                .as_str()
-                .unwrap()
-                .contains("no longer exists")
-        );
+            "parent",
+            control_mcp::ControlOp::GetThread(control_mcp::GetThreadParams {
+                thread_id: "child".into(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(thread["report"], "failed", "{thread}");
     });
 }
 
 #[test]
-fn orchestrate_send_fast_switch_persists_and_schedules_restart() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-orchestrate-send-fast-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, _receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut child = live_session(ProviderKind::Codex, commands);
-        child.meta.id = "child".into();
-        child.meta.parent_session_id = Some("parent".into());
-        child.turn_in_flight = true;
-        state.sessions.push(child.meta.clone());
-        state.residents.parked.insert(child.meta.id.clone(), child);
-
-        let send = |state: &mut AppState, cx: &mut HostCx, fast: Option<bool>| {
-            let (reply, response) = smol::channel::bounded(1);
-            state.handle_orchestrate_op(
-                orchestrate_mcp::OrchestrateOp::Send {
-                    parent_id: "parent".into(),
-                    thread_id: "child".into(),
-                    message: "carry on".into(),
-                    fast,
-                },
-                reply,
-                cx,
-            );
-            assert!(response.try_recv().unwrap().is_ok());
-        };
-        let is_fast = |state: &AppState| {
-            let selected = |selections: &[OptionSelection]| {
-                selections
-                    .iter()
-                    .any(|selection| selection.id == "serviceTier" && selection.value == "fast")
-            };
-            let resident = selected(&state.resident("child").unwrap().meta.option_selections);
-            let indexed = selected(&state.find_meta("child").unwrap().option_selections);
-            assert_eq!(resident, indexed, "resident and index must agree");
-            resident
-        };
-
-        send(state, cx, None);
-        assert!(!is_fast(state), "omitted: unchanged");
-        assert!(
-            !state
-                .resident("child")
-                .unwrap()
-                .options_changed_while_live()
-        );
-
-        send(state, cx, Some(true));
-        assert!(is_fast(state), "fast on");
-        assert!(
-            state
-                .resident("child")
-                .unwrap()
-                .options_changed_while_live(),
-            "a live child must restart before its next turn"
-        );
-
-        send(state, cx, Some(false));
-        assert!(!is_fast(state), "fast off");
-    });
-}
-
-#[test]
-fn dispatch_launches_with_setting_permission_and_validates_native_overrides() {
-    use ChildApprovalMode::{AlwaysAllow, Auto, Manual, Orchestrator};
-    let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-native-dispatch-permissions");
-    let state = cx.new_entity(TestClientState::new((*store).clone()));
-    state.update(cx, |state, cx| {
-        let parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/workspace"), None);
-        let parent_id = parent.id.clone();
-        state.sessions.push(parent);
-        for (provider, id, defaults, explicit, valid) in [
-            (
-                ProviderKind::ClaudeCode,
-                Some("permissionMode"),
-                [
-                    serde_json::json!("default"),
-                    serde_json::json!("auto"),
-                    serde_json::json!("bypassPermissions"),
-                    serde_json::json!("default"),
-                ],
-                Some("acceptEdits"),
-                "default, acceptEdits, auto, dontAsk, bypassPermissions",
-            ),
-            (
-                ProviderKind::Codex,
-                Some("permissions"),
-                [
-                    serde_json::json!("ask"),
-                    serde_json::json!("auto_review"),
-                    serde_json::json!("full_access"),
-                    serde_json::json!("ask"),
-                ],
-                Some("ask"),
-                "ask, auto_review, read_only, full_access",
-            ),
-            (
-                ProviderKind::OpenCode,
-                Some("permission_mode"),
-                [
-                    serde_json::json!("normal"),
-                    serde_json::json!("auto"),
-                    serde_json::json!("auto"),
-                    serde_json::json!("normal"),
-                ],
-                Some("normal"),
-                "normal, auto",
-            ),
-            (
-                ProviderKind::Pi,
-                None,
-                [
-                    serde_json::Value::Null,
-                    serde_json::Value::Null,
-                    serde_json::Value::Null,
-                    serde_json::Value::Null,
-                ],
-                None,
-                "none (omit permission)",
-            ),
-        ] {
-            let profile = tcode_core::settings::OrchestrateChildModel {
-                provider,
-                model: "permission-test-model".into(),
-                profile_id: None,
-                enabled: true,
-                fast: false,
-                description: String::new(),
-                bundled: None,
-            };
-            state.settings.orchestrate.child_models = vec![profile];
-            let configuration = render_orchestrate_configuration(
-                &state.settings.orchestrate,
-                None,
-                &HashMap::new(),
-            );
-            match provider {
-                ProviderKind::ClaudeCode => assert!(
-                    configuration.contains(
-                        "auto — Auto: A background safety classifier reviews each action;"
-                    ) && configuration.contains("(recommended)")
-                ),
-                ProviderKind::Codex => assert!(
-                    configuration.contains("auto_review — Approve for me: Same workspace sandbox;")
-                        && configuration.contains("(recommended)")
-                ),
-                ProviderKind::OpenCode => {
-                    assert!(configuration.contains("auto — Auto-approve: Answers every ask with once, as OpenCode's own clients do; explicit deny rules still deny. (recommended)"))
-                }
-                ProviderKind::Pi => assert!(
-                    configuration.contains("No native permission control; omit `permission`.")
-                ),
-                _ => unreachable!(),
-            }
-            for (mode, expected) in [Orchestrator, Auto, AlwaysAllow, Manual]
-                .into_iter()
-                .zip(defaults)
-            {
-                state.settings.orchestrate.child_approval = mode;
-                for (permission, expected) in [
-                    (None, expected),
-                    (
-                        explicit,
-                        explicit.map_or(serde_json::Value::Null, |value| serde_json::json!(value)),
-                    ),
-                ]
-                .into_iter()
-                .take(if explicit.is_some() { 2 } else { 1 })
-                {
-                    let (reply, response) = smol::channel::bounded(1);
-                    state.handle_orchestrate_op(
-                        orchestrate_mcp::OrchestrateOp::Dispatch {
-                            purpose: orchestrate_mcp::ThreadPurpose::Execution,
-                            parent_id: parent_id.clone(),
-                            provider: provider_name(provider).into(),
-                            model: None,
-                            effort: None,
-                            profile: None,
-                            permission: permission.map(str::to_string),
-                            title: "Permission child".into(),
-                            brief: "Inspect".into(),
-                            cwd: None,
-                            worktree: Some(false),
-                            result_max_chars: None,
-                            fast: None,
-                        },
-                        reply,
-                        cx,
-                    );
-                    let result = response.try_recv().unwrap().unwrap();
-                    assert_eq!(
-                        result["permission"], expected,
-                        "{provider:?} {mode:?} {permission:?}"
-                    );
-                    let child = state
-                        .resident(result["thread_id"].as_str().unwrap())
-                        .unwrap();
-                    if let Some(id) = id {
-                        assert_eq!(
-                            child
-                                .meta
-                                .option_selections
-                                .iter()
-                                .find(|selection| selection.id == id)
-                                .unwrap()
-                                .value,
-                            expected
-                        );
-                    } else {
-                        assert!(child.meta.option_selections.is_empty());
-                    }
-                }
-            }
-            for invalid in ["unknown-native-value", ""] {
-                let count = state.sessions.len();
-                let (reply, response) = smol::channel::bounded(1);
-                state.handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Dispatch {
-                        purpose: orchestrate_mcp::ThreadPurpose::Execution,
-                        parent_id: parent_id.clone(),
-                        provider: provider_name(provider).into(),
-                        model: None,
-                        effort: None,
-                        profile: None,
-                        permission: Some(invalid.into()),
-                        title: "Invalid".into(),
-                        brief: "Inspect".into(),
-                        cwd: None,
-                        worktree: Some(false),
-                        result_max_chars: None,
-                        fast: None,
-                    },
-                    reply,
-                    cx,
-                );
-                assert!(
-                    response
-                        .try_recv()
-                        .unwrap()
-                        .unwrap_err()
-                        .contains(&format!("valid permission values: {valid}"))
-                );
-                assert_eq!(
-                    state.sessions.len(),
-                    count,
-                    "invalid permission must not create a child"
-                );
-            }
-        }
-    });
-}
-
-#[test]
-fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() {
+fn child_native_approval_callback_and_respond_approval_preserve_options_and_scope() {
     use agent::ApprovalOptionKind::{AllowAlways, AllowOnce, RejectOnce};
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-native-child-approvals");
@@ -4435,9 +3779,19 @@ fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() 
         let mut child = live_session(ProviderKind::Codex, child_commands);
         child.meta.id = "child".into();
         child.meta.parent_session_id = Some("parent".into());
-        state.sessions.extend([parent.meta.clone(), child.meta.clone()]);
+        let mut other = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
+        other.id = "other-parent".into();
+        state.sessions.extend([parent.meta.clone(), child.meta.clone(), other]);
         state.residents.parked.insert("parent".into(), parent);
         state.residents.parked.insert("child".into(), child);
+        let respond = |state: &mut AppState, cx: &mut HostCx, caller: &str, approval: Option<&str>, option: Option<&str>, cancel: bool| {
+            control_call(state, cx, caller, control_mcp::ControlOp::RespondApproval(control_mcp::RespondApprovalParams {
+                thread_id: "child".into(),
+                approval_id: approval.map(str::to_string),
+                option: option.map(str::to_string),
+                cancel,
+            }))
+        };
         for (n, mode) in [ChildApprovalMode::Orchestrator, ChildApprovalMode::Auto, ChildApprovalMode::Manual, ChildApprovalMode::AlwaysAllow].into_iter().enumerate() {
             state.settings.orchestrate.child_approval = mode;
             let request_id = format!("request-{n}");
@@ -4452,7 +3806,7 @@ fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() 
             state.on_event("child", AgentEvent::ApprovalRequested(agent::ApprovalRequest {
                 parent_item_id: None,
                 id: request_id.clone(), turn_id: None,
-                kind: agent::ApprovalKind::ToolUse { name: "mcp__tcode_report__report_result".into(), input: serde_json::json!({}), detail: "Native MCP consent".into() },
+                kind: agent::ApprovalKind::ToolUse { name: "mcp__tcode_control__report_result".into(), input: serde_json::json!({}), detail: "Native MCP consent".into() },
                 options: options.clone(),
             }), cx);
             assert!(child_receiver.try_recv().is_err(), "requests without automatic allow must remain pending");
@@ -4461,38 +3815,37 @@ fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() 
             let native = text.split_once("Native options: ").unwrap().1.split_once(". ").unwrap().0;
             let offered: Vec<agent::ApprovalOption> = serde_json::from_str(native).unwrap();
             assert_eq!(offered, options);
-            if mode == ChildApprovalMode::Manual {
+            let manual = mode == ChildApprovalMode::Manual;
+            if manual {
                 assert!(text.contains("The user answers in the child thread."));
             } else {
+                assert!(text.contains("respond_approval"));
                 assert!(text.contains("option: <exact id> or cancel: true"));
             }
-            for (parent, request, option, cancel, error) in [
-                ("other-parent", None, Some("Reject:Native"), false, "not a child"),
-                ("parent", Some("missing"), Some("Reject:Native"), false, "no pending approval"),
+            let refusals = [
+                ("other-parent", None, Some("Reject:Native"), false, "not your subagent"),
+                ("parent", Some("missing"), Some("Reject:Native"), false, "is not pending"),
                 ("parent", None, Some("invented-id"), false, "valid option ids"),
                 ("parent", None, Some("Reject:Native"), true, "never both"),
                 ("parent", None, None, false, "never both"),
-            ] {
-                let (reply, response) = smol::channel::bounded(1);
-                state.handle_orchestrate_op(orchestrate_mcp::OrchestrateOp::Approve {
-                    parent_id: parent.into(), thread_id: "child".into(), request_id: request.map(str::to_string),
-                    option: option.map(str::to_string), cancel,
-                }, reply, cx);
-                assert!(response.try_recv().unwrap().unwrap_err().contains(error));
+            ];
+            // In manual mode the approval is the user's, whatever the lead asks.
+            let manual_refusal = [("parent", None, Some("Reject:Native"), false, "child approval is manual")];
+            for (caller, approval, option, cancel, error) in if manual { &manual_refusal[..] } else { &refusals[..] } {
+                let refused = respond(state, cx, caller, *approval, *option, *cancel).unwrap_err();
+                assert!(refused.contains(error), "{refused}");
                 assert!(child_receiver.try_recv().is_err());
                 assert_eq!(state.approval_requests("child").len(), 1);
             }
-            let cancel = mode == ChildApprovalMode::Manual;
             let chosen = offered.first().unwrap().id.clone();
-            let (reply, response) = smol::channel::bounded(1);
-            state.handle_orchestrate_op(orchestrate_mcp::OrchestrateOp::Approve {
-                parent_id: "parent".into(), thread_id: "child".into(), request_id: None,
-                option: (!cancel).then_some(chosen.clone()), cancel,
-            }, reply, cx);
-            assert_eq!(response.try_recv().unwrap().unwrap()["request_id"], request_id);
+            if manual {
+                state.respond_session_approval("child", request_id.clone(), ApprovalDecision::Cancel).unwrap();
+            } else {
+                assert_eq!(respond(state, cx, "parent", None, Some(&chosen), false).unwrap()["approval_id"], request_id);
+            }
             let SessionCommand::RespondApproval { request_id: delivered, decision } = child_receiver.try_recv().unwrap() else { panic!("missing native approval response") };
             assert_eq!(delivered, request_id);
-            assert_eq!(decision, if cancel { ApprovalDecision::Cancel } else { ApprovalDecision::Option(chosen) });
+            assert_eq!(decision, if manual { ApprovalDecision::Cancel } else { ApprovalDecision::Option(chosen) });
             assert!(state.approval_requests("child").is_empty());
         }
         state.settings.orchestrate.child_approval = ChildApprovalMode::AlwaysAllow;
@@ -4515,7 +3868,7 @@ fn child_native_approval_callback_and_approve_tool_preserve_options_and_scope() 
 }
 
 #[test]
-fn child_questions_reach_the_lead_and_the_answer_tool_answers_them() {
+fn child_questions_reach_the_lead_and_respond_input_answers_them() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-child-questions");
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -4528,9 +3881,28 @@ fn child_questions_reach_the_lead_and_the_answer_tool_answers_them() {
         let mut child = live_session(ProviderKind::Codex, child_commands);
         child.meta.id = "child".into();
         child.meta.parent_session_id = Some("parent".into());
+        let mut other = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
+        other.id = "other-parent".into();
         state
             .sessions
-            .extend([parent.meta.clone(), child.meta.clone()]);
+            .extend([parent.meta.clone(), child.meta.clone(), other]);
+        let respond = |state: &mut AppState,
+                       cx: &mut HostCx,
+                       caller: &str,
+                       question: Option<&str>,
+                       answers: serde_json::Map<String, serde_json::Value>| {
+            control_call(
+                state,
+                cx,
+                caller,
+                control_mcp::ControlOp::RespondInput(control_mcp::RespondInputParams {
+                    thread_id: "child".into(),
+                    question_id: question.map(str::to_string),
+                    answers,
+                    request_id: None,
+                }),
+            )
+        };
         state.residents.parked.insert("parent".into(), parent);
         state.residents.parked.insert("child".into(), child);
         let questions = vec![
@@ -4615,7 +3987,7 @@ fn child_questions_reach_the_lead_and_the_answer_tool_answers_them() {
                 text.contains(if mode == ChildApprovalMode::Manual {
                     "The user answers in the child thread."
                 } else {
-                    "use the answer tool"
+                    "respond_input"
                 }),
                 "{text}"
             );
@@ -4625,13 +3997,13 @@ fn child_questions_reach_the_lead_and_the_answer_tool_answers_them() {
                     "other-parent",
                     None,
                     answers(serde_json::json!({"lang": "Rust", "targets": []})),
-                    "not a child",
+                    "needs category answer_input",
                 ),
                 (
                     "parent",
                     Some("missing"),
                     answers(serde_json::json!({"lang": "Rust", "targets": []})),
-                    "no pending question with that request_id",
+                    "request missing is not pending",
                 ),
                 (
                     "parent",
@@ -4646,36 +4018,15 @@ fn child_questions_reach_the_lead_and_the_answer_tool_answers_them() {
                     "missing answers for question ids [\"targets\"]",
                 ),
             ] {
-                let (reply, response) = smol::channel::bounded(1);
-                state.handle_orchestrate_op(
-                    orchestrate_mcp::OrchestrateOp::Answer {
-                        parent_id: parent.into(),
-                        thread_id: "child".into(),
-                        request_id: request.map(str::to_string),
-                        answers,
-                    },
-                    reply,
-                    cx,
-                );
-                let refused = response.try_recv().unwrap().unwrap_err();
+                let refused = respond(state, cx, parent, request, answers).unwrap_err();
                 assert!(refused.contains(error), "{refused}");
                 assert!(child_receiver.try_recv().is_err());
             }
             let answers =
                 answers(serde_json::json!({"lang": "Rust", "targets": ["ios", "android"]}));
-            let (reply, response) = smol::channel::bounded(1);
-            state.handle_orchestrate_op(
-                orchestrate_mcp::OrchestrateOp::Answer {
-                    parent_id: "parent".into(),
-                    thread_id: "child".into(),
-                    request_id: Some(request_id.clone()),
-                    answers: answers.clone(),
-                },
-                reply,
-                cx,
-            );
             assert_eq!(
-                response.try_recv().unwrap().unwrap()["request_id"],
+                respond(state, cx, "parent", Some(&request_id), answers.clone()).unwrap()
+                    ["request_id"],
                 request_id
             );
             let SessionCommand::RespondUserInput {
@@ -4703,47 +4054,42 @@ fn child_questions_reach_the_lead_and_the_answer_tool_answers_them() {
                     .pending_user_input
                     .is_none()
             );
-            let (reply, response) = smol::channel::bounded(1);
-            state.handle_orchestrate_op(
-                orchestrate_mcp::OrchestrateOp::Answer {
-                    parent_id: "parent".into(),
-                    thread_id: "child".into(),
-                    request_id: None,
-                    answers: serde_json::Map::new(),
-                },
-                reply,
-                cx,
-            );
             assert!(
-                response
-                    .try_recv()
-                    .unwrap()
+                respond(state, cx, "parent", None, serde_json::Map::new())
                     .unwrap_err()
-                    .contains("no pending question")
+                    .contains("has no pending user-input request")
             );
         }
     });
 }
 
 #[test]
-fn resident_background_child_result_uses_completed_live_timeline() {
+fn an_unreported_fallback_is_the_final_message_of_the_last_turn() {
     let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-orchestrate-resident-result-test");
+    let test_store = TestStore::new("tcode-orchestrate-fallback-final-message-test");
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
     let report = format!("Complete answer.\n{}", "full detail ".repeat(80));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
 
     state.update(cx, |state, cx| {
-        let mut parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
-        parent.id = "parent".into();
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        state.sessions.push(parent.meta.clone());
+        state.residents.parked.insert("parent".into(), parent);
 
         let (commands, _receiver) = smol::channel::unbounded();
         let mut child = live_session(ProviderKind::Codex, commands);
         child.meta.id = "child".into();
-        child.meta.parent_session_id = Some(parent.id.clone());
+        child.meta.parent_session_id = Some("parent".into());
+        // Already reminded once, so going quiet again delivers the fallback.
+        child.meta.expectation = Some(ChildExpectation {
+            reminded: true,
+            ..ChildExpectation::opened(1)
+        });
         child.turn_in_flight = true;
 
-        state.sessions.push(parent);
         state.sessions.push(child.meta.clone());
         state.residents.parked.insert(child.meta.id.clone(), child);
 
@@ -4795,27 +4141,19 @@ fn resident_background_child_result_uses_completed_live_timeline() {
             },
             cx,
         );
-
-        let child = state.residents.parked.get("child").unwrap();
-        assert!(
-            child.idle_since.is_some(),
-            "completed child must remain resident in background"
-        );
-        assert!(!child.turn_in_flight);
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Result {
-                parent_id: "parent".into(),
-                thread_id: "child".into(),
-            },
-            reply,
-            cx,
-        );
-        let result = response.try_recv().unwrap().unwrap();
-        assert_eq!(result["state"], "completed");
-        assert_eq!(result["final_message"], report);
     });
+    cx.run_until_parked();
+    let Ok(SessionCommand::Steer { text, .. }) = parent_receiver.try_recv() else {
+        panic!("the lead must receive the fallback");
+    };
+    // The adjacent blocks of the final message, without the earlier preamble or reasoning.
+    assert!(
+        text.ends_with(&format!(
+            "{}{report}",
+            tcode_core::notice::ORCHESTRATE_FALLBACK_LABEL
+        )),
+        "{text}"
+    );
 }
 
 #[test]
@@ -8412,240 +7750,7 @@ fn recv_dispatch_reply<T>(cx: &mut TestAppContext, rx: &smol::channel::Receiver<
 }
 
 #[test]
-fn orchestrate_dispatch_fast_override_beats_profile_setting() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-dispatch-fast-data");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let mut parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
-    parent.project_id = Some("project".into());
-    let parent_id = parent.id.clone();
-
-    state.update(cx, |state, _| {
-        state.sessions.push(parent);
-        let model = state
-            .settings
-            .orchestrate
-            .child_models
-            .iter_mut()
-            .find(|child| child.model == "gpt-6.1-sol")
-            .unwrap();
-        model.fast = true;
-        let mut custom = model.clone();
-        custom.profile_id = Some("work-codex".into());
-        state.settings.orchestrate.child_models.push(custom);
-        state.settings.profiles.insert(
-            "work-codex".into(),
-            ProviderProfile {
-                kind: ProviderKind::Codex,
-                settings: ProviderSettings::default(),
-            },
-        );
-        for (provider, model) in [
-            (ProviderKind::ClaudeCode, "claude-test"),
-            (ProviderKind::Pi, "pi-test"),
-        ] {
-            state.settings.orchestrate.child_models.push(
-                tcode_core::settings::OrchestrateChildModel {
-                    provider,
-                    model: model.into(),
-                    profile_id: None,
-                    enabled: true,
-                    fast: false,
-                    description: String::new(),
-                    bundled: None,
-                },
-            );
-            state.providers.model_catalogs.insert(
-                provider,
-                vec![ModelSpec {
-                    id: model.into(),
-                    display_name: model.into(),
-                    is_default: true,
-                    options: Vec::new(),
-                }],
-            );
-        }
-    });
-
-    for (provider, kind, model, effort, fast, profile, expected_options) in [
-        (
-            "codex",
-            ProviderKind::Codex,
-            "gpt-6.1-sol",
-            Some("medium"),
-            None,
-            None,
-            vec![
-                ("reasoningEffort", serde_json::json!("medium")),
-                ("serviceTier", serde_json::json!("fast")),
-            ],
-        ),
-        (
-            "codex",
-            ProviderKind::Codex,
-            "gpt-6.1-sol",
-            Some("medium"),
-            Some(true),
-            None,
-            vec![
-                ("reasoningEffort", serde_json::json!("medium")),
-                ("serviceTier", serde_json::json!("fast")),
-            ],
-        ),
-        (
-            "codex",
-            ProviderKind::Codex,
-            "gpt-6.1-sol",
-            Some("max"),
-            None,
-            None,
-            vec![
-                ("reasoningEffort", serde_json::json!("max")),
-                ("serviceTier", serde_json::json!("fast")),
-            ],
-        ),
-        (
-            "codex",
-            ProviderKind::Codex,
-            "gpt-6.1-sol",
-            Some("max"),
-            Some(false),
-            None,
-            vec![("reasoningEffort", serde_json::json!("max"))],
-        ),
-        (
-            "codex",
-            ProviderKind::Codex,
-            "gpt-6.1-sol",
-            Some("high"),
-            Some(true),
-            Some("work-codex"),
-            vec![
-                ("reasoningEffort", serde_json::json!("high")),
-                ("serviceTier", serde_json::json!("fast")),
-            ],
-        ),
-        (
-            "claude",
-            ProviderKind::ClaudeCode,
-            "claude-test",
-            None,
-            Some(true),
-            None,
-            vec![("fastMode", serde_json::json!(true))],
-        ),
-        (
-            "pi",
-            ProviderKind::Pi,
-            "pi-test",
-            None,
-            Some(true),
-            None,
-            Vec::new(),
-        ),
-    ] {
-        state.update(cx, |state, cx| {
-            let custom = profile.is_some();
-            let (reply, response) = smol::channel::bounded(1);
-            state.handle_orchestrate_op(
-                orchestrate_mcp::OrchestrateOp::Dispatch {
-                    purpose: orchestrate_mcp::ThreadPurpose::Execution,
-                    parent_id: parent_id.clone(),
-                    provider: provider.into(),
-                    model: Some(model.into()),
-                    effort: effort.map(str::to_string),
-                    profile: profile.map(str::to_string),
-                    permission: None,
-                    title: "Child".into(),
-                    brief: "Inspect the workspace".into(),
-                    cwd: None,
-                    worktree: Some(false),
-                    result_max_chars: custom.then_some(2400),
-                    fast,
-                },
-                reply,
-                cx,
-            );
-            let result = response.try_recv().unwrap().unwrap();
-            let child = state
-                .resident(result["thread_id"].as_str().unwrap())
-                .unwrap();
-            let meta = &child.meta;
-            assert_eq!(meta.parent_session_id.as_deref(), Some(parent_id.as_str()));
-            assert_eq!(meta.project_id.as_deref(), Some("project"));
-            assert_eq!(meta.provider, kind);
-            assert_eq!(meta.model.as_deref(), Some(model));
-            assert_eq!(meta.profile_id.as_deref(), profile);
-            assert_eq!(meta.cwd, PathBuf::from("/tmp/project"));
-            assert_eq!(meta.result_max_chars, custom.then_some(2400));
-            assert_eq!(
-                meta.option_selections
-                    .iter()
-                    .filter(|selection| matches!(
-                        selection.id.as_str(),
-                        "reasoningEffort" | "serviceTier" | "fastMode"
-                    ))
-                    .map(|selection| (selection.id.as_str(), selection.value.clone()))
-                    .collect::<Vec<_>>(),
-                expected_options,
-                "{provider} effort={effort:?} fast={fast:?} profile={profile:?}"
-            );
-            let brief = &child.queue[0].text;
-            assert!(brief.starts_with("Inspect the workspace"));
-            if kind == ProviderKind::Pi {
-                assert_eq!(brief, "Inspect the workspace");
-            } else {
-                assert!(brief.contains("report_result"), "brief: {brief}");
-            }
-        });
-    }
-}
-
-#[test]
-fn orchestrate_dispatch_resolves_cwd_before_reply() {
-    let cx = &mut TestAppContext::default();
-    let root = std::env::temp_dir().join(format!("tcode-dispatch-cwd-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
-    let test_store = TestStore::new("tcode-dispatch-cwd-data");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
-    let parent_id = parent.id.clone();
-    let missing = root.join("missing");
-    let (reply, response) = smol::channel::bounded(1);
-
-    state.update(cx, |state, cx| {
-        state.sessions.push(parent);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Dispatch {
-                purpose: orchestrate_mcp::ThreadPurpose::Execution,
-                parent_id,
-                provider: "codex".into(),
-                model: Some("gpt-6.1-sol".into()),
-                effort: None,
-                profile: None,
-                permission: None,
-                title: "Child".into(),
-                brief: "Inspect the workspace".into(),
-                cwd: Some(missing.to_string_lossy().into_owned()),
-                worktree: None,
-                result_max_chars: None,
-                fast: None,
-            },
-            reply,
-            cx,
-        );
-    });
-
-    assert_eq!(
-        recv_dispatch_reply(cx, &response).unwrap_err(),
-        format!("invalid cwd: {}", missing.display())
-    );
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[test]
-fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
+fn a_subagent_started_in_a_worktree_works_in_it() {
     let cx = &mut TestAppContext::default();
     let root =
         std::env::temp_dir().join(format!("tcode-dispatch-worktree-{}", uuid::Uuid::new_v4()));
@@ -8668,28 +7773,30 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
         state.set_provider_launcher_for_test(scripted.launcher);
         state
     });
-    let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
-    let parent_id = parent.id.clone();
     let (reply, response) = smol::channel::bounded(1);
 
     state.update(cx, |state, cx| {
+        let project_id = state.create_project(root.clone(), cx).unwrap();
+        let mut parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        parent.id = "parent".into();
+        parent.project_id = Some(project_id);
         state.sessions.push(parent);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Dispatch {
-                purpose: orchestrate_mcp::ThreadPurpose::Execution,
-                parent_id,
+        state.handle_control_op(
+            "parent".into(),
+            control_mcp::ControlOp::StartThread(control_mcp::StartThreadParams {
+                project_id: None,
+                cwd: None,
+                workspace: Some(control_mcp::Workspace::Worktree),
+                subagent: Some(true),
                 provider: "codex".into(),
                 model: Some("gpt-6.1-sol".into()),
-                effort: None,
                 profile: None,
-                permission: None,
-                title: "Isolated child".into(),
-                brief: "Inspect the workspace".into(),
-                cwd: None,
-                worktree: Some(true),
-                result_max_chars: None,
-                fast: None,
-            },
+                options: None,
+                title: Some("Isolated child".into()),
+                message: "Inspect the workspace".into(),
+                attachments: None,
+                request_id: "isolated".into(),
+            }),
             reply,
             cx,
         );
@@ -8699,13 +7806,14 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
     let expected_branch = format!("tcode/{child_id}");
     let expected_path = data_worktrees.join(&child_id);
     assert_eq!(
-        response["worktree_path"],
+        response["cwd"],
         expected_path.display().to_string(),
-        "dispatch response: {response}"
+        "start_thread response: {response}"
     );
     assert_eq!(response["worktree_branch"], expected_branch);
     state.update(cx, |state, _| {
         let child = state.find_meta(&child_id).unwrap();
+        assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
         assert_eq!(child.cwd, expected_path);
         assert_eq!(
             child
@@ -11342,34 +10450,6 @@ fn a_child_completing_while_its_log_is_read_reports_that_turn() {
             state.on_event("child", event, cx);
         }
         assert!(state.log_hydrations.contains_key("child"));
-
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Status {
-                parent_id: "parent".into(),
-                thread_id: Some("child".into()),
-            },
-            reply,
-            cx,
-        );
-        let status = response.try_recv().unwrap().unwrap();
-        assert_eq!(status[0]["state"], "reported");
-        assert_eq!(status[0]["report"], "reported");
-        assert_eq!(status[0]["last_output_tail"], "the new answer");
-        let (reply, response) = smol::channel::bounded(1);
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::Result {
-                parent_id: "parent".into(),
-                thread_id: "child".into(),
-            },
-            reply,
-            cx,
-        );
-        let result = response.try_recv().unwrap().unwrap();
-        assert_eq!(result["state"], "reported");
-        assert_eq!(result["source"], "report");
-        assert_eq!(result["text"], "the new report");
-        assert_eq!(result["final_message"], "the new answer");
     });
 
     cx.run_until(|_| !parent_receiver.is_empty());
@@ -12305,11 +11385,18 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
     let activity = |state: &TestEntity, id: &str| {
         state.read(|state| state.index_snapshot().summary.activity[id].clone())
     };
+    // The lead's tcode_control calls.
     let op = |state: &TestEntity, cx: &mut TestAppContext, op| {
         let (reply, response) = smol::channel::bounded(1);
-        state.update(cx, |state, cx| state.handle_orchestrate_op(op, reply, cx));
+        state.update(cx, |state, cx| {
+            state.handle_control_op("lead".into(), op, reply, cx)
+        });
         cx.run_until(|_| !response.is_empty());
         response.try_recv().unwrap()
+    };
+    let applied = |answer: Result<serde_json::Value, String>| {
+        let answer = answer.unwrap();
+        assert_eq!(answer["results"][0]["outcome"], "applied", "{answer}");
     };
     // Every run here started and ended at `stamp`.
     let agent = |execution, delivery| {
@@ -12347,15 +11434,17 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
     );
     assert_eq!(activity(&state, "lead").agent, None);
 
-    let cancelled = op(
+    applied(op(
         &state,
         cx,
-        orchestrate_mcp::OrchestrateOp::Cancel {
-            parent_id: "lead".into(),
-            thread_id: "quitter".into(),
-        },
-    );
-    assert!(cancelled.is_ok());
+        control_mcp::ControlOp::ControlThread(control_mcp::ControlThreadParams {
+            changes: vec![control_mcp::RunChange {
+                thread_id: "quitter".into(),
+                op: control_mcp::RunOp::Cancel,
+            }],
+            request_id: None,
+        }),
+    ));
     state.read(|state| assert!(!state.find_meta("quitter").unwrap().is_settled()));
     assert_eq!(
         activity(&state, "quitter").agent,
@@ -12365,36 +11454,33 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
         activity(&state, "lead").waiting,
         "the unsettled worker still holds its lead"
     );
-    let status = op(
-        &state,
-        cx,
-        orchestrate_mcp::OrchestrateOp::Status {
-            parent_id: "lead".into(),
-            thread_id: None,
-        },
-    )
-    .unwrap();
-    let delivery = |id: &str| {
-        status
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|child| child["thread_id"] == id)
-            .unwrap()["delivery"]
+    let mut delivery = |id: &str| {
+        op(
+            &state,
+            cx,
+            control_mcp::ControlOp::GetThread(control_mcp::GetThreadParams {
+                thread_id: id.into(),
+            }),
+        )
+        .unwrap()["activity"]["agent"]["delivery"]
             .clone()
     };
     assert_eq!(delivery("worker"), "awaiting_settle");
     assert_eq!(delivery("quitter"), "not_delivered");
 
-    let settled = op(
+    applied(op(
         &state,
         cx,
-        orchestrate_mcp::OrchestrateOp::Settle {
-            parent_id: "lead".into(),
-            thread_id: "worker".into(),
-        },
-    );
-    assert!(settled.is_ok());
+        control_mcp::ControlOp::UpdateThreads(control_mcp::UpdateThreadsParams {
+            changes: vec![control_mcp::ThreadChange {
+                thread_id: "worker".into(),
+                op: control_mcp::ThreadOp::Settle,
+                expect: None,
+            }],
+            dry_run: None,
+            request_id: None,
+        }),
+    ));
     assert_eq!(
         activity(&state, "worker").agent,
         agent(AgentExecution::Finished, AgentDelivery::Settled)
@@ -12413,17 +11499,17 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
             .is_some_and(|meta| meta.settled_at == Some(stamp / 1000))
     });
 
-    let sent = op(
+    applied(op(
         &state,
         cx,
-        orchestrate_mcp::OrchestrateOp::Send {
-            parent_id: "lead".into(),
-            thread_id: "worker".into(),
-            message: "One more check".into(),
-            fast: None,
-        },
-    );
-    assert!(sent.is_ok());
+        control_mcp::ControlOp::SendMessage(control_mcp::SendMessageParams {
+            thread_ids: vec!["worker".into()],
+            text: "One more check".into(),
+            mode: control_mcp::SendMode::Queue,
+            attachments: None,
+            request_id: None,
+        }),
+    ));
     state.read(|state| assert!(!state.find_meta("worker").unwrap().is_settled()));
     assert_ne!(
         activity(&state, "worker").agent.unwrap().delivery,
@@ -13308,24 +12394,4 @@ fn settle_all_children_delivers_finished_results_and_skips_running_children() {
         }
         assert!(state.resident("running").unwrap().turn_in_flight);
     });
-    let (reply, response) = smol::channel::bounded(1);
-    state.update(cx, |state, cx| {
-        state.handle_orchestrate_op(
-            orchestrate_mcp::OrchestrateOp::SettleAll {
-                parent_id: "lead".into(),
-            },
-            reply,
-            cx,
-        )
-    });
-    cx.run_until_parked();
-    let repeated = response.try_recv().unwrap().unwrap();
-    assert_eq!(repeated["settled"], serde_json::json!([]));
-    assert!(
-        repeated["skipped"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["thread_id"] == "running" && entry["delivery"] == "running")
-    );
 }

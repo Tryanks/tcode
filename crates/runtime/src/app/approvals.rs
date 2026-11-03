@@ -32,10 +32,6 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub(super) fn first_approval(&self, session_id: &str) -> Option<&agent::ApprovalRequest> {
-        self.approval_requests(session_id).first()
-    }
-
     pub(super) fn clear_approvals(&mut self, session_id: &str) {
         self.approvals.remove(session_id);
     }
@@ -133,10 +129,7 @@ mod tests {
             }
             state.record_approval_event("child", &AgentEvent::ApprovalRequested(request("second")));
             assert_eq!(state.approval_requests("child").len(), 2);
-            assert_eq!(state.first_approval("child"), Some(&first));
-            let status = state.child_status_json(&state.sessions[0], &Timeline::default());
-            assert_eq!(status["approval_request_id"], "first");
-            assert_eq!(status["waiting_approval"], "command `cargo test`");
+            assert_eq!(state.approval_requests("child").first(), Some(&first));
             assert_eq!(
                 state
                     .session_status_snapshot("child")
@@ -152,7 +145,7 @@ mod tests {
             assert!(
                 matches!(receiver.try_recv(), Ok(SessionCommand::RespondApproval { request_id, decision: ApprovalDecision::Cancel }) if request_id == "first")
             );
-            assert_eq!(state.first_approval("child").unwrap().id, "second");
+            assert_eq!(state.approval_requests("child")[0].id, "second");
             assert!(!state.approval_requests("parent").is_empty());
 
             drop(receiver);
@@ -166,7 +159,7 @@ mod tests {
                     .is_err()
             );
             assert_eq!(
-                state.first_approval("child").unwrap().id,
+                state.approval_requests("child")[0].id,
                 "second",
                 "failed delivery must remain visible"
             );
@@ -184,10 +177,7 @@ mod tests {
                     .pending_approvals
                     .is_empty()
             );
-            assert_eq!(
-                state.child_status_json(&state.sessions[0], &Timeline::default())["approval_request_id"],
-                serde_json::Value::Null
-            );
+            assert!(state.approval_requests("child").is_empty());
             assert!(!state.approval_requests("parent").is_empty());
             state.record_approval_event(
                 "parent",

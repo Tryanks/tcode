@@ -469,14 +469,12 @@ impl OrchestrateChildModel {
 }
 
 /// Live catalogs are authoritative. Bundled fallbacks cover startup before discovery.
-/// Collaboration is deliberately capped at medium/high, independent of execution.
 pub fn orchestrate_efforts(
     provider: ProviderKind,
     model: &str,
     catalog: &[ModelSpec],
-    collaboration: bool,
 ) -> Vec<String> {
-    let mut efforts = if let Some(spec) = catalog.iter().find(|spec| spec.id == model) {
+    if let Some(spec) = catalog.iter().find(|spec| spec.id == model) {
         spec.options
             .iter()
             .find_map(|option| match option {
@@ -493,11 +491,7 @@ pub fn orchestrate_efforts(
         orchestrate_fleet::bundled()
             .effort_fallback(provider, model)
             .to_vec()
-    };
-    if collaboration {
-        efforts.retain(|effort| matches!(effort.as_str(), "medium" | "high"));
     }
-    efforts
 }
 
 /// Who answers the permission requests and questions raised by dispatched
@@ -526,8 +520,8 @@ pub struct OrchestrateSettings {
     pub child_models: Vec<OrchestrateChildModel>,
     #[serde(default)]
     pub child_approval: ChildApprovalMode,
-    /// Give dispatched children dedicated Git worktrees when their resolved cwd
-    /// is itself a repository root. Dispatch-level `worktree` overrides this.
+    /// Give subagents dedicated Git worktrees when their resolved cwd is itself a
+    /// repository root. `start_thread`'s `workspace` overrides this.
     #[serde(default)]
     pub child_worktrees: bool,
 }
@@ -2317,7 +2311,7 @@ mod tests {
     }
 
     #[test]
-    fn orchestrate_capabilities_use_catalog_and_cap_collaboration() {
+    fn orchestrate_efforts_come_from_the_live_catalog() {
         let catalog = vec![ModelSpec {
             id: "custom".into(),
             display_name: "Custom".into(),
@@ -2342,20 +2336,10 @@ mod tests {
             }],
         }];
         assert_eq!(
-            orchestrate_efforts(ProviderKind::Codex, "custom", &catalog, false),
+            orchestrate_efforts(ProviderKind::Codex, "custom", &catalog),
             ["medium", "high", "deep"]
         );
-        assert_eq!(
-            orchestrate_efforts(ProviderKind::Codex, "custom", &catalog, true),
-            ["medium", "high"]
-        );
-        assert!(orchestrate_efforts(ProviderKind::Codex, "unknown", &catalog, false).is_empty());
-        for entry in OrchestrateSettings::default().decision_models {
-            assert_eq!(
-                orchestrate_efforts(entry.provider, &entry.model, &[], true),
-                ["medium", "high"]
-            );
-        }
+        assert!(orchestrate_efforts(ProviderKind::Codex, "unknown", &catalog).is_empty());
     }
 
     #[test]

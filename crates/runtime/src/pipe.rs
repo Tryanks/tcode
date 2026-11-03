@@ -30,10 +30,6 @@ pub struct HostServices {
     /// subscribed WebViews through the preview reverse-RPC topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
     pub pull_requests: Option<pull_request_mcp::PullRequestMcpServer>,
-    /// Deliberate construction-time local handle. The broker receiver stays
-    /// entirely on the host executor; a remote transport must expose the same
-    /// operations as correlated RPC instead of moving the channel.
-    pub orchestrate: Option<orchestrate_mcp::OrchestrateMcpServer>,
     /// Registration-only startup data (URL and token issuer); this contains no
     /// request receiver or live backend handle.
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
@@ -49,13 +45,11 @@ impl HostServices {
         let mut host = mcp_host::Host::bind()?;
         let preview = preview_mcp::start(&mut host);
         let pull_requests = pull_request_mcp::start(&mut host);
-        let orchestrate = orchestrate_mcp::start(&mut host);
         let control = control_mcp::start(&mut host);
         let computer_use = computer_use.then(|| computer_use_mcp::start(&mut host));
         host.start()?;
         self.preview = Some(preview);
         self.pull_requests = Some(pull_requests);
-        self.orchestrate = Some(orchestrate);
         self.control = Some(control);
         self.computer_use = computer_use;
         Ok(())
@@ -212,9 +206,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some((url, tokens)) = preview_registration {
                 state.attach_preview_mcp(url, tokens);
             }
-            if let Some(server) = services.orchestrate.take() {
-                state.attach_orchestrate_mcp(server);
-            }
             if let Some(server) = services.computer_use.take() {
                 state.attach_computer_use_mcp(server.url, server.tokens);
             }
@@ -224,7 +215,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
-            state.pump_orchestrate_requests(&mut cx);
             state.pump_control_requests(&mut cx);
             state.pump_preview_requests(preview_requests, &mut cx);
             if services.background_startup_probes {
