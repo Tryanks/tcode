@@ -11,7 +11,7 @@
 
 use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
 
-use agent::ItemStatus;
+use agent::{ItemContent, ItemStatus};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, FocusHandle, Hsla, InteractiveElement as _,
     IntoElement as _, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -20,7 +20,7 @@ use gpui::{
 };
 use gpui_base::{ElementExt as _, v_flex};
 use serde::Deserialize;
-use tcode_core::session::TimelineEntry;
+use tcode_core::session::{EntryContent, TimelineEntry};
 use tcode_protocol::{
     STORED_OUTPUT_COLS,
     terminal::{CellWidth, TerminalCell, TerminalFrame, TerminalRow, TerminalStyle},
@@ -136,6 +136,42 @@ struct StdinInput<'a> {
     session_id: serde_json::Value,
     #[serde(default, borrow)]
     chars: Option<&'a str>,
+}
+
+/// A command line an entry ran, how it stands and the code it exited with:
+/// a `CommandExecution`, or a shell run as a tool call.
+pub(in crate::chat) struct Ran {
+    pub(in crate::chat) command: String,
+    pub(in crate::chat) status: ItemStatus,
+    pub(in crate::chat) exit_code: Option<i32>,
+}
+
+/// The command `entry` ran, when it ran one; input typed into a command
+/// already running is not one.
+pub(in crate::chat) fn ran(entry: &TimelineEntry) -> Option<Ran> {
+    if let EntryContent::Item(ItemContent::CommandExecution {
+        command,
+        exit_code,
+        status,
+        ..
+    }) = &entry.content
+    {
+        return Some(Ran {
+            command: command.clone(),
+            status: *status,
+            exit_code: *exit_code,
+        });
+    }
+    let call = Call::of(entry)?;
+    if !call.named(SHELLS) {
+        return None;
+    }
+    let input = call.input::<ShellInput<'_>>()?;
+    Some(Ran {
+        command: input.command.text(),
+        status: call.status,
+        exit_code: report(call.output.unwrap_or_default()).exit_code,
+    })
 }
 
 /// A shell call made as a tool, when its input is a command line or input

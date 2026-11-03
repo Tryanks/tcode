@@ -268,12 +268,14 @@ impl ChatView {
                     continuity,
                 );
                 self.screen.sync(&timeline.entries);
+                self.commands.sync(timeline);
                 let activity_snapshot_keys = awaiting_activity_snapshot
                     .then(|| auto_activity_snapshot_keys(&timeline.entries));
                 (list_sync, activity_snapshot_keys)
             })
             .unwrap_or_else(|| {
                 self.screen.sync(&[]);
+                self.commands = Default::default();
                 let list_sync = self.turn_index_cache.sync(
                     &mut self.rows,
                     &[],
@@ -432,31 +434,14 @@ impl ChatView {
 
         let requested_row = requested_turn.and_then(|turn| rows_of_turn(&self.rows, turn).next());
         if let (Some(turn), Some(row)) = (requested_turn, requested_row) {
-            self.reservation_scroll_back = None;
-            self.list_state.pause_following_tail();
-            let target = ListOffset {
-                item_ix: row,
-                offset_in_item: px(0.),
-            };
             // Within the thread on screen the jump glides there; a thread
             // opened at a turn starts there.
-            if session_changed {
-                self.list_scroll.cancel();
-                self.list_state.scroll_to(target);
-            } else {
-                self.list_scroll.scroll_to(
-                    &self.list_state,
-                    crate::motion::ScrollTarget::Row(target),
-                    cx,
-                );
-            }
+            self.jump_to_row(row, !session_changed, cx);
             self.highlighted_turn = Some(
                 self.workspace_store
                     .read(cx)
                     .absolute_turn_for(self.session_key.as_deref(), turn),
             );
-            self.markdown_visible_rows = viewport_row_window(row, self.rows.len());
-            self.markdown_scroll_top = Some(row);
             if let Some(session_id) = self.session_key.as_deref() {
                 self.workspace_store.update(cx, |store, _cx| {
                     store.take_pending_chat_turn(session_id, turn);
@@ -519,8 +504,15 @@ impl ChatView {
     /// Invalidate the measured height of the row that renders the activity
     /// `entry_id`; an expanded Work Log gives each activity a row of its own.
     pub(in crate::chat) fn remeasure_activity(&self, turn: usize, entry_id: &str, cx: &App) {
-        let row = self
-            .workspace_store
+        match self.row_of_activity(turn, entry_id, cx) {
+            Some(row) => self.list_state.remeasure_items(row..row + 1),
+            None => self.remeasure_turn(turn),
+        }
+    }
+
+    /// The row that renders the activity `entry_id` of `turn`.
+    fn row_of_activity(&self, turn: usize, entry_id: &str, cx: &App) -> Option<usize> {
+        self.workspace_store
             .read(cx)
             .with_timeline_for(self.session_id.as_deref(), |timeline| {
                 let entries = &timeline.entries;
@@ -532,11 +524,46 @@ impl ChatView {
                         .position(|entry| entry.id == entry_id)?;
                 row_of_entry(&self.rows, index, turn)
             })
-            .flatten();
-        match row {
-            Some(row) => self.list_state.remeasure_items(row..row + 1),
-            None => self.remeasure_turn(turn),
+            .flatten()
+    }
+
+    /// Brings the row that renders the activity `entry_id` of `turn` to the
+    /// top of the timeline, gliding there.
+    pub(in crate::chat) fn scroll_to_activity(
+        &mut self,
+        turn: usize,
+        entry_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.row_of_activity(turn, entry_id, cx) else {
+            return;
+        };
+        self.jump_to_row(row, true, cx);
+        self.sync_markdown_residency(Some(row), cx);
+        cx.notify();
+    }
+
+    /// Puts `row` at the top of the timeline, gliding there or at once, and
+    /// stops following the tail.
+    fn jump_to_row(&mut self, row: usize, glide: bool, cx: &mut Context<Self>) {
+        self.reservation_scroll_back = None;
+        self.list_state.pause_following_tail();
+        let target = ListOffset {
+            item_ix: row,
+            offset_in_item: px(0.),
+        };
+        if glide {
+            self.list_scroll.scroll_to(
+                &self.list_state,
+                crate::motion::ScrollTarget::Row(target),
+                cx,
+            );
+        } else {
+            self.list_scroll.cancel();
+            self.list_state.scroll_to(target);
         }
+        self.markdown_visible_rows = viewport_row_window(row, self.rows.len());
+        self.markdown_scroll_top = Some(row);
     }
 }
 
