@@ -5537,6 +5537,8 @@ mod tests {
 
     use super::*;
 
+    mod scenes;
+
     /// One shell over a transport the test holds both ends of, so what the
     /// client says to its host is observable and what the transport says
     /// about the link can be dictated.
