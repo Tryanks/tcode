@@ -824,7 +824,7 @@ fn a_plan_written_as_a_call_reads_as_a_checklist(cx: &mut TestAppContext) {
 }
 
 /// A subagent is a window in the shared grammar: the agent's type and its
-/// task, the model and effort it ran with as chips, interrupted said in
+/// task, the model and effort it ran with as a chip, interrupted said in
 /// words; opened, the report it gave back.
 #[gpui::test]
 fn a_subagent_reads_as_its_agent_and_task_and_opens_on_its_report(cx: &mut TestAppContext) {
@@ -846,10 +846,7 @@ fn a_subagent_reads_as_its_agent_and_task_and_opens_on_its_report(cx: &mut TestA
     assert_eq!(
         thread.header(codex, cx),
         Read {
-            chips: vec![
-                Chip::Tag("gpt-6-astra".to_owned()),
-                Chip::Tag("low".to_owned())
-            ],
+            chips: vec![Chip::Tag("gpt-6-astra · low".to_owned())],
             ..read(
                 "Ran agent",
                 Some("t3_transport"),
