@@ -166,6 +166,14 @@ pub(super) fn send_void_id(receiver: Id, name: &CStr, value: Id) -> bool {
     true
 }
 
+pub(super) fn send_bool(receiver: Id, name: &CStr) -> Option<bool> {
+    let selector = selector(name)?;
+    if !can_send(receiver, selector) {
+        return None;
+    }
+    Some(invoke!(i8, receiver, selector) != 0)
+}
+
 pub(super) fn send_void_bool(receiver: Id, name: &CStr, value: bool) -> bool {
     let Some(selector) = selector(name) else {
         return false;

@@ -44,6 +44,41 @@ impl Waypoint {
 // the agent by seconds.
 const MAX_QUEUED: usize = 6;
 const DWELL_AFTER_EFFECT: Duration = Duration::from_millis(120);
+// With Reduce Motion the cursor moves to a point at once and waits there about
+// as long as a glide would have taken, so the action is still seen coming.
+const REDUCED_MOTION_HOLD: Duration = Duration::from_millis(300);
+
+// Appearing is quick so the first action is seen where it lands; leaving is
+// slow enough to read as the agent letting go rather than the cursor breaking.
+const FADE_IN: Duration = Duration::from_millis(140);
+const FADE_OUT: Duration = Duration::from_millis(600);
+
+/// The cursor's opacity, eased in and out of view.
+pub(super) struct Fade {
+    progress: f64,
+}
+
+impl Fade {
+    pub(super) fn hidden() -> Self {
+        Self { progress: 0.0 }
+    }
+
+    /// Advances by one frame toward `shown`; returns whether it is still
+    /// changing.
+    pub(super) fn step(&mut self, step: Duration, shown: bool) -> bool {
+        self.progress = if shown {
+            (self.progress + step.as_secs_f64() / FADE_IN.as_secs_f64()).min(1.0)
+        } else {
+            (self.progress - step.as_secs_f64() / FADE_OUT.as_secs_f64()).max(0.0)
+        };
+        self.progress != if shown { 1.0 } else { 0.0 }
+    }
+
+    pub(super) fn opacity(&self) -> f64 {
+        let t = self.progress;
+        t * t * (3.0 - 2.0 * t)
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Ease {
@@ -139,6 +174,7 @@ pub(super) struct Motion {
     queued: VecDeque<Waypoint>,
     hold_until: Option<Instant>,
     pressed: bool,
+    reduced: bool,
     rng: Rng,
 }
 
@@ -150,6 +186,7 @@ impl Motion {
             queued: VecDeque::new(),
             hold_until: None,
             pressed: false,
+            reduced: false,
             rng: Rng(seed),
         }
     }
@@ -168,6 +205,11 @@ impl Motion {
     /// Whether a drag holds the button, from its press until its release.
     pub(super) fn is_pressed(&self) -> bool {
         self.pressed
+    }
+
+    /// Reduce Motion: later legs jump to their point instead of gliding.
+    pub(super) fn set_reduced(&mut self, reduced: bool) {
+        self.reduced = reduced;
     }
 
     /// Returns effects that happen immediately because the cursor had no
@@ -248,13 +290,29 @@ impl Motion {
             return false;
         };
         let from = self.resting.unwrap_or(waypoint.point);
+        let segments = if self.reduced {
+            hold(from, waypoint.point)
+        } else {
+            plan(from, waypoint.point, self.pressed, &mut self.rng)
+        };
         self.active = Some(Leg {
-            segments: plan(from, waypoint.point, self.pressed, &mut self.rng),
+            segments,
             waypoint,
             start: now,
         });
         true
     }
+}
+
+fn hold(from: Point, to: Point) -> Vec<Segment> {
+    if (to.0 - from.0).hypot(to.1 - from.1) < 1.0 {
+        return Vec::new();
+    }
+    vec![Segment {
+        shape: Shape::Curve([to; 4]),
+        duration: REDUCED_MOTION_HOLD,
+        ease: Ease::Out,
+    }]
 }
 
 /// Plans a hand-like path: a gently bowed, minimum-jerk stroke whose duration
@@ -436,6 +494,59 @@ mod tests {
         assert_eq!(
             motion.position(midway + Duration::from_secs(5)),
             Some((0.0, 500.0))
+        );
+    }
+
+    #[test]
+    fn reduced_motion_jumps_to_the_point_and_holds_there_before_the_action() {
+        let now = Instant::now();
+        let mut motion = Motion::new(3);
+        motion.set_reduced(true);
+        motion.push(now, vec![Waypoint::new((100.0, 100.0), None)]);
+        let (reached, arrival) = std::sync::mpsc::sync_channel(1);
+        let mut click = Waypoint::new((900.0, 500.0), Some(Effect::Click));
+        click.reached = Some(reached);
+        motion.push(now, vec![click]);
+        let mut time = now;
+        let mut effects = Vec::new();
+        while motion.is_moving() {
+            let (x, y) = motion.position(time).unwrap();
+            assert!(
+                (x - 900.0).hypot(y - 500.0) < 0.5,
+                "no glide: at ({x}, {y})"
+            );
+            assert!(arrival.try_recv().is_err(), "the action waits");
+            time += FRAME;
+            effects.extend(motion.advance(time));
+        }
+        assert_eq!(effects, vec![Effect::Click]);
+        assert!(arrival.try_recv().is_ok());
+        assert!(
+            time - now >= Duration::from_millis(250),
+            "the cursor is seen on its point before the click lands there"
+        );
+    }
+
+    #[test]
+    fn a_hidden_cursor_fades_out_gently_instead_of_vanishing() {
+        let mut fade = Fade::hidden();
+        while fade.step(FRAME, true) {}
+        assert_eq!(fade.opacity(), 1.0);
+        let mut opacities = vec![fade.opacity()];
+        while fade.step(FRAME, false) {
+            opacities.push(fade.opacity());
+        }
+        opacities.push(fade.opacity());
+        assert_eq!(opacities.last(), Some(&0.0));
+        assert!(opacities.windows(2).all(|pair| pair[1] <= pair[0]));
+        assert!(
+            opacities[1] > 0.95,
+            "the fade starts softly: {}",
+            opacities[1]
+        );
+        assert!(
+            FRAME * (opacities.len() as u32 - 1) >= Duration::from_millis(500),
+            "the cursor takes about half a second to leave"
         );
     }
 
