@@ -48,9 +48,16 @@ pub(crate) fn image_load(source: &ImageSource, window: &mut Window, cx: &mut App
     let decoded: Option<Result<Arc<RenderImage>, ImageCacheError>> = match source {
         ImageSource::Custom(load) => load(window, cx),
         ImageSource::Render(image) => Some(Ok(image.clone())),
-        // GPUI's memo would keep such a read for the session; `store::images` reads every
-        // picture Tcode draws, so none is ever built.
-        ImageSource::Resource(_) | ImageSource::Image(_) => None,
+        ImageSource::Resource(_) | ImageSource::Image(_) => {
+            // GPUI's memo would keep this picture for the session.
+            if cfg!(debug_assertions) {
+                panic!("draw pictures through `store::images`, which holds them within a budget");
+            }
+            // `img` draws it all the same, so it is not left invisible.
+            Some(Err(ImageCacheError::Asset(
+                "not read by store::images".into(),
+            )))
+        }
     };
     match decoded {
         None => ImageLoad::Loading,
