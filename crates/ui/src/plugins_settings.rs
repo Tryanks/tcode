@@ -1142,7 +1142,9 @@ impl PluginsSettingsPanel {
             available.list.reset(matches.len());
             available.listed = Some(listed);
         }
-        available.rows.settle_list(&available.list, &keys, cx);
+        available
+            .rows
+            .settle_list(&available.list, &keys, window, cx);
         let list_state = available.list.clone();
         // Listing cross-fades to what it found; which of those shows follows
         // the search keystrokes and does not.

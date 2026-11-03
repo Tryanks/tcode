@@ -4346,7 +4346,8 @@ impl SessionsSidebar {
                         .flatten();
                     let reveal_model = model.clone();
                     this.compact_scroll.step(&this.compact_list_state, window, cx);
-                    this.compact_presence.settle(&this.compact_list_state, cx);
+                    this.compact_presence
+                        .settle(&this.compact_list_state, window, cx);
                     div()
                         .id("compact-thread-list")
                         .debug_selector(|| "compact-thread-list".into())
@@ -4929,7 +4930,8 @@ impl SessionsSidebar {
             );
             self.grouped_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
         }
-        self.grouped_presence.settle(&self.grouped_list_state, cx);
+        self.grouped_presence
+            .settle(&self.grouped_list_state, window, cx);
         let (rows, folds) = rows.into_iter().unzip();
         let frame = Rc::new(GroupedFrame {
             rows,
@@ -5105,7 +5107,7 @@ impl SessionsSidebar {
             );
             self.flat_row_keys = keys.map(|(kind, id)| (kind, id.to_owned())).collect();
         }
-        self.flat_presence.settle(&self.flat_list_state, cx);
+        self.flat_presence.settle(&self.flat_list_state, window, cx);
         let pinned_row = |id: &str| {
             let index = visible
                 .iter()

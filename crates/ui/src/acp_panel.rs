@@ -640,7 +640,8 @@ impl AcpPanel {
             self.market_ids = market.iter().map(|agent| agent.id.clone()).collect();
             self.market_list.reset(market.len());
         }
-        self.market_rows.settle_list(&self.market_list, &keys, cx);
+        self.market_rows
+            .settle_list(&self.market_list, &keys, window, cx);
         let error = self.store.read(cx).acp_registry_error();
         let loading = self.store.read(cx).acp_registry_loading();
         let empty = market.is_empty();

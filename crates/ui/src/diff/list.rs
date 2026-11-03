@@ -625,7 +625,7 @@ fn render_layout<H: DiffListHost>(
     let (list_state, scroll) = diff.scrolled(split);
     let list_state = list_state.clone();
     scroll.step(&list_state, window, cx);
-    diff.motion(split).stamp(&list_state, cx);
+    diff.motion(split).stamp(&list_state, window, cx);
     let content_width = if wrap {
         px(0.)
     } else {
@@ -1119,7 +1119,7 @@ impl RowMotion {
 
     /// Stamps what the last relayout brought and took, now; and lets go of
     /// what has come in and gone.
-    fn stamp(&self, list: &ListState, cx: &App) {
+    fn stamp(&self, list: &ListState, window: &mut Window, cx: &App) {
         let now = cx.background_executor().now();
         if let Some((arrived, left)) = self.pending.borrow_mut().take()
             && !cx.reduce_motion()
@@ -1132,7 +1132,9 @@ impl RowMotion {
                 rows.leave(key, item, attach, now);
             }
         }
-        self.rows.borrow_mut().settle_list(list, &self.keys, cx);
+        self.rows
+            .borrow_mut()
+            .settle_list(list, &self.keys, window, cx);
     }
 }
 

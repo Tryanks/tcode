@@ -496,7 +496,7 @@ impl RenderOnce for VirtualList {
                         }
                     }
                     rows.keys = Some(new.clone());
-                    rows.rows.settle_list(&state, &new, cx);
+                    rows.rows.settle_list(&state, &new, window, cx);
                     drop(rows);
                     (motion, new, keyed.leaving)
                 });
@@ -1106,5 +1106,60 @@ mod tests {
         assert!(pushed > b && pushed < c, "c makes room gradually: {pushed}");
         crate::test_frames::draw_settled(cx);
         assert_eq!((top("b", cx), top("c", cx)), (Some(b), Some(c)));
+    }
+
+    /// A keyed list of so many 20 px rows, in a 100 px viewport.
+    struct Arriving(usize);
+
+    impl Render for Arriving {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let row = |index: usize| {
+                div()
+                    .debug_selector(move || format!("arriving-{index}"))
+                    .h(px(20.))
+                    .flex_none()
+                    .into_any_element()
+            };
+            let keys: Vec<u64> = (0..self.0 as u64).collect();
+            div().w(px(200.)).h(px(600.)).child(
+                div().debug_selector(|| "arriving".into()).child(
+                    VirtualList::measured("arriving-list", self.0, move |index, _, _| row(index))
+                        .keyed(keys, crate::motion::KEYSTROKE, |_, _, _| None)
+                        .w_full()
+                        .max_h(px(100.)),
+                ),
+            )
+        }
+    }
+
+    /// Rows that arrive together fold in from nothing, the first ones
+    /// pushing the rest past the viewport's edge while they grow; once they
+    /// are in, scrolling to the end of the list shows its last row whole at
+    /// the viewport's bottom.
+    #[gpui::test]
+    fn a_virtual_list_scrolls_to_the_last_of_rows_that_arrived_together(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (view, cx) = cx.add_window_view(|_, _| Arriving(1));
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        crate::test_frames::draw_settled(cx);
+
+        view.update(cx, |view, cx| {
+            view.0 = 20;
+            cx.notify();
+        });
+        crate::test_frames::draw_settled(cx);
+        let viewport = cx.debug_bounds("arriving").unwrap();
+        cx.simulate_event(gpui::ScrollEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-2000.))),
+            ..Default::default()
+        });
+        crate::test_frames::draw_settled(cx);
+
+        let last = cx
+            .debug_bounds("arriving-19")
+            .expect("the last row is drawn");
+        assert_eq!(last.size.height, px(20.));
+        assert_eq!(last.bottom(), viewport.bottom());
     }
 }

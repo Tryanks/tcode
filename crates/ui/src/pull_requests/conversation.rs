@@ -2019,7 +2019,7 @@ impl PullRequestView {
         let state = page.conversation_view.list.clone();
         page.conversation_view.scroll.step(&state, window, cx);
         let view = &mut page.conversation_view;
-        view.arrivals.settle_list(&state, &view.keys, cx);
+        view.arrivals.settle_list(&state, &view.keys, window, cx);
         page.conversation_view
             .shared
             .begin_frame(state.viewport_bounds(), cx);
