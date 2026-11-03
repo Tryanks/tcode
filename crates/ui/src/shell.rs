@@ -1295,6 +1295,7 @@ impl AppShell {
         let observed_session_id = store.read(cx).active_session_id();
         let panel_scene = crate::motion::Epoch::default();
         panel_scene.show(observed_session_id.as_deref());
+        preview.update(cx, |preview, _| preview.share_scene(&panel_scene));
         let thread_panel = self.new_pane(&store, window, cx);
         let shell = cx.entity().downgrade();
         let drop_landing = Rc::new(Cell::new(None));

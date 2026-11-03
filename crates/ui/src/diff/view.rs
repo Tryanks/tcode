@@ -272,7 +272,7 @@ impl DiffPanel {
     pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch, cx: &mut Context<Self>) {
         self.motion = crate::motion::owned::Owned::in_scene(scene);
         self.pull_requests
-            .update(cx, |pull_requests, _| pull_requests.share_scene(scene));
+            .update(cx, |pull_requests, cx| pull_requests.share_scene(scene, cx));
     }
 
     fn selected_scope(&self, session: &str, cx: &App) -> Option<DiffScope> {

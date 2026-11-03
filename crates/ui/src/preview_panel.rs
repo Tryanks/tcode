@@ -236,6 +236,12 @@ impl PreviewPanel {
         panel
     }
 
+    /// Keep the panel's motion in `scene`, the right panel's: the page and
+    /// its address follow the focused thread.
+    pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch) {
+        self.motion = crate::motion::owned::Owned::in_scene(scene);
+    }
+
     /// The stable conversation key the chrome is currently addressing.
     fn active_key(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let current = self.store.read(cx).preview_active_identity();

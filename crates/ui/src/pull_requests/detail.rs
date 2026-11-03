@@ -259,6 +259,12 @@ pub(super) fn reason(error: &ProtocolError) -> String {
 }
 
 impl PullRequestView {
+    /// Keep the view's motion in `scene`, its host's: the pull request it
+    /// shows is the one its host's thread has open.
+    pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch) {
+        self.motion = crate::motion::owned::Owned::in_scene(scene);
+    }
+
     /// The open pull request's host as a person reads it.
     pub(super) fn host_name(&self, cx: &App) -> String {
         self.current
