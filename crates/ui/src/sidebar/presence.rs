@@ -50,14 +50,19 @@ impl<V> Default for RowPresence<V> {
 impl<V: Clone> RowPresence<V> {
     /// The list's rows are now `rows`, each a key with its fold factor (a
     /// negative one is a row a moving disclosure leaves out, which the list
-    /// does not hold). Called before `list` is spliced, while it still lays
-    /// out the rows it drew: a row that came in where the view was arrives,
-    /// and one that went while in view folds away, drawn from what `left`
-    /// gives for its old index. A list replaced whole (another project
-    /// filter, another layout) is the same change of many rows at once. The
-    /// rows a list opens with are in place at once, as are rows that came in
-    /// out of view. While a disclosure moves (`folding`), what comes and goes
-    /// is its rows, which it folds.
+    /// does not hold). Called every frame, before `list` is spliced for rows
+    /// that changed, while it still lays out the rows it drew: a row that
+    /// came in where the view was arrives, and one that went while in view
+    /// folds away, drawn from what `left` gives for its old index. A list
+    /// replaced whole (another project filter, another layout) is the same
+    /// change of many rows at once. The rows a list opens with are in place
+    /// at once, as are rows that came in out of view. While a disclosure
+    /// moves (`folding`), what comes and goes is its rows, which it folds.
+    ///
+    /// A row whose factor moved while the list kept its rows is measured
+    /// again: `list` measures only the rows in its view, so one a disclosure
+    /// grows past the view's edge would keep, and scroll by, the height it
+    /// had there.
     pub(super) fn update(
         &mut self,
         rows: &[(u64, f32)],
@@ -71,7 +76,24 @@ impl<V: Clone> RowPresence<V> {
             .filter(|(_, factor)| *factor >= 0.)
             .map(|(key, _)| *key)
             .collect();
-        if !self.factors.is_empty() && keys != self.keys && !folding {
+        if keys == self.keys {
+            let mut moved = rows.len() != self.factors.len();
+            let mut index = 0;
+            for (key, factor) in rows {
+                if self.factors.get(key) != Some(factor) {
+                    moved = true;
+                    if *factor >= 0. {
+                        list.remeasure_items(index..index + 1);
+                    }
+                }
+                index += usize::from(*factor >= 0.);
+            }
+            if moved {
+                self.factors = rows.iter().copied().collect();
+            }
+            return;
+        }
+        if !self.factors.is_empty() && !folding {
             let top = list.logical_scroll_top();
             let at_top = top.item_ix == 0 && top.offset_in_item <= px(0.);
             let viewport = list.viewport_bounds();
