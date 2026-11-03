@@ -22,11 +22,15 @@ const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub struct PlanPanel {
     store: Entity<WorkspaceStore>,
     vscroll: ScrollHandle,
-    /// The steps last shown, drawn while an emptied list fades out.
-    last_steps: Vec<PlanStep>,
+    /// The explanation and steps last shown, drawn while an emptied plan
+    /// fades out.
+    last: (Option<String>, Vec<PlanStep>),
     _subscriptions: Vec<Subscription>,
 }
 
@@ -45,7 +49,7 @@ impl PlanPanel {
         Self {
             store,
             vscroll: ScrollHandle::new(),
-            last_steps: Vec::new(),
+            last: (None, Vec::new()),
             _subscriptions: subscriptions,
         }
     }
@@ -63,17 +67,17 @@ impl PlanPanel {
 
 impl Render for PlanPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let steps = self
+        let plan = self
             .store
             .read(cx)
             .session_plan()
-            .map(|plan| plan.steps.clone())
-            .unwrap_or_default();
-        // The step list and the empty state cross-fade; a list that empties
+            .filter(|plan| !plan.steps.is_empty())
+            .map(|plan| (explanation(plan), plan.steps.clone()));
+        // The plan and the empty state cross-fade; a plan that empties
         // leaves as it last stood.
-        let empty = steps.is_empty();
-        if !empty {
-            self.last_steps = steps;
+        let empty = plan.is_none();
+        if let Some(plan) = plan {
+            self.last = plan;
         }
         let fade =
             crate::motion::CrossFade::new("plan-panel", usize::from(!empty), 2, CHANGE, window, cx)
@@ -91,13 +95,19 @@ impl Render for PlanPanel {
             } else {
                 material::CARD_INSET
             };
-            let steps = self.last_steps.clone();
+            let (explanation, steps) = self.last.clone();
             let column = v_flex()
                 .w_full()
                 .min_w_0()
                 .px(px(inset))
                 .py_3()
-                .gap_3()
+                .children(render_explanation(
+                    "plan-explanation",
+                    explanation,
+                    compact,
+                    window,
+                    cx,
+                ))
                 .child(
                     v_flex()
                         .w_full()
@@ -134,6 +144,37 @@ impl Render for PlanPanel {
         }
         v_flex().size_full().child(fade.render(layers).size_full())
     }
+}
+
+/// What the agent said of `plan` when it set it, when it said something.
+pub(crate) fn explanation(plan: &tcode_protocol::SessionPlan) -> Option<String> {
+    plan.explanation
+        .as_deref()
+        .map(str::trim)
+        .filter(|explanation| !explanation.is_empty())
+        .map(str::to_owned)
+}
+
+/// What the agent said of a plan, drawn above its steps: it folds in when
+/// the agent first says something and away once a plan comes without it.
+pub(crate) fn render_explanation(
+    id: &'static str,
+    explanation: Option<String>,
+    compact: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let shown = crate::motion::shown(id, explanation, SHOW, window, cx)?;
+    Some(
+        shown.fold(
+            div()
+                .w_full()
+                .pb(cx.theme().tokens.spacing.sm)
+                .text_secondary(compact, cx)
+                .text_color(cx.theme().muted_foreground)
+                .child(shown.value.clone()),
+        ),
+    )
 }
 
 /// A plan's steps, keyed by their text: a plan the agent rewrites folds the
