@@ -597,14 +597,33 @@ fn chip_element(key: &str, chip: Chip, cx: &App) -> AnyElement {
             crate::material::semantic_chip(text, theme.warning.opacity(0.12), theme.warning, cx)
                 .into_any_element()
         }
-        Chip::Tag(text) => crate::material::semantic_chip(
-            text,
-            theme.muted.opacity(0.4),
-            theme.muted_foreground,
-            cx,
-        )
-        .font_family(mono)
-        .into_any_element(),
+        // What the call ran with matters less than what it acted on: in a
+        // narrow row it gives way beside the argument instead of pushing
+        // the argument out.
+        Chip::Tag(text) => {
+            return h_flex()
+                .min_w_0()
+                .flex_shrink(1.)
+                .debug_selector(move || format!("tool-chip-{key}"))
+                .child(
+                    crate::material::chip_surface(
+                        theme.muted.opacity(0.4),
+                        theme.muted_foreground,
+                        cx,
+                    )
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .font_family(mono)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(text)),
+                    ),
+                )
+                .into_any_element();
+        }
     };
     div()
         .flex_none()
