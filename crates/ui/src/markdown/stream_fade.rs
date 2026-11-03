@@ -1,15 +1,17 @@
-//! Streamed text fades in: the rendered characters an append adds start
-//! transparent and reach full colour over [`FADE`], word by word (character
-//! by character for CJK) [`STAGGER`] apart, or as one chunk when the append
-//! is too long to light up within one fade.
+//! Streamed text lights up in reading order: the rendered text an append
+//! adds is cut into words (CJK characters) in document order, across every
+//! paragraph, list item, cell and code line it touches, and each word starts
+//! fading in no earlier than the one before it, on one timeline that carries
+//! over from one append to the next. An append too large to have been
+//! written while the reader watched fades in as one document instead.
 //!
 //! gpui-base fades streamed text only inside its own `TextView`
 //! (`TextViewMotion::stream_fade`): its tracker is private to that view and
-//! bound to the document it parses. This ports its rule onto Tcode's render
-//! IR -- per text leaf, the rendered text an append shares with the previous
-//! parse stays as it is and the rest fades; `HighlightStyle::fade_out` over
-//! the leaf's runs, with decoration colours faded alongside -- until
-//! gpui-base exposes a tracker for a document it does not own.
+//! bound to the document it parses, and it schedules each update from now,
+//! so updates and the leaves within one update can overtake each other.
+//! This is built here on Tcode's render IR, painted through
+//! `HighlightStyle::fade_out` with decoration colours faded alongside,
+//! until gpui-base exposes an ordered tracker for a document it does not own.
 
 use std::{collections::HashMap, ops::Range, rc::Rc, time::Duration};
 
@@ -19,25 +21,34 @@ use std::time::Instant;
 use web_time::Instant;
 
 use gpui::HighlightStyle;
-use gpui_base::motion::{Easing, Stagger, StaggerOrigin, Timing};
 
 use super::nodes::BlockNode;
 
-/// The fade gpui-component's `TextView::stream_fade(true)` plays, the value
-/// gpui-kit recommends; gpui-base's own default is no fade.
-pub(crate) const FADE: Duration = Duration::from_millis(280);
-const STAGGER: Duration = Duration::from_millis(10);
+/// The step between consecutive words of one append.
+const STEP: Duration = Duration::from_millis(28);
 
-/// An append that adds more rendered text than this appears at once.
-///
-/// A provider streams a few tokens per delta, and the chat applies whatever
-/// arrived since its last frame in one append: tens of bytes while text is
-/// being written, a few hundred after a stall. More than that was not
-/// written while the reader watched -- a reconnect catching up, a provider
-/// that delivers whole paragraphs -- and fading it would flash a screenful
-/// in at once. gpui-base only drops the stagger for such an update, which
-/// still fades it as one chunk.
-const BURST_BYTES: usize = 512;
+/// How far ahead of now the timeline may run. Past it the step shrinks, down
+/// to [`MIN_STEP`], so a burst sweeps in quickly instead of queueing
+/// invisible text, and still in order.
+const BUDGET: Duration = Duration::from_millis(320);
+const MIN_STEP: Duration = Duration::from_millis(4);
+
+/// A word reaches most of its opacity quickly and the rest slowly: legible
+/// at once, while a batch of words arriving together never flashes in.
+const WORD_QUICK: Duration = Duration::from_millis(120);
+const WORD_SETTLE: Duration = Duration::from_millis(560);
+const WORD_QUICK_SHARE: f32 = 0.7;
+
+/// An append adding more rendered characters than this was not written
+/// while the reader watched (a provider delivering whole blocks, a stall
+/// catching up): it fades in as one document, together with the height
+/// glide of the row that holds it, rather than sweeping in line by line.
+const ONE_SHOT_CHARS: usize = 512;
+const DOCUMENT: Duration = Duration::from_millis(320);
+
+/// How long appended text can take to reach full colour.
+#[cfg(test)]
+pub(crate) const FADE: Duration = BUDGET.saturating_add(WORD_SETTLE);
 
 /// A text leaf: the render path of a paragraph, heading or table cell, or of
 /// a code block with the line in it -- the place selection runs name.
@@ -47,26 +58,63 @@ type LeafKey = (Vec<u32>, u32);
 /// with this frame: `1.0` transparent, `0.0` at full colour.
 pub(super) type Fades = Vec<(Range<usize>, f32)>;
 
+#[derive(Clone, Copy, PartialEq)]
+enum Curve {
+    Word,
+    Document,
+}
+
+impl Curve {
+    fn duration(self) -> Duration {
+        match self {
+            Curve::Word => WORD_SETTLE,
+            Curve::Document => DOCUMENT,
+        }
+    }
+
+    /// The opacity `elapsed` into the fade, 0 to 1.
+    fn opacity(self, elapsed: Duration) -> f32 {
+        let progress = |over: Duration| (elapsed.as_secs_f32() / over.as_secs_f32()).min(1.);
+        match self {
+            Curve::Word => {
+                let ease = gpui_base::animation::ease_out_cubic;
+                WORD_QUICK_SHARE * ease(progress(WORD_QUICK))
+                    + (1. - WORD_QUICK_SHARE) * ease(progress(WORD_SETTLE))
+            }
+            Curve::Document => gpui_base::animation::ease_in_out_cubic(progress(DOCUMENT)),
+        }
+    }
+}
+
 struct Segment {
     range: Range<usize>,
-    started_at: Instant,
+    start: Instant,
+    curve: Curve,
 }
 
 /// Which rendered text arrived recently, so its fade can be sampled.
 #[derive(Default)]
 pub(super) struct StreamFade {
     leaves: Vec<(LeafKey, Vec<Segment>)>,
+    /// When the word after the last one scheduled may start.
+    next_start: Option<Instant>,
 }
 
 impl StreamFade {
     /// Forget every fade: the text is shown as it is.
     pub(super) fn clear(&mut self) {
         self.leaves.clear();
+        self.next_start = None;
     }
 
-    /// Record what root blocks `new` render that `old` did not, both
-    /// starting at root block `first_block`, as fades starting at `now`.
-    /// Whether the append was a burst, which appears at once.
+    /// Schedule what root blocks `new` render that `old` did not, both
+    /// starting at root block `first_block`. Whether the append was one
+    /// document, which fades in whole.
+    ///
+    /// Per leaf, the text up to the length it had before is already shown,
+    /// even where a re-parse rewrote it (`**bo` becoming bold `bo`): only
+    /// text past that length fades, so markup completing never fades glyphs
+    /// the reader has seen.
     pub(super) fn record(
         &mut self,
         old: &[BlockNode],
@@ -74,88 +122,128 @@ impl StreamFade {
         first_block: usize,
         now: Instant,
     ) -> bool {
-        let previous = leaf_texts(old, first_block);
+        let previous: HashMap<LeafKey, String> = leaf_texts(old, first_block).into_iter().collect();
         let current = leaf_texts(new, first_block);
-        let prefixes: HashMap<&LeafKey, usize> = current
+        let shown: Vec<usize> = current
             .iter()
             .map(|(key, text)| {
-                let prefix = previous
-                    .get(key)
-                    .map_or(0, |old| common_prefix_len(text, old));
-                (key, prefix)
+                previous.get(key).map_or(0, |old| {
+                    if text.starts_with(old.as_str()) {
+                        old.len()
+                    } else {
+                        floor_boundary(text, old.len())
+                    }
+                })
             })
             .collect();
-        // A leaf that is gone, or diverged, is painted anew from the point
-        // where it diverged; fades past that point describe nothing on screen.
+        let texts: HashMap<&LeafKey, &str> = current
+            .iter()
+            .map(|(key, text)| (key, text.as_str()))
+            .collect();
+        // A leaf that is gone describes nothing on screen; one that changed
+        // keeps its fades over the text it still has.
         self.leaves.retain_mut(|(key, segments)| {
             if (key.0[0] as usize) < first_block {
                 return true;
             }
-            let Some(&prefix) = prefixes.get(key) else {
+            let Some(text) = texts.get(key) else {
                 return false;
             };
             segments.retain_mut(|segment| {
-                segment.range.end = segment.range.end.min(prefix);
+                segment.range.start = floor_boundary(text, segment.range.start);
+                segment.range.end = floor_boundary(text, segment.range.end);
                 segment.range.start < segment.range.end
             });
             !segments.is_empty()
         });
 
-        let added: Vec<_> = current
+        let added: usize = current
             .iter()
-            .map(|(key, text)| (key, text, prefixes[key]))
-            .filter(|(_, text, prefix)| *prefix < text.len())
-            .collect();
-        let added_bytes: usize = added
-            .iter()
-            .map(|(_, text, prefix)| text.len() - prefix)
+            .zip(&shown)
+            .map(|((_, text), shown)| text[*shown..].chars().count())
             .sum();
-        if added_bytes > BURST_BYTES {
-            return true;
+        if added == 0 {
+            return false;
         }
-        for (key, text, prefix) in added {
-            let units = fade_units(text, prefix, text.len());
-            let stagger = Stagger::new(stagger_step(units.len()), StaggerOrigin::First);
-            let count = units.len();
-            let segments = units.into_iter().enumerate().map(|(ix, range)| Segment {
+        let document = added > ONE_SHOT_CHARS;
+        let units: Vec<(usize, Range<usize>)> = current
+            .iter()
+            .zip(&shown)
+            .enumerate()
+            .filter(|(_, ((_, text), shown))| **shown < text.len())
+            .flat_map(|(ix, ((_, text), shown))| {
+                let units = if document {
+                    std::iter::once(*shown..text.len()).collect()
+                } else {
+                    fade_units(text, *shown, text.len())
+                };
+                units.into_iter().map(move |range| (ix, range))
+            })
+            .collect();
+
+        let count = units.len() as u32;
+        let budget_end = now + BUDGET;
+        let first = self
+            .next_start
+            .map_or(now, |at| at.max(now))
+            .min(budget_end);
+        let step = if document || count < 2 {
+            Duration::ZERO
+        } else if first + STEP * (count - 1) > budget_end {
+            (budget_end.saturating_duration_since(first) / (count - 1)).max(MIN_STEP)
+        } else {
+            STEP
+        };
+        let curve = if document {
+            Curve::Document
+        } else {
+            Curve::Word
+        };
+        for (position, (ix, range)) in units.into_iter().enumerate() {
+            let key = &current[ix].0;
+            let segment = Segment {
                 range,
-                started_at: now + stagger.delay(ix, count),
-            });
+                start: first + step * position as u32,
+                curve,
+            };
             match self.leaves.iter_mut().find(|(leaf, _)| leaf == key) {
-                Some((_, existing)) => existing.extend(segments),
-                None => self.leaves.push((key.clone(), segments.collect())),
+                Some((_, segments)) => segments.push(segment),
+                None => self.leaves.push((key.clone(), vec![segment])),
             }
         }
-        false
+        self.next_start = Some(first + step * count);
+        document
     }
 
     /// Sample every unfinished fade at `now`, dropping the finished ones.
     /// `None` when nothing fades, so no frame needs to follow.
     pub(super) fn frame(&mut self, now: Instant, reduce_motion: bool) -> Option<Rc<FadeFrame>> {
         if reduce_motion {
-            self.leaves.clear();
+            self.clear();
         }
         if self.leaves.is_empty() {
+            self.next_start = None;
             return None;
         }
-        let timing = Timing::new(FADE).ease(Easing::EaseOut);
         let mut leaves = Vec::with_capacity(self.leaves.len());
         self.leaves.retain_mut(|(key, segments)| {
             let mut fades = Vec::with_capacity(segments.len());
             segments.retain(|segment| {
-                let sample = timing.sample(now.saturating_duration_since(segment.started_at));
-                if sample.finished {
+                let Some(elapsed) = now.checked_duration_since(segment.start) else {
+                    fades.push((segment.range.clone(), 1.));
+                    return true;
+                };
+                if elapsed >= segment.curve.duration() {
                     return false;
                 }
-                fades.push((
-                    segment.range.clone(),
-                    (1. - sample.directed_progress).clamp(0., 1.),
-                ));
+                let opacity = segment.curve.opacity(elapsed);
+                fades.push((segment.range.clone(), (1. - opacity).clamp(0., 1.)));
                 true
             });
             if fades.is_empty() {
                 return false;
             }
+            fades.sort_by_key(|(range, _)| range.start);
             leaves.push((key.clone(), fades));
             true
         });
@@ -248,39 +336,25 @@ pub(super) fn surround_opacity(fades: &[(Range<usize>, f32)], len: usize) -> f32
     1. - fade_out
 }
 
-/// The rendered text of every leaf of `blocks`, root blocks from `first_block`.
-fn leaf_texts(blocks: &[BlockNode], first_block: usize) -> HashMap<LeafKey, String> {
-    let mut texts = HashMap::new();
+/// The rendered text of every leaf of `blocks`, root blocks from
+/// `first_block`, in reading order.
+fn leaf_texts(blocks: &[BlockNode], first_block: usize) -> Vec<(LeafKey, String)> {
+    let mut texts = Vec::new();
     for (offset, block) in blocks.iter().enumerate() {
         block.for_each_segment_at(first_block + offset, &mut |path, line, text, _| {
-            texts.insert((path.to_vec(), line), text.to_string());
+            texts.push(((path.to_vec(), line), text.to_string()));
         });
     }
     texts
 }
 
-/// The length of the text `new` shares with `old`, on a char boundary of `new`.
-fn common_prefix_len(new: &str, old: &str) -> usize {
-    let mut len = new
-        .bytes()
-        .zip(old.bytes())
-        .take_while(|(a, b)| a == b)
-        .count();
-    while !new.is_char_boundary(len) {
-        len -= 1;
+/// `ix`, or the char boundary of `text` before it.
+fn floor_boundary(text: &str, ix: usize) -> usize {
+    let mut ix = ix.min(text.len());
+    while !text.is_char_boundary(ix) {
+        ix -= 1;
     }
-    len
-}
-
-/// The start offset between consecutive units of an append `units` long:
-/// the stagger, or none once the last unit would start after one fade has
-/// played -- that is a sweep across text that arrived at once, not words
-/// arriving one after another.
-fn stagger_step(units: usize) -> Duration {
-    if units < 2 || STAGGER * (units as u32 - 1) > FADE {
-        return Duration::ZERO;
-    }
-    STAGGER
+    ix
 }
 
 /// Split `start..end` of `text` into the units that fade one after another:

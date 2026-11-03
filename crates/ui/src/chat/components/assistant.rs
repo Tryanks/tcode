@@ -376,101 +376,180 @@ mod tests {
         lines.iter().map(|line| line.color.a).collect()
     }
 
-    /// The alpha of each inline code background painted last frame.
-    fn chip_alphas(cx: &mut VisualTestContext) -> Vec<f32> {
-        cx.update(|window, cx| {
-            let muted = cx.theme().tokens.colors.muted;
-            window
-                .painted_quads()
-                .iter()
-                .filter_map(|quad| quad.background.as_solid())
-                .filter(|color| color.h == muted.h && color.s == muted.s && color.l == muted.l)
-                .map(|color| color.a)
-                .collect()
-        })
-    }
-
     fn frames_requested(cx: &mut VisualTestContext) -> usize {
         cx.update(|window, cx| window.simulate_next_frame(cx))
     }
 
-    /// While a message streams, the text a delta adds fades in -- and an
-    /// inline code chip with it -- while the text already shown stays as it
-    /// was; once the fade has played the window asks for no more frames.
+    /// A message drawn and streaming, as the timeline holds the live tail of
+    /// a running turn.
+    fn streaming<'a>(md: &MdState, cx: &'a mut TestAppContext) -> &'a mut VisualTestContext {
+        cx.update(|cx| md.set_streaming(true, cx));
+        open(md, cx)
+    }
+
+    /// One display frame later.
+    fn next_frame(cx: &mut VisualTestContext) {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        draw(cx);
+    }
+
+    /// The alpha of each inline code chip painted last frame, in reading
+    /// order. A chip is painted as several quads on one line.
+    fn chips_in_reading_order(cx: &mut VisualTestContext) -> Vec<f32> {
+        cx.update(|window, cx| {
+            let muted = cx.theme().tokens.colors.muted;
+            let mut quads: Vec<_> = window
+                .painted_quads()
+                .into_iter()
+                .filter_map(|quad| Some((quad.bounds.origin, quad.background.as_solid()?)))
+                .filter(|(_, color)| color.h == muted.h && color.s == muted.s && color.l == muted.l)
+                .collect();
+            quads.sort_by(|(a, _), (b, _)| a.y.0.total_cmp(&b.y.0).then(a.x.0.total_cmp(&b.x.0)));
+            let mut chips: Vec<(f32, f32)> = Vec::new();
+            for (origin, color) in quads {
+                match chips.last_mut() {
+                    Some((y, alpha)) if (origin.y.0 - *y).abs() < 1. => *alpha = alpha.max(color.a),
+                    _ => chips.push((origin.y.0, color.a)),
+                }
+            }
+            chips.into_iter().map(|(_, alpha)| alpha).collect()
+        })
+    }
+
+    /// One delta that spans a long paragraph, a CJK one, a list and a last
+    /// line lights up strictly in reading order: on every frame no chip is
+    /// more opaque than one before it, though the later ones lag the
+    /// earlier; the burst is whole within the fade, and then the window asks
+    /// for no more frames.
     #[gpui::test]
-    fn streamed_text_fades_in_where_it_is_new(cx: &mut TestAppContext) {
+    fn a_streamed_burst_lights_up_in_reading_order(cx: &mut TestAppContext) {
         init(cx);
-        let mut md = cx.update(|cx| MdState::new("Read [the docs](https://a.example)", cx));
-        let cx = open(&md, cx);
-        let link = decoration_alphas(cx);
-        assert_eq!(link.len(), 1, "the link's underline");
-        let chip = cx.update(|_, cx| cx.theme().tokens.colors.muted.a);
-
-        cx.update(|_, cx| {
-            md.sync(
-                "Read [the docs](https://a.example), then run `cargo test`".into(),
-                cx,
-            )
-        });
+        let seed = "A first line.\n\n";
+        let mut md = cx.update(|cx| MdState::new(seed, cx));
+        let cx = streaming(&md, cx);
+        let rest = cx.update(|_, cx| cx.theme().tokens.colors.muted.a);
+        let delta = "The first paragraph runs on for a good while before it ends with `alpha`.\n\n\
+                     中文段落先写几个字然后才是 `beta` 再继续写完。\n\n\
+                     - `gamma` opens the first item\n- `delta` opens the second\n\n\
+                     `omega` opens the last line.";
+        cx.update(|_, cx| md.sync(format!("{seed}{delta}"), cx));
         draw(cx);
-        assert!(frames_requested(cx) > 0, "a fade asks for frames");
-        cx.executor().advance_clock(FADE / 2);
-        draw(cx);
-        assert_eq!(decoration_alphas(cx), link, "the shown link faded again");
-        let fading = chip_alphas(cx);
+        assert!(frames_requested(cx) > 0, "the delta fades in");
+        let mut lagged = false;
+        let mut elapsed = std::time::Duration::ZERO;
+        while elapsed < FADE {
+            let chips = chips_in_reading_order(cx);
+            assert_eq!(chips.len(), 5, "every chip is painted: {chips:?}");
+            assert!(
+                chips.windows(2).all(|pair| pair[1] <= pair[0] + 1e-4),
+                "a later chip is ahead of an earlier one at {elapsed:?}: {chips:?}"
+            );
+            lagged |= chips[4] + 0.05 < chips[0];
+            next_frame(cx);
+            elapsed += std::time::Duration::from_millis(16);
+        }
+        assert!(lagged, "the chips lit up together, not in order");
         assert!(
-            !fading.is_empty() && fading.iter().all(|alpha| *alpha > 0. && *alpha < chip),
-            "the new chip fades in with its text: {fading:?} of {chip}"
+            chips_in_reading_order(cx)
+                .iter()
+                .all(|alpha| *alpha == rest),
+            "the burst is whole once the fade has played"
         );
-
-        cx.executor().advance_clock(FADE);
-        draw_settled(cx);
-        assert!(chip_alphas(cx).iter().all(|alpha| *alpha == chip));
+        frames_requested(cx);
         draw(cx);
         assert_eq!(frames_requested(cx), 0, "a played fade asks for frames");
     }
 
-    /// Markup a delta completes is painted anew from where its rendered text
-    /// changed: `~~bo` becoming `~~bold~~` fades the struck word in, and
-    /// leaves the text before it as it was.
+    /// A delta too large to have been written while the reader watched
+    /// fades in as one document: on every frame its parts -- paragraphs and
+    /// list items alike -- share one opacity, rather than lighting up one
+    /// line after another.
     #[gpui::test]
-    fn completed_markup_fades_only_the_glyphs_it_changed(cx: &mut TestAppContext) {
+    fn a_one_shot_block_fades_in_as_one_document(cx: &mut TestAppContext) {
         init(cx);
-        let mut md = cx.update(|cx| MdState::new("[seen](https://a.example) ~~bo", cx));
-        let cx = open(&md, cx);
-        let link = decoration_alphas(cx);
-        assert_eq!(link.len(), 1, "the link's underline");
-
-        cx.update(|_, cx| md.sync("[seen](https://a.example) ~~bold~~".into(), cx));
-        draw(cx);
-        cx.executor().advance_clock(FADE / 2);
-        draw(cx);
-        let painted = decoration_alphas(cx);
-        assert_eq!(painted.len(), 2, "the underline and the strikethrough");
-        assert_eq!(painted[0], link[0], "the shown link faded again");
-        assert!(
-            painted[1] > 0. && painted[1] < link[0],
-            "the struck word fades in: {painted:?}"
+        let seed = "A first line.\n\n";
+        let mut md = cx.update(|cx| MdState::new(seed, cx));
+        let cx = streaming(&md, cx);
+        let rest = cx.update(|_, cx| cx.theme().tokens.colors.muted.a);
+        let block = format!(
+            "{}`one` and on.\n\n- `two` in a list\n- and `three`\n\n{}`four` 结束。",
+            "A paragraph that arrived whole with the rest of its block. ".repeat(8),
+            "中文的一段话也一起到达，不逐字出现。".repeat(8),
         );
+        cx.update(|_, cx| md.sync(format!("{seed}{block}"), cx));
+        draw(cx);
+        let mut partial = false;
+        for _ in 0..80 {
+            let chips = chips_in_reading_order(cx);
+            assert_eq!(chips.len(), 4, "every chip is painted: {chips:?}");
+            assert!(
+                chips.iter().all(|alpha| (alpha - chips[0]).abs() < 1e-4),
+                "the block's parts fade apart: {chips:?}"
+            );
+            partial |= chips[0] > 0. && chips[0] < rest;
+            if chips[0] == rest {
+                break;
+            }
+            next_frame(cx);
+        }
+        assert!(partial, "the block fades in");
+        assert_eq!(chips_in_reading_order(cx), [rest; 4]);
+        draw_settled(cx);
+        draw(cx);
+        assert_eq!(frames_requested(cx), 0);
     }
 
-    /// Text the reader did not watch arrive is shown at once, even while
-    /// earlier text still fades: what a document holds when it is first
-    /// drawn, a rewrite, a burst larger than a stream delivers, and anything
-    /// under reduced motion.
+    /// Markup a delta completes never fades the text the reader has seen
+    /// again: `~~bo` becoming struck `bold` keeps its glyphs, and the link
+    /// before it, at full colour on every frame while the words the delta
+    /// adds after them fade in.
     #[gpui::test]
-    fn text_not_watched_arriving_appears_at_once(cx: &mut TestAppContext) {
+    fn completed_markup_does_not_fade_shown_text_again(cx: &mut TestAppContext) {
+        init(cx);
+        let mut md = cx.update(|cx| MdState::new("[seen](https://a.example) ~~bo", cx));
+        let cx = streaming(&md, cx);
+        let link = decoration_alphas(cx);
+        assert_eq!(link.len(), 1, "the link's underline");
+        let rest = cx.update(|_, cx| cx.theme().tokens.colors.muted.a);
+
+        cx.update(|_, cx| {
+            md.sync(
+                "[seen](https://a.example) ~~bold~~ and then `more` words".into(),
+                cx,
+            )
+        });
+        draw(cx);
+        let mut faded = false;
+        for _ in 0..40 {
+            let painted = decoration_alphas(cx);
+            assert_eq!(painted.len(), 2, "the underline and the strikethrough");
+            assert_eq!(painted[0], link[0], "the shown link faded again");
+            assert_eq!(painted[1], link[0], "the shown struck glyphs faded again");
+            faded |= chips_in_reading_order(cx)[0] < rest;
+            next_frame(cx);
+        }
+        assert!(faded, "the new words fade in");
+    }
+
+    /// Text the reader did not watch stream in is shown at once, and stops
+    /// what still fades: what a document holds when it is first drawn, a
+    /// rewrite, an append while the message is not the live tail of a
+    /// running turn (a thread opening, a client catching up, history), and
+    /// anything under reduced motion.
+    #[gpui::test]
+    fn text_not_watched_streaming_in_appears_at_once(cx: &mut TestAppContext) {
         init(cx);
         let link = "[docs](https://a.example)";
-        let burst = "A paragraph that arrived whole. ".repeat(20);
         let cases = [
             ("synced before it was drawn", format!("Read on: {link}")),
             ("rewritten", format!("Final {link}")),
-            ("a burst", format!("Read on: {burst}{link}")),
+            ("not streaming", format!("Read on: {link}")),
             ("reduced motion", format!("Read on: {link}")),
         ];
         for (case, text) in cases {
             let mut md = cx.update(|cx| MdState::new("Read", cx));
+            cx.update(|cx| md.set_streaming(true, cx));
             let drawn_first = case != "synced before it was drawn";
             if !drawn_first {
                 cx.update(|cx| md.sync(text.clone(), cx));
@@ -483,6 +562,9 @@ mod tests {
                 window.update(|_, cx| md.sync("Read on:".into(), cx));
                 draw(window);
                 assert!(frames_requested(window) > 0, "{case}: the delta fades");
+            }
+            if case == "not streaming" {
+                window.update(|_, cx| md.set_streaming(false, cx));
             }
             let reduce = case == "reduced motion";
             if reduce {

@@ -86,7 +86,8 @@ pub struct MarkdownState {
     pub(super) diagrams: mermaid::Diagrams,
     /// The text is still arriving: an open fence is not yet its whole source.
     pub(super) streaming: bool,
-    /// The latest append added more than appears gradually.
+    /// The latest append was not watched arriving word by word: it appears
+    /// at once, or fades in as one document.
     last_append_burst: bool,
     /// Window position of the last left mouse-down that landed on a link;
     /// a mouse-up nearby is a click, anything farther is a drag-selection.
@@ -194,8 +195,9 @@ impl MarkdownState {
     }
 
     /// Append text, synchronously reparse the one canonical source, and
-    /// repaint. Once the document has been drawn, the text this adds to it
-    /// fades in.
+    /// repaint. While the text is streaming into a document that has been
+    /// drawn, what this adds fades in; anything else -- a thread opening, a
+    /// client catching up, a message rebuilt -- appears as it is.
     pub fn push_str(&mut self, text: &str, cx: &mut Context<Self>) {
         if text.is_empty() {
             return;
@@ -207,9 +209,9 @@ impl MarkdownState {
         self.reparse_append(cx);
     }
 
-    /// Whether the text is still arriving. While it is, a Mermaid fence that
-    /// has not closed is drawn from its whole statements so far; once it is
-    /// not, every fence is drawn from its whole source.
+    /// Whether the text is still arriving. While it is, appends fade in and a
+    /// Mermaid fence that has not closed is drawn from its whole statements
+    /// so far; once it is not, every fence is drawn from its whole source.
     pub fn set_streaming(&mut self, streaming: bool, cx: &mut Context<Self>) {
         if self.streaming == streaming {
             return;
@@ -586,13 +588,17 @@ impl MarkdownState {
         for (old, new) in old_suffix.iter().zip(&blocks[unchanged..]) {
             new.reuse_highlights(old);
         }
-        self.last_append_burst = self.drawn
-            && self.stream_fade.record(
+        self.last_append_burst = if self.drawn && self.streaming {
+            self.stream_fade.record(
                 &old_suffix,
                 &blocks[unchanged..],
                 unchanged,
                 cx.background_executor().now(),
-            );
+            )
+        } else {
+            self.stream_fade.clear();
+            self.drawn
+        };
 
         // An append can only affect the old trailing block and blocks added
         // after it. Keep the measured items before it, and those of its items
