@@ -1097,23 +1097,6 @@ impl WorkspaceStore {
         self.conversation_ui.get_mut(&destination)
     }
 
-    /// Focus a thread as open without the host round trip, for tests that
-    /// feed it events directly.
-    #[cfg(test)]
-    fn focus_thread_for_test(
-        &mut self,
-        session_id: impl Into<String>,
-        status: Option<SessionStatus>,
-    ) {
-        let session_id = session_id.into();
-        let thread = self.threads.entry(session_id.clone()).or_default();
-        thread.open = true;
-        if status.is_some() {
-            thread.status = status;
-        }
-        self.focused_session_id = Some(session_id);
-    }
-
     /// The thread's replica while a surface shows it; events for any other
     /// thread are not this client's to apply.
     fn open_thread_mut(&mut self, session_id: &str) -> Option<&mut ThreadReplica> {
@@ -4587,7 +4570,7 @@ pub(crate) mod tests {
         });
         let requests = store.read_with(cx, |store, _| store.remote_preview_requests());
         store.update(cx, |store, cx| {
-            store.focus_thread_for_test("viewed", None);
+            store.select_session("viewed".into(), cx);
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -4629,24 +4612,28 @@ pub(crate) mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
-        store.update(cx, |store, _| {
-            store.focus_thread_for_test("scripted", None);
+        // The next command the client sends, past the subscriptions that
+        // opening and leaving threads send.
+        let next_command = || loop {
+            let request =
+                tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+            if matches!(request.payload, tcode_protocol::ClientPayload::Command(_)) {
+                break request;
+            }
+        };
+        store.update(cx, |store, cx| {
+            store.select_session("scripted".into(), cx);
             store.send_turn_for(
                 store.active_session_id().unwrap_or_default(),
                 "hello".into(),
                 Vec::new(),
             );
         });
-        let request = loop {
-            let request =
-                tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
-            if matches!(
-                request.payload,
-                tcode_protocol::ClientPayload::Command(Command::SendTurn { .. })
-            ) {
-                break request;
-            }
-        };
+        let request = next_command();
+        assert!(matches!(
+            request.payload,
+            tcode_protocol::ClientPayload::Command(Command::SendTurn { .. })
+        ));
         let key = request.key.clone().unwrap();
         assert_eq!(
             store.read_with(cx, |store, _| store.delivery_messages()),
@@ -4692,7 +4679,7 @@ pub(crate) mod tests {
         assert!(visual.debug_bounds("retry-delivery").is_some());
         assert!(visual.debug_bounds("discard-delivery").is_some());
         store.update(cx, |store, _| store.retry_delivery(&key));
-        let retry = tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+        let retry = next_command();
         assert_ne!(retry.key, request.key);
         assert_eq!(retry.payload, request.payload);
         replies
@@ -4743,7 +4730,7 @@ pub(crate) mod tests {
                 store.delivery_messages(),
                 vec![(accepted_key.clone(), "hello".into(), None, true)]
             );
-            store.focus_thread_for_test("another", None);
+            store.select_session("another".into(), cx);
             // Adoption must survive navigation even when no history is retained.
             store.apply_domain_event(
                 &EventEnvelope {
@@ -4758,7 +4745,7 @@ pub(crate) mod tests {
                 cx,
             );
             store.threads.remove("scripted");
-            store.focus_thread_for_test("scripted", None);
+            store.select_session("scripted".into(), cx);
             assert!(store.delivery_messages().is_empty());
         });
         store.update(cx, |store, _| {
@@ -4768,10 +4755,10 @@ pub(crate) mod tests {
                 Vec::new(),
             )
         });
-        let early = tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+        let early = next_command();
         let early_key = early.key.unwrap();
         store.update(cx, |store, cx| {
-            store.focus_thread_for_test("another", None);
+            store.select_session("another".into(), cx);
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -4795,9 +4782,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
-        store.update(cx, |store, _| {
-            store.focus_thread_for_test("scripted", None);
-        });
+        store.update(cx, |store, cx| store.select_session("scripted".into(), cx));
         assert!(
             store.read_with(cx, |store, _| store.delivery_messages().is_empty()),
             "a replica received before its Ack must stay adopted"
@@ -4809,8 +4794,7 @@ pub(crate) mod tests {
                 Vec::new(),
             )
         });
-        let request =
-            tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+        let request = next_command();
         replies
             .send_blocking(
                 tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
@@ -5477,7 +5461,7 @@ pub(crate) mod tests {
             },
         });
         workspace.update(cx, |store, cx| {
-            store.focus_thread_for_test("merged", None);
+            store.select_session("merged".into(), cx);
             store.settings_replica.last_visited = HashMap::from([("old".into(), 1)]);
             let event = |event| EventEnvelope {
                 request_id: None,
@@ -5602,7 +5586,7 @@ pub(crate) mod tests {
             },
         };
         workspace.update(cx, |store, cx| {
-            store.focus_thread_for_test("shared", None);
+            store.select_session("shared".into(), cx);
             store.apply_domain_event(&snapshot(vec![message("owner", None)]), cx);
             assert_eq!(
                 store.message_byline_for(store.active_session_id().as_deref(), "owner"),
@@ -5735,11 +5719,12 @@ pub(crate) mod tests {
     fn history_prefetch_keeps_one_bounded_page_in_flight(cx: &mut TestAppContext) {
         let root = scratch_root("tcode-prefetch-test");
         let host = test_host(SessionStore::open_at(root.clone()).unwrap());
-        let status = smol::block_on(host.update_state_for_test(|state, cx| {
+        let mut status = smol::block_on(host.update_state_for_test(|state, cx| {
             let id = state.start_draft("history".into(), std::env::temp_dir(), cx);
             state.session_status_snapshot(&id).unwrap()
         }))
         .unwrap();
+        status.session_id = "large".into();
         host.shutdown_blocking()
             .expect("stop unsubscribed fixture host");
         std::fs::remove_dir_all(root).unwrap();
@@ -5760,7 +5745,17 @@ pub(crate) mod tests {
         });
         crate::store::tests::seed_full_scope(&workspace, &incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
-            store.focus_thread_for_test("large", Some(status));
+            store.select_session("large".into(), cx);
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionStatus {
+                        session_id: "large".into(),
+                    },
+                    event: ServerEvent::SessionStatusReplaced(Box::new(status)),
+                },
+                cx,
+            );
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -6103,8 +6098,20 @@ pub(crate) mod tests {
                 })
             };
             workspace.update(cx, |store, cx| {
-                store.focus_thread_for_test(id.clone(), Some(status.clone()));
                 // The status cached from the last visit, before this turn began.
+                store.select_session(id.clone(), cx);
+                store.apply_domain_event(
+                    &EventEnvelope {
+                        request_id: None,
+                        topic: Topic::SessionStatus {
+                            session_id: id.clone(),
+                        },
+                        event: ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+                    },
+                    cx,
+                );
+                store.leave_session(cx);
+                store.select_session(id.clone(), cx);
                 if status_first {
                     store.apply_domain_event(&status_event(Some(0), Some(question())), cx);
                     store.apply_domain_event(&snapshot, cx);
@@ -6220,7 +6227,17 @@ pub(crate) mod tests {
         });
         crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
-            store.focus_thread_for_test(id.clone(), Some(status));
+            store.select_session(id.clone(), cx);
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionStatus {
+                        session_id: id.clone(),
+                    },
+                    event: ServerEvent::SessionStatusReplaced(Box::new(status)),
+                },
+                cx,
+            );
             store.apply_domain_event(&session_snapshot(&id, 3, vec![reply(4_000)]), cx);
         });
         cx.run_until_parked();
