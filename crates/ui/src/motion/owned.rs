@@ -117,8 +117,8 @@ impl Owned {
 
     /// Forgets every value not sampled or kept since the last sweep, as
     /// element state forgets an element not drawn: for a view whose parts
-    /// come and go by key (a timeline's rows scrolled away, a thread's
-    /// rows once it shows another), which sweeps as it starts to render.
+    /// come and go by key (a timeline's rows scrolled away), which sweeps
+    /// as it starts to render.
     /// Something drawn again after a sweep starts at rest, as one drawn for
     /// the first time does.
     pub(crate) fn sweep(&self) {
@@ -127,6 +127,15 @@ impl Owned {
             entry.seen = false;
             seen
         });
+    }
+
+    /// Forgets every value, whatever scope keeps it: for a view that starts
+    /// a new scene (a conversation's view showing another thread), where
+    /// what it draws next takes its first target at once, as the first
+    /// thing a view draws does, rather than gliding from what the last
+    /// scene drew under the same key.
+    pub(crate) fn clear(&self) {
+        self.values.borrow_mut().clear();
     }
 
     fn key(&self, key: impl Into<SharedString>) -> SharedString {

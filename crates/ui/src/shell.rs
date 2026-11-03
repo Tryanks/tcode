@@ -14022,6 +14022,156 @@ mod tests {
         );
     }
 
+    /// What the host answers `id`'s subscriptions with: its status, and a
+    /// log of `turns` finished turns, each a question and its answer, the
+    /// first with an agent it ran when `agent`. Only the first turn's
+    /// records carry their times, so only it has a time row.
+    fn serve_finished_turns(host: &MountedShell, id: &str, turns: usize, agent: bool) {
+        let at = 1_780_000_000_000;
+        let item = |id: String, content| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id,
+                parent_item_id: None,
+                content,
+            })
+        };
+        let records: Vec<tcode_core::session::StoredEvent> = (0..turns)
+            .flat_map(|turn| {
+                let ran = (agent && turn == 0).then(|| {
+                    item(
+                        format!("{id}-agent"),
+                        agent::ItemContent::Subagent {
+                            agent_type: "Explore".into(),
+                            description: "Survey the code".into(),
+                            status: agent::ItemStatus::Completed,
+                            summary: None,
+                            model: None,
+                            effort: None,
+                        },
+                    )
+                });
+                [
+                    Some(agent::AgentEvent::TurnStarted {
+                        turn_id: format!("{id}-turn-{turn}"),
+                    }),
+                    Some(item(
+                        format!("{id}-ask-{turn}"),
+                        agent::ItemContent::UserMessage {
+                            text: format!("What is in {id}?"),
+                            context_len: None,
+                            attachments: vec![],
+                        },
+                    )),
+                    ran,
+                    Some(item(
+                        format!("{id}-answer-{turn}"),
+                        agent::ItemContent::AssistantMessage {
+                            text: "A few things.".into(),
+                            summarized: false,
+                        },
+                    )),
+                    Some(agent::AgentEvent::TurnCompleted {
+                        turn_id: format!("{id}-turn-{turn}"),
+                        status: agent::TurnStatus::Completed,
+                        usage: None,
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+                .map(move |event| (turn, event))
+            })
+            .enumerate()
+            .map(|(index, (turn, event))| tcode_core::session::StoredEvent {
+                ts: (turn == 0).then_some(at + index as u64 * 1_000),
+                ..event.into()
+            })
+            .collect();
+        serve_status(host, id, false);
+        send_events(
+            host,
+            vec![(
+                Topic::SessionEvents {
+                    session_id: id.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: records.len() as u64,
+                    total_turns: turns as u64,
+                    truncated: false,
+                    from: 0,
+                    end: records.len() as u64,
+                    records,
+                },
+            )],
+        );
+    }
+
+    /// A pane switched to another thread shows it as a new scene: on the
+    /// first frame that draws it, every row and the header's controls are
+    /// where they rest. A thread's first turn's time row does not slide
+    /// from where the thread before drew its own first turn's (down to the
+    /// last turn of one, up to the first of two), nor does the header's
+    /// Agents toggle fold away or widen in as the thread with an agent
+    /// gives way to one without and back.
+    #[gpui::test]
+    fn a_thread_switched_to_moves_nothing_from_the_one_before(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        serve_finished_turns(&host, "thread-1", 1, true);
+        await_restore_update(&shell, cx, |store| {
+            store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+        });
+        settle_frames(cx);
+        assert!(cx.debug_bounds("turn-time-row").is_some());
+        // From the plan button to the diff button: the Agents toggle
+        // between them is there only with an agent.
+        let plan = |cx: &mut VisualTestContext| {
+            let plan = cx.debug_bounds("plan-panel").expect("the plan button");
+            let diff = cx.debug_bounds("diff-panel").expect("the diff button");
+            diff.left() - plan.left()
+        };
+        let with_agent = plan(cx);
+
+        for (key, id, turns, agent) in [
+            ("secondary-2", "thread-2", 2, false),
+            ("secondary-1", "thread-1", 1, true),
+        ] {
+            // The thread's log is there by the frame that first draws it,
+            // the frame after the one that drew the thread before.
+            serve_finished_turns(&host, id, turns, agent);
+            cx.simulate_keystrokes(key);
+            let store = store_of(&shell, cx);
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            assert_eq!(pane_threads(&shell, cx), [Some(id.into())]);
+            let shown = store.read_with(cx, |store, _| {
+                store.with_active_timeline(|timeline| timeline.turns.len())
+            });
+            assert_eq!(shown, Some(turns));
+            let drawn = |cx: &mut VisualTestContext| {
+                [
+                    "timeline-row-0",
+                    "timeline-row-1",
+                    "timeline-row-2",
+                    "timeline-row-3",
+                    "turn-time-row",
+                ]
+                .map(|selector| cx.debug_bounds(selector))
+            };
+            let first = (drawn(cx), plan(cx));
+            settle_frames(cx);
+            assert_eq!(
+                first,
+                (drawn(cx), plan(cx)),
+                "{id} is at rest from its first frame"
+            );
+            assert_eq!(
+                first.1 == with_agent,
+                agent,
+                "the toggle is there with an agent"
+            );
+        }
+    }
+
     /// As the window narrows past where the header's labels fit, its split
     /// buttons and the way back to the parent drop their labels; past where
     /// its toggles fit they give way to the overflow button. Each change

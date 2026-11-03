@@ -291,7 +291,7 @@ impl ChatView {
             .as_deref()
             .and_then(|session_id| self.workspace_store.read(cx).pending_chat_turn(session_id));
         if session_changed {
-            self.rows_motion.clear();
+            self.start_scene();
             self.md_states.clear();
             self.selection
                 .update(cx, |selection, cx| selection.clear(cx));

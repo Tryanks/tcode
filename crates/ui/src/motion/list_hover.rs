@@ -42,6 +42,13 @@ impl ListHover {
         Self(Rc::default())
     }
 
+    /// Nothing hovered and no reveal moving: the list shows other items now
+    /// (another thread's), whose keys may match the last ones'. The pointer
+    /// gives the hover to an item again as it next comes onto one.
+    pub(crate) fn clear(&self) {
+        *self.0.borrow_mut() = Hover::default();
+    }
+
     /// The handler for the `on_hover` of `item`, or of one of its parts: the
     /// item takes the list's hover as the pointer comes in, and gives it up
     /// once it has left the item and all its parts. Only one item holds the
