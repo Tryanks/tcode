@@ -1394,16 +1394,25 @@ impl WorkspaceStore {
             (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
                 if status.session_id == *session_id =>
             {
-                self.baseline_topics.insert(envelope.topic.clone());
+                let loaded = self.baseline_topics.insert(envelope.topic.clone());
                 let prefill_available = self.native_rewind_prefills.contains_key(session_id);
                 if let Some(thread) = self.threads.get_mut(session_id) {
                     let mut status = status.as_ref().clone();
                     status.native_rewind_prefill_available = prefill_available;
+                    let drawer = (status.terminal_open, status.terminal_height);
                     thread.status = Some(status);
                     if thread.open {
                         thread.resettle();
                         self.sync_terminal_topics();
                         self.sync_conversation_ui(session_id);
+                        // The host owns the drawer, which lives only with its
+                        // running terminals: a conversation that loads shows it
+                        // as the host has it, not as this client last left it.
+                        if loaded
+                            && let Some(ui) = self.thread_conversation_ui_mut(Some(session_id))
+                        {
+                            (ui.terminal_open, ui.terminal_height) = drawer;
+                        }
                     }
                 }
             }
@@ -6906,6 +6915,87 @@ pub(crate) mod tests {
             })
         });
         assert!(!workspace.read_with(cx, |store, _| store.threads.contains_key(&deleted)));
+
+        driver.shutdown(cx, &workspace, &host);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A conversation left with its drawer open but whose shell has exited
+    /// comes back with the drawer closed, as the host has it, although this
+    /// client last showed it open.
+    #[gpui::test]
+    fn a_conversation_whose_terminal_exited_comes_back_with_its_drawer_closed(
+        cx: &mut TestAppContext,
+    ) {
+        let root = scratch_root("terminal-drawer-reload");
+        let disk = SessionStore::open_at(root.clone()).expect("open test store");
+        disk.upsert_project(&project_at("p", &root))
+            .expect("persist project");
+        for meta in [
+            thread(&root, "one", "p", None),
+            thread(&root, "two", "p", None),
+        ] {
+            disk.upsert_meta(&meta).expect("persist session");
+        }
+        let host = test_host(disk);
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = driver.workspace(cx);
+        let terminals = |cx: &TestAppContext| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_for(Some("one"))
+                    .map(|status| status.terminals.clone())
+                    .unwrap_or_default()
+            })
+        };
+        let drawer_open = |cx: &TestAppContext| {
+            workspace.read_with(cx, |store, _| store.panel_state().terminal_open)
+        };
+
+        workspace.update(cx, |store, cx| store.select_session("one".into(), cx));
+        driver.wait_until(cx, &workspace, "one on screen", |cx| {
+            selected_status(cx, &workspace, "one")
+        });
+        workspace.update(cx, |store, cx| store.toggle_terminal_panel(cx));
+        driver.wait_until(cx, &workspace, "a terminal", |cx| !terminals(cx).is_empty());
+        let terminal_id = terminals(cx)[0].id;
+        driver.command(
+            cx,
+            &workspace,
+            Command::TerminalInput {
+                terminal_id,
+                bytes: b"exit\r".to_vec(),
+            },
+        );
+        // A login shell reads its startup files before it reads the input.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !terminals(cx)[0].exited {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell did not exit"
+            );
+            driver.step(cx, &workspace);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(drawer_open(cx), "the drawer stays while its output is read");
+
+        workspace.update(cx, |store, cx| store.select_session("two".into(), cx));
+        driver.wait_until(cx, &workspace, "two on screen", |cx| {
+            selected_status(cx, &workspace, "two")
+        });
+        workspace.update(cx, |store, cx| store.select_session("one".into(), cx));
+        let loaded = Topic::SessionStatus {
+            session_id: "one".into(),
+        };
+        driver.wait_until(cx, &workspace, "one loaded again", |cx| {
+            selected_status(cx, &workspace, "one")
+                && workspace.read_with(cx, |store, _| store.baseline_topics.contains(&loaded))
+        });
+        assert!(
+            !drawer_open(cx),
+            "the drawer opened on a conversation with no shell"
+        );
+        assert!(terminals(cx).is_empty());
 
         driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
