@@ -168,7 +168,7 @@ pub(crate) fn assistant(
                     let actions = h_flex()
                         .gap(px(2.))
                         .items_center()
-                        .child(copy_button(&key, copied, compact, on_copy, cx));
+                        .child(copy_button(&key, copied, compact, on_copy, cx).motion(&motion));
                     fold.fold(
                         div()
                             .pt(px(MESSAGE_GAP))

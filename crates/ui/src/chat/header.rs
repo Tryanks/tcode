@@ -104,8 +104,12 @@ pub(crate) fn header_extra_width_for(
 }
 
 /// The header's pane commands, for the pane it heads.
-fn pane_menu(panes: crate::shell::PaneControls) -> impl IntoElement {
+fn pane_menu(
+    panes: crate::shell::PaneControls,
+    motion: &crate::motion::owned::Owned,
+) -> impl IntoElement {
     Button::new("pane-menu")
+        .motion(motion)
         .debug_selector(|| "pane-menu".into())
         .ghost()
         .small()
@@ -324,6 +328,7 @@ impl ChatView {
         let panel = self.agents.clone();
         let shown = self.agents.downgrade();
         let pill = Button::new("agents-pill")
+            .motion(&self.motion)
             .debug_selector(|| "agents-pill".into())
             .ghost()
             .outline()
@@ -362,6 +367,7 @@ impl ChatView {
             .into();
         Some(
             Button::new("agent-parent-link")
+                .motion(&self.motion)
                 .debug_selector(|| "agent-parent-link".into())
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .ghost()
@@ -424,6 +430,7 @@ impl ChatView {
                 .bottom_sheet(crate::tr!("pull_requests.title").into_owned())
                 .trigger(
                     Button::new("phone-pr-pill")
+                        .motion(&self.motion)
                         .debug_selector(|| "phone-pr-pill".into())
                         .ghost()
                         .outline()
@@ -613,6 +620,7 @@ impl ChatView {
         // collapsed sidebar occupies no width at all (`crate::shell`), so a
         // control mounted inside it would have nowhere to be.
         let sidebar_toggle = Button::new("toggle-sidebar")
+            .motion(&self.motion)
             .debug_selector(|| "toggle-sidebar".into())
             // A control press must not arm the header window drag region.
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -769,6 +777,7 @@ impl ChatView {
                             // badge that comes or goes widens into the row.
                             let gap = gpui::rems(0.5).to_pixels(window.rem_size());
                             let button = Button::new("header-pr-badge")
+                                .motion(&self.motion)
                                 .debug_selector(|| "header-pr-badge".into())
                                 .ghost()
                                 .small()
@@ -863,6 +872,7 @@ impl ChatView {
                                 .gap_1()
                                 .child(
                                     Button::new("panel-layout")
+                                        .motion(&self.motion)
                                         // These panel controls must not arm the header window drag region.
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
@@ -879,6 +889,7 @@ impl ChatView {
                                 )
                                 .child(
                                     Button::new("plan-panel")
+                                        .motion(&self.motion)
                                         .debug_selector(|| "plan-panel".into())
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
@@ -900,6 +911,7 @@ impl ChatView {
                                             .relative()
                                             .child(
                                                 Button::new("agents-panel")
+                                                    .motion(&self.motion)
                                                     .on_mouse_down(
                                                         gpui::MouseButton::Left,
                                                         |_, _, cx| cx.stop_propagation(),
@@ -927,6 +939,7 @@ impl ChatView {
                                     toggle.fold_across_gap(
                                         toggle_gap,
                                         Button::new("preview-panel")
+                                            .motion(&self.motion)
                                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                                 cx.stop_propagation()
                                             })
@@ -947,6 +960,7 @@ impl ChatView {
                                 }))
                                 .child(
                                     Button::new("diff-panel")
+                                        .motion(&self.motion)
                                         .debug_selector(|| "diff-panel".into())
                                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
                                             cx.stop_propagation()
@@ -967,7 +981,7 @@ impl ChatView {
                                         window,
                                         cx,
                                     )
-                                    .map(pane_menu),
+                                    .map(|panes| pane_menu(panes, &self.motion)),
                                 ),
                         )
                         .into_any_element(),
@@ -980,10 +994,10 @@ impl ChatView {
             // After every tier's controls, so it keeps the right end however
             // the header folds.
             .children(self.pane_close.as_ref().map(|close| {
-                close.fade(crate::panes::close_button(
-                    "pane-close",
-                    close.value.clone(),
-                ))
+                close.fade(
+                    crate::panes::close_button("pane-close", close.value.clone())
+                        .motion(&self.motion),
+                )
             }))
             // Last child, so the header's own actions keep their places to the
             // left of it.
@@ -1081,6 +1095,7 @@ impl ChatView {
             .flex_none()
             .child(
                 Button::new("header-overflow")
+                    .motion(&self.motion)
                     .debug_selector(|| "header-overflow".into())
                     .ghost()
                     .small()
@@ -1148,6 +1163,7 @@ impl ChatView {
             .map(git_action_icon)
             .unwrap_or_else(|| Icon::empty().path("icons/git-branch.svg"));
         let mut main = Button::new("git-main")
+            .motion(&self.motion)
             .debug_selector(|| "git-main".into())
             .ghost()
             .small()
@@ -1176,6 +1192,7 @@ impl ChatView {
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("git-menu-trigger")
+                    .motion(&self.motion)
                     .ghost()
                     .small()
                     .rounded_corners(segment_corners(false, cx))
@@ -1311,6 +1328,7 @@ impl ChatView {
             .anchor(Anchor::TopRight)
             .trigger(
                 Button::new("open-menu-trigger")
+                    .motion(&self.motion)
                     .ghost()
                     .small()
                     .rounded_corners(segment_corners(false, cx))
@@ -1400,6 +1418,7 @@ impl ChatView {
             .overflow_hidden()
             .child(
                 Button::new("open-main")
+                    .motion(&self.motion)
                     .ghost()
                     .small()
                     .rounded_corners(segment_corners(true, cx))
