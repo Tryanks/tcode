@@ -11703,8 +11703,11 @@ mod tests {
         );
         composer.read_with(cx, |composer, cx| {
             assert_eq!(composer.draft(cx), "half a thought");
-            assert!(composer.is_compact(), "the composer followed the layout");
         });
+        assert!(
+            cx.debug_bounds("composer-settings-drawer").is_some(),
+            "the composer followed the layout: a compact one carries the settings drawer"
+        );
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell
                 .attachment
