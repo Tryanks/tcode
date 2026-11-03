@@ -211,7 +211,6 @@ jobs:
   # must not let its platform's check pass.
   linux:
     name: Linux x64
-    if: ${{ !github.event.pull_request.draft }}
     needs: [linux-clippy, linux-tests]
     if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
@@ -224,7 +223,6 @@ jobs:
 
   macos:
     name: macOS arm64
-    if: ${{ !github.event.pull_request.draft }}
     needs: [macos-clippy, macos-tests]
     if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
@@ -233,7 +231,6 @@ jobs:
 
   windows:
     name: Windows x64
-    if: ${{ !github.event.pull_request.draft }}
     needs: [windows-clippy, windows-tests]
     if: ${{ always() && !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
