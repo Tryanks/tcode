@@ -311,6 +311,7 @@ impl TraversePanel {
                                 ("remote-traverse-detail", index),
                                 expanded,
                             )
+                            .motion(&self.motion)
                             .w_full()
                             .content(status_detail(key, status, window, cx)),
                         )

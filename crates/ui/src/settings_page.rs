@@ -1181,6 +1181,7 @@ impl SettingsPage {
                         "settings-advanced-tabs-fold",
                         self.advanced_expanded(),
                     )
+                    .motion(&self.motion)
                     .w_full()
                     .content(
                         TabBar::new("settings-advanced-tabs")
@@ -1266,6 +1267,7 @@ impl SettingsPage {
                         "settings-advanced-list-fold",
                         advanced_expanded,
                     )
+                    .motion(&self.motion)
                     .w_full()
                     .content(crate::material::grouped(advanced, cx)),
                 );

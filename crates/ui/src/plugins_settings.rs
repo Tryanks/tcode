@@ -548,6 +548,7 @@ impl PluginsSettingsPanel {
             .child(material::group(cx).child(header).children(status))
             .child(
                 Collapsible::new(body_id, on)
+                    .motion(&self.motion)
                     .w_full()
                     .content(v_flex().w_full().pt_3().children(body)),
             )
@@ -1046,6 +1047,7 @@ impl PluginsSettingsPanel {
             .child(errors.render(v_flex().w_full().mt(gpui::rems(-0.375))))
             .child(
                 Collapsible::new("plugin-details", expanded)
+                    .motion(&self.motion)
                     .w_full()
                     .content(details(entry, cx)),
             )

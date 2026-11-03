@@ -277,7 +277,26 @@ impl<T> Shown<T> {
     }
 }
 
-/// A fold's clipped, measured height, or width.
+/// A fold in a column at `progress` its owner drives (a list's row under
+/// the disclosures around it): [`Shown::fold`] for a progress that is not
+/// one value's coming and going. What it folds keeps its place in the tree
+/// at every progress, so it keeps its element state as its folds move.
+pub(crate) fn fold(
+    id: impl Into<ElementId>,
+    progress: f32,
+    content: impl IntoElement,
+) -> AnyElement {
+    Shown {
+        id: id.into(),
+        value: (),
+        progress,
+        leaving: false,
+        measure: None,
+    }
+    .fold(content)
+}
+
+/// A fold's clipped, measured height, or width: every fold Tcode draws.
 ///
 /// gpui-base's `MotionReveal` lays a child it has not measured yet out at
 /// zero height, so a section open on the frame that first draws it (a

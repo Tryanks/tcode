@@ -214,6 +214,7 @@ impl Composer {
             self.motion_id(format_args!("approval-detail-{}", request.id)),
             expanded,
         )
+        .motion(&self.motion)
         .w_full()
         .content(div().w_full().pb(gap).child(detail));
 

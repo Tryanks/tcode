@@ -341,6 +341,7 @@ impl SourceControlPanel {
                             SharedString::from(format!("source-control-details-fold-{host}")),
                             choice.enabled,
                         )
+                        .motion(&self.motion)
                         .w_full()
                         .when_some(details, |fold, details| fold.content(details.pt(spacing))),
                     )
@@ -349,6 +350,7 @@ impl SourceControlPanel {
                             SharedString::from(format!("source-control-off-fold-{host}")),
                             !choice.enabled,
                         )
+                        .motion(&self.motion)
                         .w_full()
                         .content(
                             div()
@@ -869,6 +871,7 @@ impl SourceControlPanel {
                         SharedString::from(format!("source-control-email-fold-{host}")),
                         with_email,
                     )
+                    .motion(&self.motion)
                     .w_full()
                     .content(
                         div()

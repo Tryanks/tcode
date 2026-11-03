@@ -11,7 +11,6 @@ use gpui::{
     App, ClipboardItem, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     Styled as _, Window, div, prelude::FluentBuilder as _,
 };
-use gpui_base::motion::{MotionReveal, Transition, transition};
 use gpui_base::{h_flex, v_flex};
 
 pub type ToastId = u64;
@@ -101,28 +100,26 @@ pub fn notification(
                             cx.notify();
                         })),
                 );
-                let reveal = transition(
-                    gpui::ElementId::from(("toast-detail-reveal", id as usize)),
-                    if is_expanded { 1. } else { 0. },
-                    Transition::new(crate::edge_back::SETTLE),
+                let reveal = crate::motion::shown(
+                    gpui::ElementId::from(("toast-detail", id as usize)),
+                    is_expanded.then_some(()),
                     window,
                     cx,
                 );
-                if is_expanded || reveal > 0. {
-                    content = content.child(MotionReveal::new(
-                        ("toast-detail", id as usize),
-                        reveal,
-                        div()
-                            .id(("toast-detail-scroll", id as usize))
-                            .max_h_40()
-                            .p(cx.theme().tokens.spacing.sm)
-                            .rounded(crate::material::radius_input(cx))
-                            .bg(cx.theme().muted)
-                            .text_code(cx)
-                            .overflow_y_scroll_area()
-                            .child(detail.clone())
-                            .into_any_element(),
-                    ));
+                if let Some(reveal) = reveal {
+                    content = content.child(
+                        reveal.fold(
+                            div()
+                                .id(("toast-detail-scroll", id as usize))
+                                .max_h_40()
+                                .p(cx.theme().tokens.spacing.sm)
+                                .rounded(crate::material::radius_input(cx))
+                                .bg(cx.theme().muted)
+                                .text_code(cx)
+                                .overflow_y_scroll_area()
+                                .child(detail.clone()),
+                        ),
+                    );
                 }
                 if kind == ToastKind::Error {
                     content = content.child(

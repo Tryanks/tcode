@@ -998,7 +998,6 @@ impl SessionsSidebar {
             .map(|project| (project.id, project.name))
             .collect();
         let rows = Rc::new(rows);
-        let width = self.arrange_list_state.viewport_bounds().size.width;
         let flip = self.arrange_flip.clone();
         v_flex()
             .size_full()
@@ -1036,12 +1035,17 @@ impl SessionsSidebar {
                             self.arrange_list_state.clone(),
                             cx.processor(move |this, index: usize, window, cx| {
                                 let factor = folds.get(index).copied().unwrap_or(1.);
-                                let folded =
-                                    this.fold_row(factor, width, window, cx, |this, window, cx| {
-                                        this.render_arrange_row(&rows[index], &projects, window, cx)
-                                    });
                                 let key =
                                     SharedString::from(format!("arrange-{}", rows[index].key()));
+                                let folded = this.fold_row(
+                                    SharedString::from(format!("{key}-fold")),
+                                    factor,
+                                    window,
+                                    cx,
+                                    |this, window, cx| {
+                                        this.render_arrange_row(&rows[index], &projects, window, cx)
+                                    },
+                                );
                                 flip.row(index, key, folded)
                             }),
                         )
