@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, EventEmitter, SharedString, Task};
+use gpui::{Context, Entity, EventEmitter, SharedString};
 use serde::{Deserialize, Serialize};
 
 use crate::store::WorkspaceStore;
@@ -165,8 +165,9 @@ pub struct WindowState {
     /// Whether the palette is open. A closed palette stays on screen while it
     /// leaves (see [`Self::palette_mounted`]).
     pub palette_open: bool,
+    /// Closed, with the palette's presence not yet gone; the palette clears
+    /// it ([`Self::palette_left`]).
     palette_leaving: bool,
-    _palette_exit: Option<Task<()>>,
     /// Whether the palette focuses its search input when it opens. A tap on
     /// the search pill wants the keyboard; the mobile "+" button lists
     /// projects to tap and must not raise it.
@@ -184,7 +185,6 @@ impl WindowState {
             history: vec![Destination::Hosts],
             palette_open: false,
             palette_leaving: false,
-            _palette_exit: None,
             palette_focuses_query: true,
             sidebar_collapsed,
             quit_prompt_epoch: 0,
@@ -347,7 +347,6 @@ impl WindowState {
         // Settings replaces the window the palette would leave over.
         self.palette_open = false;
         self.palette_leaving = false;
-        self._palette_exit = None;
         self.go(Destination::Settings, cx);
     }
 
@@ -372,37 +371,40 @@ impl WindowState {
     fn show_palette(&mut self, focuses_query: bool, cx: &mut Context<Self>) {
         self.palette_open = true;
         self.palette_leaving = false;
-        self._palette_exit = None;
         self.palette_focuses_query = focuses_query;
         cx.notify();
     }
 
     /// Whether the palette is on screen: open, or still leaving after a
-    /// close. Its host keeps it mounted meanwhile.
+    /// close. Its host keeps it mounted meanwhile. A wide window draws the
+    /// palette only on the Chat route, so on any other a leaving palette is
+    /// gone.
     pub fn palette_mounted(&self) -> bool {
-        self.palette_open || self.palette_leaving
+        self.palette_open || (self.palette_leaving && (self.compact || self.route() == Route::Chat))
     }
 
-    /// The palette leaves over `SETTLE`, mounted and inert, then unmounts.
+    /// Whether a closed palette is still leaving.
+    pub(crate) fn palette_leaving(&self) -> bool {
+        self.palette_leaving
+    }
+
+    /// The palette leaves mounted and inert until its presence is gone
+    /// ([`Self::palette_left`]), then unmounts.
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
         if !self.palette_open {
             return;
         }
         self.palette_open = false;
-        if !cx.reduce_motion() {
-            self.palette_leaving = true;
-            self._palette_exit = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(crate::edge_back::SETTLE)
-                    .await;
-                this.update(cx, |state, cx| {
-                    state.palette_leaving = false;
-                    cx.notify();
-                })
-                .ok();
-            }));
-        }
+        self.palette_leaving = true;
         cx.notify();
+    }
+
+    /// The closed palette's presence is gone.
+    pub(crate) fn palette_left(&mut self, cx: &mut Context<Self>) {
+        if self.palette_leaving {
+            self.palette_leaving = false;
+            cx.notify();
+        }
     }
 
     pub fn toggle_palette(&mut self, cx: &mut Context<Self>) {

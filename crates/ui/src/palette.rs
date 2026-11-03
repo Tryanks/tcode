@@ -911,6 +911,13 @@ impl Render for CommandPalette {
         // open palette in again from nothing.
         let presence = self.motion.appear("presence", open, window, cx);
         if !open && presence == 0. {
+            if self.window_state.read(cx).palette_leaving() {
+                // Its host unmounts it once the window says it has left.
+                let state = self.window_state.clone();
+                window.defer(cx, move |_, cx| {
+                    state.update(cx, |state, cx| state.palette_left(cx));
+                });
+            }
             return div().into_any_element();
         }
         let exiting = !open;
