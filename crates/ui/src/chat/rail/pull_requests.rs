@@ -38,26 +38,6 @@ pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
     links(chat, cx).next().is_some()
 }
 
-/// The line the card's header shows beside its title, open or shut: the
-/// one pull request's number and state, or how many are linked.
-pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
-    let mut links = links(chat, cx);
-    let first = links.next()?;
-    Some(
-        match links.count() {
-            0 => {
-                let (_, _, state) = crate::pull_requests::appearance(
-                    PullRequestBadgeState::of(first.snapshot.as_ref()),
-                    cx,
-                );
-                format!("#{} · {}", first.key.number, crate::tr!(state))
-            }
-            more => crate::tr!("rail.pull_requests", count = more + 1).into_owned(),
-        }
-        .into(),
-    )
-}
-
 /// One linked pull request as its row shows it.
 #[derive(Clone)]
 struct Line {
@@ -92,7 +72,7 @@ impl Line {
     }
 }
 
-/// What the card shows open, laid out at the rail's width: a row for each
+/// What the card shows below its header, laid out at the rail's width: a row for each
 /// linked pull request, with its number, title, state, checks and review,
 /// opening it in the Pull requests tab on a click. Pull requests that leave
 /// fold away as they stood.

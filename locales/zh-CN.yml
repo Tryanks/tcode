@@ -132,7 +132,6 @@ rail:
   commands_running: "%{count} 条正在运行"
   commands_failed: "%{count} 条失败"
   commands_more: "另有 %{count} 条"
-  pull_requests: "%{count} 个拉取请求"
 markdown:
   math_show_rendered: "显示渲染结果"
   math_show_source: "显示 LaTeX 源码"

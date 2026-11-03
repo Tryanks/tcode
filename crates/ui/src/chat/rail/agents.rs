@@ -39,7 +39,7 @@ pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
     agents(chat, cx).is_some()
 }
 
-/// The line the card's header shows beside its title, open or shut: what
+/// The line the card's header shows beside its title: what
 /// is running or awaits settle, or else how many agents there are.
 pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     let agents = agents(chat, cx)?;
@@ -54,7 +54,7 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     )
 }
 
-/// What the card shows open, laid out at the rail's width: a row for each
+/// What the card shows below its header, laid out at the rail's width: a row for each
 /// agent, with its state, its title and how long it has run, opening it on
 /// a click; under the title, what of its state word, model, effort, branch
 /// and result is reported. Agents that leave the list fold away as they

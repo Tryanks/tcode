@@ -29,7 +29,7 @@ pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
     steps(chat, cx).is_some()
 }
 
-/// The line the card's header shows beside its title, open or shut: how far
+/// The line the card's header shows beside its title: how far
 /// through the plan the agent is, and the step it is on.
 pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     let steps = steps(chat, cx)?;
@@ -50,7 +50,7 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     )
 }
 
-/// What the card shows open, laid out at the rail's width: the plan as the
+/// What the card shows below its header, laid out at the rail's width: the plan as the
 /// Plan tab draws it, what the agent said of it over its steps. A plan that empties while the card leaves is
 /// drawn as it last stood.
 pub(super) fn body(

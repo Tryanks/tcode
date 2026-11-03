@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use agent::{ChangeCompleteness, FileChange};
 use gpui::{
     AnyElement, App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _,
     Window, div,
@@ -41,10 +42,15 @@ pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
     latest(chat, cx).is_some()
 }
 
+/// A turn's changes as the card last copied them, with what they were
+/// copied from.
+type HeldChanges =
+    Rc<RefCell<Option<((usize, usize, usize), Rc<[FileChange]>, ChangeCompleteness)>>>;
+
 /// A turn's changed-line totals, with what they were counted from.
 type Totals = Rc<RefCell<Option<((usize, usize, usize), (u32, u32))>>>;
 
-/// The line the card's header shows beside its title, open or shut: how
+/// The line the card's header shows beside its title: how
 /// many files the turn changed, and how many lines it added and removed.
 pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     let turn = latest(chat, cx)?;
@@ -86,7 +92,7 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     Some(format!("{files} · +{added} −{deleted}").into())
 }
 
-/// What the card shows open, laid out at the rail's width: which turn it
+/// What the card shows below its header, laid out at the rail's width: which turn it
 /// is and how long ago it finished, over the turn's changed files, as the
 /// turn's own summary in the timeline shows them, each opening its diff. A
 /// later turn's files cross-fade over an earlier one's; a card that leaves
@@ -110,7 +116,37 @@ pub(super) fn body(
                 let (changes, completeness, cwd, heading) = {
                     let store = chat.workspace_store.read(cx);
                     let session = chat.session_id.as_deref();
-                    let (changes, completeness) = store.chat_turn_changes_for(session, turn);
+                    // The card is drawn every frame, so the turn's changes,
+                    // diffs and all, are copied out only when they change.
+                    let held = chat.motion.keep::<HeldChanges>("rail-changes-held");
+                    let (changes, completeness) = store
+                        .with_timeline_for(session, |timeline| {
+                            let changes = timeline.turns.get(turn)?.changes.as_ref()?;
+                            let key = (
+                                turn,
+                                changes.changes.len(),
+                                changes
+                                    .changes
+                                    .iter()
+                                    .map(|change| change.diff.as_deref().map_or(0, str::len))
+                                    .sum::<usize>(),
+                            );
+                            let mut held = held.borrow_mut();
+                            match &*held {
+                                Some((at, kept, completeness))
+                                    if *at == key && *completeness == changes.completeness =>
+                                {
+                                    Some((kept.clone(), *completeness))
+                                }
+                                _ => {
+                                    let kept: Rc<[FileChange]> = changes.changes.clone().into();
+                                    *held = Some((key, kept.clone(), changes.completeness));
+                                    Some((kept, changes.completeness))
+                                }
+                            }
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| (Rc::from([]), ChangeCompleteness::Partial));
                     let cwd = store
                         .session_status_for(session)
                         .map(|status| status.cwd.clone())

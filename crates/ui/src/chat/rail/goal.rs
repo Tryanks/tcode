@@ -32,7 +32,7 @@ pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
     goal(chat, cx).is_some()
 }
 
-/// The line the card's header shows beside its title, open or shut: the
+/// The line the card's header shows beside its title: the
 /// goal's status, then the time, tokens and checks it has taken.
 pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     let goal = goal(chat, cx)?;
@@ -48,7 +48,7 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     )
 }
 
-/// What the card shows open, laid out at the rail's width: the objective
+/// What the card shows below its header, laid out at the rail's width: the objective
 /// under its status's glyph, and the latest check's verdict while the goal
 /// is not met. A goal cleared while the card leaves is drawn as it stood.
 pub(super) fn body(
