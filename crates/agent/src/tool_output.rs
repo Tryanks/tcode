@@ -1,7 +1,8 @@
-//! A tool result as the timeline keeps it: the text the model was given in
-//! [`ItemContent::ToolCall::output`](crate::ItemContent::ToolCall), and the
-//! images it was shown in `image_reads`, whatever shape the provider wrapped
-//! them in.
+//! A tool result as the timeline keeps it: the text the tool returned in
+//! [`ItemContent::ToolCall::output`](crate::ItemContent::ToolCall), and its
+//! inline images in `image_reads`, whatever shape the provider wrapped them
+//! in. That is what the harness got back, not necessarily what it gave the
+//! model: an MCP result's `structuredContent` is in the text too.
 
 use base64::Engine as _;
 use serde_json::Value;
@@ -19,7 +20,9 @@ impl ToolOutput {
     /// Claude `tool_result.content`, Codex `contentItems` and rollout output
     /// arrays, pi and ACP content, OpenCode tool content — as text and images. Text parts are joined
     /// by newlines; a block that is neither text nor an inline image (a
-    /// resource, a tool reference) stays in the text as its JSON.
+    /// resource, a tool reference) stays in the text as its JSON. An MCP
+    /// result's `structuredContent` follows as one line of JSON, unless the
+    /// text already holds it.
     pub fn from_content(content: &Value) -> Self {
         let mut output = Self::default();
         match content {
@@ -38,7 +41,9 @@ impl ToolOutput {
             Value::Object(result) if result.get("content").is_some_and(Value::is_array) => {
                 output = Self::from_content(&result["content"]);
                 // A connector may put its whole payload in `structuredContent`
-                // with only an acknowledgement as text.
+                // with only an acknowledgement as text, and which of the two
+                // the model is given is the harness's choice; dropping either
+                // would hide part of what the tool returned.
                 if let Some(structured) = result
                     .get("structuredContent")
                     .filter(|value| !value.is_null())
