@@ -187,7 +187,7 @@ struct ShellAttachment {
     /// The pane zoomed over the column.
     zoom: crate::panes::Zoom,
     /// A layout being put in while the column fades.
-    scene: crate::panes::Scene,
+    layout_swap: crate::panes::LayoutSwap,
     /// The wide routes on screen: one at rest, two or more while the
     /// window changes route.
     routes: crate::motion::Scene<Route>,
@@ -1339,7 +1339,7 @@ impl AppShell {
             glides: Default::default(),
             window_seen: None,
             zoom: Default::default(),
-            scene: Default::default(),
+            layout_swap: Default::default(),
             routes: Default::default(),
             thread_body: Default::default(),
             thread_body_shown: None,
@@ -2107,12 +2107,12 @@ impl AppShell {
         div()
             .relative()
             .size_full()
-            .when_some(attachment.scene.opacity(), |column, opacity| {
+            .when_some(attachment.layout_swap.opacity(), |column, opacity| {
                 column.opacity(opacity)
             })
             .child(attachment.thread_panes.clone())
             .children(attachment.zoom.render(area, cx))
-            .when(attachment.scene.leaving(), |column| {
+            .when(attachment.layout_swap.leaving(), |column| {
                 column.child(crate::motion::shield())
             })
             .into_any_element()
@@ -2452,9 +2452,9 @@ impl AppShell {
         })
     }
 
-    /// Choose `layout` for the column. It goes in as a change of scene (see
-    /// [`crate::panes::Scene`]): the column fades out, the layout is put in at
-    /// the bottom of the fade and the column fades back in. A layout that
+    /// Choose `layout` for the column. It goes in as a layout swap (see
+    /// [`crate::panes::LayoutSwap`]): the column fades out, the layout is put
+    /// in at the bottom of the fade and the column fades back in. A layout that
     /// would leave every pane where it is drawn, none zoomed, changes
     /// nothing. The focused pane keeps the keyboard.
     fn apply_layout(&mut self, layout: PaneLayout, window: &mut Window, cx: &mut Context<Self>) {
@@ -2465,8 +2465,8 @@ impl AppShell {
         let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
-        if !(unchanged && attachment.zoom.pane().is_none() && attachment.scene.is_idle()) {
-            attachment.scene.choose(layout);
+        if !(unchanged && attachment.zoom.pane().is_none() && attachment.layout_swap.is_idle()) {
+            attachment.layout_swap.choose(layout);
         }
         let focused = attachment.focused_pane.clone();
         self.pane_focused(focused.clone(), window, cx);
@@ -2474,19 +2474,18 @@ impl AppShell {
         cx.notify();
     }
 
-    /// This frame of a layout's change of scene: the layout goes in at the
-    /// bottom of the fade. The compact layout draws no panes, so a change of
-    /// scene stops there.
-    fn switch_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// This frame of a layout swap: the layout goes in at the bottom of the
+    /// fade. The compact layout draws no panes, so a swap stops there.
+    fn swap_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
         let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
         if compact {
-            attachment.scene.land();
+            attachment.layout_swap.land();
             return;
         }
-        if let Some(layout) = attachment.scene.sample(window, cx) {
+        if let Some(layout) = attachment.layout_swap.sample(window, cx) {
             self.install_layout(layout, window, cx);
         }
     }
@@ -5534,7 +5533,7 @@ impl Render for AppShell {
         // first frame, or an inset change that narrowed the content box).
         self.sync_layout(window, cx);
         self.glide_panes(window, cx);
-        self.switch_scene(window, cx);
+        self.swap_layout(window, cx);
         self.zoom_panes(window, cx);
         self.colour_panes(cx);
         self.sync_panes(window, cx);
@@ -8321,7 +8320,7 @@ mod tests {
         })
     }
 
-    /// A layout goes in as a change of scene: the column fades out, the new
+    /// A layout goes in as a layout swap: the column fades out, the new
     /// panes are put in during the frame it is faintest, and it fades back
     /// in. A layout chosen meanwhile is the one put in, the fade going on
     /// from where it is: down to the bottom while it falls, turning back

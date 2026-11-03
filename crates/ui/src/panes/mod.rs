@@ -22,11 +22,11 @@ use serde::Deserialize;
 use web_time::Instant;
 
 mod glide;
-mod scene;
+mod layout_swap;
 mod zoom;
 
 pub(crate) use glide::{Before, Glides, Held, window_jumped};
-pub(crate) use scene::Scene;
+pub(crate) use layout_swap::LayoutSwap;
 pub(crate) use zoom::{PaneZoom, Zoom};
 
 use crate::chat::{ChatView, WindowEdges};
@@ -135,7 +135,7 @@ impl MoveThreadToPane {
 #[action(namespace = tcode, no_json)]
 pub(crate) struct OpenInNewPane(pub(crate) String);
 
-/// Lay the whole column out anew, as a change of scene (see [`Scene`]). The
+/// Lay the whole column out anew, as a layout swap (see [`LayoutSwap`]). The
 /// panes there fill the new slots in the layout's order, the focused one
 /// first; panes left over close, and slots left over wait for a thread.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -680,7 +680,7 @@ pub(crate) type DropTarget = Rc<dyn Fn(&Window, &App) -> Option<Bounds<Pixels>>>
 ///
 /// A pane opening or closing glides its split's slots (see [`Glides`]), a
 /// zoomed pane grows over the column out of its slot (see [`Zoom`]), a
-/// layout is put in while the column is faded out (see [`Scene`]), and
+/// layout is put in while the column is faded out (see [`LayoutSwap`]), and
 /// the seams glide when the window jumps to another size
 /// ([`Glides::resize`]); a window whose edge is dragged is followed at once.
 /// Two panes that swap conversations carry each across to the other
