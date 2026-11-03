@@ -25,7 +25,7 @@ pub(crate) mod list_rows;
 mod list_scroll;
 mod size_glide;
 
-pub(crate) use hover::{blend, hover_fill, hover_layer, hovered};
+pub(crate) use hover::{blend, hover_fill, hover_layer, hovered, pointer_hover};
 pub(crate) use image_fade::{image_arrival, image_load};
 pub(crate) use keyed::{keyed, keyed_across};
 pub(crate) use list_flip::ListFlip;

@@ -23,6 +23,22 @@ pub(crate) fn blend(rest: Hsla, hover: Hsla, reveal: f32) -> Hsla {
     Colour(rest).interpolate(&Colour(hover), reveal).0
 }
 
+/// `listener`, for an element's `on_hover`, hearing only a pointer come in.
+/// gpui-fast's `on_hover` hit-tests the last touch as a pointer at rest, so
+/// the element a finger tapped or panned over is reported entered and stays
+/// so until another touch lands elsewhere; its own `hover` styles skip that
+/// report through `Window::last_input_was_touch`, and so does this. Leaving
+/// is always passed on.
+pub(crate) fn pointer_hover(
+    listener: impl Fn(&bool, &mut Window, &mut App) + 'static,
+) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+    move |entered, window, cx| {
+        if !(*entered && window.last_input_was_touch()) {
+            listener(entered, window, cx);
+        }
+    }
+}
+
 /// Whether the pointer is over the element `id`, as its `on_hover` last
 /// heard, and that handler: for an element whose hover moves more than a
 /// fill (a label's colour too), each part gliding to its hovered value.
@@ -36,14 +52,14 @@ pub(crate) fn hovered<I: Into<ElementId>>(
 ) {
     let hovered = window.use_keyed_state(child_id(&id.into(), "hovered"), cx, |_, _| false);
     let now = *hovered.read(cx);
-    let on_hover = move |is_hovered: &bool, _: &mut Window, cx: &mut App| {
+    let on_hover = pointer_hover(move |is_hovered: &bool, _: &mut Window, cx: &mut App| {
         hovered.update(cx, |hovered, cx| {
             if *hovered != *is_hovered {
                 *hovered = *is_hovered;
                 cx.notify();
             }
         });
-    };
+    });
     (now, on_hover)
 }
 
