@@ -39,8 +39,8 @@ use chrono::Local;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardEntry, Context, Entity, EventEmitter,
     ExternalPaths, Focusable as _, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
-    img, prelude::FluentBuilder as _, px, rgb,
+    Pixels, Render, Role, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
+    div, img, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::PopoverState;
 use gpui_base::input::{MoveDown, MoveUp};
@@ -141,6 +141,9 @@ fn draft_placeholder(compact: bool) -> Cow<'static, str> {
 
 pub struct Composer {
     compact: bool,
+    /// How far right of the page inset the column keeps clear, for the
+    /// chat's side rail ([`Self::set_column_shift`]).
+    column_shift: Pixels,
     workspace_store: Entity<WorkspaceStore>,
     /// The thread this composer writes to.
     session_id: Option<String>,
@@ -336,6 +339,17 @@ impl Composer {
             .update(cx, |input, cx| input.set_auto_grow(min_rows, max_rows, cx));
         cx.notify();
     }
+
+    /// Keep `shift` clear right of the page inset, so the column centres
+    /// where the chat's rows do beside its side rail. Only the column's
+    /// place changes: the width it is laid out at stays the same.
+    pub(crate) fn set_column_shift(&mut self, shift: Pixels, cx: &mut Context<Self>) {
+        if self.column_shift != shift {
+            self.column_shift = shift;
+            cx.notify();
+        }
+    }
+
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window: &mut Window,
@@ -416,6 +430,7 @@ impl Composer {
 
         Self {
             compact,
+            column_shift: px(0.),
             session_id: workspace_store.read(cx).active_session_id(),
             workspace_store,
             input,
@@ -2105,16 +2120,18 @@ impl Render for Composer {
         // Mirror the chat timeline's centered content column (same page
         // padding, same max width) so the composer lines up with the messages
         // above it instead of stretching edge to edge on wide windows.
+        let inset = px(if self.compact {
+            crate::material::COMPACT_PAGE_INSET
+        } else {
+            crate::chat::CONTENT_MIN_PADDING
+        });
         v_flex()
             .relative()
             .flex_shrink_0()
             .w_full()
             .items_center()
-            .px(px(if self.compact {
-                crate::material::COMPACT_PAGE_INSET
-            } else {
-                crate::chat::CONTENT_MIN_PADDING
-            }))
+            .px(inset)
+            .pr(inset + self.column_shift)
             .pb_2()
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::on_menu))

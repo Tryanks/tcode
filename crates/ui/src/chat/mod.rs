@@ -27,6 +27,7 @@ pub(crate) mod components;
 mod empty;
 mod header;
 pub(crate) mod model;
+mod rail;
 pub(crate) use model::format_elapsed;
 mod timeline;
 pub(crate) mod tools;
@@ -188,6 +189,10 @@ pub struct ChatView {
     terminal_glide: crate::motion::resize_glide::ResizeGlide,
     /// Whether the last frame was compact, which has no drawer.
     terminal_glide_compact: bool,
+    /// How the body under the header sits at the width it was laid out at
+    /// this frame: set as the body is laid out, before the rows and the
+    /// composer that it moves are.
+    body: rail::BodyLayout,
     /// The Agents sheet's content on phone.
     agents: Entity<crate::agents_panel::AgentsPanel>,
     terminal_was_open: bool,
@@ -430,6 +435,7 @@ impl ChatView {
                 gpui::Axis::Vertical,
             ),
             terminal_glide_compact: false,
+            body: Default::default(),
             list_state,
             timeline_stale: false,
             history_placeholder_height: px(0.),
@@ -750,7 +756,7 @@ impl Render for ChatView {
         if let Some(active) = active.filter(|_| !loading) {
             layers.push((
                 SURFACE_THREAD,
-                self.render_thread(active, show_jump_to_latest, window, cx),
+                self.render_thread(active, show_jump_to_latest, cx),
             ));
         }
         root.child(fade.render(layers).size_full())
@@ -819,7 +825,6 @@ impl ChatView {
         &mut self,
         (title, cwd, is_draft): (String, std::path::PathBuf, bool),
         show_jump_to_latest: bool,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
@@ -832,6 +837,59 @@ impl ChatView {
                 .filter(|agents| !agents.is_empty())
         };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), agents.as_ref(), cx);
+        // Laid out at the width the header leaves it in this frame, before
+        // anything in it is: the rail's room moves the rows and the composer.
+        let view = cx.entity();
+        let body = gpui::container_query(move |size, window, cx| {
+            view.update(cx, |this, cx| {
+                this.render_body(
+                    size.width,
+                    (&cwd, is_draft, agents),
+                    show_jump_to_latest,
+                    window,
+                    cx,
+                )
+            })
+        });
+        v_flex()
+            .size_full()
+            .when(!compact, |el| el.child(header))
+            // The body is as tall as what holds it; under the header, that
+            // is what the header leaves.
+            .child(div().flex_1().min_h_0().w_full().child(body))
+            .into_any_element()
+    }
+
+    /// The thread under its header, `width` wide: its timeline with the side
+    /// rail over its gutter, its deliveries and its composer, with the
+    /// terminal drawer below when it is open.
+    fn render_body(
+        &mut self,
+        width: gpui::Pixels,
+        (cwd, is_draft, agents): (&Path, bool, Option<crate::agents_panel::Agents>),
+        show_jump_to_latest: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
+        let rail_cards = self.rail_cards(cx);
+        let layout = rail::BodyLayout::of(width, !rail_cards.is_empty(), self.side_open(), compact);
+        // gpui-base has no transition that moves a laid-out column to a new
+        // centre, so the view glides the column's offset itself: its shift
+        // follows the rail's presence, which glides, and the width, which
+        // does not, so a resize is tracked at once.
+        let presence = self.motion.transition(
+            "chat-rail",
+            if layout.rail() { 1f32 } else { 0. },
+            SHOW,
+            window,
+            cx,
+        );
+        self.body = layout.at(presence);
+        let shift = self.body.shift();
+        self.composer
+            .update(cx, |composer, cx| composer.set_column_shift(shift, cx));
+        let rail = self.render_rail(rail_cards, window, cx);
         let phone_strip = self.render_phone_strip(agents.as_ref(), window, cx);
         let phone_strip_height = phone_strip.as_ref().map_or(px(0.), |(_, progress)| {
             px(crate::material::bar_height(
@@ -854,11 +912,11 @@ impl ChatView {
         let terminal_height = panel.terminal_height;
 
         let item_count = self.rows.len();
-        let timeline = self.render_timeline_list(&cwd, cx);
+        let timeline = self.render_timeline_list(cwd, cx);
 
         // A fresh phone draft shows its project/model context above the focused composer.
         let timeline: AnyElement = if compact && is_draft && item_count == 0 {
-            self.render_compact_draft_empty(&cwd, cx)
+            self.render_compact_draft_empty(cwd, cx)
         } else {
             // GPUI's scrollbar extent excludes List padding, while wheel and
             // tail-resume calculations include it. Keep the inset outside the
@@ -1014,6 +1072,7 @@ impl ChatView {
             );
         }
 
+        let delivery_inset = gpui::rems(1.).to_pixels(window.rem_size());
         let main = v_flex()
             .size_full()
             .min_h_0()
@@ -1081,6 +1140,7 @@ impl ChatView {
                         .size_full(),
                     )
                     .children(self.render_scroll_pill(show_jump_to_latest, window, cx))
+                    .children(rail)
                     .children(phone_strip),
             )
             .child(
@@ -1090,7 +1150,8 @@ impl ChatView {
                     .id("pending-deliveries")
                     .items_center()
                     .overflow_y_scroll()
-                    .px_4()
+                    .px(delivery_inset)
+                    .pr(delivery_inset + shift)
                     .gap_2()
                     .children(delivery_rows),
             )
@@ -1108,6 +1169,8 @@ impl ChatView {
                     )
                     .child(composer),
             );
+        // A subagent open beside the thread splits `main` with it here, or
+        // covers it where the body is too narrow to split (`side_open`).
 
         // Opening and closing the drawer glide; entering or leaving the
         // compact layout, which has no drawer, does not.
@@ -1143,7 +1206,7 @@ impl ChatView {
         let width = f32::from(window.bounds().size.width);
         // One group whether or not the drawer is open, so the conversation
         // keeps its place in the tree as the drawer comes and goes.
-        let body = gpui_base::v_resizable("chat-terminal-panels")
+        gpui_base::v_resizable("chat-terminal-panels")
             .with_state(&self.terminal_split)
             .on_resize(move |state, _, cx| {
                 let height = state.read(cx).sizes().get(1).copied();
@@ -1158,14 +1221,14 @@ impl ChatView {
                     .child(glide.hold(0, main)),
             )
             // Not `children`: the group's replaces the panels added before.
-            .when_some(drawer, |group, drawer| group.child(drawer));
-        v_flex()
-            .size_full()
-            .when(!self.window_state.read(cx).compact, |el| el.child(header))
-            // The group is as tall as what holds it; under the header, that
-            // is what the header leaves.
-            .child(div().flex_1().min_h_0().w_full().child(body))
+            .when_some(drawer, |group, drawer| group.child(drawer))
             .into_any_element()
+    }
+
+    /// Whether a subagent is open beside the thread, taking the room the
+    /// side rail would have.
+    fn side_open(&self) -> bool {
+        false
     }
 }
 

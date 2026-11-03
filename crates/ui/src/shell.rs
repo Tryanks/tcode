@@ -762,8 +762,10 @@ struct PageBack {
 /// The right panel's default width.
 const RIGHT_PANEL_WIDTH: f32 = 560.;
 /// The panel's narrowest: the icon tabs and the panel's own controls fit in
-/// 320pt, beside the window's caption buttons where the panel's strip holds them.
-const RIGHT_PANEL_MIN_WIDTH: f32 = 320. + window_caption::RIGHT_PANEL_CAPTION_WIDTH;
+/// a panel's narrowest content, beside the window's caption buttons where the
+/// panel's strip holds them.
+const RIGHT_PANEL_MIN_WIDTH: f32 =
+    crate::material::PANEL_CONTENT_MIN_WIDTH + window_caption::RIGHT_PANEL_CAPTION_WIDTH;
 /// A pane alone in the chat column never gets narrower than this beside the
 /// right panel, plus whatever its header holds beyond the plain one
 /// (`header_extra_width_for`), so its header keeps the tiers it has without
