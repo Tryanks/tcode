@@ -1,6 +1,6 @@
 use gpui::{
-    App, ElementId, IntoElement, RenderOnce, StyleRefinement, Styled, Window,
-    prelude::FluentBuilder as _,
+    App, ElementId, IntoElement, ParentElement as _, RenderOnce, StyleRefinement, Styled, Window,
+    div, prelude::FluentBuilder as _,
 };
 use gpui_base::motion::{Transition, transition};
 
@@ -25,7 +25,10 @@ impl Collapsible {
     }
 
     pub fn content(mut self, content: impl IntoElement) -> Self {
-        self.base = self.base.content(content);
+        // gpui-base's reveal lays its content out as a root of its own, where
+        // content with no width of its own takes its widest line's, not the
+        // region's as it does in flow: give it the region's.
+        self.base = self.base.content(div().w_full().child(content));
         self
     }
 }
