@@ -66,7 +66,7 @@ impl ListHover {
         item: impl Into<SharedString>,
     ) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
         let (hover, item) = (self.clone(), item.into());
-        move |entered, window, cx| {
+        super::pointer_hover(move |entered, window, cx| {
             let (previous, next) = {
                 let mut hover = hover.0.borrow_mut();
                 let previous = hover.hovered.as_ref().map(|(item, _)| item.clone());
@@ -90,7 +90,7 @@ impl ListHover {
             if previous != next {
                 hover.moved(previous, next, window, cx);
             }
-        }
+        })
     }
 
     fn moved(
@@ -313,6 +313,39 @@ mod tests {
             cx.update(|window, cx| window.simulate_next_frame(cx)),
             0,
             "a reveal kept asking for frames"
+        );
+    }
+
+    /// A tap reaches gpui as the pointer coming to rest where the finger
+    /// lifted, but a finger is not a pointer: the row tapped reveals
+    /// nothing, then or in any frame after.
+    #[gpui::test]
+    fn a_tapped_row_reveals_nothing(cx: &mut TestAppContext) {
+        let drawn = Rc::new(RefCell::new(HashMap::new()));
+        let (_, cx) = cx.add_window_view({
+            let drawn = drawn.clone();
+            |_, _| Rows {
+                hover: ListHover::new(crate::material::HOVER),
+                drawn,
+            }
+        });
+        cx.simulate_mouse_move(point(px(300.), px(300.)), None, Modifiers::none());
+        draw_settled(cx);
+        let since = drawn.borrow()[&1].len();
+        for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Ended] {
+            cx.simulate_event(gpui::TouchEvent {
+                id: gpui::TouchId(1),
+                phase,
+                position: point(px(50.), px(50.)),
+                predicted_position: None,
+                force: None,
+            });
+        }
+        frames(cx);
+        let row = reveals(&drawn, 1, since);
+        assert!(
+            !row.is_empty() && row.iter().all(|value| *value == 0.),
+            "the tapped row revealed {row:?}"
         );
     }
 

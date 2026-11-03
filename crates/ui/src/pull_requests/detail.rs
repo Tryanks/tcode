@@ -1539,14 +1539,14 @@ impl PullRequestView {
             .min_w_0()
             .gap_1()
             .items_start()
-            .on_hover(move |is_hovered, _, cx| {
+            .on_hover(crate::motion::pointer_hover(move |is_hovered, _, cx| {
                 hovered.update(cx, |hovered, cx| {
                     if *hovered != *is_hovered {
                         *hovered = *is_hovered;
                         cx.notify();
                     }
                 })
-            })
+            }))
             .child(text)
             .child(affordance)
             .into_any_element()

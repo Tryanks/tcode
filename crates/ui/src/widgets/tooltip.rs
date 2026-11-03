@@ -260,6 +260,12 @@ pub(crate) fn track_parts(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // A touch is hit-tested as a pointer at rest; see `motion::pointer_hover`.
+    let part_at = move |window: &Window, cx: &App| {
+        (!window.last_input_was_touch())
+            .then(|| part_at(window, cx))
+            .flatten()
+    };
     let was = owner.read(cx).hovered.get();
     let update = Rc::new(
         move |part: Option<TooltipPart>, window: &mut Window, cx: &mut App| {

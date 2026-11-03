@@ -1224,13 +1224,15 @@ impl PullRequestsPanel {
                     .into_owned(),
                 )
                 .tooltip(tooltip)
-                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                    let key = hovered.then(|| hover_key.clone());
-                    if this.eye_hovered != key {
-                        this.eye_hovered = key;
-                        cx.notify();
-                    }
-                }))
+                .on_hover(crate::motion::pointer_hover(cx.listener(
+                    move |this, hovered: &bool, _, cx| {
+                        let key = hovered.then(|| hover_key.clone());
+                        if this.eye_hovered != key {
+                            this.eye_hovered = key;
+                            cx.notify();
+                        }
+                    },
+                )))
                 .on_click(move |_, window, cx| {
                     cx.stop_propagation();
                     window.dispatch_action(Box::new(stop.clone()), cx);

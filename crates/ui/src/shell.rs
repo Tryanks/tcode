@@ -5448,12 +5448,14 @@ impl AppShell {
                         .h_full()
                         .w(px(SIDEBAR_HOVER_EDGE))
                         .occlude()
-                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                            this.update_sidebar_overlay(
-                                SidebarHoverTransition::Trigger(*hovered),
-                                cx,
-                            );
-                        })),
+                        .on_hover(crate::motion::pointer_hover(cx.listener(
+                            |this, hovered: &bool, _, cx| {
+                                this.update_sidebar_overlay(
+                                    SidebarHoverTransition::Trigger(*hovered),
+                                    cx,
+                                );
+                            },
+                        ))),
                 )
             })
             .when_some(
@@ -5474,12 +5476,14 @@ impl AppShell {
                         // The blocker and hover listener share this hitbox: the
                         // overlay owns its full visible lifetime.
                         .occlude()
-                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                            this.update_sidebar_overlay(
-                                SidebarHoverTransition::Overlay(*hovered),
-                                cx,
-                            );
-                        }))
+                        .on_hover(crate::motion::pointer_hover(cx.listener(
+                            |this, hovered: &bool, _, cx| {
+                                this.update_sidebar_overlay(
+                                    SidebarHoverTransition::Overlay(*hovered),
+                                    cx,
+                                );
+                            },
+                        )))
                         .child(sidebar)
                         .when(overlay_leaving, |overlay| {
                             overlay.child(crate::motion::shield())
