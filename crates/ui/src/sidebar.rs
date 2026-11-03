@@ -14,6 +14,7 @@ use crate::widgets::TooltipTrigger as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _};
+use crate::widgets::scrollbar::Scrollbar;
 use crate::widgets::spinner::Spinner;
 use crate::widgets::tooltip::Tooltip;
 use crate::{
@@ -27,7 +28,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::transition;
-use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::settlement::AgentDelivery;
 use tcode_core::thread_sort::{ThreadSection, ThreadSections, partition_threads};

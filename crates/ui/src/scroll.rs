@@ -11,6 +11,7 @@
 use std::{ops::Range, panic::Location, rc::Rc};
 
 use crate::motion::{ListScroll, ScrollTarget};
+use crate::widgets::scrollbar::Scrollbar;
 
 use gpui::{
     AnyElement, App, Axis, Div, Element, ElementId, InteractiveElement, IntoElement, ListAlignment,
@@ -20,8 +21,7 @@ use gpui::{
     uniform_list,
 };
 use gpui_base::{
-    InteractiveElementExt as _, ScrollBounce, ScrollableMask, Scrollbar, ScrollbarHandle,
-    StyledExt as _,
+    InteractiveElementExt as _, ScrollBounce, ScrollableMask, ScrollbarHandle, StyledExt as _,
 };
 
 pub(crate) trait ScrollableElement:

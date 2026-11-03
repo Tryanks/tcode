@@ -13,6 +13,7 @@ pub mod menu;
 mod popover;
 pub mod progress;
 pub(crate) mod ring;
+pub(crate) mod scrollbar;
 pub mod slider;
 pub mod spinner;
 pub mod switch;

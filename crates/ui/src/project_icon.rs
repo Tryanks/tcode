@@ -1,4 +1,5 @@
 //! Shared project artwork and an in-app picker over the attached host's files.
+use crate::widgets::scrollbar::Scrollbar;
 use crate::{
     icon::{Icon, IconName},
     overlay::OverlayExt as _,
@@ -16,7 +17,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
     UniformListScrollHandle, Window, div, img, prelude::FluentBuilder as _, px, uniform_list,
 };
-use gpui_base::{ElementExt as _, Scrollbar, h_flex, v_flex};
+use gpui_base::{ElementExt as _, h_flex, v_flex};
 use std::{path::PathBuf, rc::Rc};
 use tcode_core::project::Project;
 use tcode_protocol::{IconImageEntry, QueryResponse};

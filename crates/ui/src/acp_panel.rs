@@ -7,6 +7,7 @@ use crate::typography::TextRole as _;
 use crate::widgets::Collapsible;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
+use crate::widgets::scrollbar::Scrollbar;
 use crate::widgets::switch::Switch;
 use crate::widgets::tabs::{TabBar, TabItem};
 use crate::{
@@ -20,7 +21,7 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::transition;
-use gpui_base::{Scrollbar, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 use std::f32::consts::PI;
 use std::rc::Rc;
 
