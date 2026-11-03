@@ -840,10 +840,25 @@ pub(crate) fn project_icon(
     })
 }
 
-/// A reset can return to a previously read default after the project config changes, so every
-/// display scale's icon, error included, is read again when next drawn. A read already in flight
-/// may have left before the change: it is read again now, for the views waiting on it.
-pub(crate) fn invalidate_project_icon(project: &tcode_core::project::Project, cx: &mut App) {
+/// Why a project's icons are read again.
+pub(crate) enum IconReset {
+    /// The host changed the project: a reset can return to a previously read default after its
+    /// config changes, and a read in flight may have been answered before the change, so it is
+    /// read again now, for the views waiting on it.
+    Changed,
+    /// A fresh index baseline, which may follow changes this client missed. A read in flight was
+    /// sent on the current connection, since losing the connection fails every read in flight
+    /// (`HostLink::set_connection_state`), and stands: reading it again would ask the host twice
+    /// for what one read answers.
+    Baseline,
+}
+
+/// Every display scale's icon of `project`, error included, is read again when next drawn.
+pub(crate) fn invalidate_project_icon(
+    project: &tcode_core::project::Project,
+    reset: IconReset,
+    cx: &mut App,
+) {
     let Some(namespace) = cx.try_global::<HostImages>().map(|images| images.namespace) else {
         return;
     };
@@ -863,7 +878,7 @@ pub(crate) fn invalidate_project_icon(project: &tcode_core::project::Project, cx
             && *override_path == project.icon_path
         {
             entry.stale = true;
-            if entry.read.is_some() {
+            if entry.read.is_some() && matches!(reset, IconReset::Changed) {
                 in_flight.push(source.clone());
             }
         }
