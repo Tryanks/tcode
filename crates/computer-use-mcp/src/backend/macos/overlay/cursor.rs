@@ -11,7 +11,7 @@ use super::ffi::{
     send_void_rect_bool, send_void_size, send_void_usize, status_window_level,
 };
 use super::geometry::ax_screen_to_appkit;
-use super::motion::{Effect, Fade, Motion, Point, Waypoint};
+use crate::backend::cursor::motion::{Effect, Fade, Motion, Point, Waypoint};
 use crate::outline::Frame;
 
 // The pointer is a translucent disc whose centre is the action point.

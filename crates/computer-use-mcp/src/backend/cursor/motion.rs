@@ -3,27 +3,27 @@ use std::f64::consts::TAU;
 use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
-pub(super) type Point = (f64, f64);
+pub(crate) type Point = (f64, f64);
 
 /// Effect played when the cursor reaches a waypoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Effect {
+pub(crate) enum Effect {
     Click,
     /// Starts a drag: the cursor shrinks and trails ripples until `Release`.
     Press,
     Release,
 }
 
-pub(super) struct Waypoint {
-    pub(super) point: Point,
-    pub(super) effect: Option<Effect>,
+pub(crate) struct Waypoint {
+    pub(crate) point: Point,
+    pub(crate) effect: Option<Effect>,
     /// Signalled when the cursor reaches the point; dropping it unsent (the
     /// waypoint was discarded) releases the waiter as well.
-    pub(super) reached: Option<SyncSender<()>>,
+    pub(crate) reached: Option<SyncSender<()>>,
 }
 
 impl Waypoint {
-    pub(super) fn new(point: Point, effect: Option<Effect>) -> Self {
+    pub(crate) fn new(point: Point, effect: Option<Effect>) -> Self {
         Self {
             point,
             effect,
@@ -54,18 +54,18 @@ const FADE_IN: Duration = Duration::from_millis(140);
 const FADE_OUT: Duration = Duration::from_millis(600);
 
 /// The cursor's opacity, eased in and out of view.
-pub(super) struct Fade {
+pub(crate) struct Fade {
     progress: f64,
 }
 
 impl Fade {
-    pub(super) fn hidden() -> Self {
+    pub(crate) fn hidden() -> Self {
         Self { progress: 0.0 }
     }
 
     /// Advances by one frame toward `shown`; returns whether it is still
     /// changing.
-    pub(super) fn step(&mut self, step: Duration, shown: bool) -> bool {
+    pub(crate) fn step(&mut self, step: Duration, shown: bool) -> bool {
         self.progress = if shown {
             (self.progress + step.as_secs_f64() / FADE_IN.as_secs_f64()).min(1.0)
         } else {
@@ -74,7 +74,7 @@ impl Fade {
         self.progress != if shown { 1.0 } else { 0.0 }
     }
 
-    pub(super) fn opacity(&self) -> f64 {
+    pub(crate) fn opacity(&self) -> f64 {
         let t = self.progress;
         t * t * (3.0 - 2.0 * t)
     }
@@ -167,8 +167,9 @@ impl Leg {
     }
 }
 
-/// Cursor path in AX global coordinates, advanced by the overlay's frame tick.
-pub(super) struct Motion {
+/// Cursor path in the backend's global screen coordinates, advanced by the
+/// overlay's frame tick.
+pub(crate) struct Motion {
     resting: Option<Point>,
     active: Option<Leg>,
     queued: VecDeque<Waypoint>,
@@ -179,7 +180,7 @@ pub(super) struct Motion {
 }
 
 impl Motion {
-    pub(super) fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self {
             resting: None,
             active: None,
@@ -191,24 +192,24 @@ impl Motion {
         }
     }
 
-    pub(super) fn position(&self, now: Instant) -> Option<Point> {
+    pub(crate) fn position(&self, now: Instant) -> Option<Point> {
         self.active
             .as_ref()
             .map(|leg| leg.sample(now))
             .or(self.resting)
     }
 
-    pub(super) fn is_moving(&self) -> bool {
+    pub(crate) fn is_moving(&self) -> bool {
         self.active.is_some() || !self.queued.is_empty()
     }
 
     /// Whether a drag holds the button, from its press until its release.
-    pub(super) fn is_pressed(&self) -> bool {
+    pub(crate) fn is_pressed(&self) -> bool {
         self.pressed
     }
 
     /// Reduce Motion: later legs jump to their point instead of gliding.
-    pub(super) fn set_reduced(&mut self, reduced: bool) {
+    pub(crate) fn set_reduced(&mut self, reduced: bool) {
         self.reduced = reduced;
     }
 
@@ -218,7 +219,7 @@ impl Motion {
     /// A leg that ends in an effect finishes before later waypoints start, so
     /// each effect lands where its action happened; a plain glide is
     /// redirected from wherever it currently is.
-    pub(super) fn push(&mut self, now: Instant, waypoints: Vec<Waypoint>) -> Vec<Effect> {
+    pub(crate) fn push(&mut self, now: Instant, waypoints: Vec<Waypoint>) -> Vec<Effect> {
         let mut waypoints = waypoints.into_iter();
         let mut fired = Vec::new();
         if self.resting.is_none() && self.active.is_none() {
@@ -247,7 +248,7 @@ impl Motion {
     }
 
     /// Advances to `now` and returns the effects reached on the way.
-    pub(super) fn advance(&mut self, now: Instant) -> Vec<Effect> {
+    pub(crate) fn advance(&mut self, now: Instant) -> Vec<Effect> {
         let mut fired = Vec::new();
         loop {
             if let Some(leg) = self.active.take_if(|leg| now >= leg.start + leg.duration()) {
@@ -261,7 +262,7 @@ impl Motion {
     }
 
     /// Stops where the cursor is and forgets pending waypoints.
-    pub(super) fn halt(&mut self, now: Instant) {
+    pub(crate) fn halt(&mut self, now: Instant) {
         self.resting = self.position(now);
         self.active = None;
         self.queued.clear();
