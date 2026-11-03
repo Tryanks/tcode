@@ -17,10 +17,11 @@ use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
 use crate::workspace_walk::relativize_to_workspace;
 use agent::FileChangeKind;
 use gpui::{
-    Action, AnyElement, App, ClipboardItem, Context, FocusHandle, Hsla, InteractiveElement as _,
-    IntoElement, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement as _, ScrollHandle, StatefulInteractiveElement as _, Styled as _, StyledText,
-    Window, canvas, div, list, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, ClipboardItem, Context, Entity, FocusHandle, Hsla,
+    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Window, canvas, div, list,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -118,6 +119,11 @@ pub(crate) struct DiffList {
     unified_motion: RowMotion,
     split_motion: RowMotion,
     pub(crate) selection: Option<LineSelection>,
+    /// Whether line numbers are being dragged over to select their lines, in
+    /// the split list or the unified one.
+    line_drag: Option<bool>,
+    /// Scrolls the list while that drag is past its top or bottom.
+    drag_scroll: gpui_base::AutoScroll,
     /// The viewport that scrolls the rows sideways; a file header spans it and stays in it.
     horizontal: ScrollHandle,
     focus: FocusHandle,
@@ -140,6 +146,8 @@ impl DiffList {
             split_items: items.split,
             width_candidates,
             selection: None,
+            line_drag: None,
+            drag_scroll: gpui_base::AutoScroll::default(),
             horizontal: ScrollHandle::new(),
             focus: cx.focus_handle().tab_stop(true),
         }
@@ -357,6 +365,67 @@ impl DiffList {
         self.remeasure();
     }
 
+    /// One frame of a line drag held past the list's top or bottom: the
+    /// selection reaches the line at that edge as last laid out (rows
+    /// scrolled in this frame are not measured yet), and the list scrolls
+    /// `delta` on.
+    fn drag_scroll_tick(&mut self, split: bool, delta: gpui::Pixels) {
+        let Some(pointer) = self.drag_scroll.last_drag_position else {
+            return;
+        };
+        let at_edge = self.selected_side_line_at(split, pointer.y);
+        self.scrolled(split).0.scroll_by(delta);
+        if let Some((path, row, line, side)) = at_edge {
+            self.select_line(path, row, line, side, true);
+        }
+    }
+
+    /// The line on the selection's file and side in the row at `y`, clamped
+    /// into the list's viewport.
+    fn selected_side_line_at(
+        &self,
+        split: bool,
+        y: gpui::Pixels,
+    ) -> Option<(String, usize, u32, ReviewSide)> {
+        let selection = self.selection.as_ref()?;
+        let side = selection.side;
+        let (state, _) = self.scrolled(split);
+        let viewport = state.viewport_bounds();
+        let y = y.clamp(viewport.top() + px(1.), viewport.bottom() - px(1.));
+        let items = if split {
+            &self.split_items
+        } else {
+            &self.unified_items
+        };
+        let (ix, bounds) = (state.logical_scroll_top().item_ix..items.len())
+            .map_while(|ix| Some((ix, state.bounds_for_item(ix)?)))
+            .find(|(_, bounds)| bounds.bottom() > y)?;
+        let &DiffListItem::Code { file, left, right } =
+            items.get(ix).filter(|_| bounds.top() <= y)?
+        else {
+            return None;
+        };
+        let file = self
+            .files
+            .get(file)
+            .filter(|file| file.path == selection.file)?;
+        let row = match (split, side) {
+            (false, _) => right.or(left),
+            (true, ReviewSide::Old) => left,
+            (true, ReviewSide::New) => right,
+        }?;
+        let line = match side {
+            ReviewSide::Old => file.all_rows[row].old,
+            ReviewSide::New => file.all_rows[row].new,
+        }?;
+        Some((file.path.clone(), row, line, side))
+    }
+
+    fn end_line_drag(&mut self) {
+        self.line_drag = None;
+        self.drag_scroll.stop();
+    }
+
     /// The selected rows' text, without diff markers, in file order.
     pub(crate) fn selected_lines(&self) -> String {
         let Some(selection) = &self.selection else {
@@ -555,6 +624,7 @@ fn render_layout<H: DiffListHost>(
     let horizontal = diff.horizontal.clone();
     let shown = (horizontal.bounds().size.width, horizontal.offset().x);
     let entity = cx.entity();
+    let drag_host = entity.clone();
     // Base's VirtualList requires known item sizes; wrapping and review annotations
     // have dynamic heights, as in GPUI Kit's diff, so GPUI's measured list owns them.
     // A resize of the viewport puts every row at its new height at once.
@@ -611,12 +681,70 @@ fn render_layout<H: DiffListHost>(
                         window.request_animation_frame();
                     }
                 },
-                |_, _, _, _| {},
+                move |_, _, window, _| listen_for_line_drag(drag_host, split, window),
             )
             .absolute()
             .inset_0(),
         )
         .into_any_element()
+}
+
+/// A drag from a line number selects down to the line level with the pointer
+/// wherever it is, scrolls the list while held past its top or bottom, inside
+/// the window or not, and ends wherever the button comes up. An element's own
+/// listeners would hear the pointer only while it is over that element.
+fn listen_for_line_drag<H: DiffListHost>(host: Entity<H>, split: bool, window: &mut Window) {
+    let dragging = move |host: &Entity<H>, cx: &App| {
+        host.read(cx)
+            .diff_list()
+            .is_some_and(|list| list.line_drag == Some(split))
+    };
+    window.on_mouse_event({
+        let host = host.clone();
+        move |event: &MouseMoveEvent, phase, _, cx| {
+            if !phase.capture() || !dragging(&host, cx) {
+                return;
+            }
+            host.update(cx, |host, cx| {
+                let Some(list) = host.diff_list_mut() else {
+                    return;
+                };
+                if event.pressed_button != Some(MouseButton::Left) {
+                    list.end_line_drag();
+                    return;
+                }
+                if let Some((path, row, line, side)) =
+                    list.selected_side_line_at(split, event.position.y)
+                    && list
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selection| selection.row_end != row)
+                {
+                    list.select_line(path, row, line, side, true);
+                    cx.notify();
+                }
+                let viewport = list.scrolled(split).0.viewport_bounds();
+                let delta = gpui_base::AutoScroll::compute_delta(event.position.y, viewport);
+                list.drag_scroll.last_drag_position = Some(event.position);
+                list.drag_scroll
+                    .set(delta, cx, move |delta, host: &mut H, cx| {
+                        if let Some(list) = host.diff_list_mut() {
+                            list.drag_scroll_tick(split, delta);
+                            cx.notify();
+                        }
+                    });
+            });
+        }
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+        if phase.capture() && event.button == MouseButton::Left && dragging(&host, cx) {
+            host.update(cx, |host, _| {
+                if let Some(list) = host.diff_list_mut() {
+                    list.end_line_drag();
+                }
+            });
+        }
+    });
 }
 
 /// The row at the top of a list, by what it shows rather than by its index.
@@ -1317,7 +1445,6 @@ fn render_code_row<H: DiffListHost>(
             ReviewSide::New => row.new,
         };
         let file_down = file.path.clone();
-        let file_move = file.path.clone();
         let path = file.path.clone();
         let side_name = match side {
             ReviewSide::Old => "old",
@@ -1336,24 +1463,16 @@ fn render_code_row<H: DiffListHost>(
             .child(line.map(|value| value.to_string()).unwrap_or_default())
             .cursor_pointer()
             .when_some(line, |gutter, line| {
-                gutter
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |host, _: &MouseDownEvent, _, cx| {
-                            if let Some(list) = host.diff_list_mut() {
-                                list.select_line(file_down.clone(), row_index, line, side, false);
-                            }
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |host, event: &MouseMoveEvent, _, cx| {
-                        if event.dragging() {
-                            if let Some(list) = host.diff_list_mut() {
-                                list.select_line(file_move.clone(), row_index, line, side, true);
-                            }
-                            cx.notify();
+                gutter.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |host, _: &MouseDownEvent, _, cx| {
+                        if let Some(list) = host.diff_list_mut() {
+                            list.select_line(file_down.clone(), row_index, line, side, false);
+                            list.line_drag = Some(split);
                         }
-                    }))
+                        cx.notify();
+                    }),
+                )
             })
     };
     let (text, runs) = if split_side == Some(ReviewSide::Old)
@@ -1785,5 +1904,95 @@ mod tests {
                 "Review text"
             );
         }
+    }
+
+    fn created_file(path: &str, lines: usize) -> RenderedFile {
+        let text: String = (1..=lines).map(|line| format!("line {line}\n")).collect();
+        build_file(
+            &FileDiffInput {
+                path,
+                kind: FileChangeKind::Create,
+                old_text: None,
+                new_text: Some(&text),
+                patch: None,
+                ignore_whitespace: false,
+                show_invisibles: false,
+            },
+            path.into(),
+            "rust",
+            &crate::highlight::HighlightTheme::default_dark(),
+            &DiffColors {
+                added_word_bg: gpui::green(),
+                removed_word_bg: gpui::red(),
+            },
+            &HighlightStyle::default(),
+        )
+    }
+
+    /// Dragging down a created file's line numbers and past the list's
+    /// bottom keeps scrolling while the pointer is held there, faster the
+    /// further below it is, outside the window too, the selection taking in
+    /// each line that comes up; back over the lines it stops, and a release
+    /// outside the window ends the drag.
+    #[gpui::test]
+    fn a_line_drag_past_the_bottom_scrolls_until_it_comes_back(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, point};
+        cx.update(crate::theme::init);
+        let (viewer, cx) = cx.add_window_view(|_, cx| Reviewed {
+            list: DiffList::new(vec![created_file("long.rs", 400)], Vec::new(), cx),
+            card: None,
+        });
+        cx.simulate_resize(gpui::size(px(600.), px(700.)));
+        crate::test_frames::draw_settled(cx);
+        let line_end = |cx: &mut VisualTestContext| {
+            viewer.read_with(cx, |viewer, _| {
+                viewer
+                    .list
+                    .selection
+                    .as_ref()
+                    .expect("a selection")
+                    .line_end
+            })
+        };
+        let hold = |cx: &mut VisualTestContext| {
+            let before = line_end(cx);
+            for _ in 0..10 {
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                crate::test_frames::draw(cx);
+            }
+            line_end(cx) - before
+        };
+        let drag_to = |position: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_move(position, Some(MouseButton::Left), gpui::Modifiers::none());
+            crate::test_frames::draw(cx);
+        };
+        let start = cx
+            .debug_bounds("diff-line-new-long.rs-2")
+            .expect("the second line's number")
+            .center();
+        cx.simulate_mouse_move(start, None, gpui::Modifiers::none());
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::none());
+        crate::test_frames::draw(cx);
+
+        drag_to(point(start.x, px(608.)), cx);
+        let near = hold(cx);
+        assert!(near > 0, "held just below the list, it scrolls");
+        drag_to(point(start.x, px(820.)), cx);
+        let far = hold(cx);
+        assert!(
+            far > near,
+            "past the window it scrolls faster: {far} against {near}"
+        );
+
+        drag_to(point(start.x, px(300.)), cx);
+        assert_eq!(hold(cx), 0, "over the lines it stops");
+
+        let outside = point(start.x, px(780.));
+        drag_to(outside, cx);
+        assert!(hold(cx) > 0);
+        cx.simulate_mouse_up(outside, MouseButton::Left, gpui::Modifiers::none());
+        crate::test_frames::draw(cx);
+        assert_eq!(hold(cx), 0, "released outside the window, the drag is over");
     }
 }
