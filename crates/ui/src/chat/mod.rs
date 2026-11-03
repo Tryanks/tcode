@@ -151,9 +151,6 @@ pub struct ChatView {
     scene_shown: bool,
     /// When the view was bound to what it shows.
     scene_at: Instant,
-    /// The thread's layer's opacity in the last frame.
-    #[cfg(test)]
-    pub(crate) thread_opacity: f32,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -392,8 +389,6 @@ impl ChatView {
             motion: Default::default(),
             scene_shown: false,
             scene_at: cx.background_executor().now(),
-            #[cfg(test)]
-            thread_opacity: 0.,
             window_state,
             composer,
             terminal_drawer,
@@ -693,10 +688,6 @@ impl Render for ChatView {
             )
             .fill()
             .stage(SURFACE_THREAD);
-        #[cfg(test)]
-        {
-            self.thread_opacity = fade.opacity(SURFACE_THREAD);
-        }
         let mut layers = Vec::new();
         if fade.shows(SURFACE_SKELETON) {
             layers.push((

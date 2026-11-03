@@ -763,12 +763,6 @@ impl CrossFade {
         self
     }
 
-    /// The opacity `layer` is drawn at this frame.
-    #[cfg(test)]
-    pub(crate) fn opacity(&self, layer: usize) -> f32 {
-        self.opacity.get(layer).copied().unwrap_or_default()
-    }
-
     /// Whether `layer` is drawn this frame, so only those are built.
     pub(crate) fn shows(&self, layer: usize) -> bool {
         layer == self.current
