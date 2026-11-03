@@ -3044,6 +3044,8 @@ impl SessionsSidebar {
                         .icon(Icon::new(IconName::PinOff).text_color(cx.theme().muted_foreground))
                         .aria_label(label.clone())
                         .tooltip(label)
+                        // As the settle button does, over the row's pointer.
+                        .cursor_default()
                         .absolute()
                         .top_0()
                         .left_0()
@@ -3506,6 +3508,9 @@ impl SessionsSidebar {
                         )
                         .aria_label(label.clone())
                         .tooltip(label)
+                        // The row's pointer covers its children; the button
+                        // keeps Button's own cursor, the default.
+                        .cursor_default()
                         .absolute()
                         .right_0()
                         .top_0()
