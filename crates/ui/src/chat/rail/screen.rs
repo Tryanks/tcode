@@ -1,6 +1,6 @@
 //! The screenshots Tcode's own computer use took in the held history window.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +25,9 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 /// How long a screenshot takes to fade in once it has decoded, and to
 /// cross-fade over the one it replaces.
 const CHANGE: Duration = Duration::from_millis(200);
+
+/// How short the picture scales, at least.
+const MIN_PICTURE: f32 = 80.;
 
 /// The picture box's height for its width: the 16:10 most screens and
 /// windows come near; a screenshot of another shape is fitted inside.
@@ -141,15 +144,23 @@ pub(super) fn present(chat: &ChatView, _cx: &App) -> bool {
     !chat.screen.shots.is_empty()
 }
 
-/// The line the card's header shows beside its title, open or shut: the
-/// window the latest screenshot shows, and how long ago it was taken.
-pub(super) fn summary(chat: &ChatView, _cx: &App) -> Option<SharedString> {
-    let shot = chat.screen.shots.last()?;
-    let parts: Vec<String> = shot.label().into_iter().chain(shot.ago()).collect();
-    (!parts.is_empty()).then(|| parts.join(" · ").into())
+/// How tall the picture is drawn, as the rail last scaled it.
+fn scaled(chat: &ChatView) -> Rc<Cell<Option<f32>>> {
+    chat.motion.keep("rail-screen-scaled")
 }
 
-/// What the card shows open, laid out at the rail's width.
+/// The picture, which scales down in a rail too short for every card
+/// before the card scrolls.
+pub(super) fn scale(chat: &ChatView) -> super::stack::Scale {
+    let full = (f32::from(chat.body.width()) - 2. * CARD_INSET) * ASPECT;
+    super::stack::Scale {
+        full,
+        min: MIN_PICTURE.min(full),
+        height: scaled(chat),
+    }
+}
+
+/// What the card shows below its header, laid out at the rail's width.
 pub(super) fn body(
     chat: &ChatView,
     window: &mut Window,
@@ -162,8 +173,11 @@ pub(super) fn body(
     // The picture's box is the card's inner width. The cross-fade layers
     // have no size of their own, so the box and the rows beside it take it
     // explicitly.
-    let width = f32::from(chat.body.width()) - 2. * CARD_INSET;
-    let height = width * ASPECT;
+    let full = f32::from(chat.body.width()) - 2. * CARD_INSET;
+    // In a rail too short for every card the picture scales down, its
+    // width following its height, before the card scrolls.
+    let height = scaled(chat).get().unwrap_or(full * ASPECT);
+    let width = height / ASPECT;
     let preview = |shot: &Shot| {
         crate::store::item_image_preview(
             session_id.clone(),
@@ -226,7 +240,7 @@ pub(super) fn body(
         |shot, _, cx| {
             let ago = shot.ago();
             h_flex()
-                .w(px(width))
+                .w(px(full))
                 .gap(cx.theme().tokens.spacing.sm)
                 .text_secondary(false, cx)
                 .child(
@@ -313,7 +327,7 @@ pub(super) fn body(
             );
             fold.fold(
                 h_flex()
-                    .w(px(width))
+                    .w(px(full))
                     .justify_center()
                     .gap(cx.theme().tokens.spacing.sm)
                     .child(
@@ -350,7 +364,7 @@ pub(super) fn body(
         v_flex()
             .w_full()
             .gap(cx.theme().tokens.spacing.sm)
-            .child(picture)
+            .child(h_flex().w_full().justify_center().child(picture))
             .child(caption)
             .children(stepper)
             .into_any_element(),

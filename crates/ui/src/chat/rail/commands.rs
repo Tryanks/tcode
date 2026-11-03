@@ -130,7 +130,7 @@ pub(super) fn present(chat: &ChatView, _cx: &App) -> bool {
     chat.commands.total > 0
 }
 
-/// The line the card's header shows beside its title, open or shut: how
+/// The line the card's header shows beside its title: how
 /// many commands run, or how many ran, and how many of those failed.
 pub(super) fn summary(chat: &ChatView, _cx: &App) -> Option<SharedString> {
     let commands = &chat.commands;
@@ -152,7 +152,7 @@ pub(super) fn summary(chat: &ChatView, _cx: &App) -> Option<SharedString> {
     )
 }
 
-/// What the card shows open, laid out at the rail's width: a row for each
+/// What the card shows below its header, laid out at the rail's width: a row for each
 /// command, running ones first, each with how it stands, bringing its place
 /// in the timeline into view on a click; past [`SHOWN`], how many more.
 /// Commands that leave the list fold away as they stood.

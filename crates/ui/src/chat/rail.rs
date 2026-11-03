@@ -1,5 +1,5 @@
 //! The thread's side rail: cards stacked in the room a wide chat leaves
-//! right of its content column, each folding open to what it shows.
+//! right of its content column, each showing what it holds.
 
 mod agents;
 mod changes;
@@ -8,17 +8,16 @@ mod goal;
 mod plan;
 mod pull_requests;
 pub(super) mod screen;
+mod stack;
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    Pixels, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    Pixels, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, v_flex};
+use gpui_base::StyledExt as _;
 use tcode_core::ui::RightTab;
 
 use super::ChatView;
@@ -27,12 +26,12 @@ use crate::material::{
     CARD_INSET, CHAT_CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING, CHAT_RAIL_EDGE, CHAT_RAIL_GAP,
     CHAT_RAIL_NARROWEST, CHAT_RAIL_WIDEST, PANEL_CONTENT_MIN_WIDTH,
 };
+use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
-/// How long the rail, or a card in it, takes to come in or go, and a card's
-/// body to fold open or shut.
+/// How long the rail, or a card in it, takes to come in or go.
 const SHOW: Duration = Duration::from_millis(200);
 
 /// How far right of its place what takes the slot comes in from and leaves
@@ -247,26 +246,6 @@ impl RailCard {
         }
     }
 
-    /// Whether the card shows open until the reader shuts it, rather than
-    /// shut until the reader opens it.
-    fn open_at_first(self) -> bool {
-        matches!(self, Self::Goal | Self::Agents)
-    }
-
-    /// Its key in the view's expansion state, which holds the cards the
-    /// reader turned from how they show at first.
-    fn expansion_key(self) -> String {
-        if self.open_at_first() {
-            format!("rail-shut:{}", self.key())
-        } else {
-            format!("rail:{}", self.key())
-        }
-    }
-
-    fn open(self, expanded: &HashSet<String>) -> bool {
-        expanded.contains(&self.expansion_key()) != self.open_at_first()
-    }
-
     fn title(self) -> Cow<'static, str> {
         match self {
             Self::Goal => crate::tr!("chat.rail_goal"),
@@ -315,15 +294,16 @@ impl RailCard {
         }
     }
 
+    /// What its header says beside its title, where that is a fact the
+    /// top of its body does not already show.
     fn summary(self, chat: &ChatView, cx: &App) -> Option<SharedString> {
         match self {
             Self::Goal => goal::summary(chat, cx),
             Self::Plan => plan::summary(chat, cx),
             Self::Agents => agents::summary(chat, cx),
             Self::Commands => commands::summary(chat, cx),
-            Self::Screen => screen::summary(chat, cx),
             Self::Changes => changes::summary(chat, cx),
-            Self::PullRequests => pull_requests::summary(chat, cx),
+            Self::Screen | Self::PullRequests => None,
         }
     }
 
@@ -378,34 +358,25 @@ impl ChatView {
         if presence <= 0. || self.window_state.read(cx).compact {
             return None;
         }
-        let gap = cx.theme().tokens.spacing.sm;
-        let stack = crate::motion::keyed::keyed_owned(
-            &self.motion,
-            "rail-cards",
-            crate::motion::keyed::Fold::Down,
-            cards
-                .into_iter()
-                .map(|card| (SharedString::from(card.key()), card)),
-            SHOW,
-            window,
-            cx,
-            // The space under a card folds with it, so the cards below
-            // never jump by it.
-            |_, card, window, cx| {
-                div()
-                    .w_full()
-                    .pb(gap)
-                    .child(self.render_rail_card(*card, window, cx))
-                    .into_any_element()
-            },
-        )
-        .render(
-            v_flex()
-                .id("chat-rail-cards")
-                .w_full()
-                .max_h_full()
-                .overflow_y_scroll(),
-        );
+        // A card that goes keeps its place while it folds away.
+        let cards = RailCard::ALL
+            .into_iter()
+            .filter_map(|card| {
+                let shown = self.motion.shown(
+                    format!("rail-card-{}", card.key()),
+                    cards.contains(&card).then_some(()),
+                    SHOW,
+                    window,
+                    cx,
+                )?;
+                Some(self.render_rail_card(card, shown.progress(), shown.leaving(), window, cx))
+            })
+            .collect();
+        let stack = stack::RailStack {
+            id: "chat-rail-cards".into(),
+            cards,
+            gap: cx.theme().tokens.spacing.sm,
+        };
         Some(
             slot(self.body.width, presence, cx)
                 .debug_selector(|| "chat-rail".into())
@@ -415,86 +386,70 @@ impl ChatView {
         )
     }
 
-    /// One card: its header names it, sums it up and folds its body open
-    /// or shut; which cards are open is kept with the thread's other
-    /// expansions.
+    /// One card, `presence` of the way in: its header names it and sums
+    /// it up, and its body shows below in whatever height the rail gives
+    /// it, scrolling inside it.
     fn render_rail_card(
         &self,
         card: RailCard,
+        presence: f32,
+        leaving: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> stack::StackCard {
         let key = card.key();
-        let open_key = card.expansion_key();
-        let open = card.open(&self.expanded);
-        let muted = cx.theme().muted_foreground;
-        let title = card.title();
-        let header = crate::material::accessible_clickable(
-            crate::material::card_header_row(cx),
-            SharedString::from(format!("rail-card-{key}")),
-            Role::Button,
-            title.clone(),
-            cx,
-        )
-        .debug_selector(move || format!("rail-card-{key}"))
-        .aria_expanded(open)
-        .relative()
-        .cursor_pointer()
-        .on_click(cx.listener(move |this, _, _, cx| {
-            if !this.expanded.remove(&open_key) {
-                this.expanded.insert(open_key.clone());
-            }
-            cx.notify();
-        }))
-        .child(crate::material::row_hover(
-            crate::material::radius_card(cx),
-            cx,
-        ))
-        .child(Icon::new(card.icon()).small().text_color(muted))
-        .child(
-            div()
-                .flex_none()
-                .text_body(false, cx)
-                .font_medium()
-                .text_color(cx.theme().foreground)
-                .child(title),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_secondary(false, cx)
-                // A new summary cross-fades over the one it replaces. No
-                // summary is still a line tall: this box clips what leaves
-                // to the one that stays, and a card leaving has none.
-                .child(self.motion.cross_fade_part(
-                    format!("rail-card-summary-{key}"),
-                    card.summary(self, cx).unwrap_or_default(),
-                    SHOW,
-                    window,
-                    cx,
-                    |summary, _, _| crate::widgets::fade_text(summary.clone()).into_any_element(),
-                )),
-        )
-        .child(
-            crate::widgets::Chevron::new(SharedString::from(format!("rail-chevron-{key}")), open)
-                .owned(&self.motion)
-                .text_color(muted),
-        );
-        let body = self
-            .motion
-            .shown(
-                format!("rail-card-body-{key}"),
-                open.then_some(()),
-                SHOW,
-                window,
-                cx,
+        let summary = card.summary(self, cx);
+        let header = crate::material::card_header_row(cx)
+            .debug_selector(move || format!("rail-card-{key}"))
+            .relative()
+            .opacity(presence)
+            .child(
+                Icon::new(card.icon())
+                    .small()
+                    .text_color(cx.theme().muted_foreground),
             )
-            .and_then(|fold| {
-                let body = card.body(self, window, cx)?;
-                Some(
-                    fold.fold(
+            .child(
+                div()
+                    .flex_none()
+                    .text_body(false, cx)
+                    .font_medium()
+                    .text_color(cx.theme().foreground)
+                    .child(card.title()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_secondary(false, cx)
+                    // A new summary cross-fades over the one it replaces. No
+                    // summary is still a line tall: this box clips what
+                    // leaves to the one that stays, and a card leaving has
+                    // none.
+                    .child(self.motion.cross_fade_part(
+                        format!("rail-card-summary-{key}"),
+                        summary.unwrap_or_default(),
+                        SHOW,
+                        window,
+                        cx,
+                        |summary, _, _| {
+                            crate::widgets::fade_text(summary.clone()).into_any_element()
+                        },
+                    )),
+            )
+            .into_any_element();
+        let body = card.body(self, window, cx).map(|body| {
+            div()
+                .id(SharedString::from(format!("rail-card-body-{key}")))
+                .debug_selector(move || format!("rail-card-body-{key}"))
+                .relative()
+                .size_full()
+                .opacity(presence)
+                // The body takes the wheel over it rather than the timeline
+                // under the rail.
+                .occlude()
+                .child(
+                    div().w_full().overflow_y_scrollbar().child(
                         div()
                             .w_full()
                             .px(px(CARD_INSET))
@@ -502,16 +457,23 @@ impl ChatView {
                             .child(body),
                     ),
                 )
-            });
-        crate::material::card_raised(cx)
-            .p_0()
-            .gap_0()
-            .w_full()
-            .overflow_hidden()
-            .block_mouse_except_scroll()
-            .child(header)
-            .children(body)
-            .into_any_element()
+                // What is leaving takes no clicks.
+                .when(leaving, |body| body.child(crate::motion::shield()))
+                .into_any_element()
+        });
+        stack::StackCard {
+            chrome: crate::material::card_raised(cx)
+                .p_0()
+                .size_full()
+                .opacity(presence)
+                .debug_selector(move || format!("rail-card-frame-{key}"))
+                .block_mouse_except_scroll()
+                .into_any_element(),
+            header,
+            body,
+            presence,
+            scale: (card == RailCard::Screen).then(|| screen::scale(self)),
+        }
     }
 }
 
@@ -571,5 +533,153 @@ impl gpui::Render for Clock {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         let now = tcode_core::project::now_secs() * 1000;
         div().child(super::format_elapsed(now.saturating_sub(self.since)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent::{Goal, GoalStatus, PlanStep, PlanStepStatus};
+    use gpui::{AppContext as _, Bounds, TestAppContext, VisualTestContext, point, size};
+    use tcode_core::session::Timeline;
+
+    use super::*;
+    use crate::chat::tests::*;
+    use crate::test_frames::{draw, draw_settled};
+    use crate::window_state::WindowState;
+
+    /// A thread with a long goal and a long plan, whose latest turn ran
+    /// `commands` commands.
+    fn timeline(commands: usize) -> Timeline {
+        let mut timeline = synthetic_markdown_timeline(2);
+        timeline.goal = Some(Goal {
+            objective: "Keep the rail inside the window however many cards it holds, \
+                        scrolling each card's body rather than the rail"
+                .into(),
+            status: GoalStatus::Active,
+            tokens_used: Some(12_000),
+            token_budget: Some(200_000),
+            time_used_secs: Some(90),
+            checks: Some(2),
+            last_check: Some("The plan card still pushes the others off the rail".into()),
+        });
+        timeline.plan_steps = (0..14)
+            .map(|step| PlanStep {
+                step: format!("Step {step} of a plan long enough to fill its card"),
+                status: PlanStepStatus::Pending,
+            })
+            .collect();
+        timeline
+            .entries
+            .extend((0..commands).map(|index| at_turn(command(&format!("cmd-{index}")), 1)));
+        timeline
+    }
+
+    const AT_REST: &[&str] = &["frame", "body"];
+
+    fn bounds(cx: &mut VisualTestContext, selector: &str) -> Option<Bounds<Pixels>> {
+        cx.debug_bounds(selector.to_owned().leak())
+    }
+
+    /// The `parts` of every card lie inside the rail. A card coming in is
+    /// drawn clipped to its surface, so only that is its extent then.
+    fn inside(cx: &mut VisualTestContext, keys: &[&str], parts: &[&str], when: &str) {
+        let rail = bounds(cx, "chat-rail").expect("the rail is drawn");
+        let slack = px(0.5);
+        for key in keys {
+            for part in parts {
+                let Some(part) = bounds(cx, &format!("rail-card-{part}-{key}")) else {
+                    continue;
+                };
+                assert!(
+                    part.top() >= rail.top() - slack && part.bottom() <= rail.bottom() + slack,
+                    "{when}: the {key} card's {part:?} leaves the rail {rail:?}"
+                );
+            }
+        }
+    }
+
+    /// Cards with more to show than a short rail holds share its height:
+    /// the rail never runs past its bottom, as a card comes in or once it
+    /// is in, and each card's body scrolls inside its share.
+    #[gpui::test]
+    fn cards_share_a_short_rail_and_scroll_inside_it(cx: &mut TestAppContext) {
+        let mut threads = seed_two_threads(cx, timeline(0));
+        let store = threads.store.clone();
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (chat, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        cx.simulate_resize(size(px(1_400.), px(560.)));
+        let first = threads.first.clone();
+        threads.bind(&chat, &first, timeline(0), cx);
+        draw_settled(cx);
+        assert!(
+            cx.update(|_, cx| !cx.reduce_motion()),
+            "the cards come in with motion"
+        );
+        inside(cx, &["goal", "plan"], AT_REST, "at rest with two cards");
+
+        // The commands card comes in over frames, the others giving way.
+        threads.store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(first.clone(), timeline(9), cx)
+        });
+        draw(cx);
+        for frame in 0..30 {
+            inside(
+                cx,
+                &["goal", "plan", "commands"],
+                &["frame"],
+                &format!("frame {frame}"),
+            );
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+        }
+        draw_settled(cx);
+        inside(
+            cx,
+            &["goal", "plan", "commands"],
+            AT_REST,
+            "at rest with three cards",
+        );
+
+        let rail = bounds(cx, "chat-rail").unwrap();
+        for key in ["goal", "plan", "commands"] {
+            let header = bounds(cx, &format!("rail-card-{key}")).expect("the header shows");
+            assert!(header.bottom() <= rail.bottom(), "the {key} header shows");
+            let body = bounds(cx, &format!("rail-card-body-{key}")).expect("the body shows");
+            assert!(body.size.height > px(0.), "the {key} body has room");
+        }
+
+        // The commands' body holds more rows than its share and scrolls.
+        let body = bounds(cx, "rail-card-body-commands").unwrap();
+        let oldest = bounds(cx, "rail-command-cmd-3").expect("the sixth row is listed");
+        assert!(
+            oldest.bottom() > body.bottom(),
+            "the commands body shows all its rows ({oldest:?} in {body:?}): nothing to scroll"
+        );
+        cx.simulate_mouse_move(body.center(), None, gpui::Modifiers::default());
+        cx.simulate_event(gpui::ScrollEvent {
+            position: body.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-400.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        draw_settled(cx);
+        let scrolled = bounds(cx, "rail-command-cmd-3").unwrap();
+        assert!(
+            scrolled.top() < oldest.top(),
+            "the commands body scrolls inside its card"
+        );
+        assert_eq!(
+            bounds(cx, "rail-card-body-commands").unwrap(),
+            body,
+            "the card stays where it is"
+        );
+        inside(
+            cx,
+            &["goal", "plan", "commands"],
+            AT_REST,
+            "after scrolling",
+        );
     }
 }

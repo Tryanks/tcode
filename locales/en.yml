@@ -132,7 +132,6 @@ rail:
   commands_running: "%{count} running"
   commands_failed: "%{count} failed"
   commands_more: "%{count} more"
-  pull_requests: "%{count} pull requests"
 markdown:
   math_show_rendered: "Show rendered formula"
   math_show_source: "Show LaTeX source"
