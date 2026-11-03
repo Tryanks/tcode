@@ -1,5 +1,7 @@
 use super::*;
 
+#[cfg(test)]
+mod catch_up;
 mod expansion;
 mod glide;
 mod list;
