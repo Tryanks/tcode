@@ -7,8 +7,9 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::ContextMenuExt as _;
 use agent::{ChangeCompleteness, FileChange};
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, IntoElement as _, ParentElement as _, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -172,6 +173,188 @@ pub(crate) fn changed_files(
     content = content.child(body);
 
     content.into_any_element()
+}
+
+/// How many files [`changed_file_rows`] lists before it offers the rest.
+const RAIL_SHOWN: usize = 3;
+
+/// A turn's changed files one row each, for the chat rail: the file's name
+/// then its folder, fading, and its added and removed lines at the right.
+/// A row opens the file's diff on a click; past [`RAIL_SHOWN`] a control
+/// shows the rest, or fewer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn changed_file_rows(
+    index: usize,
+    cwd: &Path,
+    changes: &[FileChange],
+    show_all: bool,
+    open_files: Vec<ClickHandler>,
+    toggle_more: ClickHandler,
+    motion: &crate::motion::owned::Owned,
+    cx: &App,
+) -> AnyElement {
+    let visible = if show_all {
+        changes.len()
+    } else {
+        changes.len().min(RAIL_SHOWN)
+    };
+    let rows: Vec<(SharedString, RailRow)> = changes
+        .iter()
+        .take(visible)
+        .zip(open_files)
+        .map(|(change, open)| {
+            let display = crate::workspace_walk::relativize_to_workspace(&change.path, cwd);
+            let path = Path::new(&display);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| display.clone());
+            let folder = path
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+                .filter(|parent| !parent.is_empty());
+            let (added, deleted) = diff_stats(change.diff.as_deref());
+            (
+                SharedString::from(format!("file-{}", change.path)),
+                RailRow {
+                    name,
+                    folder,
+                    display,
+                    path: change.path.clone(),
+                    added,
+                    deleted,
+                    open: std::rc::Rc::new(open),
+                },
+            )
+        })
+        .collect();
+    let more = (changes.len() > RAIL_SHOWN).then(|| {
+        let label: SharedString = if show_all {
+            crate::tr!("chat.show_fewer_files")
+        } else {
+            crate::tr!("chat.more_files", count = changes.len() - RAIL_SHOWN)
+        }
+        .into_owned()
+        .into();
+        quiet_control(("changed-files-more", index), label, toggle_more, cx)
+            .motion(motion)
+            .font_family(cx.theme().mono_font_family.clone())
+    });
+    let cwd = cwd.to_path_buf();
+    let motion = motion.clone();
+    let rows = crate::motion::Sampled::new(move |window, cx| {
+        crate::motion::keyed::keyed_owned(
+            &motion,
+            format!("changed-file-rows-{index}"),
+            crate::motion::keyed::Fold::Down,
+            rows,
+            ROWS,
+            window,
+            cx,
+            |key, row, _, cx| rail_row(index, &cwd, key, row, cx),
+        )
+        .render(v_flex().w_full().min_w_0())
+    });
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .child(rows)
+        .children(more)
+        .into_any_element()
+}
+
+/// One file as [`changed_file_rows`] lists it.
+#[derive(Clone)]
+struct RailRow {
+    name: String,
+    /// The folder it is in, relative to the workspace, when it is not at
+    /// its root.
+    folder: Option<String>,
+    display: String,
+    path: String,
+    added: u32,
+    deleted: u32,
+    open: std::rc::Rc<ClickHandler>,
+}
+
+fn rail_row(index: usize, cwd: &Path, key: &SharedString, row: &RailRow, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let radius = crate::material::radius_card(cx);
+    let open = row.open.clone();
+    let selector = key.clone();
+    crate::material::accessible_clickable(
+        h_flex(),
+        SharedString::from(format!("changed-file-row-{index}-{key}")),
+        Role::Button,
+        format!("{}: {}", crate::tr!("chat.view_diff"), row.display),
+        cx,
+    )
+    .debug_selector(move || format!("changed-file-row-{selector}"))
+    .relative()
+    .w_full()
+    .min_w_0()
+    .px_1()
+    .py_1()
+    .gap_2()
+    .items_center()
+    .rounded(radius)
+    .cursor_pointer()
+    .text_meta_mono(false, cx)
+    .child(crate::material::row_hover(radius, cx))
+    .child(
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_1p5()
+            .overflow_hidden()
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_color(theme.foreground)
+                    .child(crate::widgets::fade_text(row.name.clone())),
+            )
+            .children(row.folder.clone().map(|folder| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(folder))
+            })),
+    )
+    .child(
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .whitespace_nowrap()
+            .child(
+                div()
+                    .text_color(theme.success)
+                    .child(format!("+{}", row.added)),
+            )
+            .child(
+                div()
+                    .text_color(theme.danger)
+                    .child(format!("-{}", row.deleted)),
+            ),
+    )
+    .on_click(move |event, window, cx| open(event, window, cx))
+    .context_menu({
+        let path = row.path.clone();
+        let cwd = cwd.to_path_buf();
+        move |menu, _, _| {
+            menu.menu(
+                crate::tr!("chat.view_diff").into_owned(),
+                Box::new(super::super::OpenFileDiff {
+                    turn: index,
+                    path: path.clone(),
+                }),
+            )
+            .separator()
+            .path_items(&path, Some(&cwd))
+        }
+    })
+    .into_any_element()
 }
 
 /// What one place in the files row holds.
