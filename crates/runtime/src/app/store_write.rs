@@ -41,7 +41,6 @@ pub(super) enum StoreWrite {
         commands: Vec<ProviderCommand>,
     },
     InvalidateCommands(CommandsCacheKey),
-    WriteTerminalUi(Vec<u8>),
     WriteSettings(Vec<u8>),
     WriteReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     WriteControlActivity(Vec<tcode_core::control::ControlActivityEntry>),
@@ -179,7 +178,6 @@ impl StoreWrite {
             }
             StoreWrite::SaveCommands { .. }
             | StoreWrite::InvalidateCommands(_)
-            | StoreWrite::WriteTerminalUi(_)
             | StoreWrite::WriteSettings(_)
             | StoreWrite::WriteReviewRecords(_)
             | StoreWrite::WriteControlActivity(_)
@@ -225,7 +223,6 @@ pub(super) fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()>
 pub(super) struct StoreWriter {
     pub(super) store: SessionStore,
     pub(super) settings_store: SettingsStore,
-    pub(super) terminal_preferences_path: PathBuf,
     pub(super) failures: smol::channel::Sender<StoreWriteFailure>,
     /// The first failed database write, until the writer stops.
     unresolved: Option<String>,
@@ -235,13 +232,11 @@ impl StoreWriter {
     pub(super) fn new(
         store: SessionStore,
         settings_store: SettingsStore,
-        terminal_preferences_path: PathBuf,
         failures: smol::channel::Sender<StoreWriteFailure>,
     ) -> Self {
         Self {
             store,
             settings_store,
-            terminal_preferences_path,
             failures,
             unresolved: None,
         }
@@ -352,15 +347,6 @@ impl StoreWriter {
                         "failed to invalidate {key:?} command cache: {err}"
                     ))
                 })
-            }
-            StoreWrite::WriteTerminalUi(bytes) => {
-                atomic_write(self.terminal_preferences_path.clone(), bytes)
-                    .err()
-                    .map(|err| {
-                        StoreWriteFailure::Warning(format!(
-                            "failed to persist terminal UI state: {err}"
-                        ))
-                    })
             }
             StoreWrite::WriteSettings(bytes) => {
                 atomic_write(self.store.root().join("settings.json"), bytes)
