@@ -12,9 +12,7 @@ use gpui::{
 };
 use gpui_base::h_flex;
 
-use super::super::model::{
-    TurnTimeClause, format_elapsed, format_local_time, turn_time_breakdown, turn_time_clauses,
-};
+use super::super::model::{TurnTimeClause, format_elapsed, format_local_time, turn_time_clauses};
 use crate::time::now_millis;
 use tcode_core::session::TurnMeta;
 
@@ -214,7 +212,6 @@ pub(crate) fn turn_working_indicator(
 pub(crate) fn turn_time_footer(
     id: SharedString,
     clauses: Vec<TurnTimeClause>,
-    breakdown: Option<String>,
     cx: &App,
 ) -> AnyElement {
     let warning = cx.theme().warning;
@@ -226,9 +223,6 @@ pub(crate) fn turn_time_footer(
         .items_start()
         .text_meta_mono(false, cx)
         .debug_selector(|| "turn-time-row".into())
-        .when_some(breakdown, |row, breakdown| {
-            row.with_tooltip(move |_, _| Tooltip::new(breakdown.clone()))
-        })
         .child(
             h_flex()
                 .flex_1()
@@ -239,15 +233,22 @@ pub(crate) fn turn_time_footer(
                 .gap_y(px(2.))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
                     let selector = clause.selector;
-                    div()
+                    // The clause alone triggers its tooltip, which stands
+                    // beside what it explains.
+                    let text = div()
+                        .id(selector)
                         .min_w_0()
                         .debug_selector(move || selector.into())
+                        .child(clause.text)
+                        .when_some(clause.tooltip, |text, tooltip| {
+                            text.with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
+                        });
+                    h_flex()
+                        .min_w_0()
+                        .gap_x(px(4.))
                         .when(clause.warning, |element| element.text_color(warning))
-                        .child(if index == last {
-                            clause.text
-                        } else {
-                            format!("{} ·", clause.text)
-                        })
+                        .child(text)
+                        .when(index != last, |element| element.child("·"))
                 })),
         )
         .into_any_element()
@@ -268,7 +269,6 @@ pub(crate) fn finished_turn_time(
             turn.served_model.as_deref(),
             requested_model,
         ),
-        turn_time_breakdown(turn.timing),
         cx,
     )
 }
@@ -297,7 +297,6 @@ mod tests {
             gpui_base::v_flex().size_full().child(turn_time_footer(
                 "turn-time-probe".into(),
                 self.clauses.clone(),
-                None,
                 cx,
             ))
         }
