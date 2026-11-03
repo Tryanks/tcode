@@ -140,6 +140,16 @@ pub const STORED_OUTPUT_COLS: std::ops::RangeInclusive<u16> = 20..=400;
 /// trimmed, so a shorter output returns a shorter frame.
 pub const STORED_OUTPUT_ROWS: u16 = 16;
 
+/// How much of a finished command's output its frame holds: all of it, up to
+/// its last `STORED_OUTPUT_BYTES` and the `STORED_OUTPUT_HISTORY` rows of
+/// scrollback they make; what comes before, the frame counts in
+/// `lines_evicted`. A frame goes as one transport line, whose peers read
+/// 16 MiB at most, and each character is a JSON cell of about 13 bytes: this
+/// much dense output makes a frame of about 10 MiB (measured by the host's
+/// `a_frame_at_the_ceiling_fits_one_transport_line`).
+pub const STORED_OUTPUT_BYTES: usize = 768 * 1024;
+pub const STORED_OUTPUT_HISTORY: usize = 20_000;
+
 /// Largest export the host will put on one response frame. The transport writes
 /// a single WebSocket text frame per NDJSON line and peers read with
 /// tungstenite's 16 MiB frame cap, so the base64 payload (4/3 of the raw bytes)

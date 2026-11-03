@@ -370,6 +370,7 @@ pub(crate) fn preview_window(
             elapsed_ms,
             compact: false,
             copy,
+            whole_output: None,
             path: None,
             hover,
             motion: Default::default(),

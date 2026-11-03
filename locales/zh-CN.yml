@@ -2896,6 +2896,7 @@ tools:
   copy_diff: "复制差异"
   line_range: "第 %{first}–%{last} 行"
   copy_content: "复制内容"
+  lines_left_out: "… 前面还有 %{count} 行未在此显示 — “复制输出”会复制全部"
   lines_not_shown: "另有 %{count} 行未显示；复制内容即可阅读"
   results: "%{count} 个结果"
   more_results: "另 %{count} 个"

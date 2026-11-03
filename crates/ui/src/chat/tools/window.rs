@@ -259,6 +259,9 @@ pub(in crate::chat) struct WindowSpec {
     pub(in crate::chat) elapsed_ms: Option<u64>,
     pub(in crate::chat) compact: bool,
     pub(in crate::chat) copy: Vec<(String, String)>,
+    /// The copy of an output the record holds only a preview of, which the
+    /// chat takes whole.
+    pub(in crate::chat) whole_output: Option<(String, crate::chat::CopyWholeOutput)>,
     /// A file the call is about, which the menu offers to open, and the
     /// directory a relative one is under.
     pub(in crate::chat) path: Option<(String, std::path::PathBuf)>,
@@ -298,6 +301,7 @@ pub(in crate::chat) fn tool_window(
         elapsed_ms,
         compact,
         copy,
+        whole_output,
         path,
         hover,
         motion,
@@ -392,9 +396,13 @@ pub(in crate::chat) fn tool_window(
                 }
                 None => menu,
             };
-            copy.iter().cloned().fold(menu, |menu, (label, text)| {
+            let menu = copy.iter().cloned().fold(menu, |menu, (label, text)| {
                 menu.menu(label, Box::new(CopyText(text)))
-            })
+            });
+            match &whole_output {
+                Some((label, action)) => menu.menu(label.clone(), Box::new(action.clone())),
+                None => menu,
+            }
         })
         .into_any_element()
 }

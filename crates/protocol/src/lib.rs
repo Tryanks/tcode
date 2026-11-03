@@ -53,9 +53,10 @@ pub use query::{
     GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
     MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
     PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
-    STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo,
-    TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
-    TraverseRelayStatus, TraverseSourceStatus,
+    STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
+    SessionSearchHit, SourceTool, SpaceAction, SpaceInfo, TraverseLookupState,
+    TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus,
+    TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -250,7 +251,9 @@ pub use wire::{
 // timeline entries feedback. The instruction channel drops per_prompt_system:
 // OpenCode 2.x keeps Tcode's instructions in a session instruction entry.
 // A command output frame carries the rows that scrolled off its screen as
-// its history.
+// its history: a finished command's whole output up to STORED_OUTPUT_BYTES
+// and STORED_OUTPUT_HISTORY rows, and lines_evicted counts the lines before
+// them it leaves out.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]
