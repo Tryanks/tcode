@@ -8027,8 +8027,7 @@ mod tests {
     }
 
     /// `id`'s status as the host reports a native subagent's: read-only,
-    /// so its composer is its settings row and the lead's composer card is
-    /// the one on screen.
+    /// its composer only its settings row.
     fn serve_subagent_status(host: &MountedShell, id: &str) {
         let mut status = session_status(id, std::path::Path::new(PANES_CWD));
         status.conversation_read_only = true;
@@ -8043,8 +8042,8 @@ mod tests {
         );
     }
 
-    /// Open `agent-1` from its lead's Agents panel, and serve it as a
-    /// native subagent with an empty log.
+    /// Open `agent-1` from its lead's Agents panel, and serve it with an
+    /// empty log.
     fn open_agent_from_panel(
         shell: &Entity<AppShell>,
         host: &MountedShell,
@@ -8058,13 +8057,10 @@ mod tests {
         cx.simulate_click(row.center(), gpui::Modifiers::default());
         draw(cx);
         serve_thread(host, "agent-1");
-        serve_subagent_status(host, "agent-1");
         // The app applies what the host sent as it arrives; an agent come
         // back to draws from what was kept until its window lands.
         await_restore_update(shell, cx, |store| {
-            !store.chat_loading()
-                && store.timeline_settled_for("agent-1")
-                && store.native_subagent_readonly_for(Some("agent-1"))
+            !store.chat_loading() && store.timeline_settled_for("agent-1")
         });
         settle_panes(cx);
     }
@@ -8143,10 +8139,9 @@ mod tests {
                 (card.size.width * 3. - pane.size.width).abs() < pane.size.width * 0.03,
                 "{card:?} is a third of {pane:?}"
             );
-            let lead = cx
-                .debug_bounds("composer-card")
-                .expect("the lead's composer");
-            assert_eq!(lead.size.width, column.size.width, "round {round}");
+            let lead = lead_card(column, cx).unwrap_or_else(|| {
+                panic!("round {round}: the lead's composer keeps the width of {column:?}")
+            });
             assert!(lead.right() < card.left(), "{lead:?} clear of {card:?}");
             assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
             store.read_with(cx, |store, _| {
@@ -8182,9 +8177,7 @@ mod tests {
         settle_panes(cx);
         open_agent_from_panel(&shell, &host, cx);
         let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
-        let lead = cx
-            .debug_bounds("composer-card")
-            .expect("the lead's composer");
+        let lead = lead_card(column, cx).expect("the lead's composer");
         let grip = cx
             .debug_bounds("chat-side-grip")
             .expect("the grip of the card's edge");
@@ -8211,14 +8204,41 @@ mod tests {
             (dragged.left() - (card.left() - px(10.))).abs() < px(1.),
             "{dragged:?} widened from {card:?} as far as its edge went"
         );
-        let lead = cx
-            .debug_bounds("composer-card")
-            .expect("the lead's composer");
-        assert_eq!(lead.size.width, column.size.width);
+        let lead = lead_card(column, cx).expect("the lead's composer keeps its width");
         assert!(
             lead.right() < dragged.left(),
             "{lead:?} clear of {dragged:?}"
         );
+    }
+
+    /// The lead's composer card, `column` as the lead alone drew it, where
+    /// it is painted now with the same size at the same height. With a
+    /// writable agent beside the lead, the agent's composer card is a
+    /// "composer-card" too, and drawn after the lead's.
+    fn lead_card(
+        column: gpui::Bounds<Pixels>,
+        cx: &mut VisualTestContext,
+    ) -> Option<gpui::Bounds<Pixels>> {
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            crate::test_frames::painted_quads(window)
+                .iter()
+                .map(|quad| {
+                    let bounds = quad.bounds;
+                    gpui::Bounds::new(
+                        gpui::point(px(bounds.origin.x.0 / scale), px(bounds.origin.y.0 / scale)),
+                        size(
+                            px(bounds.size.width.0 / scale),
+                            px(bounds.size.height.0 / scale),
+                        ),
+                    )
+                })
+                .find(|bounds| {
+                    (bounds.size.width - column.size.width).abs() < px(0.5)
+                        && (bounds.size.height - column.size.height).abs() < px(0.5)
+                        && (bounds.top() - column.top()).abs() < px(0.5)
+                })
+        })
     }
 
     /// The first pane's timeline on screen.
