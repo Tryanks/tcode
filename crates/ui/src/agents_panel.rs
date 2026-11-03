@@ -1009,7 +1009,9 @@ impl Render for AgentsPanel {
             .on_action(cx.listener(Self::on_settle))
             .on_action(cx.listener(Self::on_cancel));
         // The empty state and the list cross-fade as the first agent starts
-        // or the last one goes.
+        // or the last one goes. The current one stays in flow: the phone
+        // sheet is as tall as what it holds, and gives layers that only
+        // fill it no height.
         let fade = crate::motion::CrossFade::new(
             "agents-empty-or-list",
             usize::from(!agents.is_empty()),
@@ -1018,7 +1020,8 @@ impl Render for AgentsPanel {
             window,
             cx,
         )
-        .fill();
+        .column()
+        .span();
         let mut layers = Vec::new();
         if fade.shows(0) {
             layers.push((0, Self::render_empty(cx)));
