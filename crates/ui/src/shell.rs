@@ -8142,19 +8142,12 @@ mod tests {
             settle_panes(cx);
             settle_frames(cx);
         };
-        cx.update(|window, cx| {
-            crate::agents_panel::open_agent(
-                &store,
-                "agent-1".into(),
-                crate::shell::side_host_for("thread-1", cx),
-                None,
-                window,
-                cx,
-            )
-        });
+        press("rail-agent-agent-1", cx);
         serve_agent("agent-1", &["spawn-2"], cx);
         choose_from_palette(&shell, &PaneLayout::SpreadAgents.label(), cx);
-        // The agent's pane asks for its log again.
+        // The layout goes in as the column fades, and the agent's pane then
+        // asks for its log again.
+        settle_panes(cx);
         serve_agent("agent-1", &["spawn-2"], cx);
         let both = [Some("thread-1".to_owned()), Some("agent-1".to_owned())];
         assert_eq!(pane_threads(&shell, cx), both);
@@ -8168,7 +8161,11 @@ mod tests {
                 press("rail-agent-spawn-2", cx);
             } else {
                 // The keyboard in the right pane, its agents in the panel.
-                cx.simulate_keystrokes("secondary-alt-right");
+                let right = pane_bounds(&shell, cx)[1];
+                let at = gpui::point(right.center().x, right.top() + right.size.height / 4.);
+                cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+                draw(cx);
+                cx.simulate_click(at, gpui::Modifiers::default());
                 settle_panes(cx);
                 assert_eq!(keyboard_pane(&shell, cx), Some(1));
                 store.update(cx, |store, cx| store.toggle_agents_panel(cx));
