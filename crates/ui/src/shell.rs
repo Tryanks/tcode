@@ -7039,7 +7039,11 @@ mod tests {
                 )
                 .unwrap();
         }
-        await_restore_update(shell, cx, |store| !store.chat_loading());
+        // The app applies what the host sent as it arrives; a thread come
+        // back to draws from what was kept until its window lands.
+        await_restore_update(shell, cx, |store| {
+            !store.chat_loading() && store.timeline_settled_for(session)
+        });
     }
 
     /// A tablet that rotates through phone widths and back: a subagent's
