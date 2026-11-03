@@ -50,9 +50,10 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     )
 }
 
-/// What the card shows below its header, laid out at the rail's width: the plan as the
-/// Plan tab draws it, what the agent said of it over its steps. A plan that empties while the card leaves is
-/// drawn as it last stood.
+/// What the card shows below its header, laid out at the rail's width: the
+/// plan's steps without the Plan tab's marker column, what the agent said
+/// of it over them. A plan that empties while the card leaves is drawn as
+/// it last stood.
 pub(super) fn body(
     chat: &ChatView,
     window: &mut Window,
@@ -83,6 +84,7 @@ pub(super) fn body(
                 "rail-plan-steps",
                 &steps,
                 false,
+                crate::plan_panel::StepLayout::Dense,
                 window,
                 cx,
             ))

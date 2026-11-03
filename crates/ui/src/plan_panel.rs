@@ -11,6 +11,7 @@ use gpui::{
 use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 
 use crate::material;
+use crate::sizing::Sizable as _;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// How long a value drawn here takes to glide to a new one.
@@ -119,7 +120,14 @@ impl Render for PlanPanel {
                                 .child(crate::tr!("tasks.steps")),
                         )
                         .child(material::rail_detail(
-                            render_steps("plan-steps", &steps, compact, window, cx),
+                            render_steps(
+                                "plan-steps",
+                                &steps,
+                                compact,
+                                StepLayout::Marked,
+                                window,
+                                cx,
+                            ),
                             cx,
                         )),
                 );
@@ -177,6 +185,16 @@ pub(crate) fn render_explanation(
     )
 }
 
+/// How a plan's steps say where each stands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepLayout {
+    /// A marker column before each step's text.
+    Marked,
+    /// No marker column: the text's colour says it, and the step under way
+    /// ends with a small spinner.
+    Dense,
+}
+
 /// A plan's steps, keyed by their text: a plan the agent rewrites folds the
 /// steps it dropped away as they stood and folds new ones in, and the steps
 /// it kept glide to their new places, carrying their state.
@@ -184,6 +202,7 @@ pub(crate) fn render_steps(
     id: &'static str,
     steps: &[PlanStep],
     compact: bool,
+    layout: StepLayout,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -194,9 +213,17 @@ pub(crate) fn render_steps(
         *repeat += 1;
         (key, step.clone())
     });
-    crate::motion::keyed(id, keyed, ROWS, window, cx, |key, step, _, cx| {
-        render_step(key, step, compact, cx)
-    })
+    crate::motion::keyed(
+        id,
+        keyed,
+        ROWS,
+        window,
+        cx,
+        |key, step, _, cx| match layout {
+            StepLayout::Marked => render_step(key, step, compact, cx),
+            StepLayout::Dense => render_dense_step(key, step, compact, cx),
+        },
+    )
     .render(v_flex().w_full().min_w_0().gap_1())
 }
 
@@ -267,6 +294,72 @@ fn render_step(key: &SharedString, step: &PlanStep, compact: bool, cx: &App) -> 
                 .child(marker),
         )
         .child(text)
+        .into_any_element()
+}
+
+/// A step of [`StepLayout::Dense`]: its text from the left edge, muted and
+/// struck through once done, in the primary colour while under way, with
+/// a small spinner at the right that folds in and away with it.
+fn render_dense_step(key: &SharedString, step: &PlanStep, compact: bool, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (muted, foreground, primary) = (theme.muted_foreground, theme.foreground, theme.primary);
+    let status = step.status;
+    let completed = status == PlanStepStatus::Completed;
+    let text_id = SharedString::from(format!("plan-step-text-{key}"));
+    let label = step.step.clone();
+    let text = crate::motion::Sampled::new(move |window, cx| {
+        let color = gpui_base::motion::transition(
+            text_id,
+            match status {
+                PlanStepStatus::Completed => muted,
+                PlanStepStatus::InProgress => primary,
+                PlanStepStatus::Pending => foreground,
+            },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        div()
+            .flex_1()
+            .min_w_0()
+            .text_color(color)
+            .when(completed, |text| text.line_through())
+            .child(label)
+            .into_any_element()
+    });
+    let spinner_id = SharedString::from(format!("plan-step-spinner-{key}"));
+    let line_height = if compact {
+        cx.theme().tokens.typography.md.line_height
+    } else {
+        cx.theme().tokens.typography.sm.line_height
+    };
+    let spinner = crate::motion::Sampled::new(move |window, cx| {
+        let running = (status == PlanStepStatus::InProgress).then_some(());
+        crate::motion::shown(spinner_id, running, CHANGE, window, cx)
+            .map(|shown| {
+                shown.fold_across(
+                    // One body line tall, so the spinner centres on the
+                    // first line.
+                    h_flex().h(line_height).pl_2().child(
+                        Spinner::new()
+                            .color(primary)
+                            .with_size(crate::sizing::Size::XSmall),
+                    ),
+                )
+            })
+            .unwrap_or_else(|| div().into_any_element())
+    });
+
+    let key = key.clone();
+    h_flex()
+        .id(SharedString::from(format!("plan-step-{key}")))
+        .debug_selector(move || format!("plan-step-{key}"))
+        .w_full()
+        .py_1()
+        .items_start()
+        .text_body(compact, cx)
+        .child(text)
+        .child(spinner)
         .into_any_element()
 }
 
