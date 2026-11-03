@@ -466,7 +466,7 @@ impl ChatView {
             .in_scene(&scene),
             terminal_glide_compact: false,
             body: Default::default(),
-            side: side::Side::new(&scene, cx),
+            side: side::Side::new(),
             side_of: None,
             list_state,
             timeline_stale: false,
@@ -703,17 +703,20 @@ impl Render for ChatView {
         // time the window crossed the breakpoint.
         self.composer
             .update(cx, |composer, cx| composer.set_compact(compact, cx));
-        // The phone reads on T1 paper; the desktop keeps the glass canvas.
+        // The phone reads on T1 paper; the desktop keeps the glass canvas,
+        // but for an agent on its lead's card, which reads on the card.
         // The header's title menu dispatches these, and the header is a sibling of `main`.
         let root = v_flex()
             .id(self.scene.id("chat"))
             .size_full()
             .min_w_0()
             .track_focus(&self.focus_handle)
-            .bg(if compact {
-                crate::material::content_surface(cx)
-            } else {
-                crate::material::canvas(cx)
+            .when(!self.on_side_card(), |root| {
+                root.bg(if compact {
+                    crate::material::content_surface(cx)
+                } else {
+                    crate::material::canvas(cx)
+                })
             })
             .on_action(cx.listener(Self::on_link_dialog))
             .on_action(cx.listener(Self::on_move_thread_dialog))
@@ -908,16 +911,13 @@ impl ChatView {
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
         let rail_cards = self.rail_cards(cx);
-        let layout = rail::BodyLayout::of(
-            width,
-            !rail_cards.is_empty(),
-            self.side_open(width, cx),
-            compact,
-        );
+        let layout =
+            rail::BodyLayout::of(width, !rail_cards.is_empty(), self.side_share(cx), compact);
         // gpui-base has no transition that moves a laid-out column to a new
         // centre, so the view glides the column's offset itself: its shift
-        // follows the rail's presence, which glides, and the width, which
-        // does not, so a resize is tracked at once.
+        // follows the presence of the rail and of the agent's card, which
+        // glide, and the widths, which do not, so a resize or a drag of the
+        // card's edge is tracked at once.
         let presence = self.motion.transition(
             "chat-rail",
             if layout.rail() { 1f32 } else { 0. },
@@ -925,11 +925,19 @@ impl ChatView {
             window,
             cx,
         );
-        self.body = layout.at(presence);
+        let side_presence = self.motion.transition(
+            "chat-side",
+            if layout.side() { 1f32 } else { 0. },
+            SHOW,
+            window,
+            cx,
+        );
+        self.body = layout.at(presence, side_presence);
         let shift = self.body.shift();
         self.composer
             .update(cx, |composer, cx| composer.set_column_shift(shift, cx));
         let rail = self.render_rail(rail_cards, window, cx);
+        let mut side = self.render_side(window, cx);
         let phone_strip = self.render_phone_strip(agents.as_ref(), window, cx);
         let phone_strip_height = phone_strip.as_ref().map_or(px(0.), |(_, progress)| {
             px(crate::material::bar_height(
@@ -1185,6 +1193,7 @@ impl ChatView {
                     )
                     .children(self.render_scroll_pill(show_jump_to_latest, window, cx))
                     .children(rail)
+                    .children(side.card.take())
                     .children(phone_strip),
             )
             .child(
@@ -1213,7 +1222,7 @@ impl ChatView {
                     )
                     .child(composer),
             );
-        let main = self.render_with_side(main.into_any_element(), width, window, cx);
+        let main = self.cover_with_side(main.into_any_element(), side, cx);
 
         // Opening and closing the drawer glide; entering or leaving the
         // compact layout, which has no drawer, does not.

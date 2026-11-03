@@ -39,16 +39,6 @@ pub(crate) const CHAT_RAIL_GAP: f32 = 16.;
 /// Between the side rail and the chat's right edge: the timeline
 /// scrollbar's track is this wide, so the rail stays clear of it.
 pub(crate) const CHAT_RAIL_EDGE: f32 = 16.;
-/// The least width the side rail takes from the chat, with its gap and its
-/// edge.
-pub(crate) const CHAT_RAIL_SPAN: f32 = CHAT_RAIL_NARROWEST + CHAT_RAIL_GAP + CHAT_RAIL_EDGE;
-/// From this chat width the side rail fits in the gutter right of the
-/// centred column, which never moves for it.
-pub(crate) const CHAT_RAIL_WIDE_MIN_WIDTH: f32 = CHAT_CONTENT_MAX_WIDTH + 2. * CHAT_RAIL_SPAN;
-/// From this chat width the side rail fits beside the column once the
-/// column moves left as far as the page inset.
-pub(crate) const CHAT_RAIL_MIN_WIDTH: f32 =
-    CHAT_CONTENT_MAX_WIDTH + CHAT_CONTENT_MIN_PADDING + CHAT_RAIL_SPAN;
 /// The compact layout's page inset: content is held this far clear of both
 /// window edges. Cards inside that content inset a further [`CARD_INSET`].
 pub(crate) const COMPACT_PAGE_INSET: f32 = 16.;
