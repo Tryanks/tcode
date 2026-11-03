@@ -2393,6 +2393,54 @@ mod replica_tests {
         assert_eq!(sent(), [(id, Some(serde_json::Value::String(chosen)))]);
     }
 
+    /// The model picker's current row is highlighted with the same inset
+    /// from its column on both sides: clear of the rail's divider on the
+    /// left as much as of the popover's edge on the right.
+    #[gpui::test]
+    fn the_current_model_is_highlighted_with_an_even_inset(cx: &mut TestAppContext) {
+        let (store, incoming, _outgoing, mut status) = attach(cx);
+        let models = ["first", "chosen", "last"].map(|id| agent::ModelSpec {
+            id: id.into(),
+            display_name: id.into(),
+            is_default: false,
+            options: Vec::new(),
+        });
+        status.requested_model = Some("chosen".into());
+        replace(
+            &incoming,
+            Topic::Providers,
+            ServerEvent::ProvidersReplaced(tcode_protocol::ProvidersStatus {
+                model_catalogs: [(status.provider, models.to_vec())].into_iter().collect(),
+                ..Default::default()
+            }),
+        );
+        replace(
+            &incoming,
+            Topic::SessionStatus {
+                session_id: status.session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (_composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        crate::test_frames::draw_settled(cx);
+        let picker = cx.debug_bounds("model-picker").expect("model picker");
+        cx.simulate_click(picker.center(), Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        let column = cx.debug_bounds("model-picker-list").expect("model list");
+        let current = cx.debug_bounds("model-row-current").expect("current model");
+        let left = current.left() - column.left();
+        let right = column.right() - current.right();
+        assert!(
+            left > px(0.),
+            "the highlight touches the rail: {current:?} in {column:?}"
+        );
+        assert_eq!(left, right, "{current:?} in {column:?}");
+    }
+
     #[gpui::test]
     fn switching_language_relocalizes_the_model_search_placeholder(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
