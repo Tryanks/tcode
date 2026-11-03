@@ -145,6 +145,7 @@ const FAMILIES: &[Matcher] = &[
     threads::tool_call,
     harness::tool_call,
     question::tool_call,
+    other::tool_call,
 ];
 
 /// Whether `call` drives a computer — a desktop app or the preview
@@ -205,9 +206,6 @@ pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
             }
         }
         ItemContent::ImageRead { .. } => Family::Read,
-        ItemContent::Other { provider_kind, .. } if other::is_image_view(provider_kind) => {
-            Family::Read
-        }
         ItemContent::WebSearch { .. } | ItemContent::Other { .. } => Family::Tool,
         ItemContent::Subagent { .. } => Family::Agent,
         ItemContent::UserMessage { .. }
@@ -305,10 +303,11 @@ pub(in crate::chat) fn activity(
         ItemContent::Other {
             provider_kind,
             summary,
-        } => settled(
-            other::header(provider_kind, summary, cwd),
-            other::copy_items(provider_kind, summary),
-        ),
+        } => {
+            let mut items = Vec::new();
+            copy(&mut items, "chat.copy_text", summary);
+            settled(generic::other_header(provider_kind, summary), items)
+        }
         ItemContent::Subagent {
             agent_type,
             description,

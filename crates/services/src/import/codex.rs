@@ -202,26 +202,28 @@ pub(super) fn convert(path: &Path, external_id: &str) -> Result<Option<Converted
                         );
                     }
                     "image_generation_call" => {
-                        let mut summary = serde_json::Map::new();
-                        summary.insert("type".into(), "imageGeneration".into());
+                        let mut item = serde_json::Map::new();
                         for (key, field) in [
-                            ("id", "id"),
                             ("status", "status"),
                             ("revised_prompt", "revisedPrompt"),
                             ("result", "result"),
                         ] {
                             if let Some(value) = payload.get(key) {
-                                summary.insert(field.into(), value.clone());
+                                item.insert(field.into(), value.clone());
                             }
+                        }
+                        let mut content = agent::codex::image_generation(&Value::Object(item));
+                        // A generation the rollout ends without a picture for never finished.
+                        if let ItemContent::ToolCall { status, .. } = &mut content
+                            && *status == ItemStatus::InProgress
+                        {
+                            *status = ItemStatus::Interrupted;
                         }
                         push_item(
                             &mut entries,
                             ts,
                             &mut next_id,
-                            ItemContent::Other {
-                                provider_kind: "imageGeneration".into(),
-                                summary: Value::Object(summary).to_string(),
-                            },
+                            content,
                             payload.get("id").and_then(Value::as_str),
                         );
                     }

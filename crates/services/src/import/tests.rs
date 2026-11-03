@@ -457,17 +457,19 @@ fn codex_converter_keeps_recorded_tool_shapes() {
             status: ItemStatus::Completed,
         }
     );
-    let ItemContent::Other {
-        provider_kind,
-        summary,
-    } = contents[6]
-    else {
-        panic!("{:?}", contents[6])
-    };
-    assert_eq!(provider_kind, "imageGeneration");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(summary).unwrap(),
-        json!({"type":"imageGeneration","id":"ig_093e33d59b19e538016a1fd0b660948191a503acc522dcc8fc","status":"generating","revisedPrompt":"A blue square.","result":png})
+        contents[6],
+        &ItemContent::ToolCall {
+            image_reads: vec![agent::Attachment {
+                media_type: "image/png".into(),
+                data_base64: png.into(),
+                source_path: None,
+            }],
+            name: "image_generation".into(),
+            input: json!({"revised_prompt":"A blue square."}),
+            output: None,
+            status: ItemStatus::Completed,
+        }
     );
     assert!(matches!(contents[7], ItemContent::ToolCall {
         name, output: None, status: ItemStatus::Interrupted, ..

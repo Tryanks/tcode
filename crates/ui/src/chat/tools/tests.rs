@@ -1658,9 +1658,9 @@ fn a_thread_call_reads_as_what_it_did_to_which_thread(cx: &mut TestAppContext) {
 /// The harness's calls about the session read as what they did: the tools
 /// a search loaded, the skill launched, a plan proposed as a call, a
 /// question asked and the answer it got, the reviewer's verdict with its
-/// risk and, when it denied, its rationale; a wait, an image viewed before
-/// views carried images and an image generated read as such, not as their
-/// kind and summary.
+/// risk and, when it denied, its rationale. A wait and an image generated,
+/// recorded as Codex items before they were mapped, read as such, and an
+/// image viewed then shows as its image, as one recorded now does.
 #[gpui::test]
 fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
@@ -1669,6 +1669,8 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
     let review = "6edd6799-9365-40eb-bb46-1b81349825ce";
     let ask = "toolu_01ATcf9PyE343ETE6mET6bu9";
     let codex_ask = "call_xOISWlfXvmW4R9A8oaZnC3uD";
+    let viewed = "exec-5bd102db-8280-4811-a3c3-6146bd58a20c";
+    let generated = "exec-89f575db-4c35-4d77-a024-611fdd5d1d50";
     let rationale = "该脚本通过 DOM 查询定位控件，违反用户明确禁止用页面脚本替代正常交互、\
                      读取隐藏页面状态的限制；应改用可见控件快照定位或停止。";
     for (id, expected) in [
@@ -1718,11 +1720,7 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
             read("Waited", None, Some("20.0s"), None),
         ),
         (
-            "exec-5bd102db-8280-4811-a3c3-6146bd58a20c",
-            read("Viewed", None, Some("/tmp/tcode-before.png"), None),
-        ),
-        (
-            "exec-89f575db-4c35-4d77-a024-611fdd5d1d50",
+            generated,
             read(
                 "Generated an image",
                 None,
@@ -1734,6 +1732,9 @@ fn a_harness_call_reads_as_what_it_did_to_the_session(cx: &mut TestAppContext) {
         ),
     ] {
         assert_eq!(thread.header(id, cx), expected, "{id}");
+    }
+    for id in [viewed, generated] {
+        assert!(shows(cx, &format!("image-read-{id}-0")), "{id}");
     }
 
     thread.open_work_log(review, cx);
