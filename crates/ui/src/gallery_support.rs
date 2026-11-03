@@ -130,7 +130,7 @@ pub fn assistant(
             markdown: Some(markdown),
             compact: false,
             pinned: true,
-            show_actions: true,
+            actions: assistant::MessageActions::Below,
             copied: false,
             hover: crate::motion::ListHover::new(),
             motion: Default::default(),

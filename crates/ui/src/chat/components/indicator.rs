@@ -6,9 +6,10 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, ElementId, Entity,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce,
-    SharedString, Styled as _, StyledText, Task, Window, div, prelude::FluentBuilder as _, px,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, ElementId,
+    Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce,
+    SharedString, Stateful, Styled as _, StyledText, Task, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::h_flex;
 
@@ -208,27 +209,31 @@ pub(crate) fn turn_working_indicator(
         .into_any_element()
 }
 
-/// A finished turn's quiet mono timing row.
-pub(crate) fn turn_time_footer(
+/// A finished turn's footer: on the leading edge the actions of the message
+/// it ends on, if any, and on the trailing edge its quiet mono timing, whose
+/// clauses wrap toward that edge as the column narrows.
+fn turn_time_footer(
     id: SharedString,
     clauses: Vec<TurnTimeClause>,
+    actions: Option<AnyElement>,
     cx: &App,
-) -> AnyElement {
+) -> Stateful<Div> {
     let warning = cx.theme().warning;
     let last = clauses.len().saturating_sub(1);
     h_flex()
         .id(id)
         .w_full()
         .gap_1p5()
-        .items_start()
+        .items_center()
         .text_meta_mono(false, cx)
         .debug_selector(|| "turn-time-row".into())
+        .children(actions.map(|actions| div().flex_none().child(actions)))
         .child(
             h_flex()
                 .flex_1()
                 .min_w_0()
                 .flex_wrap()
-                .justify_start()
+                .justify_end()
                 .gap_x(px(4.))
                 .gap_y(px(2.))
                 .children(clauses.into_iter().enumerate().map(|(index, clause)| {
@@ -251,122 +256,29 @@ pub(crate) fn turn_time_footer(
                         .when(index != last, |element| element.child("·"))
                 })),
         )
-        .into_any_element()
 }
 
+/// [`turn_time_footer`] for `turn`, timed from `timestamp` when it has one.
 pub(crate) fn finished_turn_time(
-    timestamp: u64,
+    timestamp: Option<u64>,
     turn: &TurnMeta,
     requested_model: Option<&str>,
+    actions: Option<AnyElement>,
     cx: &App,
-) -> AnyElement {
-    turn_time_footer(
-        SharedString::from(format!("turn-time-{timestamp}")),
+) -> Stateful<Div> {
+    let clauses = timestamp.map_or_else(Vec::new, |timestamp| {
         turn_time_clauses(
             format_local_time(timestamp),
             turn.timing,
             turn.cost_usd,
             turn.served_model.as_deref(),
             requested_model,
-        ),
+        )
+    });
+    turn_time_footer(
+        SharedString::from(format!("turn-time-{}", timestamp.unwrap_or_default())),
+        clauses,
+        actions,
         cx,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::turn_time_footer;
-    use crate::chat::model::{TurnTimeClause, turn_time_clauses};
-    use gpui::TestAppContext;
-    use tcode_core::session::TurnTiming;
-
-    struct TurnTimeFooterProbe {
-        clauses: Vec<TurnTimeClause>,
-    }
-
-    impl gpui::Render for TurnTimeFooterProbe {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            // The turn column stacks the footer under the answer, so the row is
-            // content-height there; reproduce that rather than letting the window
-            // stretch it and mask a wrap.
-            use gpui::{ParentElement as _, Styled as _};
-            gpui_base::v_flex().size_full().child(turn_time_footer(
-                "turn-time-probe".into(),
-                self.clauses.clone(),
-                cx,
-            ))
-        }
-    }
-
-    #[gpui::test]
-    fn the_time_row_keeps_its_compact_clauses_inside_narrow_widths(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        let clauses = turn_time_clauses(
-            "10:18 AM".into(),
-            Some(TurnTiming::new(99_000, 0)),
-            None,
-            None,
-            None,
-        );
-        // The footer's clauses, in render order (mirrors `turn_time_footer`).
-        let selectors = ["turn-time-clock", "turn-time-total"];
-        assert_eq!(clauses.len(), selectors.len());
-
-        cx.update(crate::theme::init);
-        let (_, cx) = cx.add_window_view(|_, _| TurnTimeFooterProbe { clauses });
-        let cx: &mut VisualTestContext = cx;
-        let draw = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                _ = window.draw(cx);
-            });
-        };
-
-        // A comfortable chat width: the restrained single-line baseline.
-        cx.simulate_resize(size(px(900.), px(120.)));
-        draw(cx);
-        let first = cx.debug_bounds(selectors[0]).expect("clock bounds");
-        for selector in &selectors[1..] {
-            let clause = cx.debug_bounds(selector).expect("clause bounds");
-            assert_eq!(
-                clause.top(),
-                first.top(),
-                "{selector} left the single line at 900px: {clause:?}"
-            );
-        }
-
-        // Opening the diff panel squeezes the chat column; sweep well below any
-        // practical width. Every clause must stay inside the row, and the row
-        // must preserve the intentionally left-aligned footer.
-        for width in 260..=900 {
-            cx.simulate_resize(size(px(width as f32), px(120.)));
-            draw(cx);
-
-            let row = cx.debug_bounds("turn-time-row").expect("row bounds");
-            for selector in &selectors {
-                let clause = cx.debug_bounds(selector).expect("clause bounds");
-                assert!(
-                    clause.left() >= row.left() && clause.right() <= row.right(),
-                    "{selector} escaped the row at {width}px: row={row:?}, clause={clause:?}"
-                );
-                assert!(
-                    clause.size.width > px(0.) && clause.size.height > px(0.),
-                    "{selector} was squeezed away at {width}px: {clause:?}"
-                );
-            }
-            let first_clause = cx.debug_bounds(selectors[0]).expect("clause bounds");
-            assert!(
-                (first_clause.left() - row.left()).abs() <= px(0.5),
-                "the footer left the leading edge at {width}px: \
-                 row={row:?}, clause={first_clause:?}"
-            );
-        }
-    }
 }

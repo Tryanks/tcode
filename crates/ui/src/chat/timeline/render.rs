@@ -50,6 +50,9 @@ impl ChatView {
         // A row's entries re-segment to the one segment it was indexed from.
         let segmented = segment_entries(own, turn.running);
         let segments = &segmented.flow;
+        // The actions of the message the turn ends on, which its footer draws,
+        // and the text they copy.
+        let mut ending = None;
 
         for segment in segments.iter() {
             match segment {
@@ -181,6 +184,24 @@ impl ChatView {
                     let copy_key = format!("assistant:{}", entry.id);
                     let copied = self.copied.is(&copy_key);
                     let mark = copy_key;
+                    let compact = self.window_state.read(cx).compact;
+                    let pinned = pinned.1 == Some(entry.id.as_str());
+                    let actions = match (turn.running, row.last_assistant, row.last_in_turn) {
+                        (false, true, true) => components::assistant::MessageActions::InFooter,
+                        (false, true, false) => components::assistant::MessageActions::Below,
+                        _ => components::assistant::MessageActions::None,
+                    };
+                    if actions == components::assistant::MessageActions::InFooter {
+                        ending = Some((
+                            components::assistant::EndingActions {
+                                id: entry.id.clone(),
+                                copied,
+                                pinned,
+                                compact,
+                            },
+                            copy_text.clone(),
+                        ));
+                    }
                     column = column.child(components::assistant::assistant(
                         components::assistant::AssistantData {
                             id: &entry.id,
@@ -188,9 +209,9 @@ impl ChatView {
                             summarized: *summarized,
                             cwd,
                             markdown,
-                            compact: self.window_state.read(cx).compact,
-                            pinned: pinned.1 == Some(entry.id.as_str()),
-                            show_actions: !turn.running && row.last_assistant,
+                            compact,
+                            pinned,
+                            actions,
                             copied,
                             hover: self.hover.clone(),
                             motion: self.motion.clone(),
@@ -423,10 +444,11 @@ impl ChatView {
 
         // The turn's liveness, bare after everything it produced: no fold can
         // reach it, so collapsing the last disclosure never hides that we work.
-        // It cross-fades into the finished turn's time row as the turn ends.
+        // It cross-fades into the finished turn's footer as the turn ends:
+        // the actions of the message it ends on, and its time row.
         let finished_at = turn.end_ts.or(entries.last().and_then(|e| e.ts));
         let mut status = None;
-        if turn.running || finished_at.is_some() {
+        if turn.running || finished_at.is_some() || ending.is_some() {
             let requested_model = self
                 .workspace_store
                 .read(cx)
@@ -446,6 +468,7 @@ impl ChatView {
             );
             let motion = self.motion.clone();
             let indicator_motion = motion.clone();
+            let hover = self.hover.clone();
             status = Some(self.shared.element(
                 status_key,
                 motion.cross_fade_value(
@@ -453,15 +476,9 @@ impl ChatView {
                     turn.running,
                     window,
                     cx,
-                    move |running, _, cx| {
-                        match (*running, finished_at) {
-                            (false, Some(ts)) => components::indicator::finished_turn_time(
-                                ts,
-                                &turn,
-                                requested_model.as_deref(),
-                                cx,
-                            ),
-                            _ => div()
+                    move |running, window, cx| {
+                        if *running {
+                            return div()
                                 .id(("working-status", index))
                                 .debug_selector(move || format!("working-status-{index}"))
                                 .child(components::indicator::turn_working_indicator(
@@ -471,8 +488,29 @@ impl ChatView {
                                     &indicator_motion,
                                     cx,
                                 ))
-                                .into_any_element(),
+                                .into_any_element();
                         }
+                        let actions = ending.as_ref().map(|(actions, text)| {
+                            let text = text.clone();
+                            let mark = format!("assistant:{}", actions.id);
+                            let on_copy = cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+                                this.mark_copied(mark.clone(), cx);
+                            });
+                            actions.render(&hover, &indicator_motion, on_copy, window, cx)
+                        });
+                        let on_hover = ending
+                            .as_ref()
+                            .and_then(|(actions, _)| actions.on_hover(&hover));
+                        components::indicator::finished_turn_time(
+                            finished_at,
+                            &turn,
+                            requested_model.as_deref(),
+                            actions,
+                            cx,
+                        )
+                        .when_some(on_hover, |footer, on_hover| footer.on_hover(on_hover))
+                        .into_any_element()
                     },
                 ),
             ));
