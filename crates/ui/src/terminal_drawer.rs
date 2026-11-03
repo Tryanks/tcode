@@ -371,6 +371,12 @@ pub struct TerminalDrawer {
     split_states: [Entity<gpui_base::ResizableState>; 2],
     /// Glides the second pane open and shut.
     split_glide: crate::motion::resize_glide::ResizeGlide,
+    /// Counts the threads the drawer has shown, naming the element its
+    /// content is drawn under: what it draws keeps its motion (a tab
+    /// folding in, the selection's glide, a control coming and going) in
+    /// element state keyed by that path, so another thread's starts at rest
+    /// rather than from where the last thread's namesakes were.
+    scene: u64,
     /// The split last shown, which a closing pane is drawn from and lies
     /// along.
     last_split: Option<tcode_protocol::TerminalSplitStatus>,
@@ -500,6 +506,7 @@ impl TerminalDrawer {
                 "terminal-split-glide",
                 gpui::Axis::Horizontal,
             ),
+            scene: 0,
             last_split: None,
             split_shown: false,
             body_size: Rc::default(),
@@ -529,6 +536,7 @@ impl TerminalDrawer {
             self.session_id = session_id;
             // Another thread's terminals land as they are.
             self.split_glide.reset();
+            self.scene += 1;
             self.last_split = None;
             cx.notify();
         }
@@ -2010,6 +2018,10 @@ impl Render for TerminalDrawer {
         .into_any_element();
 
         v_flex()
+            .id(gpui::ElementId::NamedInteger(
+                "terminal-scene".into(),
+                self.scene,
+            ))
             .size_full()
             .min_h_0()
             .font_family(TERMINAL_FONT_FAMILY)
