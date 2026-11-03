@@ -5570,9 +5570,14 @@ impl Render for AppShell {
             .reflowed(std::mem::take(&mut self.layout_flipped));
         self.layout_reflow = Some(reflow.clone());
         let body = if self.compact(cx) {
-            // A compact window's pages slide over the ones they replace.
+            // A compact window's pages slide over the ones they replace, so
+            // the window turning wide again draws its route at rest rather
+            // than rising over the route it last drew wide.
             self.departed.clear();
             self.attachments = Default::default();
+            if let Some(attachment) = self.attachment.as_mut() {
+                attachment.routes = Default::default();
+            }
             self.render_compact(window, cx)
         } else {
             self.render_wide(window, cx)
@@ -15513,6 +15518,32 @@ mod tests {
         cx.executor().advance_clock(motion.idle());
         draw(cx);
         assert_eq!(thumb(cx), 0., "reduced motion: gone at once");
+    }
+
+    /// A tablet turning wide in Settings shows the settings route as it is:
+    /// turning wide changes no route, so the route the window last drew
+    /// wide is not drawn beneath it with Settings rising over it.
+    #[gpui::test]
+    fn turning_wide_in_settings_draws_the_route_at_rest(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 1024.);
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("chat-route").is_some());
+        resize(cx, 899.);
+        shell.read_with(cx, |shell, cx| assert!(shell.compact(cx)));
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.open_settings(cx));
+        crate::test_frames::draw_settled(cx);
+
+        resize(cx, 1024.);
+        shell.read_with(cx, |shell, cx| assert!(!shell.compact(cx)));
+        assert!(cx.debug_bounds("settings-route").is_some());
+        assert!(
+            cx.debug_bounds("chat-route").is_none(),
+            "the chat is drawn beneath Settings as the window turns wide"
+        );
     }
 
     /// How much of `fill` was painted over exactly `bounds` in the last
