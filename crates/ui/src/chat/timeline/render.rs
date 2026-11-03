@@ -970,7 +970,7 @@ impl ChatView {
                     window,
                     cx,
                 );
-            }) as components::subagent::ClickHandler
+            }) as components::changed_files::ClickHandler
         });
         let toggle_key = key.clone();
         components::disclosure::callback_row(
@@ -1325,12 +1325,6 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if matches!(
-            &entry.content,
-            EntryContent::Item(ItemContent::Subagent { .. })
-        ) {
-            return self.compose_subagent_row(entry, cx);
-        }
         let key = format!("activity-{}", entry.id);
         let turn = entry.turn;
         let is_command = matches!(
@@ -1352,12 +1346,14 @@ impl ChatView {
             path,
             ..
         } = activity;
+        // A subagent's window also opens on the way to its thread.
+        let expandable = expandable || tools::subagent::child_thread(self, entry, cx).is_some();
         let detail = if !expandable {
             tools::window::Detail::None
         } else {
             match tools::window::fold(&self.motion, &entry.id, expanded, window, cx) {
                 Some(shown) => {
-                    let shows = self.activity_body_key(entry, status);
+                    let shows = self.activity_body_key(entry, status, cx);
                     let body = self.activity_body(entry, cwd, row.images_inline, cx);
                     tools::window::Detail::Fold(shown, body, shows)
                 }
@@ -1390,10 +1386,13 @@ impl ChatView {
     /// What an open activity window's body shows, as far as its height goes:
     /// whether the call is done, how much of its output this client holds,
     /// and which of its parts the reader opened.
-    fn activity_body_key(&self, entry: &TimelineEntry, status: agent::ItemStatus) -> u64 {
+    fn activity_body_key(&self, entry: &TimelineEntry, status: agent::ItemStatus, cx: &App) -> u64 {
         use std::hash::{Hash as _, Hasher as _};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(&status).hash(&mut hash);
+        tools::subagent::child_thread(self, entry, cx)
+            .is_some()
+            .hash(&mut hash);
         self.full_outputs
             .get(&entry.id)
             .map(std::mem::discriminant)
@@ -1458,6 +1457,15 @@ impl ChatView {
                 .whitespace_normal()
                 .child(text.clone())
                 .into_any_element(),
+            ItemContent::Subagent { .. } => tools::subagent::body(
+                entry,
+                &mut tools::ToolCtx {
+                    chat: self,
+                    cx,
+                    cwd,
+                    images_inline,
+                },
+            ),
             _ => div().into_any_element(),
         }
     }
@@ -1547,44 +1555,6 @@ impl ChatView {
             self.remeasure_activity(*turn, id, cx);
         }
         cx.notify();
-    }
-
-    fn compose_subagent_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
-        let active_id = self.session_id.clone();
-        let mirror_id = active_id.as_deref().and_then(|active_id| {
-            self.workspace_store
-                .read(cx)
-                .sidebar_sessions()
-                .into_iter()
-                .find(|meta| {
-                    meta.parent_session_id.as_deref() == Some(active_id)
-                        && meta.native_subagent.as_deref() == Some(entry.id.as_str())
-                })
-                .map(|meta| meta.id)
-        });
-        let shown = mirror_id
-            .as_deref()
-            .is_some_and(|mirror_id| crate::shell::shown_in_pane(mirror_id, cx));
-        let on_open = mirror_id.map(|mirror_id| {
-            let store = self.workspace_store.clone();
-            Box::new(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                crate::agents_panel::open_agent(
-                    &store,
-                    mirror_id.clone(),
-                    active_id.as_deref(),
-                    window,
-                    cx,
-                );
-            }) as components::subagent::ClickHandler
-        });
-        components::subagent::subagent_row(
-            entry,
-            on_open,
-            shown,
-            self.hover.clone(),
-            &self.motion,
-            cx,
-        )
     }
 
     /// Show the "Copied!" confirmation on `key` for 2s; a second copy re-arms the timer.

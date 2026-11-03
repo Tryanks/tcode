@@ -8,8 +8,7 @@ use tcode_core::notice::OrchestrateCallback;
 use tcode_core::session::{SteeringStatus, TimelineEntry};
 
 use crate::chat::components::{
-    assistant, bubble, changed_files, disclosure, dividers, error_card, indicator, plan, subagent,
-    work_log,
+    assistant, bubble, changed_files, disclosure, dividers, error_card, indicator, plan, work_log,
 };
 use crate::markdown::MarkdownState;
 
@@ -96,10 +95,6 @@ pub fn work_log(
         |_, _, _| {},
         cx,
     )
-}
-
-pub fn subagent(entry: &TimelineEntry, cx: &App) -> AnyElement {
-    subagent::subagent_row(entry, None, false, hover(), &Default::default(), cx)
 }
 
 pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App) -> AnyElement {

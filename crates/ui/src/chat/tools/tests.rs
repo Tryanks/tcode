@@ -823,21 +823,55 @@ fn a_plan_written_as_a_call_reads_as_a_checklist(cx: &mut TestAppContext) {
     thread.shutdown(cx);
 }
 
-/// A subagent keeps its pill, in the shared grammar: interrupted says so
-/// in words, beside an agent that completed and one Codex left running no
-/// longer.
+/// A subagent is a window in the shared grammar: the agent's type and its
+/// task, the model and effort it ran with as chips, interrupted said in
+/// words; opened, the report it gave back.
 #[gpui::test]
-fn a_subagent_keeps_its_pill_and_says_how_it_stands(cx: &mut TestAppContext) {
+fn a_subagent_reads_as_its_agent_and_task_and_opens_on_its_report(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/subagent.jsonl"), 1_024.);
     let claude = "toolu_01N5qbJptVEf5KH4yk3fYa9N";
     let codex = "call_vmWu7cCLM2uUfy2hX4GQhU9Y";
     let interrupted = "call_fCcc53Gl87IKZZRYJZKIisUT";
+    assert_eq!(
+        thread.header(claude, cx),
+        read(
+            "Ran agent",
+            Some("Explore"),
+            Some("Classify chat/markdown tests"),
+            None
+        )
+    );
+    assert_eq!(
+        thread.header(codex, cx),
+        Read {
+            chips: vec![
+                Chip::Tag("gpt-6-astra".to_owned()),
+                Chip::Tag("low".to_owned())
+            ],
+            ..read(
+                "Ran agent",
+                Some("t3_transport"),
+                Some("/root/t3_transport"),
+                None
+            )
+        }
+    );
+    assert_eq!(
+        thread.header(interrupted, cx),
+        read(
+            "Ran agent",
+            Some("clock_limits"),
+            Some("/root/sd_timing_finish/clock_limits"),
+            None
+        )
+    );
     thread.open_work_log(claude, cx);
     for id in [claude, codex, interrupted] {
-        assert!(shows(cx, &format!("subagent-{id}")), "{id}");
+        assert!(shows(cx, &format!("tool-argument-{id}")), "{id}");
     }
+    assert!(shows(cx, &format!("tool-chip-{codex}")));
     assert!(shows(cx, &format!("tool-status-chip-{interrupted}")));
     for settled in [claude, codex] {
         assert!(
@@ -845,6 +879,61 @@ fn a_subagent_keeps_its_pill_and_says_how_it_stands(cx: &mut TestAppContext) {
             "{settled}"
         );
     }
+    assert!(!shows(cx, &format!("subagent-summary-{claude}")));
+    click(cx, &format!("activity-row-{claude}"));
+    assert!(shows(cx, &format!("subagent-summary-{claude}")));
+    thread.shutdown(cx);
+}
+
+/// A running agent says so; a failed one tells its error by the first line
+/// of what it reported, and opens on the whole of it, verbatim. The running
+/// row is the recorded Codex update; no failed agent is recorded, so that
+/// one takes the shape the adapters give a failure: the error as the
+/// summary.
+#[gpui::test]
+fn a_subagent_window_tells_a_running_and_a_failed_agent(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let running = "call_vmWu7cCLM2uUfy2hX4GQhU9Y";
+    let failed = "spawn-failed";
+    let log = [
+        serde_json::json!({ "ts": 1_000, "event": { "type": "turn_started", "turn_id": "t" } }),
+        serde_json::json!({ "ts": 1_001, "event": { "type": "item_completed", "id": "user",
+            "content": { "kind": "user_message", "text": "Delegate it." } } }),
+        serde_json::json!({ "ts": 1_788_812_926_728_u64, "event": { "type": "item_updated",
+            "id": running, "content": { "kind": "subagent", "agent_type": "t3_transport",
+                "description": "/root/t3_transport", "status": "in_progress", "summary": null,
+                "model": "gpt-6-astra", "effort": "low" } } }),
+        serde_json::json!({ "ts": 1_788_812_926_800_u64, "event": { "type": "item_completed",
+            "id": failed, "content": { "kind": "subagent", "agent_type": "general",
+                "description": "Survey the store", "status": "failed",
+                "summary": "ProviderModelNotFoundError: model not found\n  at resolve (session.ts:12)" } } }),
+    ]
+    .map(|line| line.to_string())
+    .join("\n");
+    let (thread, cx) = StoredThread::open(cx, &log, 1_024.);
+    assert_eq!(
+        thread.header(running, cx).verb.as_deref(),
+        Some("Running agent")
+    );
+    assert_eq!(
+        thread.header(failed, cx),
+        read(
+            "Ran agent",
+            Some("general"),
+            Some("Survey the store"),
+            Some("ProviderModelNotFoundError: model not found")
+        )
+    );
+    thread.open_work_log(running, cx);
+    assert!(shows(cx, &format!("tool-error-{failed}")));
+    click(cx, &format!("activity-row-{failed}"));
+    assert!(
+        !shows(cx, &format!("tool-error-{failed}")),
+        "the body tells it whole"
+    );
+    assert!(shows(cx, &format!("tool-text-{failed}-summary")));
+    assert!(!shows(cx, &format!("subagent-summary-{failed}")));
     thread.shutdown(cx);
 }
 
