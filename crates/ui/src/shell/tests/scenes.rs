@@ -839,3 +839,55 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// A lead switched back to with an agent open beside it draws the agent's
+/// card on the first frame that shows the lead: the card, what it holds
+/// and the lead's column beside it are where and as large as they rest,
+/// none of them sliding or growing in. The agent is hosted again in the
+/// update that binds the lead, before that frame.
+#[gpui::test]
+fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_lead_with_agent(cx);
+    let store = store_of(&shell, cx);
+    serve_finished(&host, "thread-1");
+    switch(&shell, "secondary-1", "thread-1", cx);
+    settle_frames(cx);
+    serve_finished(&host, "agent-1");
+    cx.update(|window, cx| {
+        crate::agents_panel::open_agent(&store, "agent-1".into(), Some("thread-1"), window, cx)
+    });
+    arrive(&shell, cx);
+    settle_frames(cx);
+    assert!(
+        cx.debug_bounds("chat-side-card").is_some(),
+        "agent-1 beside thread-1"
+    );
+
+    serve_other(&host);
+    switch(&shell, "secondary-2", "thread-2", cx);
+    settle_frames(cx);
+    assert!(cx.debug_bounds("chat-side-card").is_none());
+
+    serve_finished(&host, "thread-1");
+    serve_finished(&host, "agent-1");
+    switch(&shell, "secondary-1", "thread-1", cx);
+    // The first frame that shows the lead, however little.
+    for _ in 0..10 {
+        if bubble_fill("thread-1", cx).is_some_and(|fill| fill > 0.) {
+            break;
+        }
+        display_frame(cx);
+    }
+    let first = (painted(cx), cx.debug_bounds("chat-side-card"));
+    settle_frames(cx);
+    let rest = (painted(cx), cx.debug_bounds("chat-side-card"));
+    assert!(rest.1.is_some(), "agent-1 beside thread-1 again");
+    let (moving, resting) = differences(&first.0, &rest.0);
+    assert!(
+        first == rest,
+        "card {:?} -> {:?}; first frame only {moving:?}; at rest only {resting:?}",
+        first.1,
+        rest.1
+    );
+}
