@@ -235,6 +235,10 @@ pub(crate) struct ThreadPanel {
     /// The pane's thread closed beside others: its chat stays bound to it
     /// while it fades out under the waiting hint.
     fading_out: bool,
+    /// A thread came to the pane while it waited beside others: the waiting
+    /// hint stays, and the chat is drawn unseen under it, until the chat
+    /// [appears](ChatView::appears), when one cross-fades into the other.
+    awaiting: bool,
     /// How the content is drawn while its split glides.
     held: Held,
     /// The chat on its way in from another pane: where it was drawn there,
@@ -289,6 +293,7 @@ impl ThreadPanel {
             closing: false,
             lease: None,
             fading_out: false,
+            awaiting: false,
             held: Held::default(),
             flight: None,
             motion: Default::default(),
@@ -347,6 +352,7 @@ impl ThreadPanel {
     ) -> Entity<ChatView> {
         let session_id = chat.read(cx).session_id().map(str::to_owned);
         self.fading_out = false;
+        self.await_chat(false, cx);
         let replaced = std::mem::replace(&mut self.chat, chat);
         self.hold(session_id.as_deref(), cx);
         self.session_id = session_id;
@@ -373,14 +379,23 @@ impl ThreadPanel {
         let fading_out = session_id.is_none()
             && self.among_others
             && (self.session_id.is_some() || self.fading_out);
+        let waited = self.among_others && self.session_id.is_none() && !self.fading_out;
         self.session_id = session_id.clone();
         self.fading_out = fading_out;
+        self.await_chat(waited && session_id.is_some(), cx);
         if !fading_out {
             self.hold(session_id.as_deref(), cx);
             self.chat
                 .update(cx, |chat, cx| chat.set_session(session_id, cx));
         }
         cx.notify();
+    }
+
+    fn await_chat(&mut self, awaiting: bool, cx: &mut Context<Self>) {
+        if self.awaiting != awaiting {
+            self.awaiting = awaiting;
+            self.chat.update(cx, |chat, cx| chat.set_held(awaiting, cx));
+        }
     }
 
     /// Whether other panes share the column.
@@ -507,7 +522,13 @@ impl Render for ThreadPanel {
         let held = self.held;
         // A pane beside others waits for a thread rather than offering the
         // empty workspace's way to start one.
-        let waiting = self.among_others && self.session_id.is_none();
+        if self.awaiting && self.chat.read(cx).appears(cx) {
+            self.await_chat(false, cx);
+        }
+        if self.awaiting {
+            window.request_animation_frame();
+        }
+        let waiting = self.among_others && (self.session_id.is_none() || self.awaiting);
         let content = self
             .motion
             .cross_fade(
@@ -519,6 +540,11 @@ impl Render for ThreadPanel {
                 cx,
             )
             .fill();
+        let content = if self.awaiting {
+            content.stage(CHAT)
+        } else {
+            content
+        };
         let mut layers = Vec::new();
         if content.shows(WAITING) {
             // A waiting pane draws no chat header, so its close button sits in

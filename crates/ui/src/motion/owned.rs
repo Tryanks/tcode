@@ -138,6 +138,15 @@ impl Owned {
         self.values.borrow_mut().clear();
     }
 
+    /// Forgets `key`'s values, every layer's and channel's: what it draws
+    /// next takes its target at once, for a part whose owner shows its
+    /// changes some other way (a view a host holds unseen, to fade it in
+    /// itself).
+    pub(crate) fn forget(&self, key: impl Into<SharedString>) {
+        let key = self.key(key);
+        self.values.borrow_mut().retain(|(held, _), _| *held != key);
+    }
+
     fn key(&self, key: impl Into<SharedString>) -> SharedString {
         let key = key.into();
         if self.prefix.is_empty() {
