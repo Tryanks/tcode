@@ -14,7 +14,6 @@ computer-use-mcp = { path = "../computer-use-mcp" }
 control-mcp = { path = "../control-mcp" }
 log = "0.4"
 mcp-host = { path = "../mcp-host" }
-orchestrate-mcp = { path = "../orchestrate-mcp" }
 preview-mcp = { path = "../preview-mcp" }
 pull-request-mcp = { path = "../pull-request-mcp" }
 serde = { version = "1", features = ["derive"] }

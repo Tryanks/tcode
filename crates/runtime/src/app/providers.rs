@@ -1556,8 +1556,6 @@ pub(super) fn session_provider_settings(
 #[derive(Default)]
 pub(super) struct McpServers {
     pub(super) preview: Option<agent::McpRegistration>,
-    pub(super) orchestrate: Option<agent::McpRegistration>,
-    pub(super) orchestrate_report: Option<agent::McpRegistration>,
     pub(super) computer_use: Option<agent::McpRegistration>,
     pub(super) control: Option<agent::McpRegistration>,
 }
@@ -1591,13 +1589,6 @@ pub(super) fn session_options(
                 .caps()
                 .mcp_servers
                 .then_some(servers.preview)
-                .flatten(),
-            meta.orchestrate_enabled
-                .then_some(servers.orchestrate)
-                .flatten(),
-            meta.parent_session_id
-                .is_some()
-                .then_some(servers.orchestrate_report)
                 .flatten(),
             computer_use_attaches(meta.provider, settings)
                 .then_some(servers.computer_use)

@@ -4353,7 +4353,7 @@ mod tests {
     fn mcp_tool_consent_uses_native_options_without_preapproval() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
-            actor.handle_line(r#"{"method":"mcpServer/elicitation/request","id":0,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"tcode_report","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_description":"Harmless permission probe: return PONG.","tool_params":{},"tool_params_display":[]},"message":"Allow the tcode_report MCP server to run tool \"probe\"?","requestedSchema":{"type":"object","properties":{}}}}"#).await;
+            actor.handle_line(r#"{"method":"mcpServer/elicitation/request","id":0,"params":{"threadId":"thread-1","turnId":"turn-1","serverName":"tcode_control","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],"tool_description":"Harmless permission probe: return PONG.","tool_params":{},"tool_params_display":[]},"message":"Allow the tcode_control MCP server to run tool \"probe\"?","requestedSchema":{"type":"object","properties":{}}}}"#).await;
             let AgentEvent::ApprovalRequested(request) = events.recv().await.unwrap() else {
                 panic!("MCP consent")
             };
@@ -4384,7 +4384,7 @@ mod tests {
                 json!({"id":0,"result":{"action":"accept","content":{},"_meta":{"persist":"session"}}})
             );
             let config = crate::McpRegistration {
-                name: "tcode_report".into(),
+                name: "tcode_control".into(),
                 url: "http://127.0.0.1/mcp".into(),
                 bearer_token: "probe".into(),
             }
@@ -4490,8 +4490,8 @@ mod tests {
                 (
                     "approved",
                     ItemStatus::Completed,
-                    json!({"type":"mcpToolCall","server":"tcode_report","toolName":"report_result"}),
-                    "MCP tool: tcode_report/report_result",
+                    json!({"type":"mcpToolCall","server":"tcode_control","toolName":"report_result"}),
+                    "MCP tool: tcode_control/report_result",
                 ),
                 (
                     "approved",
@@ -4572,7 +4572,7 @@ mod tests {
                 bearer_token: "p".into(),
             },
             crate::McpRegistration {
-                name: "tcode_orchestrate".into(),
+                name: "tcode_control".into(),
                 url: "http://o".into(),
                 bearer_token: "o".into(),
             },
@@ -4587,7 +4587,7 @@ mod tests {
             assert_eq!(args.len(), count * 2);
             for (arg, (key, url, authorization)) in args.as_chunks::<2>().0.iter().zip([
                 ("mcp_servers.tcode_preview", "http://p", "Bearer p"),
-                ("mcp_servers.tcode_orchestrate", "http://o", "Bearer o"),
+                ("mcp_servers.tcode_control", "http://o", "Bearer o"),
                 ("mcp_servers.tcode_computer_use", "http://c", "Bearer c"),
             ]) {
                 assert_eq!(arg[0], "-c");

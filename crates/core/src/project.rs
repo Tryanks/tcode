@@ -166,7 +166,8 @@ pub struct SessionMeta {
     /// absent in every index file written before ACP existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_agent_id: Option<String>,
-    /// Parent orchestrator thread for native child sessions.
+    /// The thread that started this one as its subagent, or whose provider-native subagent
+    /// this mirrors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     /// Set when this session mirrors a provider-native subagent transcript.
@@ -174,19 +175,12 @@ pub struct SessionMeta {
     /// sessions are read-only: disabled composer, no provider process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_subagent: Option<String>,
-    /// Whether this session receives the tcode_orchestrate MCP registration.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub orchestrate_enabled: bool,
-    /// Set (unix secs) when orchestrate `cancel` stopped this dispatched
-    /// child: its result is not delivered. A message admitted to it clears it.
+    /// Set (unix secs) when this subagent was cancelled or archived unsettled: its result is
+    /// not delivered. A message admitted to it clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelled_at: Option<u64>,
-    /// Maximum inline result characters for this child's terminal callback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_max_chars: Option<u32>,
-    /// The report this dispatched child owes its lead, opened by the lead's
-    /// latest message. Absent until the first dispatch or `send`, and after
-    /// `cancel`.
+    /// The report this subagent owes its lead, opened by the lead's latest message. Absent
+    /// after a cancel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expectation: Option<ChildExpectation>,
     /// This thread's own `tcode_control` grant, set by an approved request; absent means its project's or the default applies.
@@ -299,14 +293,13 @@ impl SessionMeta {
             || (self.settled_override.is_none() && self.settled_at.is_some())
     }
 
-    /// A dispatched orchestrate child or a provider-native subagent mirror:
-    /// reached from its parent, never listed on its own.
+    /// A subagent another thread started or a provider-native subagent mirror: reached from
+    /// its parent, never listed on its own.
     pub fn is_subagent(&self) -> bool {
         self.parent_session_id.is_some() || self.native_subagent.is_some()
     }
 
-    /// A child its lead dispatched through orchestrate, as opposed to a
-    /// provider-native subagent mirror.
+    /// A subagent its lead started, as opposed to a provider-native subagent mirror.
     pub fn is_dispatched(&self) -> bool {
         self.parent_session_id.is_some() && self.native_subagent.is_none()
     }
@@ -384,9 +377,7 @@ impl SessionMeta {
             acp_agent_id: None,
             parent_session_id: None,
             native_subagent: None,
-            orchestrate_enabled: false,
             cancelled_at: None,
-            result_max_chars: None,
             expectation: None,
             control_grant: None,
             control_grant_requests: Vec::new(),
@@ -714,7 +705,6 @@ mod tests {
         assert!(!meta.pending_fork);
         assert_eq!(meta.parent_session_id, None);
         assert_eq!(meta.native_subagent, None);
-        assert!(!meta.orchestrate_enabled);
         assert_eq!(meta.archived_at, None);
         assert_eq!(meta.worktree, None);
         let json = serde_json::to_value(&meta).unwrap();
@@ -725,7 +715,6 @@ mod tests {
             "pending_fork",
             "parent_session_id",
             "native_subagent",
-            "orchestrate_enabled",
             "archived_at",
             "worktree",
         ] {
@@ -736,7 +725,6 @@ mod tests {
         meta.pending_fork = true;
         meta.parent_session_id = Some("parent".into());
         meta.native_subagent = Some("spawn-1".into());
-        meta.orchestrate_enabled = true;
         meta.archived_at = Some(1234);
         meta.worktree = Some(WorktreeInfo {
             root_project_path: PathBuf::from("/proj"),

@@ -1565,13 +1565,15 @@ impl Timeline {
     }
 }
 
-/// The tool a dispatched child reports through.
+/// The tool a subagent reports through: tcode_control's `report_result`, or the
+/// `tcode_report` server's in transcripts recorded before it moved there.
 pub fn is_report_result_tool(name: &str) -> bool {
-    agent::ToolName::parse(name)
-        == agent::ToolName {
-            server: Some(agent::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT),
-            tool: "report_result",
-        }
+    let name = agent::ToolName::parse(name);
+    name.tool == "report_result"
+        && matches!(
+            name.server,
+            Some(agent::McpRegistration::SERVER_NAME_CONTROL | "tcode_report")
+        )
 }
 
 /// Merge an authoritative item snapshot over an existing entry, keeping

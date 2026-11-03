@@ -1526,20 +1526,10 @@ fn resume_session(resume: &Option<ResumeCursor>) -> Option<&str> {
 /// Naming them beats a blanket notice: the person reading it wants to know
 /// which opted-in tools went missing, not that a protocol lacks a feature.
 fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
-    [
-        (
-            crate::McpRegistration::SERVER_NAME_ORCHESTRATE,
-            "orchestration",
-        ),
-        (
-            crate::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT,
-            "result reporting",
-        ),
-        (
-            crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
-            "computer-use",
-        ),
-    ]
+    [(
+        crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
+        "computer-use",
+    )]
     .into_iter()
     .filter_map(|(server_name, label)| {
         opts.mcp_servers

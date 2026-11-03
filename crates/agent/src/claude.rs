@@ -3911,7 +3911,11 @@ mod tests {
         let session =
             json!({"type":"addRules", "rules":[{"toolName":"Write"}], "destination":"session"});
         let user = json!({"type":"setMode", "mode":"acceptEdits", "destination":"userSettings"});
-        for name in ["Write", "EnterPlanMode", "mcp__tcode_report__report_result"] {
+        for name in [
+            "Write",
+            "EnterPlanMode",
+            "mcp__tcode_control__report_result",
+        ] {
             for choice in [
                 "allow",
                 "deny",
@@ -4113,7 +4117,7 @@ mod tests {
                 bearer_token: "p".into(),
             },
             crate::McpRegistration {
-                name: "tcode_orchestrate".into(),
+                name: "tcode_control".into(),
                 url: "http://o".into(),
                 bearer_token: "o".into(),
             },
@@ -4136,7 +4140,7 @@ mod tests {
             assert_eq!(servers.len(), count);
             for (name, url, authorization) in [
                 ("tcode_preview", "http://p", "Bearer p"),
-                ("tcode_orchestrate", "http://o", "Bearer o"),
+                ("tcode_control", "http://o", "Bearer o"),
                 ("tcode_computer_use", "http://c", "Bearer c"),
             ]
             .into_iter()

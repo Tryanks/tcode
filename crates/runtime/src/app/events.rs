@@ -1048,7 +1048,6 @@ pub(super) fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMe
         .profile_id
         .clone()
         .filter(|id| settings.resolved_profile(id).is_some());
-    meta.orchestrate_enabled = false;
     meta.option_selections.push(OptionSelection {
         id: "reasoningEffort".into(),
         value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
@@ -1064,7 +1063,6 @@ pub(super) fn fallback_review_session_meta(settings: &Settings, cwd: PathBuf) ->
         .profile_id
         .clone()
         .filter(|id| settings.resolved_profile(id).is_some());
-    meta.orchestrate_enabled = false;
     meta
 }
 

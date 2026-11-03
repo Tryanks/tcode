@@ -2962,20 +2962,20 @@ mod tests {
         // No preview server running → nothing to send, capability or not.
         assert!(mcp_servers(&[], &caps).is_empty());
 
-        let orchestrate = McpRegistration {
-            name: McpRegistration::SERVER_NAME_ORCHESTRATE.into(),
+        let control = McpRegistration {
+            name: McpRegistration::SERVER_NAME_CONTROL.into(),
             url: "http://127.0.0.1:5321/mcp".into(),
             bearer_token: "other".into(),
         };
-        assert_eq!(mcp_servers(&[&registration, &orchestrate], &caps).len(), 2);
-        assert_eq!(mcp_servers(&[&orchestrate], &caps).len(), 1);
+        assert_eq!(mcp_servers(&[&registration, &control], &caps).len(), 2);
+        assert_eq!(mcp_servers(&[&control], &caps).len(), 1);
 
         let computer_use = McpRegistration {
             name: McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
             url: "http://127.0.0.1:5322/mcp".into(),
             bearer_token: "computer-token".into(),
         };
-        let servers = mcp_servers(&[&registration, &orchestrate, &computer_use], &caps);
+        let servers = mcp_servers(&[&registration, &control, &computer_use], &caps);
         assert_eq!(servers.len(), 3);
         let value = serde_json::to_value(&servers[2]).unwrap();
         assert_eq!(value["name"], "tcode_computer_use");

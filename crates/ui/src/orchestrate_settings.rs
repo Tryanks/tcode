@@ -897,15 +897,11 @@ impl OrchestrateSettingsPanel {
                         let catalog = self.store.read(cx).provider_model_catalog(provider);
                         let unavailable =
                             !catalog.is_empty() && !catalog.iter().any(|spec| spec.id == row.model);
-                        let choices = orchestrate_efforts(provider, &row.model, &catalog, decision);
+                        let choices = orchestrate_efforts(provider, &row.model, &catalog);
                         let efforts = if unavailable {
                             crate::tr!("orchestrate.children.model_unavailable").into_owned()
                         } else if choices.is_empty() {
-                            if decision {
-                                crate::tr!("orchestrate.decisions.effort_unavailable").into_owned()
-                            } else {
-                                crate::tr!("orchestrate.children.effort_default").into_owned()
-                            }
+                            crate::tr!("orchestrate.children.effort_default").into_owned()
                         } else {
                             choices.join(" · ")
                         };
