@@ -2891,7 +2891,6 @@ tools:
   copy_arguments: "复制参数"
   session: "会话 %{id}"
   copy_diff: "复制差异"
-  all_lines: "显示全部 %{count} 行"
   line_range: "第 %{first}–%{last} 行"
   copy_content: "复制内容"
   lines_not_shown: "另有 %{count} 行未显示；复制内容即可阅读"

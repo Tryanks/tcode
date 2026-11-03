@@ -339,6 +339,7 @@ pub(crate) fn preview_window(
             output,
             Default::default(),
             None,
+            shell::OutputHandlers::inert(),
             cx,
         )),
         _ if expandable => window::Detail::Shut,

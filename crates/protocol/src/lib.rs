@@ -249,6 +249,8 @@ pub use wire::{
 // kind naming its item, approval decisions feedback (the user's words), and
 // timeline entries feedback. The instruction channel drops per_prompt_system:
 // OpenCode 2.x keeps Tcode's instructions in a session instruction entry.
+// A command output frame carries the rows that scrolled off its screen as
+// its history.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]
