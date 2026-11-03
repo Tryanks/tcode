@@ -227,7 +227,8 @@ impl ChatView {
             self.motion
                 .shown("scroll-to-end-pill", shown.then_some(()), SHOW, window, cx)?;
         // Absolute positioning ignores mx_auto without pinned horizontal
-        // insets; span the region and center with flex instead.
+        // insets; span the region and center with flex instead, clear of
+        // the side rail as the column is.
         let pill = floating_backing(crate::material::radius_button(cx), cx).child(
             Button::new("scroll-to-end")
                 .motion(&self.motion)
@@ -250,7 +251,7 @@ impl ChatView {
                 .absolute()
                 .bottom(px(12.) + self.phone_strip_height)
                 .left_0()
-                .right_0()
+                .right(self.body.shift())
                 .flex()
                 .justify_center()
                 .child(shown.fade(pill))
