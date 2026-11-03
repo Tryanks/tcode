@@ -2437,6 +2437,7 @@ agents:
   empty_desc: "Agents this thread dispatches appear here."
   close_side: "Close agent"
   back_to_parent: "Back to %{title}"
+  side_badge: "Subagent"
   open_child: "Open"
 tabs:
   with_count: "%{label} (%{count})"

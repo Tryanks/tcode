@@ -712,14 +712,14 @@ impl Render for ChatView {
         self.composer
             .update(cx, |composer, cx| composer.set_compact(compact, cx));
         // The phone reads on T1 paper; the desktop keeps the glass canvas,
-        // but for an agent on its lead's card, which reads on the card.
+        // but for an agent beside its lead, which reads on its card or sheet.
         // The header's title menu dispatches these, and the header is a sibling of `main`.
         let root = v_flex()
             .id(self.scene.id("chat"))
             .size_full()
             .min_w_0()
             .track_focus(&self.focus_handle)
-            .when(!self.on_side_card(), |root| {
+            .when(!self.is_side(), |root| {
                 root.bg(if compact {
                     crate::material::content_surface(cx)
                 } else {
