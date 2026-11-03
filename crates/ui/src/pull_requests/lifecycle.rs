@@ -40,6 +40,15 @@ use crate::{
     window_state::{Destination, WindowState},
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub(super) enum Lifecycle {
     Ready,
@@ -1281,6 +1290,7 @@ impl Render for MergeDialog {
                     crate::motion::cross_fade(
                         "pr-merge-head",
                         head.clone(),
+                        CHANGE,
                         window,
                         cx,
                         |head, _, cx| {
@@ -1332,7 +1342,7 @@ impl Render for MergeDialog {
         let reading = gpui_base::motion::transition(
             "pr-merge-reading",
             if state.is_none() { 1. } else { 0. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -1359,8 +1369,8 @@ impl Render for MergeDialog {
             .zip(target.project.clone())
             .map(|(method, (_, project))| (method, project));
         let make_default = self.make_default;
-        let default_box =
-            crate::motion::shown("pr-merge-default", default_box, window, cx).map(|shown| {
+        let default_box = crate::motion::shown("pr-merge-default", default_box, SHOW, window, cx)
+            .map(|shown| {
                 let (method, project) = shown.value.clone();
                 let view = view.clone();
                 shown.fold(
@@ -1387,6 +1397,7 @@ impl Render for MergeDialog {
         let credits = crate::motion::shown(
             "pr-merge-credits",
             self.credits_shown().then_some(()),
+            SHOW,
             window,
             cx,
         )
@@ -1522,6 +1533,7 @@ impl Render for MergeDialog {
                             text.clone(),
                         )
                     }),
+                    SHOW,
                     window,
                     cx,
                 )?;
@@ -1536,6 +1548,7 @@ impl Render for MergeDialog {
                 Some(Err(reason)) => Some(reason.clone()),
                 _ => None,
             },
+            SHOW,
             window,
             cx,
         )

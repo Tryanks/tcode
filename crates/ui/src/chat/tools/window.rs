@@ -19,6 +19,12 @@ use crate::widgets::TooltipTrigger as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::spinner::Spinner;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(in crate::chat) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 /// A verb in the three forms a call's state reads in: going on ("Reading"),
@@ -229,7 +235,13 @@ pub(in crate::chat) fn fold(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<crate::motion::Shown<()>> {
-    motion.shown(format!("tool-fold-{id}"), open.then_some(()), window, cx)
+    motion.shown(
+        format!("tool-fold-{id}"),
+        open.then_some(()),
+        SHOW,
+        window,
+        cx,
+    )
 }
 
 /// An open body whose height glides when what it shows changes at rest:
@@ -696,32 +708,41 @@ pub(in crate::chat) fn status_glyph(
     let background = cx.theme().background;
     let danger = cx.theme().danger;
     crate::motion::Sampled::new(move |window, cx| {
-        motion.cross_fade_part(id, glyph, window, cx, move |glyph, _, _| match glyph {
-            Glyph::Running => Spinner::new().color(primary).into_any_element(),
-            Glyph::Settled { failed } => {
-                let icon = Icon::empty()
-                    .path(icon.clone())
-                    .text_color(muted)
-                    .into_any_element();
-                if !failed {
-                    return icon;
+        motion.cross_fade_part(
+            id,
+            glyph,
+            CHANGE,
+            window,
+            cx,
+            move |glyph, _, _| match glyph {
+                Glyph::Running => Spinner::new().color(primary).into_any_element(),
+                Glyph::Settled { failed } => {
+                    let icon = Icon::empty()
+                        .path(icon.clone())
+                        .text_color(muted)
+                        .into_any_element();
+                    if !failed {
+                        return icon;
+                    }
+                    div()
+                        .relative()
+                        .flex_none()
+                        .child(icon)
+                        .child(
+                            div()
+                                .absolute()
+                                .right(px(-3.))
+                                .bottom(px(-3.))
+                                .rounded_full()
+                                .bg(background)
+                                .child(
+                                    Icon::new(IconName::CircleX).size(px(7.)).text_color(danger),
+                                ),
+                        )
+                        .into_any_element()
                 }
-                div()
-                    .relative()
-                    .flex_none()
-                    .child(icon)
-                    .child(
-                        div()
-                            .absolute()
-                            .right(px(-3.))
-                            .bottom(px(-3.))
-                            .rounded_full()
-                            .bg(background)
-                            .child(Icon::new(IconName::CircleX).size(px(7.)).text_color(danger)),
-                    )
-                    .into_any_element()
-            }
-        })
+            },
+        )
     })
     .into_any_element()
 }

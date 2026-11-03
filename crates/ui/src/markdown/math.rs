@@ -22,6 +22,9 @@ use gpui::{
 use gpui_base::h_flex;
 use latex_rust::{MathBox, MathFont, MathStyle, layout, parse};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 type FormulaCache = RecentCache<(String, bool), Option<Arc<MathBox>>>;
 
 thread_local! {
@@ -241,7 +244,7 @@ pub(super) fn actions_pinned(
     view.read(cx).motion().transition(
         format!("{path}/actions/compact"),
         if compact { 1f32 } else { 0. },
-        &crate::motion::Curve::settle(),
+        GLIDE,
         window,
         cx,
     )

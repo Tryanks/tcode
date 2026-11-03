@@ -17,6 +17,15 @@ use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, WeakEntity, defer
 use gpui_base::dock::AnyDrag;
 use tcode_core::thread_sort::{order_key_between, plan_reorder, thread_section};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A `semantic_chip`'s height: one `xs` line and its 1pt insets.
 const BOUNDARY_LABEL_HEIGHT: f32 = 18.;
 const EMPTY_TARGET_HEIGHT: f32 = 36.;
@@ -169,6 +178,7 @@ fn carried_thread(
         let badge = crate::motion::cross_fade_part(
             "thread-drag-action",
             action,
+            CHANGE,
             window,
             cx,
             |action, _, cx| {
@@ -200,6 +210,7 @@ fn carried_thread(
     let badge = crate::motion::cross_fade_part(
         "thread-drag-action",
         action,
+        CHANGE,
         window,
         cx,
         |action, _, cx| {
@@ -817,17 +828,18 @@ impl SessionsSidebar {
         // The seam's label fades in as a drag starts and out as it ends, and
         // lights up while the drag targets its section; an empty section's
         // target folds open in its place instead.
-        let shown = crate::motion::shown(id.clone(), targeted.filter(|_| !empty), window, cx);
+        let shown = crate::motion::shown(id.clone(), targeted.filter(|_| !empty), SHOW, window, cx);
         let target = crate::motion::shown(
             SharedString::from(format!("drag-boundary-target-{section:?}")),
             targeted.filter(|_| empty).map(|_| ()),
+            SHOW,
             window,
             cx,
         );
         let lit = transition(
             (id, "lit"),
             if targeted == Some(true) { 1. } else { 0. },
-            settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -959,7 +971,7 @@ impl SessionsSidebar {
         let settled_fold = transition(
             ("arrange-settled", "fold"),
             if open { 1. } else { 0. },
-            settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -1079,7 +1091,7 @@ impl SessionsSidebar {
                 } else {
                     cx.theme().muted_foreground
                 },
-                settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             )
@@ -1097,9 +1109,13 @@ impl SessionsSidebar {
                     .into_any_element()
             }
             ArrangeRow::PinnedEmpty(empty) => {
-                let Some(shown) =
-                    crate::motion::shown("arrange-pinned-empty", empty.then_some(()), window, cx)
-                else {
+                let Some(shown) = crate::motion::shown(
+                    "arrange-pinned-empty",
+                    empty.then_some(()),
+                    SHOW,
+                    window,
+                    cx,
+                ) else {
                     return div().into_any_element();
                 };
                 let row =

@@ -5,6 +5,9 @@ use gpui_base::{h_flex, v_flex};
 
 use crate::theme::ActiveTheme as _;
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A QR code as `(width_in_modules, dark_module_flags)`, row-major.
 fn qr_modules(payload: &str) -> Option<(usize, Vec<bool>)> {
     let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
@@ -34,9 +37,16 @@ pub(super) fn beside_qr(
 ) -> gpui::Div {
     let id = id.into();
     let qr = qr_modules(payload).is_some().then(|| {
-        let qr = crate::motion::cross_fade(id, payload.to_owned(), window, cx, |payload, _, cx| {
-            qr_element(payload, compact, cx).unwrap_or_else(|| div().into_any_element())
-        });
+        let qr = crate::motion::cross_fade(
+            id,
+            payload.to_owned(),
+            CHANGE,
+            window,
+            cx,
+            |payload, _, cx| {
+                qr_element(payload, compact, cx).unwrap_or_else(|| div().into_any_element())
+            },
+        );
         reflow.part("qr", qr)
     });
     let layout = if compact {

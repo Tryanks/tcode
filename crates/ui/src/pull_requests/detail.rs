@@ -5,6 +5,9 @@
 use crate::widgets::TooltipTrigger as _;
 use std::collections::{HashMap, HashSet};
 
+/// How long a conversation row takes to come in, or to fold away as it leaves.
+const ROWS_IN: std::time::Duration = std::time::Duration::from_millis(200);
+
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ListAlignment, ListState, ParentElement as _, Render, ScrollHandle, SharedString,
@@ -40,6 +43,15 @@ use crate::{
     },
     window_state::WindowState,
 };
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The behind-base chip: how far the head is behind, and the updates the account may make.
 #[derive(Clone, PartialEq)]
@@ -164,7 +176,7 @@ impl Default for ConversationView {
             list: ListState::new(0, ListAlignment::Top, px(200.)),
             rows: Vec::new(),
             keys: Vec::new(),
-            arrivals: Default::default(),
+            arrivals: crate::motion::list_rows::ListRows::over(ROWS_IN),
             drawn: None,
             drawn_pending: 0,
             shared: Default::default(),
@@ -863,15 +875,15 @@ impl PullRequestView {
                 key.repository, key.number
             )))
         };
-        let glyph = crate::motion::status_icon(id("state"), glyph, color, window, cx);
+        let glyph = crate::motion::status_icon(id("state"), glyph, color, CHANGE, window, cx);
         let color = gpui_base::motion::transition(
             id("state-chip"),
             color,
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
-        let synced = crate::motion::shown(id("synced"), snapshot.clone(), window, cx);
+        let synced = crate::motion::shown(id("synced"), snapshot.clone(), SHOW, window, cx);
         let title = snapshot
             .as_ref()
             .map(|s| s.title.clone())
@@ -1006,12 +1018,14 @@ impl PullRequestView {
                     id(&format!("{part}-icon")),
                     icon,
                     color,
+                    CHANGE,
                     window,
                     cx,
                 ))
                 .child(crate::motion::cross_fade(
                     id(&format!("{part}-label")),
                     label,
+                    CHANGE,
                     window,
                     cx,
                     |label, _, _| {
@@ -1022,9 +1036,13 @@ impl PullRequestView {
                     },
                 ))
         };
-        if let Some(checks) =
-            crate::motion::shown(id("checks"), open.and_then(|s| s.checks_state), window, cx)
-        {
+        if let Some(checks) = crate::motion::shown(
+            id("checks"),
+            open.and_then(|s| s.checks_state),
+            SHOW,
+            window,
+            cx,
+        ) {
             has_chip |= !checks.leaving();
             drawn = true;
             let (icon, color, label) = match checks.value {
@@ -1056,6 +1074,7 @@ impl PullRequestView {
         if let Some(review) = crate::motion::shown(
             id("review"),
             open.and_then(|s| s.review_decision),
+            SHOW,
             window,
             cx,
         ) {
@@ -1088,7 +1107,7 @@ impl PullRequestView {
             )));
         }
         let behind = open.and_then(|snapshot| self.behind(&key, snapshot, cx));
-        if let Some(behind) = crate::motion::shown(id("behind"), behind, window, cx) {
+        if let Some(behind) = crate::motion::shown(id("behind"), behind, SHOW, window, cx) {
             has_chip |= !behind.leaving();
             drawn = true;
             chips =
@@ -1098,6 +1117,7 @@ impl PullRequestView {
             id("conflict"),
             open.filter(|s| s.mergeability == Mergeability::Conflicting)
                 .map(|s| s.base_branch.clone()),
+            SHOW,
             window,
             cx,
         ) {
@@ -1123,6 +1143,7 @@ impl PullRequestView {
         if let Some(shown) = crate::motion::shown(
             id("stack-map"),
             selector.is_some().then_some(()),
+            SHOW,
             window,
             cx,
         ) {
@@ -1145,7 +1166,7 @@ impl PullRequestView {
                 .thread_meta(&session)
                 .is_some_and(|meta| meta.pull_request_watches_paused)
         });
-        if let Some(watching) = crate::motion::shown(id("watching"), watching, window, cx) {
+        if let Some(watching) = crate::motion::shown(id("watching"), watching, SHOW, window, cx) {
             has_chip |= !watching.leaving();
             drawn = true;
             let paused = watching.value;
@@ -1167,13 +1188,13 @@ impl PullRequestView {
                 ),
             );
         }
-        let chip_row = crate::motion::shown(id("chips"), has_chip.then_some(()), window, cx);
+        let chip_row = crate::motion::shown(id("chips"), has_chip.then_some(()), SHOW, window, cx);
         let condition = match link.as_ref().map(|link| link.source) {
             Some(PullRequestSource::Dismissed) => Some("pull_requests.source_dismissed"),
             None => Some("pull_requests.source_not_linked"),
             _ => None,
         };
-        let condition = crate::motion::shown(id("condition"), condition, window, cx);
+        let condition = crate::motion::shown(id("condition"), condition, SHOW, window, cx);
         v_flex()
             .flex_none()
             .px(if compact {
@@ -1398,7 +1419,7 @@ impl PullRequestView {
             } else {
                 0.
             },
-            &crate::motion::Curve::settle(),
+            GLIDE,
             window,
             cx,
         );
@@ -1467,6 +1488,7 @@ impl PullRequestView {
             .child(crate::motion::cross_fade(
                 id("title"),
                 (title.clone(), known),
+                CHANGE,
                 window,
                 cx,
                 |(title, known), _, cx| {
@@ -1489,7 +1511,7 @@ impl PullRequestView {
             let shown = gpui_base::motion::transition(
                 id("title-edit-shown"),
                 if *hovered.read(cx) { 1. } else { 0. },
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -1766,13 +1788,19 @@ impl PullRequestView {
         };
         // The target outlives the action it offered, so a leaving action is drawn from it.
         let target = self.shown_target(cx);
-        let kept =
-            crate::motion::shown(id("shown"), current.map(|(_, primary)| primary), window, cx)?;
+        let kept = crate::motion::shown(
+            id("shown"),
+            current.map(|(_, primary)| primary),
+            SHOW,
+            window,
+            cx,
+        )?;
         let action = match target {
             // A new action, or a status in its place, cross-fades over the one it follows.
             Some(target) => crate::motion::cross_fade(
                 id("kind"),
                 kept.value,
+                CHANGE,
                 window,
                 cx,
                 move |primary, _, cx| {
@@ -1828,7 +1856,7 @@ impl PullRequestView {
             let spin = gpui_base::motion::transition(
                 "pr-detail-refreshing",
                 if refreshing { 1. } else { 0. },
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -1987,6 +2015,7 @@ impl PullRequestView {
         let stats = crate::motion::shown(
             SharedString::from(format!("pr-detail-{number}-stats")),
             stats,
+            SHOW,
             window,
             cx,
         )
@@ -2066,6 +2095,7 @@ impl PullRequestView {
             crate::motion::shown(
                 SharedString::from(format!("pr-detail-{number}-notice-{part}")),
                 text,
+                SHOW,
                 window,
                 cx,
             )
@@ -2236,6 +2266,7 @@ impl PullRequestView {
             SharedString::from(format!("pr-detail-{number}-{part}-loading")),
             usize::from(!loading),
             2,
+            CHANGE,
             window,
             cx,
         )
@@ -2379,6 +2410,7 @@ impl Render for PullRequestView {
             SharedString::from(format!("pr-detail-{number}-tab")),
             usize::from(tab == Tab::Conversation),
             2,
+            CHANGE,
             window,
             cx,
         )
@@ -2397,7 +2429,7 @@ impl Render for PullRequestView {
         // Another pull request, a stack layer chosen from the map, fades in in this one's place.
         let page = self
             .motion
-            .entered("page", key_id(self.current.as_ref()), window, cx);
+            .entered("page", key_id(self.current.as_ref()), CHANGE, window, cx);
         v_flex()
             .size_full()
             .opacity(page)

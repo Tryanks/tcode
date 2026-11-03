@@ -48,6 +48,21 @@ use crate::{
     },
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Whether a stack write is offered, and why not when it is shown disabled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Avail {
@@ -360,7 +375,7 @@ pub(super) fn operation_chip(
                 let color = gpui_base::motion::transition(
                     (gpui::ElementId::from(id.clone()), "color"),
                     color,
-                    crate::motion::settle(),
+                    gpui_base::motion::Transition::new(GLIDE),
                     window,
                     cx,
                 );
@@ -375,6 +390,7 @@ pub(super) fn operation_chip(
                     .child(crate::motion::cross_fade(
                         (gpui::ElementId::from(id.clone()), "glyph"),
                         glyph,
+                        CHANGE,
                         window,
                         cx,
                         |glyph, _, _| match glyph {
@@ -385,6 +401,7 @@ pub(super) fn operation_chip(
                     .child(crate::motion::cross_fade(
                         (gpui::ElementId::from(id), "label"),
                         label,
+                        CHANGE,
                         window,
                         cx,
                         |label, _, _| {
@@ -688,7 +705,7 @@ pub(super) fn map_selector(
                     let status =
                         status.map(|(icon, color, _)| (crate::icon::IconNamed::path(icon), color));
                     crate::motion::Sampled::new(move |window, cx| {
-                        match crate::motion::shown("pr-layer-status", status, window, cx) {
+                        match crate::motion::shown("pr-layer-status", status, SHOW, window, cx) {
                             Some(shown) => {
                                 let (path, color) = shown.value.clone();
                                 shown.fade(Icon::empty().path(path).text_color(color))
@@ -795,16 +812,22 @@ fn map_content(
             ),
     );
     // The running write's row folds in when it starts and out when it is done.
-    let operation = crate::motion::shown("pr-map-operation", offer.operation.clone(), window, cx)
-        .map(|shown| {
-            shown.fold(h_flex().px_2().py_1().child(operation_chip(
-                target.cloned(),
-                &shown.value,
-                &offer.links,
-                compact,
-                cx,
-            )))
-        });
+    let operation = crate::motion::shown(
+        "pr-map-operation",
+        offer.operation.clone(),
+        SHOW,
+        window,
+        cx,
+    )
+    .map(|shown| {
+        shown.fold(h_flex().px_2().py_1().child(operation_chip(
+            target.cloned(),
+            &shown.value,
+            &offer.links,
+            compact,
+            cx,
+        )))
+    });
     let rows = map.rows.iter().rev().map(|row| {
         let number = row.layer.number;
         let layer_key = PullRequestKey::new(&offer.key.host, &offer.key.repository, number);
@@ -1090,7 +1113,7 @@ pub(super) fn caption(
                     let (operation, links) = (operation.cloned(), links.to_vec());
                     let id = SharedString::from(format!("pr-stack-caption-operation-{}", stack.id));
                     crate::motion::Sampled::new(move |window, cx| {
-                        match crate::motion::shown(id, operation, window, cx) {
+                        match crate::motion::shown(id, operation, SHOW, window, cx) {
                             Some(shown) => {
                                 shown.fade(operation_chip(None, &shown.value, &links, compact, cx))
                             }
@@ -1859,6 +1882,7 @@ impl Render for MergeStackDialog {
         let read = crate::motion::appear(
             SharedString::from(format!("pr-stack-merge-phase-{phase}")),
             true,
+            APPEAR,
             window,
             cx,
         )
@@ -1931,31 +1955,33 @@ impl Render for MergeStackDialog {
             .zip(self.project.clone())
             .map(|(method, (_, project))| (method, project));
         let make_default = self.make_default;
-        let default_box = crate::motion::shown("pr-stack-merge-default", default_box, window, cx)
-            .map(|shown| {
-                let (method, project) = shown.value.clone();
-                let view = view.clone();
-                shown.fold(
-                    Checkbox::new("pr-stack-merge-default")
-                        .label(
-                            crate::tr!(
-                                "pull_requests.merge.make_default",
-                                method = super::lifecycle::segment_label(method),
-                                project = project
+        let default_box =
+            crate::motion::shown("pr-stack-merge-default", default_box, SHOW, window, cx).map(
+                |shown| {
+                    let (method, project) = shown.value.clone();
+                    let view = view.clone();
+                    shown.fold(
+                        Checkbox::new("pr-stack-merge-default")
+                            .label(
+                                crate::tr!(
+                                    "pull_requests.merge.make_default",
+                                    method = super::lifecycle::segment_label(method),
+                                    project = project
+                                )
+                                .into_owned(),
                             )
-                            .into_owned(),
-                        )
-                        .checked(make_default)
-                        .disabled(self.sending)
-                        .on_click(move |checked, _, cx| {
-                            let checked = *checked;
-                            view.update(cx, |dialog, cx| {
-                                dialog.make_default = checked;
-                                cx.notify();
-                            })
-                        }),
-                )
-            });
+                            .checked(make_default)
+                            .disabled(self.sending)
+                            .on_click(move |checked, _, cx| {
+                                let checked = *checked;
+                                view.update(cx, |dialog, cx| {
+                                    dialog.make_default = checked;
+                                    cx.notify();
+                                })
+                            }),
+                    )
+                },
+            );
         let body = v_flex().gap_3().child(facts).child(
             v_flex()
                 .w_full()
@@ -2219,6 +2245,7 @@ impl Render for MergeStackDialog {
                 let notes = crate::motion::keyed(
                     "pr-stack-merge-notes",
                     notes,
+                    ROWS,
                     window,
                     cx,
                     |_, (icon, text), _, _| {
@@ -2234,9 +2261,13 @@ impl Render for MergeStackDialog {
                 body = body.child(notes.render(self::notes(cx).gap_0().mt(gpui::rems(-0.25))));
                 let changed = self.notice.clone();
                 let again = cx.listener(|this, _, _, cx| this.load(cx));
-                if let Some(shown) =
-                    crate::motion::shown("pr-stack-merge-changed", changed.clone(), window, cx)
-                {
+                if let Some(shown) = crate::motion::shown(
+                    "pr-stack-merge-changed",
+                    changed.clone(),
+                    SHOW,
+                    window,
+                    cx,
+                ) {
                     body = body.child(
                         shown.fold(
                             warning_wash(cx)
@@ -2511,6 +2542,7 @@ impl RebaseStackDialog {
         let read = crate::motion::appear(
             SharedString::from(format!("pr-stack-rebase-phase-{phase}")),
             true,
+            APPEAR,
             window,
             cx,
         )
@@ -2655,9 +2687,13 @@ impl RebaseStackDialog {
                 }
                 let changed = self.notice.clone();
                 let again = cx.listener(|this, _, _, cx| this.load(cx));
-                if let Some(shown) =
-                    crate::motion::shown("pr-stack-rebase-changed", changed.clone(), window, cx)
-                {
+                if let Some(shown) = crate::motion::shown(
+                    "pr-stack-rebase-changed",
+                    changed.clone(),
+                    SHOW,
+                    window,
+                    cx,
+                ) {
                     body = body.child(
                         shown.fold(
                             warning_wash(cx)
@@ -2725,6 +2761,7 @@ impl Render for RebaseStackDialog {
         let shown = crate::motion::appear(
             SharedString::from(format!("pr-stack-rebase-view-{}", self.started)),
             true,
+            APPEAR,
             window,
             cx,
         )
@@ -2863,6 +2900,7 @@ fn progress_view(
             let icon = crate::motion::cross_fade(
                 (row_id.clone(), "icon"),
                 step.clone(),
+                CHANGE,
                 window,
                 cx,
                 |(step, below), _, cx| step_parts(step, *below, &base, cx).0,
@@ -2870,6 +2908,7 @@ fn progress_view(
             let text = crate::motion::cross_fade(
                 (row_id, "text"),
                 step,
+                CHANGE,
                 window,
                 cx,
                 |(step, below), _, cx| {
@@ -2915,6 +2954,7 @@ fn progress_view(
     let shown = crate::motion::shown(
         "pr-stack-recovery",
         (stopped.is_some() && ended).then_some(()),
+        SHOW,
         window,
         cx,
     );

@@ -12,6 +12,9 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+/// How long a result takes to come into the list as the query changes.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -32,6 +35,9 @@ use crate::settings_page::apply_theme;
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How far below the window's top the desktop palette hangs. See the host's
 /// note in [`CommandPalette`]'s render on why it does not use `overlay::Dialog`.
@@ -203,7 +209,7 @@ impl CommandPalette {
             search_generation: 0,
             results: None,
             list_state: ListState::new(0, ListAlignment::Top, px(120.)),
-            arrived: Default::default(),
+            arrived: crate::motion::list_rows::ListRows::over(ARRIVE),
             hits_arrived: false,
             list_scroll: Default::default(),
             opened: false,
@@ -909,7 +915,7 @@ impl Render for CommandPalette {
         // The palette's own clock: the window turning compact or wide draws
         // it under another parent, where an element's clock would bring an
         // open palette in again from nothing.
-        let presence = self.motion.appear("presence", open, window, cx);
+        let presence = self.motion.appear("presence", open, APPEAR, window, cx);
         if !open && presence == 0. {
             if self.window_state.read(cx).palette_leaving() {
                 // Its host unmounts it once the window says it has left.

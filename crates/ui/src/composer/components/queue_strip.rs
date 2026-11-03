@@ -16,6 +16,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(target_family = "wasm")]
 use web_time::{SystemTime, UNIX_EPOCH};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The drag payload; the composer keeps the drag's state in [`QueueDrag`].
 pub(in super::super) struct DraggedQueued {
     id: u64,
@@ -239,6 +245,7 @@ impl Composer {
         let shown = self.motion.shown(
             self.motion_key("queue-strip"),
             (!queued.is_empty()).then_some(()),
+            SHOW,
             window,
             cx,
         )?;
@@ -264,6 +271,7 @@ impl Composer {
             this.motion_key("queue-rows"),
             crate::motion::keyed::Fold::Down,
             rows.collect::<Vec<_>>(),
+            ROWS,
             window,
             cx,
             |_, (index, message), window, cx| {

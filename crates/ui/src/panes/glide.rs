@@ -6,8 +6,11 @@ use std::collections::{HashMap, HashSet};
 use gpui::{Along as _, App, Axis, ElementId, Pixels, Size, Window};
 use gpui_base::dock::{NodeId, PaneNode, PaneRef, PaneTree, PanelId};
 
-/// The chat column's splits gliding to the shares their last edit gave them,
-/// over `edge_back::SETTLE`: a new pane grows out of nothing beside the one
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The chat column's splits gliding to the shares their last edit gave them:
+/// a new pane grows out of nothing beside the one
 /// it halves, and a closing one shrinks to nothing into its neighbours.
 ///
 /// gpui-base's dock draws a split at the slot sizes its tree holds and has no
@@ -362,6 +365,7 @@ impl Glides {
             let sample = crate::motion::appear(
                 ElementId::NamedInteger("pane-glide".into(), glide.generation),
                 true,
+                APPEAR,
                 window,
                 cx,
             );

@@ -31,6 +31,18 @@ use crate::widgets::spinner::Spinner;
 use crate::widgets::tooltip::Tooltip;
 use gpui_base::PopoverState;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_agents, no_json)]
 struct AgentOpen(String);
@@ -617,13 +629,14 @@ impl AgentsPanel {
                 .map_or(cx.theme().muted_foreground, |execution| {
                     execution_color(execution, cx)
                 }),
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
         crate::motion::cross_fade_part(
             SharedString::from(format!("agent-status-{}", row.key)),
             working,
+            CHANGE,
             window,
             cx,
             move |working, _, cx| {
@@ -678,7 +691,7 @@ impl AgentsPanel {
             let focused = gpui_base::motion::transition(
                 (group.clone(), "action-focus-reveal"),
                 if keyboard { 1f32 } else { 0. },
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -745,6 +758,7 @@ impl AgentsPanel {
         let badges = crate::motion::keyed_across(
             SharedString::from(format!("agent-badges-{}", row.key)),
             Self::delivery_badges(row),
+            ROWS,
             window,
             cx,
             |key, (style, checked), _, cx| {
@@ -812,6 +826,7 @@ impl AgentsPanel {
         let preview = crate::motion::shown(
             SharedString::from(format!("agent-preview-{}", row.key)),
             row.preview.clone(),
+            SHOW,
             window,
             cx,
         )
@@ -933,6 +948,7 @@ impl Render for AgentsPanel {
             "agents-empty-or-list",
             usize::from(!agents.is_empty()),
             2,
+            CHANGE,
             window,
             cx,
         )
@@ -1016,6 +1032,7 @@ impl AgentsPanel {
         let column = crate::motion::keyed(
             "agents-list",
             entries,
+            ROWS,
             window,
             cx,
             |_, entry, window, cx| {

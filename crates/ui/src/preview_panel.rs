@@ -62,6 +62,9 @@ use crate::widgets::menu::DropdownMenu as _;
 use crate::window_caption;
 use crate::window_state::{Route, WindowState};
 
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Whether this client can embed a browser. Views ask before offering an action
 /// that needs one, so nothing renders an enabled control that cannot work.
 ///
@@ -459,7 +462,7 @@ impl PreviewPanel {
             .child({
                 let swap = self
                     .motion
-                    .swap("actions", usize::from(compact), 2, window, cx)
+                    .swap("actions", usize::from(compact), 2, CHANGE, window, cx)
                     .across();
                 let mut layers = Vec::new();
                 if swap.shows(0) {

@@ -16,6 +16,9 @@ use gpui::{App, ListState, px};
 
 use crate::motion::list_rows::{Around, ListRows};
 
+/// How long a row takes to come into a sidebar list or fold out of it.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A row's key in [`RowPresence`], from what names it in its list.
 pub(super) fn row_key(name: impl Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -37,7 +40,7 @@ pub(super) struct RowPresence<V> {
 impl<V> Default for RowPresence<V> {
     fn default() -> Self {
         Self {
-            rows: ListRows::default(),
+            rows: ListRows::over(ROWS),
             factors: HashMap::new(),
             keys: Vec::new(),
         }

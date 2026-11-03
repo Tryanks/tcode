@@ -13,6 +13,9 @@ use gpui_base::motion::{Transition, transition};
 use gpui_base::{SwitchThumb, SwitchTrack};
 use std::rc::Rc;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(IntoElement)]
 pub struct Switch {
     id: ElementId,
@@ -94,7 +97,7 @@ impl RenderOnce for Switch {
         let checked_bg = self.color.unwrap_or(cx.theme().primary);
         let unchecked_bg = cx.theme().muted;
         let thumb_bg = cx.theme().background;
-        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let settle = || Transition::new(GLIDE);
         let track_bg = transition(
             (self.id.clone(), "track-bg"),
             if checked { checked_bg } else { unchecked_bg },

@@ -3,6 +3,9 @@ use super::super::*;
 use crate::store::{FallbackBlock, FallbackReview};
 use agent::{ClassifierCategory, RewindMode};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Opus is the classifier's intended fallback target for legitimate work; the
 /// flagged category picks which release takes the retry.
 fn retry_model(category: Option<&ClassifierCategory>) -> &'static str {
@@ -96,6 +99,7 @@ impl Composer {
             .shown(
                 self.motion_key("fallback-edit-retry"),
                 can_rewind.then(|| rewind_turn.unwrap_or_default()),
+                SHOW,
                 window,
                 cx,
             )
@@ -124,7 +128,13 @@ impl Composer {
             });
         let retry = self
             .motion
-            .shown(self.motion_key("fallback-retry"), retry_text, window, cx)
+            .shown(
+                self.motion_key("fallback-retry"),
+                retry_text,
+                SHOW,
+                window,
+                cx,
+            )
             .map(|shown| {
                 let text = shown.value.clone();
                 shown.fold_across(

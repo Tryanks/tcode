@@ -19,6 +19,15 @@ use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::switch::Switch;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The width of a text field beside its row's label; gpui-base has no form-field width token.
 pub const FIELD_WIDTH: f32 = 240.;
 
@@ -43,7 +52,7 @@ pub(crate) fn content_column(
         } else {
             spacing.xl
         },
-        &crate::motion::Curve::settle(),
+        GLIDE,
         window,
         cx,
     );
@@ -95,7 +104,7 @@ pub fn grouped_keyed<T: Clone + 'static, C: std::borrow::BorrowMut<App>>(
     cx: &mut C,
     mut build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> AnyElement {
-    crate::motion::keyed(id, items, window, cx, |key, value, window, cx| {
+    crate::motion::keyed(id, items, ROWS, window, cx, |key, value, window, cx| {
         let row = build(key, value, window, cx);
         hairlined(row, std::borrow::Borrow::<App>::borrow(&*cx))
     })
@@ -191,6 +200,7 @@ impl RenderOnce for ResetAction {
         let Some(shown) = crate::motion::shown(
             (self.id.clone(), "reset"),
             self.overridden.then_some(()),
+            SHOW,
             window,
             cx,
         ) else {
@@ -534,8 +544,13 @@ impl RenderOnce for ToggleRow {
         let row_focus = focus.clone();
         let key_toggle = on_toggle.clone();
         let has_accessory = accessory.is_some();
-        let error =
-            crate::motion::shown(SharedString::from(format!("{id}-error")), error, window, cx);
+        let error = crate::motion::shown(
+            SharedString::from(format!("{id}-error")),
+            error,
+            SHOW,
+            window,
+            cx,
+        );
         let selector = id.clone();
         crate::material::accessible_clickable(
             crate::material::group_row(cx),

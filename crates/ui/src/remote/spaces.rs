@@ -46,6 +46,20 @@ use crate::widgets::menu::PopupMenu;
 #[cfg(feature = "remote-hosting")]
 use super::RemoteController;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Add a project to a space, or take it out again.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_spaces, no_json)]
@@ -878,6 +892,7 @@ fn link_block(
             .link
             .is_none()
             .then(|| link_unavailable(space, accepting).unwrap_or_default()),
+        SHOW,
         window,
         cx,
     )
@@ -889,7 +904,7 @@ fn link_block(
             } else {
                 cx.theme().muted_foreground
             },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -899,6 +914,7 @@ fn link_block(
                 .clone()
                 .filter(|_| space.link_dead && space.link.is_none())
                 .map(|_| ()),
+            SHOW,
             window,
             cx,
         )
@@ -923,7 +939,7 @@ fn link_block(
                 .children(fix),
         )
     });
-    let qr = crate::motion::shown(id("qr"), space.link.clone(), window, cx).map(|shown| {
+    let qr = crate::motion::shown(id("qr"), space.link.clone(), SHOW, window, cx).map(|shown| {
         let link = shown.value.clone();
         let has_actions = copy || regenerate.is_some();
         let actions = h_flex()
@@ -1094,6 +1110,7 @@ mod section {
                 status
                     .as_ref()
                     .map(|(label, _, _)| SharedString::from(label.to_string())),
+                SHOW,
                 window,
                 cx,
             )
@@ -1105,7 +1122,7 @@ mod section {
                     gpui_base::motion::transition(
                         (SharedString::from(format!("space-status-{id}")), channel),
                         color,
-                        crate::motion::settle(),
+                        gpui_base::motion::Transition::new(GLIDE),
                         window,
                         cx,
                     )
@@ -1402,6 +1419,7 @@ mod section {
             let shared = crate::motion::keyed(
                 SharedString::from(format!("space-projects-{space_id}")),
                 shared,
+                ROWS,
                 window,
                 cx,
                 |_, project_ids, window, cx| match project_ids {
@@ -1417,6 +1435,7 @@ mod section {
                         crate::motion::keyed_across(
                             SharedString::from(format!("space-project-chips-{space_id}")),
                             chips,
+                            ROWS,
                             window,
                             cx,
                             |_, project_id, _, cx| chip(project_id, cx),
@@ -1516,13 +1535,14 @@ mod section {
                             Some(_) => cx.theme().success,
                             None => cx.theme().muted_foreground,
                         },
-                        crate::motion::settle(),
+                        gpui_base::motion::Transition::new(GLIDE),
                         window,
                         cx,
                     );
                     let path = crate::motion::cross_fade(
                         SharedString::from(format!("member-path-{}", member.id)),
                         super::super::path_label(member.path.as_ref()),
+                        CHANGE,
                         window,
                         cx,
                         move |label, _, cx| {
@@ -1916,6 +1936,7 @@ mod machines {
             let status = crate::motion::cross_fade(
                 SharedString::from(format!("machine-space-status-{id}")),
                 (status, color),
+                CHANGE,
                 window,
                 cx,
                 move |(status, color), _, cx| {
@@ -1945,6 +1966,7 @@ mod machines {
             let controls = crate::motion::keyed_across(
                 SharedString::from(format!("machine-space-controls-{id}")),
                 items,
+                ROWS,
                 window,
                 cx,
                 |_, control, _, cx| {
@@ -2028,6 +2050,7 @@ mod machines {
             let qr = crate::motion::shown(
                 SharedString::from(format!("machine-space-qr-{id}")),
                 open.then_some(()),
+                SHOW,
                 window,
                 cx,
             )

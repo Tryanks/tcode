@@ -1,6 +1,15 @@
 use super::*;
 use crate::widgets::TooltipTrigger as _;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Show or hide one of the panels a thread's header toggles, as its button
 /// or its row in the header's overflow menu does.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -134,14 +143,8 @@ fn agents_cue_dot(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
-    let shown = motion.shown("agents-cue", cue, window, cx)?;
-    let color = motion.transition(
-        "agents-cue-color",
-        shown.value,
-        &crate::motion::Curve::settle(),
-        window,
-        cx,
-    );
+    let shown = motion.shown("agents-cue", cue, SHOW, window, cx)?;
+    let color = motion.transition("agents-cue-color", shown.value, GLIDE, window, cx);
     Some(
         div()
             .absolute()
@@ -165,14 +168,8 @@ fn cue_in_pill(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
-    let shown = motion.shown("agents-pill-cue", cue, window, cx)?;
-    let color = motion.transition(
-        "agents-pill-cue-color",
-        shown.value,
-        &crate::motion::Curve::settle(),
-        window,
-        cx,
-    );
+    let shown = motion.shown("agents-pill-cue", cue, SHOW, window, cx)?;
+    let color = motion.transition("agents-pill-cue-color", shown.value, GLIDE, window, cx);
     let gap = gpui::rems(0.25).to_pixels(window.rem_size());
     Some(shown.fold_across_gap(gap, div().size(px(6.)).rounded_full().bg(color)))
 }
@@ -253,6 +250,7 @@ impl ChatView {
         let strip = self.motion.shown(
             "phone-strip",
             (agents.is_some() || links.is_some()).then_some(()),
+            SHOW,
             window,
             cx,
         )?;
@@ -264,7 +262,7 @@ impl ChatView {
         let radius = crate::material::radius_chip(cx);
         let agents = self
             .motion
-            .shown("phone-agents-pill-fold", agents, window, cx)
+            .shown("phone-agents-pill-fold", agents, SHOW, window, cx)
             .map(|pill| {
                 let (count, cue) = pill.value;
                 let chip = floating_backing(radius, cx)
@@ -277,7 +275,7 @@ impl ChatView {
             });
         let pull_requests = self
             .motion
-            .shown("phone-pr-pill-fold", links, window, cx)
+            .shown("phone-pr-pill-fold", links, SHOW, window, cx)
             .and_then(|pill| {
                 let chip = floating_backing(radius, cx)
                     .child(self.render_pull_request_pill(&pill.value, cx)?);
@@ -585,6 +583,7 @@ impl ChatView {
             "header-pr-badge-fold",
             self.active_pull_requests(cx)
                 .filter(|links| !links.is_empty() && !overflow),
+            SHOW,
             window,
             cx,
         );
@@ -599,17 +598,12 @@ impl ChatView {
                     .and_then(|session_id| crate::shell::pane_colour(session_id, cx))
                     .filter(|_| overflow)
                     .map(|colour| colour.alpha(1.)),
+                SHOW,
                 window,
                 cx,
             )
             .map(|tint| {
-                let colour = motion.transition(
-                    "pane-tint-colour",
-                    tint.value,
-                    &crate::motion::Curve::settle(),
-                    window,
-                    cx,
-                );
+                let colour = motion.transition("pane-tint-colour", tint.value, GLIDE, window, cx);
                 let progress = tint.progress();
                 (crate::material::pane_tint(colour, progress, cx), progress)
             });
@@ -617,12 +611,14 @@ impl ChatView {
         let agents_toggle = motion.shown(
             "agents-toggle-fold",
             agents_cue.is_some().then_some(()),
+            SHOW,
             window,
             cx,
         );
         let preview_toggle = motion.shown(
             "preview-toggle-fold",
             self.workspace_store.read(cx).offers_preview().then_some(()),
+            SHOW,
             window,
             cx,
         );
@@ -635,7 +631,7 @@ impl ChatView {
             } else {
                 cx.theme().tokens.spacing.sm
             },
-            &crate::motion::Curve::settle(),
+            GLIDE,
             window,
             cx,
         );
@@ -869,7 +865,7 @@ impl ChatView {
         // widens with them.
         let tier = show_actions.then(|| {
             let swap = motion
-                .swap("header-tier", usize::from(overflow), 2, window, cx)
+                .swap("header-tier", usize::from(overflow), 2, CHANGE, window, cx)
                 .across();
             let mut layers = Vec::new();
             if swap.shows(1) {
@@ -1084,7 +1080,7 @@ impl ChatView {
     ) -> Option<AnyElement> {
         let swap = self
             .motion
-            .swap(key, usize::from(labelled), 2, window, cx)
+            .swap(key, usize::from(labelled), 2, CHANGE, window, cx)
             .across();
         let layers = (0..2)
             .filter(|layer| swap.shows(*layer))

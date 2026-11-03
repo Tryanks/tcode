@@ -45,6 +45,9 @@ use tcode_core::session::{EntryContent, TimelineEntry};
 use super::ChatView;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 pub(in crate::chat) use window::{ClickHandler, Header};
 
 /// A `ToolCall` item as a view reads it.
@@ -748,6 +751,7 @@ fn elided_control(
             motion.cross_fade(
                 format!("load-output-state-{id}"),
                 current.clone(),
+                CHANGE,
                 window,
                 cx,
                 move |state, _, cx| {

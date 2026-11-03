@@ -37,6 +37,15 @@ use crate::provider_models::{
 use crate::settings::{ACCENT_PRESETS, EnvVar, provider_label};
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// One environment-variable row's live inputs and its draft flags.
 #[derive(Clone)]
 struct EnvRow {
@@ -485,7 +494,7 @@ impl ProviderDialog {
                 } else {
                     cx.theme().foreground.opacity(0.)
                 },
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -646,7 +655,7 @@ impl ProviderDialog {
                 .collect()
         };
         // Each row carries the gap above it, so the gap goes with it.
-        let rows = crate::motion::keyed("env-rows", rows, window, cx, |_, row, _, cx| {
+        let rows = crate::motion::keyed("env-rows", rows, ROWS, window, cx, |_, row, _, cx| {
             let Some((index, row)) = row else {
                 return div()
                     .pt_2()
@@ -720,6 +729,7 @@ impl ProviderDialog {
         let models = crate::motion::keyed(
             "provider-models",
             models,
+            ROWS,
             window,
             cx,
             |_, (index, row), window, cx| self.render_model_row(*index, row, window, cx),
@@ -749,7 +759,8 @@ impl ProviderDialog {
                         ),
                 ),
         );
-        if let Some(error) = crate::motion::shown("slug-error", self.slug_error.clone(), window, cx)
+        if let Some(error) =
+            crate::motion::shown("slug-error", self.slug_error.clone(), SHOW, window, cx)
         {
             block = block.child(
                 error.fold(
@@ -798,6 +809,7 @@ impl ProviderDialog {
         if let Some(chip) = crate::motion::shown(
             SharedString::from(format!("model-hidden-{}", row.id)),
             hidden.then_some(()),
+            SHOW,
             window,
             cx,
         ) {
@@ -811,7 +823,7 @@ impl ProviderDialog {
         let name_color = transition(
             ElementId::from(SharedString::from(format!("model-name-{}", row.id))),
             if hidden { muted } else { cx.theme().foreground },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );

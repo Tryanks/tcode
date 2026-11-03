@@ -3,6 +3,15 @@ use tcode_core::control::{ControlGrant, SettlementAutomation};
 use tcode_core::project::Project;
 use tcode_protocol::ControlActivityEntry;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How many recent `tcode_control` writes the section lists.
 const ACTIVITY_LIMIT: u32 = 50;
 
@@ -255,9 +264,14 @@ impl SettingsPage {
         // The phone's accordion and the desktop's dropdown and list trade
         // places when the window turns, cross-fading while the group's
         // height glides.
-        let swap = self
-            .motion
-            .swap("control-projects-form", usize::from(compact), 2, window, cx);
+        let swap = self.motion.swap(
+            "control-projects-form",
+            usize::from(compact),
+            2,
+            CHANGE,
+            window,
+            cx,
+        );
         let mut layers = Vec::new();
         for (layer, compact) in [(0, false), (1, true)] {
             if swap.shows(layer) {
@@ -300,6 +314,7 @@ impl SettingsPage {
             let list = crate::motion::keyed(
                 "control-projects",
                 list,
+                ROWS,
                 window,
                 cx,
                 |_, project, window, cx| {
@@ -310,6 +325,7 @@ impl SettingsPage {
                     let summary = crate::motion::shown(
                         SharedString::from(format!("control-project-summary-{}", project.id)),
                         own.map(crate::control::grant_summary),
+                        SHOW,
                         window,
                         cx,
                     );
@@ -357,7 +373,7 @@ impl SettingsPage {
                     let fold_id =
                         SharedString::from(format!("control-project-fold-{}", project.id));
                     let shown =
-                        crate::motion::shown(fold_id.clone(), open.then_some(()), window, cx);
+                        crate::motion::shown(fold_id.clone(), open.then_some(()), SHOW, window, cx);
                     let mut fold = crate::widgets::Collapsible::new(fold_id, open)
                         .motion(&self.motion)
                         .w_full();
@@ -369,6 +385,7 @@ impl SettingsPage {
                         let remove = crate::motion::shown(
                             SharedString::from(format!("control-project-default-{}", project.id)),
                             own.is_some().then_some(()),
+                            SHOW,
                             window,
                             cx,
                         );
@@ -483,6 +500,7 @@ impl SettingsPage {
         let list = crate::motion::keyed(
             "control-overrides",
             overrides,
+            ROWS,
             window,
             cx,
             |_, (project, summary), _, cx| {
@@ -555,6 +573,7 @@ impl SettingsPage {
         let list = crate::motion::keyed(
             "control-threads",
             threads,
+            ROWS,
             window,
             cx,
             |_, meta, _, cx| match meta {
@@ -627,6 +646,7 @@ impl SettingsPage {
         let body = crate::motion::cross_fade(
             "control-activity",
             state,
+            CHANGE,
             window,
             cx,
             |state, window, cx| {
@@ -723,6 +743,7 @@ impl SettingsPage {
         let entries = crate::motion::keyed(
             "control-activity-entries",
             entries.collect::<Vec<_>>(),
+            ROWS,
             window,
             cx,
             |key, entry, _, cx| {

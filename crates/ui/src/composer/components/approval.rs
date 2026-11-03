@@ -1,6 +1,12 @@
 use super::super::*;
 use crate::scroll::ScrollableElement as _;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How tall a request's detail grows before it scrolls inside the card, so the
 /// options stay on screen; no owner sizes a card's scrolling body.
 const DETAIL_MAX_HEIGHT: f32 = 240.;
@@ -18,6 +24,7 @@ impl Composer {
         self.motion.cross_fade(
             self.motion_key("approval-request"),
             request.clone(),
+            CHANGE,
             window,
             cx,
             |request, window, cx| self.render_approval(request, count, window, cx),
@@ -172,6 +179,7 @@ impl Composer {
             .shown(
                 self.motion_key(format_args!("approval-delivery-{}", request.id)),
                 pending.then_some(connected),
+                SHOW,
                 window,
                 cx,
             )
@@ -179,6 +187,7 @@ impl Composer {
                 let line = self.motion.cross_fade_part(
                     self.motion_key(format_args!("approval-delivery-text-{}", request.id)),
                     shown.value,
+                    CHANGE,
                     window,
                     cx,
                     |connected, _, _| {
@@ -198,6 +207,7 @@ impl Composer {
             .shown(
                 self.motion_key(format_args!("approval-offline-{}", request.id)),
                 (self.compact && !self.interactive(cx)).then_some(()),
+                SHOW,
                 window,
                 cx,
             )

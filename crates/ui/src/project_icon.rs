@@ -22,6 +22,15 @@ use std::{path::PathBuf, rc::Rc};
 use tcode_core::project::Project;
 use tcode_protocol::{IconImageEntry, QueryResponse};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a picture drawn here takes to fade in once it has decoded.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const TILE_WIDTH: f32 = 96.;
 const TILE_GAP: f32 = 8.;
 
@@ -74,6 +83,7 @@ impl RenderOnce for Artwork {
             crate::motion::Clock::Element,
             self.id,
             &self.source,
+            ARRIVE,
             window,
             cx,
         );
@@ -259,6 +269,7 @@ impl Picker {
                 crate::motion::Clock::Element,
                 SharedString::from(format!("icon-thumbnail-{}", entry.name)),
                 &source,
+                ARRIVE,
                 window,
                 cx,
             );
@@ -283,14 +294,14 @@ impl Picker {
         let border = gpui_base::motion::transition(
             (id.clone(), "border"),
             border,
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
         let bg = gpui_base::motion::transition(
             (id.clone(), "bg"),
             bg,
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -387,12 +398,17 @@ impl Render for Picker {
         let viewport_height =
             (f32::from(window.viewport_size().height) * 0.9 - 360.).clamp(48., 320.);
         // Loading… fades out over the folder it loaded, which fades in.
-        let leaving =
-            crate::motion::shown("icon-file-loading", self.loading.then_some(()), window, cx);
+        let leaving = crate::motion::shown(
+            "icon-file-loading",
+            self.loading.then_some(()),
+            SHOW,
+            window,
+            cx,
+        );
         let arriving = gpui_base::motion::transition(
             ("icon-file-grid", "opacity"),
             if self.loading { 0. } else { 1. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -535,7 +551,7 @@ impl Render for Picker {
                     }),
             )
             .when_some(
-                crate::motion::shown("icon-error", self.error.clone(), window, cx),
+                crate::motion::shown("icon-error", self.error.clone(), SHOW, window, cx),
                 |el, error| {
                     el.child(
                         error.fold(

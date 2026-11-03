@@ -42,6 +42,18 @@ use crate::widgets::tabs::{TabBar, TabItem};
 use crate::widgets::{Collapsible, Spinner};
 use crate::window_state::WindowState;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const SCOPES: [PluginScope; 5] = [
     PluginScope::User,
     PluginScope::Project,
@@ -469,12 +481,14 @@ impl PluginsSettingsPanel {
         let spinner = crate::motion::shown(
             SharedString::from(format!("plugins-loading-{profile_id}")),
             loading.then_some(()),
+            SHOW,
             window,
             cx,
         );
         let refresh = crate::motion::shown(
             SharedString::from(format!("plugins-refresh-slot-{profile_id}")),
             on.then_some(()),
+            SHOW,
             window,
             cx,
         );
@@ -520,7 +534,7 @@ impl PluginsSettingsPanel {
         let unfolded = gpui_base::motion::transition(
             (body_id.clone(), "built"),
             if on { 1. } else { 0. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -529,6 +543,7 @@ impl PluginsSettingsPanel {
                 SharedString::from(format!("plugins-listed-{profile_id}")),
                 usize::from(catalog.is_some()),
                 2,
+                CHANGE,
                 window,
                 cx,
             );
@@ -641,6 +656,7 @@ impl PluginsSettingsPanel {
             SharedString::from(format!("plugins-views-body-{profile_id}")),
             views.iter().position(|shown| *shown == view).unwrap_or(0),
             views.len(),
+            CHANGE,
             window,
             cx,
         );
@@ -668,6 +684,7 @@ impl PluginsSettingsPanel {
                             (true, true) => 0,
                         },
                         3,
+                        CHANGE,
                         window,
                         cx,
                     );
@@ -739,12 +756,13 @@ impl PluginsSettingsPanel {
         });
         let mut rows = Vec::new();
         let status_id = SharedString::from(format!("plugins-status-{profile_id}"));
-        if let Some(slot) = crate::motion::shown(status_id.clone(), status, window, cx) {
+        if let Some(slot) = crate::motion::shown(status_id.clone(), status, SHOW, window, cx) {
             let row = match slot.value.clone() {
                 CatalogStatus::Note(text) => {
                     let text = crate::motion::cross_fade(
                         (ElementId::from(status_id), "text"),
                         text,
+                        CHANGE,
                         window,
                         cx,
                         |text, _, _| div().child(text.clone()).into_any_element(),
@@ -771,6 +789,7 @@ impl PluginsSettingsPanel {
         let errors = crate::motion::keyed(
             SharedString::from(format!("plugins-catalog-errors-{profile_id}")),
             errors,
+            ROWS,
             window,
             cx,
             |_, error, _, cx| {
@@ -826,7 +845,7 @@ impl PluginsSettingsPanel {
         };
         let row_id = format!("plugin-row-{profile_id}-{}", entry.id);
         let toggle_id = format!("plugin-details-{profile_id}-{}", entry.id);
-        let settle = crate::motion::settle;
+        let settle = || gpui_base::motion::Transition::new(GLIDE);
         let enabled_id = SharedString::from(format!("{row_id}-enabled"));
         let enabled_bg = gpui_base::motion::transition(
             (enabled_id.clone(), "bg"),
@@ -845,6 +864,7 @@ impl PluginsSettingsPanel {
         let enabled_label = crate::motion::cross_fade(
             (ElementId::from(enabled_id), "label"),
             SharedString::from(enabled_label.into_owned()),
+            CHANGE,
             window,
             cx,
             |label, _, _| label.clone().into_any_element(),
@@ -852,6 +872,7 @@ impl PluginsSettingsPanel {
         let spinner = crate::motion::shown(
             SharedString::from(format!("{row_id}-pending")),
             pending.then_some(()),
+            SHOW,
             window,
             cx,
         );
@@ -925,6 +946,7 @@ impl PluginsSettingsPanel {
         let scope_lines = crate::motion::keyed(
             SharedString::from(format!("{row_id}-scopes")),
             scopes,
+            ROWS,
             window,
             cx,
             |scope_id, scope, window, cx| {
@@ -972,6 +994,7 @@ impl PluginsSettingsPanel {
                 let actions = crate::motion::keyed_across(
                     SharedString::from(format!("{row_id}-{scope_id}-actions")),
                     actions,
+                    ROWS,
                     window,
                     cx,
                     |_, action, _, _| {
@@ -1018,6 +1041,7 @@ impl PluginsSettingsPanel {
         let errors = crate::motion::keyed(
             SharedString::from(format!("{row_id}-errors")),
             text_keys(&entry.errors),
+            ROWS,
             window,
             cx,
             |_, error, _, cx| {
@@ -1127,6 +1151,7 @@ impl PluginsSettingsPanel {
             SharedString::from(format!("plugins-available-{profile_id}")),
             usize::from(!listing),
             2,
+            CHANGE,
             window,
             cx,
         )
@@ -1276,6 +1301,7 @@ impl PluginsSettingsPanel {
         let spinner = crate::motion::shown(
             SharedString::from(format!("{row_id}-pending")),
             pending.then_some(()),
+            SHOW,
             window,
             cx,
         );
@@ -1399,6 +1425,7 @@ impl PluginsSettingsPanel {
                         marketplace.name
                     )),
                     catalog.pending.contains(&marketplace.name).then_some(()),
+                    SHOW,
                     window,
                     cx,
                 );
@@ -1478,6 +1505,7 @@ impl PluginsSettingsPanel {
             SharedString::from(format!("plugin-marketplaces-{profile_id}")),
             usize::from(listed),
             2,
+            CHANGE,
             window,
             cx,
         );
@@ -1622,7 +1650,7 @@ impl Render for PluginsSettingsPanel {
             } else {
                 material::section_gap(cx)
             },
-            &crate::motion::Curve::settle(),
+            GLIDE,
             window,
             cx,
         );
@@ -1649,6 +1677,7 @@ impl Render for PluginsSettingsPanel {
                         "plugins-profile-body",
                         current,
                         profiles.len(),
+                        CHANGE,
                         window,
                         cx,
                     );

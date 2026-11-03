@@ -69,10 +69,13 @@ pub(super) fn is_mermaid(lang: Option<&str>) -> bool {
 /// the diagram growing.
 const REST: Duration = Duration::from_millis(150);
 
+/// How long one picture takes to fade into the next.
+const SWAP: Duration = Duration::from_millis(200);
+
 /// The least time between two pictures replacing each other while a fence
 /// streams in: one fade, then [`REST`].
 fn swap_interval() -> Duration {
-    crate::edge_back::SETTLE + REST
+    SWAP + REST
 }
 
 /// The most pixels a diagram is rasterized with, so a huge one does not
@@ -397,7 +400,7 @@ impl Slot {
 
         if let Some(swap) = self.swap {
             frame.remeasure.push(path.to_string());
-            if env.now.saturating_duration_since(swap.at) >= crate::edge_back::SETTLE {
+            if env.now.saturating_duration_since(swap.at) >= SWAP {
                 self.finish_swap();
             } else {
                 frame.moving = true;
@@ -462,7 +465,7 @@ impl Slot {
 
         if let Some(ready) = &self.ready {
             let wait = if ready.attempt.whole {
-                crate::edge_back::SETTLE
+                SWAP
             } else {
                 swap_interval()
             };
@@ -699,7 +702,7 @@ pub(super) fn block(
     let glide = slot.map(|slot| slot.glide.clone()).unwrap_or_default();
     let now = cx.background_executor().now();
     let progress = swap.map_or(1., |swap| {
-        crate::motion::settle_progress(now.saturating_duration_since(swap.at))
+        crate::motion::Curve::new(SWAP).progress(now.saturating_duration_since(swap.at))
     });
 
     let layer_fade = swap

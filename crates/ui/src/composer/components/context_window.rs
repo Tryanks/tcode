@@ -4,6 +4,9 @@ use crate::store::ComposerState;
 
 use agent::context_window::{self, OPTION_ID};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The context-window choice for the active model: its presets, each applied
 /// as it is chosen, and a custom size.
 pub(in super::super) struct ContextWindowDialog {
@@ -101,6 +104,7 @@ impl Render for ContextWindowDialog {
         let invalid = crate::motion::shown(
             "context-window-invalid",
             self.invalid.then_some(()),
+            SHOW,
             window,
             cx,
         );

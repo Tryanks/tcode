@@ -38,6 +38,9 @@ use super::{
     utils::list_item_prefix,
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const BLOCK_OVERDRAW: Pixels = px(300.);
 const CODE_LINES_PER_ITEM: usize = 32;
 const LIST_ITEMS_PER_ITEM: usize = 8;
@@ -847,7 +850,7 @@ fn pending_images(
                         let arrived = state.read(cx).motion().transition(
                             slot.clone(),
                             if standing { 0f32 } else { 1. },
-                            &crate::motion::Curve::settle(),
+                            GLIDE,
                             window,
                             cx,
                         );

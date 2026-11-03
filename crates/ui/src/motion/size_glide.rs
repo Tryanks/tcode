@@ -20,6 +20,9 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, Pixels, Size, Style, Window, relative, size,
 };
 
+/// How long a size glide on its own clock takes.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The sides of an element a [`SizeGlide`] moves; the others are the
 /// content's own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,9 +87,10 @@ impl GlideState {
     /// the frame it starts to the one that lays the content out at rest. A
     /// glide whose content is no longer drawn stops counting a beat later.
     pub(crate) fn moving(&self, now: Instant) -> bool {
-        self.0.borrow().run.is_some_and(|(_, at)| {
-            now.saturating_duration_since(at) <= crate::edge_back::SETTLE * 2
-        })
+        self.0
+            .borrow()
+            .run
+            .is_some_and(|(_, at)| now.saturating_duration_since(at) <= GLIDE * 2)
     }
 
     /// The size content with `key` takes this frame when its own size is
@@ -100,7 +104,8 @@ impl GlideState {
         glide.retarget(key, now, cx);
         match glide.run {
             Some((from, at)) => {
-                let progress = super::settle_progress(now.saturating_duration_since(at));
+                let progress =
+                    crate::motion::Curve::new(GLIDE).progress(now.saturating_duration_since(at));
                 if progress >= 1. {
                     glide.run = None;
                 }
@@ -166,7 +171,7 @@ fn lerp(from: Size<Pixels>, to: Size<Pixels>, progress: f32, axes: GlideAxes) ->
 /// own new size, clipped to the glided size on the way.
 ///
 /// Two clocks drive it. With [`SizeGlide::on_change`] it keeps its own: a
-/// new content key starts a glide over `SETTLE`, and the site says nothing
+/// new content key starts a glide over [`GLIDE`], and the site says nothing
 /// more. With [`SizeGlide::gliding`] its owner keeps one, for a glide that
 /// must stay in step with other motion (a cross-fade): the owner starts it
 /// with [`GlideState::begin`] and samples the progress each frame. Either
@@ -226,7 +231,8 @@ impl SizeGlide {
             Some((from, progress)) => (from?, progress),
             None => {
                 let (from, at) = glide.run?;
-                let progress = super::settle_progress(now.saturating_duration_since(at));
+                let progress =
+                    crate::motion::Curve::new(GLIDE).progress(now.saturating_duration_since(at));
                 // The run ends once it has played and its content was
                 // measured; the content then lays itself out.
                 if progress >= 1. && glide.content.is_some() {

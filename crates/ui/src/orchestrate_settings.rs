@@ -25,6 +25,15 @@ use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
 use crate::settings::{ChildApprovalMode, OrchestrateChildModel, provider_label};
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Clone)]
 struct ChildRowState {
     provider: ProviderKind,
@@ -739,6 +748,7 @@ impl OrchestrateSettingsPanel {
         let none_enabled = crate::motion::shown(
             (gpui::ElementId::from(list_id), "none-enabled"),
             (!profiles.is_empty() && !profiles.iter().any(|profile| profile.enabled)).then_some(()),
+            SHOW,
             window,
             cx,
         );
@@ -830,8 +840,7 @@ impl OrchestrateSettingsPanel {
                                 };
                                 let chip =
                                     gpui::SharedString::from(format!("{list_id}-chip-{key}"));
-                                let settle =
-                                    || gpui_base::motion::Transition::new(crate::edge_back::SETTLE);
+                                let settle = || gpui_base::motion::Transition::new(GLIDE);
                                 let bg = gpui_base::motion::transition(
                                     (chip.clone(), "bg"),
                                     bg,
@@ -906,6 +915,7 @@ impl OrchestrateSettingsPanel {
                         let fast = crate::motion::shown(
                             gpui::SharedString::from(format!("{list_id}-fast-{key}")),
                             (fast_supported || profile.fast).then_some(()),
+                            SHOW,
                             window,
                             cx,
                         );
@@ -974,6 +984,7 @@ impl OrchestrateSettingsPanel {
         let body = crate::motion::cross_fade(
             (gpui::ElementId::from(list_id), "body"),
             slot,
+            CHANGE,
             window,
             cx,
             |slot, _, cx| match *slot {

@@ -5,6 +5,9 @@ use gpui::{
 
 use crate::icon::{Icon, IconName};
 
+/// How long a disclosure takes to fold open or shut, and its chevron to turn.
+const FOLD: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A disclosure's section: its content grows open and shrinks shut through
 /// [`crate::motion::Shown::fold`], the one fold Tcode draws, and is not
 /// built while it is shut.
@@ -55,7 +58,7 @@ impl RenderOnce for Collapsible {
         let fold = crate::motion::Clock::from(self.motion.as_ref()).shown(
             self.id,
             open,
-            &crate::motion::Curve::settle(),
+            &crate::motion::Curve::new(FOLD),
             window,
             cx,
         );
@@ -117,7 +120,7 @@ impl Chevron {
         let turn = crate::motion::Clock::from(self.motion.as_ref()).transition(
             (self.id, "chevron"),
             target,
-            &crate::motion::Curve::settle(),
+            &crate::motion::Curve::new(FOLD),
             window,
             cx,
         );

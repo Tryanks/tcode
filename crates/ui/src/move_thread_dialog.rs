@@ -16,6 +16,15 @@ use tcode_protocol::Command;
 
 use crate::store::WorkspaceStore;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) struct MoveThreadDialog {
     store: Entity<WorkspaceStore>,
     session_id: String,
@@ -113,6 +122,7 @@ impl Render for MoveThreadDialog {
         let rows = crate::motion::keyed(
             "move-thread-project-rows",
             projects,
+            ROWS,
             window,
             cx,
             |_, project, window, cx| {
@@ -135,7 +145,7 @@ impl Render for MoveThreadDialog {
                     } else {
                         cx.theme().list_active.opacity(0.)
                     },
-                    crate::motion::settle(),
+                    gpui_base::motion::Transition::new(GLIDE),
                     window,
                     cx,
                 );
@@ -199,16 +209,15 @@ impl Render for MoveThreadDialog {
                     .child(crate::tr!("sidebar.move_thread_confirm")),
             )
             .children(
-                crate::motion::shown("move-thread-error", self.error.clone(), window, cx).map(
-                    |error| {
+                crate::motion::shown("move-thread-error", self.error.clone(), SHOW, window, cx)
+                    .map(|error| {
                         error.fold(
                             div()
                                 .text_secondary(false, cx)
                                 .text_color(cx.theme().danger)
                                 .child(error.value.clone()),
                         )
-                    },
-                ),
+                    }),
             )
     }
 }

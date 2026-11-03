@@ -8,6 +8,9 @@ use gpui_base::motion::{Transition, transition};
 use gpui_base::slider::SliderState;
 use gpui_base::{SliderIndicator, SliderThumb, SliderTrack, StyledExt as _};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const TRACK_HEIGHT: f32 = 24.;
 const THUMB_SIZE: f32 = 28.;
 const THUMB_PRESSED_SIZE: f32 = 32.;
@@ -79,7 +82,7 @@ impl RenderOnce for Slider {
             0
         };
         let entity_id = self.state.entity_id();
-        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let settle = || Transition::new(GLIDE);
         let motion_id = |name: &'static str| ElementId::from((name, entity_id));
         let filled = transition(motion_id("slider-fill"), target, settle(), window, cx);
         // Raised while hovered, and kept through a drag that leaves the thumb.

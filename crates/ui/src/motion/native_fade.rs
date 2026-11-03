@@ -20,7 +20,7 @@ use gpui::{
 use gpui_base::motion::{Presence, Transition};
 
 /// How long a native view takes to fade in where it now belongs.
-const ENTER: Duration = crate::edge_back::SETTLE;
+const ENTER: Duration = Duration::from_millis(200);
 /// How long it takes to fade out: quicker, since what replaces it, or the
 /// drag it steps aside for, is already under way.
 const LEAVE: Duration = Duration::from_millis(120);

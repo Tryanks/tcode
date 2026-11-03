@@ -69,6 +69,15 @@ use crate::window_caption;
 use crate::window_state::{Destination, OpenPanel, OpenThread, Route, WindowState};
 use gpui_base::dock::{DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, PanelId};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 actions!(tcode, [Quit, TogglePalette]);
 
 /// Transient per-frame state backing [`window_drag_area`].
@@ -769,7 +778,7 @@ const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
 /// Compact push/pop duration.
-const NAV_TRANSITION: Duration = crate::edge_back::SETTLE;
+const NAV_TRANSITION: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarHoverTransition {
@@ -2657,6 +2666,7 @@ impl AppShell {
             let close = crate::motion::shown(
                 gpui::ElementId::NamedInteger("pane-close".into(), pane.entity_id().as_u64()),
                 (among_others && !compact).then(|| pane.focus_handle(cx)),
+                SHOW,
                 window,
                 cx,
             );
@@ -4095,7 +4105,8 @@ impl AppShell {
         } else {
             3
         };
-        let fade = crate::motion::CrossFade::new("compact-panel-body", current, 4, window, cx);
+        let fade =
+            crate::motion::CrossFade::new("compact-panel-body", current, 4, CHANGE, window, cx);
         let layers: Vec<(usize, AnyElement)> = (0..4)
             .filter(|layer| fade.shows(*layer))
             .map(|layer| {
@@ -4612,7 +4623,14 @@ impl AppShell {
     /// left fades out under the one opened in its place.
     fn hosts_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let pairing = self.destination(cx) == Destination::Pair;
-        let fade = crate::motion::CrossFade::new("hosts-body", usize::from(pairing), 2, window, cx);
+        let fade = crate::motion::CrossFade::new(
+            "hosts-body",
+            usize::from(pairing),
+            2,
+            CHANGE,
+            window,
+            cx,
+        );
         let layers: Vec<(usize, AnyElement)> = (0..2)
             .filter(|layer| fade.shows(*layer))
             .map(|layer| {
@@ -4675,22 +4693,24 @@ impl AppShell {
         // Machines is a root the sidebar switches to; Pair is pushed over it,
         // so only Pair has somewhere to go back to.
         let gap = cx.theme().tokens.spacing.xs;
-        let back = crate::motion::shown("hosts-back-shown", pairing.then_some(()), window, cx).map(
-            |shown| {
-                shown.fold_across_gap(
-                    gap,
-                    back_button("hosts-back", Destination::Hosts.back_label())
-                        .debug_selector(|| "hosts-back".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.window_state
-                                .update(cx, |state, cx| state.close_pair(cx));
-                        })),
-                )
-            },
-        );
+        let back =
+            crate::motion::shown("hosts-back-shown", pairing.then_some(()), SHOW, window, cx).map(
+                |shown| {
+                    shown.fold_across_gap(
+                        gap,
+                        back_button("hosts-back", Destination::Hosts.back_label())
+                            .debug_selector(|| "hosts-back".into())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.window_state
+                                    .update(cx, |state, cx| state.close_pair(cx));
+                            })),
+                    )
+                },
+            );
         let title = div().flex_1().min_w_0().child(crate::motion::cross_fade(
             "hosts-title",
             title,
+            CHANGE,
             window,
             cx,
             |title, _, cx| crate::material::bar_title(title.clone(), cx).into_any_element(),
@@ -4928,7 +4948,7 @@ impl AppShell {
         let shown_width = gpui_base::motion::transition(
             "hosts-route-sidebar",
             if collapsed { px(0.) } else { sidebar_width },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -5008,6 +5028,7 @@ impl AppShell {
             "right-panel-body",
             usize::from(right_tab == RightTab::Preview),
             2,
+            CHANGE,
             window,
             cx,
         );
@@ -5124,7 +5145,7 @@ impl AppShell {
                     ),
                     true,
                 )
-                .transition(crate::motion::settle())
+                .transition(gpui_base::motion::Transition::new(GLIDE))
                 .sample(window, cx);
                 let to = if right_floats {
                     floating_width
@@ -5157,7 +5178,7 @@ impl AppShell {
         let overlay_in = gpui_base::motion::transition(
             ElementId::NamedInteger("right-panel-overlay-in".into(), attachment.float_generation),
             if floating_panel.is_some() { 1. } else { 0. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -5388,7 +5409,7 @@ impl AppShell {
         let overlay_in = gpui_base::motion::transition(
             "sidebar-hover-overlay-in",
             if overlay_visible { 1. } else { 0. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );

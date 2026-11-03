@@ -2,6 +2,12 @@ use super::super::*;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use agent::{Goal, GoalStatus};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 fn status_label(status: GoalStatus) -> String {
     match status {
         GoalStatus::Active => crate::tr!("composer.goal_active"),
@@ -92,6 +98,7 @@ impl Composer {
                 goal.last_check
                     .clone()
                     .filter(|_| goal.status != GoalStatus::Complete),
+                SHOW,
                 window,
                 cx,
             )
@@ -109,11 +116,17 @@ impl Composer {
                 )
             });
         let objective = goal.objective.clone();
-        let status_icon =
-            crate::motion::status_icon(self.motion_id("goal-status"), icon, color, window, cx);
+        let status_icon = crate::motion::status_icon(
+            self.motion_id("goal-status"),
+            icon,
+            color,
+            CHANGE,
+            window,
+            cx,
+        );
         let pause = self
             .motion
-            .shown(self.motion_key("goal-pause"), pause, window, cx)
+            .shown(self.motion_key("goal-pause"), pause, SHOW, window, cx)
             .map(|shown| {
                 let (status, label) = shown.value;
                 let icon = if status == GoalStatus::Paused {

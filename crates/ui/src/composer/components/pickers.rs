@@ -8,6 +8,15 @@ use crate::{
 };
 use gpui_base::slider::{SliderEvent, SliderState};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Clone)]
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
 struct ModelRow {
@@ -239,9 +248,17 @@ impl Composer {
                             .min_w_0()
                             .overflow_hidden()
                             .child(crate::motion::Sampled::new(move |window, cx| {
-                                motion.cross_fade_part(key, display, window, cx, |display, _, _| {
-                                    crate::widgets::fade_text(display.clone()).into_any_element()
-                                })
+                                motion.cross_fade_part(
+                                    key,
+                                    display,
+                                    CHANGE,
+                                    window,
+                                    cx,
+                                    |display, _, _| {
+                                        crate::widgets::fade_text(display.clone())
+                                            .into_any_element()
+                                    },
+                                )
                             }))
                     })
                     .child(
@@ -470,7 +487,7 @@ impl Composer {
             .child(div().size(px(16.)).child({
                 let motion = self.motion.scope(self.motion_key("context-ring"));
                 crate::motion::Sampled::new(move |window, cx| {
-                    let curve = crate::motion::Curve::settle();
+                    let curve = crate::motion::Curve::new(GLIDE);
                     let pct = motion.transition("pct", pct.unwrap_or(0.0), &curve, window, cx);
                     let color = motion.transition("color", ring_color, &curve, window, cx);
                     crate::widgets::ring::ring_canvas(pct, color, track).into_any_element()
@@ -842,7 +859,8 @@ fn render_model_pane(
             last.update(cx, |last, _| *last = shown_rows.clone());
         }
         let last = last.read(cx).clone();
-        let fade = crate::motion::CrossFade::new("model-picker-states", state, 3, window, cx);
+        let fade =
+            crate::motion::CrossFade::new("model-picker-states", state, 3, CHANGE, window, cx);
         let layers: Vec<(usize, AnyElement)> = (0..3)
             .filter(|layer| fade.shows(*layer))
             .map(|layer| {
@@ -1595,13 +1613,14 @@ fn render_effort_slider(
         } else {
             cx.theme().primary
         },
-        crate::motion::settle(),
+        gpui_base::motion::Transition::new(GLIDE),
         window,
         cx,
     );
     let level_label = crate::motion::cross_fade_part(
         gpui::SharedString::from(format!("effort-label-{key}")),
         levels[shown].label.clone(),
+        CHANGE,
         window,
         cx,
         move |label, _, _| {
@@ -1964,7 +1983,7 @@ fn render_context_meter_pane(
         } else {
             rgb(METER_BLUE).into()
         },
-        crate::motion::settle(),
+        gpui_base::motion::Transition::new(GLIDE),
         window,
         cx,
     );
@@ -2040,11 +2059,11 @@ fn render_context_meter_pane(
     let fraction = gpui_base::motion::transition(
         glide("bar-fraction"),
         pct.map_or(0., |pct| pct.clamp(0.0, 100.0) / 100.0),
-        crate::motion::settle(),
+        gpui_base::motion::Transition::new(GLIDE),
         window,
         cx,
     );
-    if let Some(shown) = crate::motion::shown(glide("bar"), pct.map(|_| ()), window, cx) {
+    if let Some(shown) = crate::motion::shown(glide("bar"), pct.map(|_| ()), SHOW, window, cx) {
         pane = pane.child(
             shown.fold(
                 div()
@@ -2080,6 +2099,7 @@ fn render_context_meter_pane(
     if let Some(shown) = crate::motion::shown(
         glide("total"),
         usage.and_then(|u| u.total_processed_tokens),
+        SHOW,
         window,
         cx,
     ) {
@@ -2110,6 +2130,7 @@ fn render_context_meter_pane(
     if let Some(shown) = crate::motion::shown(
         glide("account"),
         account_usage.filter(|a| a.error.is_some() || !a.windows.is_empty()),
+        SHOW,
         window,
         cx,
     ) {
@@ -2143,6 +2164,7 @@ fn render_context_meter_pane(
         if let Some(unavailable) = crate::motion::shown(
             glide("unavailable"),
             account.error.is_some().then_some(()),
+            SHOW,
             window,
             cx,
         ) {
@@ -2160,14 +2182,14 @@ fn render_context_meter_pane(
             let fill = gpui_base::motion::transition(
                 limit_id("fill"),
                 crate::usage::bar_color(limit.used_percent, cx),
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
             let used = gpui_base::motion::transition(
                 limit_id("used"),
                 limit.used_percent.clamp(0.0, 100.0) / 100.0,
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -2230,7 +2252,7 @@ fn folding_note(
 ) -> crate::motion::Sampled {
     let id = id.into();
     crate::motion::Sampled::new(move |window, cx| {
-        match crate::motion::shown(id, present.then_some(()), window, cx) {
+        match crate::motion::shown(id, present.then_some(()), SHOW, window, cx) {
             Some(shown) => shown.fold(build(cx)),
             None => gpui::Empty.into_any_element(),
         }
@@ -2255,7 +2277,7 @@ fn folding_suffix(
 ) -> crate::motion::Sampled {
     let id = id.into();
     crate::motion::Sampled::new(move |window, cx| {
-        match crate::motion::shown(id, present.then_some(()), window, cx) {
+        match crate::motion::shown(id, present.then_some(()), SHOW, window, cx) {
             Some(shown) => shown.fold_across_gap(gap, build(cx)),
             None => gpui::Empty.into_any_element(),
         }
@@ -2276,7 +2298,7 @@ fn glided_label(
             hasher.finish()
         };
         let glide = motion.glide_state("glide");
-        let text = motion.cross_fade_part("text", label, window, cx, |label, _, _| {
+        let text = motion.cross_fade_part("text", label, CHANGE, window, cx, |label, _, _| {
             div()
                 .whitespace_nowrap()
                 .child(label.clone())

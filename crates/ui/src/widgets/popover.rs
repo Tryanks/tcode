@@ -19,6 +19,12 @@ use std::time::Duration;
 
 pub use gpui_base::PopoverState;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Styled tcode facade over the headless gpui-base popover.
 #[derive(IntoElement)]
 pub struct Popover {
@@ -188,8 +194,9 @@ impl RenderOnce for Popover {
             })
             .read(cx)
             .clone();
-        let presence = (open || shown.get())
-            .then(|| crate::motion::appear((self.id.clone(), "presence"), open, window, cx));
+        let presence = (open || shown.get()).then(|| {
+            crate::motion::appear((self.id.clone(), "presence"), open, APPEAR, window, cx)
+        });
         let leaving =
             !open && presence.is_some_and(|presence| presence.phase == PresencePhase::Exiting);
         shown.set(open || leaving);
@@ -361,8 +368,9 @@ impl Popover {
             })
             .read(cx)
             .clone();
-        let presence = (open || shown.get())
-            .then(|| crate::motion::appear((self.id.clone(), "presence"), open, window, cx));
+        let presence = (open || shown.get()).then(|| {
+            crate::motion::appear((self.id.clone(), "presence"), open, APPEAR, window, cx)
+        });
         let leaving =
             !open && presence.is_some_and(|presence| presence.phase == PresencePhase::Exiting);
         shown.set(open || leaving);
@@ -465,7 +473,7 @@ impl Popover {
             gpui::SharedString::from(format!("{:?}-sheet", self.id)),
             open,
         )
-        .transition(gpui_base::motion::Transition::new(crate::edge_back::SETTLE))
+        .transition(gpui_base::motion::Transition::new(GLIDE))
         .sample(window, cx);
         let progress = presence.progress;
         let toggle: SheetToggle = Rc::new({

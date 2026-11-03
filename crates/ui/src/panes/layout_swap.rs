@@ -17,8 +17,11 @@ use super::PaneLayout;
 /// layout is put in still draws it, faintly, rather than nothing.
 const LOWEST: f32 = 0.04;
 
+/// How long a layout swap takes, out and back in.
+const SWAP: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A layout chosen for the whole column, swapped in: the column
-/// fades out over half of `edge_back::SETTLE`, the layout is put in during
+/// fades out over half of [`SWAP`], the layout is put in during
 /// the frame the column is faintest, and the column fades back in over the
 /// other half. A layout chosen meanwhile joins in: while the column fades
 /// out it keeps going and puts that one in at the bottom; while it fades in
@@ -85,7 +88,7 @@ impl LayoutSwap {
         let id = ElementId::NamedInteger("pane-layout-swap".into(), switch.generation);
         let fade = |out: bool, window: &mut Window, cx: &mut App| -> PresenceSample {
             Presence::new(id.clone(), out)
-                .transition(Transition::new(crate::edge_back::SETTLE / 2))
+                .transition(Transition::new(SWAP / 2))
                 .sample(window, cx)
         };
         let mut sample = fade(switch.chosen.is_some(), window, cx);

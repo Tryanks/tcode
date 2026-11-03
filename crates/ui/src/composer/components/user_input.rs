@@ -2,6 +2,18 @@ use super::super::*;
 use crate::scroll::ScrollableElement as _;
 use tcode_core::session::PendingUserInput;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Composer {
     /// The active session's pending user-input request, if any.
     pub(in super::super) fn pending_user_input(&self, cx: &App) -> Option<PendingUserInput> {
@@ -71,6 +83,7 @@ impl Composer {
                 gpui::SharedString::from(if hidden { "pill" } else { "card" }),
                 hidden,
             )],
+            ROWS,
             window,
             cx,
             |_, hidden, window, cx| {
@@ -140,7 +153,7 @@ impl Composer {
                 let turn = self.motion.transition(
                     self.motion_key(format_args!("ui-toggle-{request_id}")),
                     if expanded { 1f32 } else { 0. },
-                    &crate::motion::Curve::settle(),
+                    GLIDE,
                     window,
                     cx,
                 );
@@ -187,7 +200,7 @@ impl Composer {
             let preview = self.motion.transition(
                 self.motion_key(format_args!("ui-preview-{request_id}")),
                 if expanded { 0f32 } else { 1. },
-                &crate::motion::Curve::settle(),
+                GLIDE,
                 window,
                 cx,
             );
@@ -280,6 +293,7 @@ impl Composer {
         let body = self.motion.cross_fade(
             self.motion_key(format_args!("ui-question-{request_id}")),
             index,
+            CHANGE,
             window,
             cx,
             |index, window, cx| {
@@ -293,6 +307,7 @@ impl Composer {
             .shown(
                 self.motion_key(format_args!("ui-done-{request_id}")),
                 multi_done.then_some(()),
+                SHOW,
                 window,
                 cx,
             )
@@ -432,7 +447,7 @@ impl Composer {
                     question.id
                 )),
                 if is_selected { 1f32 } else { 0. },
-                &crate::motion::Curve::settle(),
+                GLIDE,
                 window,
                 cx,
             );
@@ -453,7 +468,7 @@ impl Composer {
                         question.id
                     )),
                     if is_selected { primary } else { muted },
-                    &crate::motion::Curve::settle(),
+                    GLIDE,
                     window,
                     cx,
                 ))

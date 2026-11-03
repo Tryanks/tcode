@@ -4,6 +4,15 @@ use tcode_core::{
     settings::{ProjectSettlementSettings, Settings},
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) fn open_project_rules(
     store: Entity<WorkspaceStore>,
     project: Project,
@@ -338,9 +347,14 @@ impl SettingsPage {
         // trade places when the window turns, cross-fading while the
         // group's height glides.
         let compact = self.window_state.read(cx).compact;
-        let swap = self
-            .motion
-            .swap("project-rules-form", usize::from(compact), 2, window, cx);
+        let swap = self.motion.swap(
+            "project-rules-form",
+            usize::from(compact),
+            2,
+            CHANGE,
+            window,
+            cx,
+        );
         let mut layers = Vec::new();
         for (layer, compact) in [(0, false), (1, true)] {
             if !swap.shows(layer) {
@@ -368,6 +382,7 @@ impl SettingsPage {
                 let list = crate::motion::keyed(
                     "project-rules",
                     projects,
+                    ROWS,
                     window,
                     cx,
                     |_, project, _, cx| {
@@ -462,6 +477,7 @@ impl SettingsPage {
                 let list = crate::motion::keyed(
                     "settle-overrides",
                     overrides,
+                    ROWS,
                     window,
                     cx,
                     |_, (project, summary), _, cx| {
@@ -740,9 +756,14 @@ impl Render for ProjectRulesEditor {
         // A phone page saves with its own button, which folds in under the
         // last choice when the window turns compact and away when it turns
         // wide, bringing its gap with it.
-        let save = self
-            .motion
-            .swap("save-project-rules", usize::from(compact), 2, window, cx);
+        let save = self.motion.swap(
+            "save-project-rules",
+            usize::from(compact),
+            2,
+            CHANGE,
+            window,
+            cx,
+        );
         let layers = save.shows(1).then(|| {
             (
                 1,
@@ -791,7 +812,7 @@ fn rule_selector<T: Clone + 'static>(
 ) -> AnyElement {
     let compact = crate::window_seam::window_is_compact(window, cx);
     // The list and the dropdown trade places when the window turns.
-    let swap = motion.swap(id, usize::from(compact), 2, window, cx);
+    let swap = motion.swap(id, usize::from(compact), 2, CHANGE, window, cx);
     let mut layers = Vec::new();
     if swap.shows(0) {
         layers.push((0, rule_dropdown(id, choices.clone(), selected, pick, cx)));
@@ -822,7 +843,7 @@ fn rule_list<T: Clone + 'static>(
                 let mark = gpui_base::motion::transition(
                     SharedString::from(format!("{id}-check-{index}")),
                     if checked { 1. } else { 0. },
-                    gpui_base::motion::Transition::new(crate::edge_back::SETTLE),
+                    gpui_base::motion::Transition::new(GLIDE),
                     window,
                     cx,
                 );

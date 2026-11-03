@@ -17,6 +17,9 @@ use super::super::model::{TurnTimeClause, format_elapsed, format_local_time, tur
 use crate::time::now_millis;
 use tcode_core::session::TurnMeta;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A running turn's working indicator, drawn by a view whose clock ticks
 /// only while a frame draws it: the view is the element's state, so a turn
 /// scrolled out of the timeline's rows drops it, and its clock with it.
@@ -189,7 +192,7 @@ pub(crate) fn turn_working_indicator(
         })
         .child(crate::motion::Sampled::new(move |window, cx| {
             let id = SharedString::from(format!("served-model-{turn}"));
-            match motion.shown(id.clone(), served_model, window, cx) {
+            match motion.shown(id.clone(), served_model, SHOW, window, cx) {
                 Some(served) => {
                     let tooltip = crate::tr!("chat.served_model_tooltip").into_owned();
                     served.fade(

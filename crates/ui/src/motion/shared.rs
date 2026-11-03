@@ -28,6 +28,9 @@ use gpui::{
     IntoElement, LayoutId, Pixels, Point, SharedString, Window,
 };
 
+/// How long a shared element takes to travel to its new place.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Where a view's shared elements were drawn, by key; kept by the view and
 /// cloned into whatever draws them. Every clone is the same record.
 #[derive(Clone, Default)]
@@ -170,11 +173,11 @@ impl SharedMoves {
 }
 
 fn progress(travel: &Travel, now: Instant) -> f32 {
-    super::settle_progress(now.saturating_duration_since(travel.at))
+    crate::motion::Curve::new(GLIDE).progress(now.saturating_duration_since(travel.at))
 }
 
 fn settled(travel: &Travel, now: Instant) -> bool {
-    now.saturating_duration_since(travel.at) >= crate::edge_back::SETTLE
+    now.saturating_duration_since(travel.at) >= GLIDE
 }
 
 /// A shared element, laid out in its place and drawn there, or on its way

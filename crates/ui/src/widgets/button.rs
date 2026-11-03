@@ -13,6 +13,9 @@ use gpui::{
 use gpui_base::motion::Interpolate;
 use std::rc::Rc;
 
+/// How long a button's colours, dim, spinner and glyph take to glide.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ButtonVariant {
     #[default]
@@ -440,7 +443,7 @@ impl RenderOnce for Button {
             clocks.clock().cross_fade_part(
                 clocks.channel("icon"),
                 shown,
-                &crate::motion::Curve::settle(),
+                &crate::motion::Curve::new(GLIDE),
                 window,
                 cx,
                 build,
@@ -587,7 +590,7 @@ impl Clocks {
         self.clock().transition(
             self.channel(channel),
             target,
-            &crate::motion::Curve::settle(),
+            &crate::motion::Curve::new(GLIDE),
             window,
             cx,
         )

@@ -14,6 +14,9 @@ use super::TouchSelectionLayout;
 
 use crate::theme::ActiveTheme as _;
 
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Reads the touch selection as laid out by the time the handles paint.
 pub(crate) type SnapshotSource = Rc<dyn Fn(&Window, &App) -> Option<TouchSelectionLayout>>;
 /// What a handle's owner gets told as the finger moves it.
@@ -202,7 +205,8 @@ impl RenderOnce for SelectionHandles {
         // where they last were once it is gone; a leaving handle takes no
         // touch.
         let present = source(window, cx).is_some_and(|snapshot| !snapshot.is_empty());
-        let presence = crate::motion::appear((self.id.clone(), "handles"), present, window, cx);
+        let presence =
+            crate::motion::appear((self.id.clone(), "handles"), present, APPEAR, window, cx);
         let last = window
             .use_keyed_state((self.id, "handles-last"), cx, |_, _| {
                 Rc::new(std::cell::RefCell::new(Vec::new()))

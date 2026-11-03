@@ -63,12 +63,13 @@ impl FlipBounds {
 /// How far from its laid-out place to draw a participant whose layout just
 /// jumped by `jump` (old place minus new; zero on a frame it did not): the
 /// jump is added to whatever offset it was still carrying, which then springs
-/// back to zero over [`FLIP`], keeping its velocity through a later jump.
+/// back to zero over `response`, keeping its velocity through a later jump.
 /// Kept by `clock` under `id`; reduced motion draws it in place at once.
 pub(crate) fn flip_offset(
     clock: Clock<'_>,
     id: impl Into<ElementId>,
     jump: Point<Pixels>,
+    response: std::time::Duration,
     window: &mut Window,
     cx: &mut App,
 ) -> Point<Pixels> {
@@ -82,13 +83,10 @@ pub(crate) fn flip_offset(
     let jumps = jumps.get();
     let mut follow = |axis: &'static str, jump: Pixels| {
         let id = super::child_id(&id, axis);
-        px(clock.follow(id, f32::from(-jump), FLIP, window, cx)) + jump
+        px(clock.follow(id, f32::from(-jump), response, window, cx)) + jump
     };
     Point::new(follow("flip-x", jumps.x), follow("flip-y", jumps.y))
 }
-
-/// How long a row that changed places takes to spring to its new one.
-pub(crate) const FLIP: std::time::Duration = crate::edge_back::SETTLE;
 
 struct ListState<T> {
     /// The keys drawn last frame, in order, those leaving included.
@@ -130,6 +128,7 @@ impl<T> Default for Kept<T> {
 pub(crate) fn keyed<T: Clone + 'static, C: BorrowMut<App>>(
     id: impl Into<ElementId>,
     items: impl IntoIterator<Item = (SharedString, T)>,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
@@ -139,6 +138,7 @@ pub(crate) fn keyed<T: Clone + 'static, C: BorrowMut<App>>(
         Clock::Element,
         Fold::Down,
         items,
+        curve.into(),
         window,
         cx,
         build,
@@ -151,6 +151,7 @@ pub(crate) fn keyed<T: Clone + 'static, C: BorrowMut<App>>(
 pub(crate) fn keyed_across<T: Clone + 'static, C: BorrowMut<App>>(
     id: impl Into<ElementId>,
     items: impl IntoIterator<Item = (SharedString, T)>,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
@@ -160,6 +161,7 @@ pub(crate) fn keyed_across<T: Clone + 'static, C: BorrowMut<App>>(
         Clock::Element,
         Fold::Across(px(0.)),
         items,
+        curve.into(),
         window,
         cx,
         build,
@@ -184,22 +186,34 @@ pub(crate) fn keyed_in<T: Clone + 'static, C: BorrowMut<App>>(
     id: impl Into<ElementId>,
     fold: Fold,
     items: impl IntoIterator<Item = (SharedString, T)>,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    keyed_along(id.into(), Clock::Element, fold, items, window, cx, build)
+    keyed_along(
+        id.into(),
+        Clock::Element,
+        fold,
+        items,
+        curve.into(),
+        window,
+        cx,
+        build,
+    )
 }
 
 /// [`keyed_in`] with every row's clock, value, fold and glide kept by
 /// `motion` under `key` rather than in element state, so rows coming,
 /// going or changing places carry on when the view is drawn under a new
 /// parent. `key` is also the list's element id.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn keyed_owned<T: Clone + 'static, C: BorrowMut<App>>(
     motion: &super::owned::Owned,
     key: impl Into<SharedString>,
     fold: Fold,
     items: impl IntoIterator<Item = (SharedString, T)>,
+    curve: impl Into<Curve>,
     window: &mut Window,
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
@@ -211,17 +225,20 @@ pub(crate) fn keyed_owned<T: Clone + 'static, C: BorrowMut<App>>(
         Clock::Owned(&motion.scope(&key)),
         fold,
         items,
+        curve.into(),
         window,
         cx,
         build,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
     id: ElementId,
     clock: Clock<'_>,
     fold: Fold,
     items: impl IntoIterator<Item = (SharedString, T)>,
+    curve: Curve,
     window: &mut Window,
     cx: &mut C,
     mut build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
@@ -260,7 +277,6 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
         let arrives = here && started && !drawn.contains(&key);
         let target = if here { 1f32 } else { 0. };
         let presence = super::child_id(&row_id(&key), "presence");
-        let curve = Curve::settle();
         if arrives {
             clock.transition(presence.clone(), 0f32, &curve, window, app);
         }
@@ -316,6 +332,7 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
                         Clock::Element => None,
                         Clock::Owned(motion) => Some(motion.scope(&key)),
                     },
+                    response: curve.duration(),
                     key,
                     jumped,
                     wraps: matches!(fold, Fold::Across(_)),
@@ -425,6 +442,8 @@ impl gpui::Element for Scope {
 /// its layout, and so its neighbours', is never moved.
 struct FlipRow {
     id: ElementId,
+    /// How long it springs to a new place over.
+    response: std::time::Duration,
     /// The row's own part of its list's owner, which keeps its glide.
     motion: Option<super::owned::Owned>,
     key: SharedString,
@@ -488,6 +507,7 @@ impl gpui::Element for FlipRow {
             Clock::from(self.motion.as_ref()),
             self.id.clone(),
             jump,
+            self.response,
             window,
             cx,
         );
@@ -510,6 +530,9 @@ impl gpui::Element for FlipRow {
 
 #[cfg(test)]
 mod tests {
+    /// How long a row drawn here takes to fold in or out, or to move to a new place.
+    const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::{
@@ -532,7 +555,7 @@ mod tests {
                 .iter()
                 .map(|name| (SharedString::from(*name), *name));
             let presses = self.presses.clone();
-            let rows = super::keyed("rows", items, window, cx, move |_, name, _, _| {
+            let rows = super::keyed("rows", items, ROWS, window, cx, move |_, name, _, _| {
                 let (name, presses) = (*name, presses.clone());
                 div()
                     .id(name)
@@ -598,7 +621,7 @@ mod tests {
     impl Render for Chips {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let items = self.0.iter().map(|name| (SharedString::from(*name), *name));
-            let chips = super::keyed_across("chips", items, window, cx, |_, name, _, _| {
+            let chips = super::keyed_across("chips", items, ROWS, window, cx, |_, name, _, _| {
                 let name = *name;
                 div()
                     .debug_selector(move || name.to_string())
@@ -659,7 +682,7 @@ mod tests {
                 .iter()
                 .map(|name| (SharedString::from(*name), *name));
             let glide = crate::motion::GlideState::keyed("chips-glide", window, cx);
-            let chips = super::keyed_across("chips", items, window, cx, |_, name, _, _| {
+            let chips = super::keyed_across("chips", items, ROWS, window, cx, |_, name, _, _| {
                 let name = *name;
                 div()
                     .debug_selector(move || name.to_string())

@@ -29,6 +29,18 @@ use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
 use tcode_protocol::{CommandResponse, ExternalImportState, ExternalThread, RecentDir, SourceTool};
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
 const RECENT_VIEWPORT_MAX_HEIGHT: f32 = 390.;
@@ -331,6 +343,7 @@ impl AddProjectDialog {
                 RecentState::Ready(_) => 3,
             },
             4,
+            CHANGE,
             window,
             cx,
         );
@@ -387,6 +400,7 @@ impl AddProjectDialog {
                 let rows = crate::motion::keyed(
                     "recent-directory-rows",
                     items,
+                    ROWS,
                     window,
                     cx,
                     |_, (index, recent), _, cx| {
@@ -452,7 +466,7 @@ impl AddProjectDialog {
                         (visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT),
                         window.viewport_size().height - px(RECENT_VIEWPORT_CHROME),
                     ),
-                    crate::motion::settle(),
+                    gpui_base::motion::Transition::new(GLIDE),
                     window,
                     cx,
                 );
@@ -540,15 +554,21 @@ impl Render for AddProjectDialog {
                         column.child(div().text_secondary(false, cx).child(hint))
                     })
                     .children(
-                        crate::motion::shown("add-project-error", self.error.clone(), window, cx)
-                            .map(|error| {
-                                error.fold(
-                                    div()
-                                        .text_secondary(false, cx)
-                                        .text_color(cx.theme().danger)
-                                        .child(error.value.clone()),
-                                )
-                            }),
+                        crate::motion::shown(
+                            "add-project-error",
+                            self.error.clone(),
+                            SHOW,
+                            window,
+                            cx,
+                        )
+                        .map(|error| {
+                            error.fold(
+                                div()
+                                    .text_secondary(false, cx)
+                                    .text_color(cx.theme().danger)
+                                    .child(error.value.clone()),
+                            )
+                        }),
                     ),
             )
             .child(
@@ -633,10 +653,11 @@ impl Render for ImportProgress {
             "external-import-outcome",
             usize::from(summary.is_some()),
             2,
+            CHANGE,
             window,
             cx,
         );
-        let running = crate::motion::shown("external-import-running", running, window, cx)
+        let running = crate::motion::shown("external-import-running", running, SHOW, window, cx)
             .map(|running| running.value)
             .filter(|_| outcome.shows(0));
         let mut layers = Vec::new();

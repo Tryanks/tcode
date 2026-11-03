@@ -14,6 +14,9 @@ use gpui_base::{h_flex, v_flex};
 
 use super::super::model::diff_stats;
 
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 pub(crate) struct ChangedFilesHandlers {
@@ -151,6 +154,7 @@ pub(crate) fn changed_files(
             format!("changed-files-{index}"),
             crate::motion::keyed::Fold::Across(px(0.)),
             chips,
+            ROWS,
             window,
             cx,
             |key, chip, _, cx| {

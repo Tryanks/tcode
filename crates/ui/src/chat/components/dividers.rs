@@ -7,6 +7,9 @@ use gpui::{
 };
 use gpui_base::h_flex;
 
+/// How long a divider's label takes to cross-fade to its next one.
+const LABEL: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Width of the hairline stub flanking a divider label. Short on purpose: a
 /// full-width rule would cut the flow in two, and these events only annotate it.
 const STUB_WIDTH: f32 = 24.;
@@ -43,7 +46,7 @@ fn divider_in(
         crate::motion::Clock::from(motion.as_ref()).cross_fade(
             label_id,
             label,
-            &crate::motion::Curve::settle(),
+            &crate::motion::Curve::new(LABEL),
             window,
             cx,
             build,

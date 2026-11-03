@@ -35,6 +35,15 @@ use agent::ProviderKind;
 use tcode_core::provider_status::AuthStatus;
 use tcode_core::settings::builtin_provider_color;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The card's dialog asked to manage this profile's plugins.
 pub struct ManagePlugins(pub String);
 
@@ -198,6 +207,7 @@ impl ProviderCard {
                 crate::motion::shown(
                     "update-available-slot",
                     update_available.then_some(()),
+                    SHOW,
                     window,
                     cx,
                 )
@@ -257,7 +267,7 @@ impl ProviderCard {
             ),
             StatusDot::Amber => (cx.theme().muted, muted),
         };
-        let settle = crate::motion::settle;
+        let settle = || gpui_base::motion::Transition::new(GLIDE);
         let status_bg = transition(("provider-status", "bg"), status_bg, settle(), window, cx);
         let status_fg = transition(("provider-status", "fg"), status_fg, settle(), window, cx);
         let (lead, email) = match &summary.email {
@@ -278,6 +288,7 @@ impl ProviderCard {
         let text = crate::motion::cross_fade(
             "provider-status-text",
             (lead, email, summary.detail.clone()),
+            CHANGE,
             window,
             cx,
             move |(lead, email, detail), _, _| {

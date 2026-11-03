@@ -31,6 +31,15 @@ use tcode_core::{
     settings::{CredentialSource, HostProblem, HostSettings, HostStatus, SourceControlSettings},
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Action, Clone, PartialEq, serde::Deserialize)]
 #[action(namespace = source_control_settings, no_json)]
 struct ChooseAccount {
@@ -298,7 +307,7 @@ impl SourceControlPanel {
             } else {
                 theme.muted_foreground
             },
-            gpui_base::motion::Transition::new(crate::edge_back::SETTLE),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -327,6 +336,7 @@ impl SourceControlPanel {
         let details = crate::motion::shown(
             SharedString::from(format!("source-control-details-{host}")),
             choice.enabled.then_some(()),
+            SHOW,
             window,
             cx,
         )
@@ -395,6 +405,7 @@ impl SourceControlPanel {
                 .as_ref()
                 .is_some_and(|status| status.problem == Some(HostProblem::Unverified))
                 .then_some(()),
+            SHOW,
             window,
             cx,
         );
@@ -408,6 +419,7 @@ impl SourceControlPanel {
             .child(crate::motion::cross_fade(
                 SharedString::from(format!("source-control-status-{host}")),
                 status_line(status.as_ref()),
+                CHANGE,
                 window,
                 cx,
                 |line, _, _| line.clone().into_any_element(),
@@ -435,6 +447,7 @@ impl SourceControlPanel {
                 .as_ref()
                 .and_then(|status| status.problem.clone())
                 .filter(|problem| matches!(problem, HostProblem::NotSignedIn { .. })),
+            SHOW,
             window,
             cx,
         );
@@ -455,6 +468,7 @@ impl SourceControlPanel {
         let accounts = crate::motion::shown(
             SharedString::from(format!("source-control-account-{host}")),
             (accounts.len() > 1).then_some(accounts),
+            SHOW,
             window,
             cx,
         );
@@ -505,6 +519,7 @@ impl SourceControlPanel {
                 .as_ref()
                 .is_some_and(|status| status.env_overrides_account)
                 .then_some(()),
+            SHOW,
             window,
             cx,
         ) {
@@ -641,6 +656,7 @@ impl SourceControlPanel {
         let help = crate::motion::shown(
             SharedString::from(format!("source-control-help-{host}")),
             (scopes.is_some() || token_url.is_some()).then_some((scopes, token_url)),
+            SHOW,
             window,
             cx,
         )
@@ -764,6 +780,7 @@ impl SourceControlPanel {
         let description = crate::motion::cross_fade(
             SharedString::from(format!("source-control-method-desc-{host}")),
             with_email,
+            CHANGE,
             window,
             cx,
             |&with_email, _, cx| {
@@ -808,6 +825,7 @@ impl SourceControlPanel {
         let replaces = crate::motion::shown(
             SharedString::from(format!("source-control-replaces-{host}")),
             replaces.map(|replaces| replaces.into_owned()),
+            SHOW,
             window,
             cx,
         );
@@ -1171,8 +1189,13 @@ impl AddHostDialog {
 impl Render for AddHostDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
-        let error =
-            crate::motion::shown("source-control-add-error", self.error.clone(), window, cx);
+        let error = crate::motion::shown(
+            "source-control-add-error",
+            self.error.clone(),
+            SHOW,
+            window,
+            cx,
+        );
         let theme = cx.theme();
         let kind = self.kind;
         let label = |text: SharedString| div().text_caption(cx).child(text);

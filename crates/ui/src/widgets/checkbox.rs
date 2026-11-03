@@ -13,6 +13,9 @@ use gpui_base::StyledExt as _;
 use gpui_base::motion::{Transition, transition};
 use std::rc::Rc;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(IntoElement)]
 pub struct Checkbox {
     id: ElementId,
@@ -99,7 +102,7 @@ impl RenderOnce for Checkbox {
             Size::Medium => px(16.),
         };
         let label = self.label.clone();
-        let settle = || Transition::new(crate::edge_back::SETTLE);
+        let settle = || Transition::new(GLIDE);
         let (rest_bg, rest_border, primary) =
             (cx.theme().background, cx.theme().input, cx.theme().primary);
         let bg = transition(

@@ -18,6 +18,9 @@ use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 
 use super::super::model::{MdSync, md_sync};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Markdown state mirrored from a timeline entry.
 pub(crate) struct MdState {
     pub(crate) state: Entity<MarkdownState>,
@@ -223,7 +226,7 @@ pub(crate) fn assistant(
         .when(reveals, |message| message.on_hover(on_hover))
         .child(message)
         .child(crate::motion::Sampled::new(
-            move |window, cx| match motion.shown(fold_id, below.then_some(()), window, cx) {
+            move |window, cx| match motion.shown(fold_id, below.then_some(()), SHOW, window, cx) {
                 Some(fold) => {
                     let reveal = hover.reveal(&hover_key, window, cx);
                     let actions = h_flex()

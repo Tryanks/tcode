@@ -34,6 +34,15 @@ use crate::{
     },
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PickerKind {
     Labels,
@@ -143,7 +152,7 @@ impl MetaChip {
                     .child(name.clone())
                     // A review recolours the reviewer's verdict where it stands.
                     .child(crate::motion::Sampled::new(move |window, cx| {
-                        crate::motion::status_icon(verdict, icon, color, window, cx)
+                        crate::motion::status_icon(verdict, icon, color, CHANGE, window, cx)
                     }))
                     .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
                     .into_any_element()
@@ -455,14 +464,20 @@ impl PullRequestView {
             }
             let mut edit = edit;
             crate::motion::Sampled::new(move |window, cx| {
-                let parts =
-                    crate::motion::keyed_across(selector, parts, window, cx, |_, part, _, cx| {
+                let parts = crate::motion::keyed_across(
+                    selector,
+                    parts,
+                    ROWS,
+                    window,
+                    cx,
+                    |_, part, _, cx| {
                         let part = match part {
                             MetaChip::Edit => edit.take(),
                             part => Some(part.render(muted, cx)),
                         };
                         div().pl_2().children(part).into_any_element()
-                    });
+                    },
+                );
                 parts.render(
                     h_flex()
                         .debug_selector(|| selector.into())
@@ -560,7 +575,7 @@ impl PullRequestView {
         let spinning = gpui_base::motion::transition(
             "pr-picker-loading",
             if loading { 1. } else { 0. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );

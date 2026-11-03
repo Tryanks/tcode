@@ -28,6 +28,9 @@ use crate::{
     },
 };
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Where an editor is open. Its unsent text stays with the pull request until it is sent or
 /// cancelled, across tab switches and closing the panel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1028,7 +1031,7 @@ fn warning(id: String, text: Option<String>, compact: bool, cx: &App) -> AnyElem
         .text_secondary(compact, cx)
         .text_color(cx.theme().warning);
     crate::motion::Sampled::new(move |window, cx| {
-        match crate::motion::shown(SharedString::from(id), text, window, cx) {
+        match crate::motion::shown(SharedString::from(id), text, SHOW, window, cx) {
             Some(kept) => kept.fold(line.child(kept.value.clone())),
             // Out of flow, so an absent warning takes no gap in the editor.
             None => div().absolute().into_any_element(),

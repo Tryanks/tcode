@@ -31,7 +31,7 @@ use super::keyed::FlipBounds;
 
 /// How long a part takes to glide from where a reflow found it to where it
 /// was laid out.
-const GLIDE: Duration = crate::edge_back::SETTLE;
+const GLIDE: Duration = Duration::from_millis(200);
 
 /// A part's glide: the offset it was drawn at when the last reflow moved it,
 /// easing out to nothing from then.

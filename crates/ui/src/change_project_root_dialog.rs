@@ -20,6 +20,9 @@ use gpui_base::{h_flex, v_flex};
 use crate::store::WorkspaceStore;
 use tcode_protocol::CommandResponse;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Whether this build can put up a directory picker at all.
 const NATIVE_DIRECTORY_PICKER: bool = cfg!(feature = "native-dialogs");
 
@@ -317,6 +320,7 @@ impl Render for ChangeProjectRootDialog {
                 crate::motion::shown(
                     "change-project-root-working",
                     self.busy.then_some(()),
+                    SHOW,
                     window,
                     cx,
                 )
@@ -329,15 +333,21 @@ impl Render for ChangeProjectRootDialog {
                 }),
             )
             .children(
-                crate::motion::shown("change-project-root-error", self.error.clone(), window, cx)
-                    .map(|error| {
-                        error.fold(
-                            div()
-                                .text_secondary(false, cx)
-                                .text_color(cx.theme().danger)
-                                .child(error.value.clone()),
-                        )
-                    }),
+                crate::motion::shown(
+                    "change-project-root-error",
+                    self.error.clone(),
+                    SHOW,
+                    window,
+                    cx,
+                )
+                .map(|error| {
+                    error.fold(
+                        div()
+                            .text_secondary(false, cx)
+                            .text_color(cx.theme().danger)
+                            .child(error.value.clone()),
+                    )
+                }),
             )
     }
 }

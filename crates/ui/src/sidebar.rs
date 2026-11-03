@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::material::{Bar, COMPACT_PAGE_INSET, bar, bar_height, empty_row, selectable_row};
+use crate::motion::drag_ghost;
 use crate::motion::list_rows::Glide;
-use crate::motion::{drag_ghost, settle};
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::remote::spaces::{self, ShareTarget, SpacesObserver};
 use crate::theme::ActiveTheme as _;
@@ -52,6 +52,18 @@ pub(crate) use arrange::thread_carried;
 use arrange::{DropZone, ThreadDrag};
 use gpui_base::dock::AnyDrag;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The provider mark behind a thread row: its provider's glyph at this alpha,
 /// sized to the row height minus this vertical inset so it sits inside the row.
 const PROVIDER_MARK_ALPHA: f32 = 0.32;
@@ -89,10 +101,11 @@ fn faded_status<T: Clone + PartialEq + 'static>(
     build: impl Fn(&T, &mut Window, &mut App) -> gpui::AnyElement,
 ) -> Option<gpui::AnyElement> {
     let id: SharedString = id.into();
-    let shown = crate::motion::shown(id.clone(), value, window, cx)?;
+    let shown = crate::motion::shown(id.clone(), value, SHOW, window, cx)?;
     let content = crate::motion::cross_fade(
         (gpui::ElementId::from(id), "swap"),
         shown.value.clone(),
+        CHANGE,
         window,
         cx,
         build,
@@ -929,7 +942,7 @@ impl SessionsSidebar {
             let progress = transition(
                 SharedString::from(format!("fold-{scope}-{key}")),
                 target,
-                settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -978,13 +991,14 @@ impl SessionsSidebar {
         let leaving = crate::motion::shown(
             "sidebar-loading-skeleton",
             skeleton.then_some(()),
+            SHOW,
             window,
             cx,
         );
         let arriving = transition(
             ("sidebar-loaded", "opacity"),
             if loading { 0. } else { 1. },
-            settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -1730,7 +1744,7 @@ impl SessionsSidebar {
         let color = transition(
             (SharedString::from(format!("settled-{key}")), "color"),
             color,
-            settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -1928,6 +1942,7 @@ impl SessionsSidebar {
         let shown = crate::motion::shown(
             SharedString::from(format!("shared-badge-{project_id}")),
             names,
+            SHOW,
             window,
             cx,
         )?;
@@ -2163,7 +2178,13 @@ impl SessionsSidebar {
                 crate::remote::local_machine_name(cx).map(SharedString::from),
             ),
         };
-        let dot = transition(("sidebar-hosts", "connection"), dot, settle(), window, cx);
+        let dot = transition(
+            ("sidebar-hosts", "connection"),
+            dot,
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
         let tooltip_name = name.clone();
         let control = Button::new("sidebar-hosts")
             .ghost()
@@ -2305,7 +2326,7 @@ impl SessionsSidebar {
             } else {
                 cx.theme().muted_foreground
             },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -2459,6 +2480,7 @@ impl SessionsSidebar {
         let unread_dot = crate::motion::shown(
             SharedString::from(format!("project-unread-{project_id}")),
             has_unread.then_some(()),
+            SHOW,
             window,
             cx,
         )
@@ -2761,7 +2783,7 @@ impl SessionsSidebar {
             } else {
                 active.opacity(0.)
             },
-            settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
@@ -2771,6 +2793,7 @@ impl SessionsSidebar {
         let outline = crate::motion::shown(
             SharedString::from(format!("{row_id}-pane-outline")),
             crate::shell::pane_colour(&meta.id, cx),
+            SHOW,
             window,
             cx,
         )
@@ -2778,7 +2801,7 @@ impl SessionsSidebar {
             let colour = transition(
                 (row_id.clone(), "pane-outline-colour"),
                 shown.value,
-                settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
@@ -2900,7 +2923,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<gpui::AnyElement> {
-        let shown = crate::motion::shown(id, spinning.then_some(()), window, cx)?;
+        let shown = crate::motion::shown(id, spinning.then_some(()), SHOW, window, cx)?;
         Some(shown.fade(Spinner::new().color(cx.theme().muted_foreground)))
     }
 
@@ -2916,6 +2939,7 @@ impl SessionsSidebar {
         let shown = crate::motion::shown(
             SharedString::from(format!("follow-up-shown-{}", meta.id)),
             meta.follow_up.is_some().then_some(()),
+            SHOW,
             window,
             cx,
         )?;
@@ -2953,6 +2977,7 @@ impl SessionsSidebar {
         let shown = crate::motion::shown(
             SharedString::from(format!("{slot}-{}", meta.id)),
             links,
+            SHOW,
             window,
             cx,
         )?;
@@ -3346,6 +3371,7 @@ impl SessionsSidebar {
             let unread = crate::motion::shown(
                 SharedString::from(format!("unread-{session_id}")),
                 show_unread.then_some(()),
+                SHOW,
                 window,
                 cx,
             )
@@ -3375,6 +3401,7 @@ impl SessionsSidebar {
                     crate::motion::shown(
                         SharedString::from(format!("thread-time-{session_id}")),
                         (!working).then_some(()),
+                        SHOW,
                         window,
                         cx,
                     ),
@@ -4170,6 +4197,7 @@ impl SessionsSidebar {
         crate::motion::keyed(
             "pending-thread-rows",
             pending,
+            ROWS,
             window,
             cx,
             |_, (id, preview), _, cx| {
@@ -4255,6 +4283,7 @@ impl SessionsSidebar {
                 let empty = crate::motion::shown(
                     "threads-empty",
                     (!model.has_projects).then_some(()),
+                    SHOW,
                     window,
                     cx,
                 );
@@ -4598,7 +4627,13 @@ impl SessionsSidebar {
         } else {
             cx.theme().list_active.opacity(0.)
         };
-        let fill = transition((cached.row_id.clone(), "fill"), fill, settle(), window, cx);
+        let fill = transition(
+            (cached.row_id.clone(), "fill"),
+            fill,
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
         let label = crate::pull_requests::badge_label(&meta.pull_requests, cx).map_or_else(
             || cached.label.to_string(),
             |badge| format!("{}, {badge}", cached.label),
@@ -4671,6 +4706,7 @@ impl SessionsSidebar {
                                 crate::motion::shown(
                                     SharedString::from(format!("compact-pin-{session_id}")),
                                     (meta.pinned_at.is_some() && !meta.is_settled()).then_some(()),
+                                    SHOW,
                                     window,
                                     cx,
                                 )
@@ -4772,6 +4808,7 @@ fn compact_status_glyph(
         .child(crate::motion::cross_fade(
             SharedString::from(format!("compact-glyph-{id}")),
             glyph,
+            CHANGE,
             window,
             cx,
             move |glyph, _, cx| compact_glyph(*glyph, project.as_ref(), cx).into_any_element(),
@@ -5273,7 +5310,7 @@ impl Render for SessionsSidebar {
                 let rest = (0..2).map(|layer| f32::from(u8::from(layer == current)));
                 crate::motion::CrossFade::sampled(id, current, rest.collect())
             } else {
-                crate::motion::CrossFade::new(id, current, 2, window, cx)
+                crate::motion::CrossFade::new(id, current, 2, CHANGE, window, cx)
             }
         };
         let fade = layout_fade("sidebar-layout", window, cx);

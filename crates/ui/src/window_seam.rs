@@ -13,6 +13,9 @@
 
 use gpui::{App, Edges, Global, Pixels, Window, px};
 
+/// How long content takes to follow a change of the window's insets.
+const INSETS: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The layout breakpoint for a mobile build: below this much usable content
 /// width the shell uses its compact layout, at or above it the wide split. A
 /// desktop build never consults it — see [`window_is_compact`].
@@ -40,7 +43,7 @@ pub(crate) fn content_insets(window: &Window) -> Edges<Pixels> {
 
 /// [`content_insets`] as the surface `id` lays its content out against them:
 /// each edge glides to a new value (a software keyboard sliding up or down,
-/// a rotation) over the house settle, and lands at once with motion reduced.
+/// a rotation) over [`INSETS`], and lands at once with motion reduced.
 /// The glide is kept by `owner` for a surface drawn under a new parent as
 /// the window turns compact or wide, in element state otherwise.
 ///
@@ -62,7 +65,7 @@ pub(crate) fn content_insets_gliding(
         clock.transition(
             gpui::ElementId::NamedChild(std::sync::Arc::new(id.into()), name.into()),
             value,
-            &crate::motion::Curve::settle(),
+            &crate::motion::Curve::new(INSETS),
             window,
             cx,
         )

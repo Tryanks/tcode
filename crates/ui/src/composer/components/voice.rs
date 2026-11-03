@@ -4,6 +4,12 @@ use super::super::*;
 use client::{DictationEvent as SpeechEvent, SpeechState, SpeechStatus};
 use gpui::SharedString;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 mod client;
 
 pub(in super::super) struct Voice {
@@ -107,20 +113,21 @@ impl Composer {
                 } else {
                     theme.muted_foreground
                 },
-                crate::motion::settle(),
+                gpui_base::motion::Transition::new(GLIDE),
                 window,
                 cx,
             );
             let halo = gpui_base::motion::spring(
                 "voice-mic-halo",
                 if recording { 0.08 + level * 0.42 } else { 0. },
-                crate::motion::FOLLOW,
+                gpui_base::motion::Spring::new(GLIDE).with_epsilon(0.25),
                 window,
                 cx,
             );
             crate::motion::cross_fade_part(
                 "voice-mic-mark",
                 preparing,
+                CHANGE,
                 window,
                 cx,
                 move |preparing, _, cx| {

@@ -13,6 +13,9 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub type ToastId = u64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +106,7 @@ pub fn notification(
                 let reveal = crate::motion::shown(
                     gpui::ElementId::from(("toast-detail", id as usize)),
                     is_expanded.then_some(()),
+                    SHOW,
                     window,
                     cx,
                 );

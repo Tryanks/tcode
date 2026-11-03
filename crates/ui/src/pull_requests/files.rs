@@ -46,6 +46,18 @@ use crate::{
     },
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A Files view toggle; the phone's overflow menu addresses them by action.
 #[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_pull_requests, no_json)]
@@ -540,7 +552,7 @@ impl PullRequestView {
     fn off_diff(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let card = self.off_diff_card(cx);
         let open = self.page()?.files_view.off_diff_open;
-        let kept = crate::motion::shown("pr-off-diff-card", card, window, cx)?;
+        let kept = crate::motion::shown("pr-off-diff-card", card, SHOW, window, cx)?;
         let chevron = crate::widgets::Chevron::new("pr-off-diff-chevron", open);
         Some(self.off_diff_body(kept, open, chevron, window, cx))
     }
@@ -684,6 +696,7 @@ impl PullRequestView {
         let rows = crate::motion::keyed(
             "pr-off-diff-rows",
             rows,
+            ROWS,
             window,
             cx,
             |_, row, window, cx| match row {
@@ -893,6 +906,7 @@ impl PullRequestView {
                     crate::motion::cross_fade(
                         "pr-viewed-count",
                         counter,
+                        CHANGE,
                         window,
                         cx,
                         |text, _, _| {
@@ -953,6 +967,7 @@ impl PullRequestView {
             .shown(
                 "file-jump",
                 (!wide_column).then_some(count_label),
+                SHOW,
                 window,
                 cx,
             )
@@ -1354,6 +1369,7 @@ impl PullRequestView {
                 }
                 .into_owned()
             }),
+            SHOW,
             window,
             cx,
         )
@@ -1373,61 +1389,62 @@ impl PullRequestView {
         .then(|| page.files_view.page_error.is_some());
         let listed = page.files_view.list.is_some();
         // The footer comes and goes, and its loading and failed lines cross-fade.
-        let footer = crate::motion::shown("pr-files-footer", footer, window, cx).map(|kept| {
-            let failed = kept.value;
-            let failing = gpui_base::motion::transition(
-                "pr-files-footer-failed",
-                if failed { 1. } else { 0. },
-                crate::motion::settle(),
-                window,
-                cx,
-            );
-            let loading_line = || {
-                h_flex()
-                    .gap_2()
+        let footer =
+            crate::motion::shown("pr-files-footer", footer, SHOW, window, cx).map(|kept| {
+                let failed = kept.value;
+                let failing = gpui_base::motion::transition(
+                    "pr-files-footer-failed",
+                    if failed { 1. } else { 0. },
+                    gpui_base::motion::Transition::new(GLIDE),
+                    window,
+                    cx,
+                );
+                let loading_line = || {
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(crate::widgets::spinner::Spinner::new())
+                        .child(crate::tr!("pull_requests.files.loading_more"))
+                };
+                let bar = material::bar("pr-files-footer", material::Bar::Toolbar, compact, cx)
                     .items_center()
-                    .child(crate::widgets::spinner::Spinner::new())
-                    .child(crate::tr!("pull_requests.files.loading_more"))
-            };
-            let bar = material::bar("pr-files-footer", material::Bar::Toolbar, compact, cx)
-                .items_center()
-                .text_secondary(compact, cx)
-                .when(failed && failing < 1., |row| {
-                    row.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .px(cx.theme().tokens.spacing.sm)
-                            .opacity(1. - failing)
-                            .child(loading_line()),
-                    )
-                })
-                .when(!failed, |row| {
-                    row.child(loading_line().opacity(1. - failing))
-                })
-                .when(failed, |row| {
-                    row.child(
-                        div()
-                            .opacity(failing)
-                            .child(crate::tr!("pull_requests.files.rest_failed")),
-                    )
-                    .child(
-                        Button::new("pr-files-rest-retry")
-                            .outline()
-                            .xsmall()
-                            .label(crate::tr!("pull_requests.detail.retry"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(page) = this.page_mut() {
-                                    page.files_view.page_error = None;
-                                }
-                                cx.notify();
-                            })),
-                    )
-                });
-            kept.fold(bar)
-        });
+                    .text_secondary(compact, cx)
+                    .when(failed && failing < 1., |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .px(cx.theme().tokens.spacing.sm)
+                                .opacity(1. - failing)
+                                .child(loading_line()),
+                        )
+                    })
+                    .when(!failed, |row| {
+                        row.child(loading_line().opacity(1. - failing))
+                    })
+                    .when(failed, |row| {
+                        row.child(
+                            div()
+                                .opacity(failing)
+                                .child(crate::tr!("pull_requests.files.rest_failed")),
+                        )
+                        .child(
+                            Button::new("pr-files-rest-retry")
+                                .outline()
+                                .xsmall()
+                                .label(crate::tr!("pull_requests.detail.retry"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(page) = this.page_mut() {
+                                        page.files_view.page_error = None;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    });
+                kept.fold(bar)
+            });
         // The list is built in the background after the read; it cross-fades over the skeleton.
         let body = if listed {
             render_list(self, "pr-files-body", split, wrap, window, cx)
@@ -1456,7 +1473,7 @@ impl PullRequestView {
         let column = self.motion.transition(
             "file-column",
             if wide { 1f32 } else { 0. },
-            &crate::motion::Curve::settle(),
+            GLIDE,
             window,
             cx,
         );
@@ -1674,6 +1691,7 @@ impl DiffListHost for PullRequestView {
                 crate::motion::shown(
                     gpui::ElementId::from((gpui::ElementId::from(file), "pr-changed-since-viewed")),
                     changed.then_some(()),
+                    SHOW,
                     window,
                     cx,
                 )
@@ -1843,7 +1861,7 @@ fn settle_viewed(file: usize, known: bool, cell: AnyElement, cx: &App) -> AnyEle
         let unknown = gpui_base::motion::transition(
             gpui::ElementId::from((gpui::ElementId::from(file), "pr-viewed-known")),
             if known { 0. } else { 1. },
-            crate::motion::settle(),
+            gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
         );
