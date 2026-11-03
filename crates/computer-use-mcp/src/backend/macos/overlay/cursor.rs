@@ -5,21 +5,19 @@ use std::time::{Duration, Instant};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 
 use super::ffi::{
-    Id, class, display_frame_for_ax_point, send_id, send_id_cstr, send_id_f64, send_id_id,
-    send_id_rect, send_id_window_init, send_void, send_void_bool, send_void_f32, send_void_f64,
-    send_void_id, send_void_id_id, send_void_isize, send_void_point, send_void_rect,
+    Id, class, display_frame_for_ax_point, send_bool, send_id, send_id_cstr, send_id_f64,
+    send_id_id, send_id_rect, send_id_window_init, send_void, send_void_bool, send_void_f32,
+    send_void_f64, send_void_id, send_void_id_id, send_void_isize, send_void_point, send_void_rect,
     send_void_rect_bool, send_void_size, send_void_usize, status_window_level,
 };
 use super::geometry::ax_screen_to_appkit;
-use super::motion::{Effect, Motion, Point, Waypoint};
+use super::motion::{Effect, Fade, Motion, Point, Waypoint};
 use crate::outline::Frame;
 
 // The pointer is a translucent disc whose centre is the action point.
 const POINTER_RADIUS: f64 = 10.0;
 const RIPPLE_RADIUS: f64 = 20.0;
 const PRESSED_SCALE: f64 = 0.72;
-const FADE_IN: Duration = Duration::from_millis(140);
-const FADE_OUT: Duration = Duration::from_millis(240);
 const MAX_FRAME_STEP: Duration = Duration::from_millis(50);
 // Ripples pulse at this fixed rate for as long as a drag holds the button,
 // whether or not the cursor is moving.
@@ -37,11 +35,17 @@ enum Ripple {
 }
 
 impl Ripple {
-    /// (from scale, to scale, from opacity, duration, line width)
-    fn animation(self) -> (f64, f64, f64, f64, f64) {
-        match self {
+    /// (from scale, to scale, from opacity, duration, line width). Under
+    /// Reduce Motion a ripple keeps its full size and only fades.
+    fn animation(self, reduced: bool) -> (f64, f64, f64, f64, f64) {
+        let (from, to, opacity, duration, line_width) = match self {
             Self::Click => (0.45, 1.7, 0.9, 0.5, 2.0),
             Self::Trail => (0.35, 0.95, 0.55, 0.38, 1.25),
+        };
+        if reduced {
+            (to, to, opacity, duration, line_width)
+        } else {
+            (from, to, opacity, duration, line_width)
         }
     }
 }
@@ -59,7 +63,8 @@ pub(super) struct CursorUi {
     panel: Option<Frame>,
     motion: Motion,
     shown: bool,
-    alpha: f64,
+    fade: Fade,
+    reduced: bool,
     ordered: bool,
     position: Option<Point>,
     last_frame: Instant,
@@ -160,7 +165,8 @@ impl CursorUi {
             panel: None,
             motion: Motion::new(seed()),
             shown: false,
-            alpha: 0.0,
+            fade: Fade::hidden(),
+            reduced: false,
             ordered: false,
             position: None,
             last_frame: Instant::now(),
@@ -170,6 +176,8 @@ impl CursorUi {
 
     /// Must only be called from the process main queue.
     pub(super) fn push(&mut self, now: Instant, waypoints: Vec<Waypoint>) {
+        self.reduced = reduce_motion();
+        self.motion.set_reduced(self.reduced);
         for effect in self.motion.push(now, waypoints) {
             self.play(effect, now);
         }
@@ -213,29 +221,16 @@ impl CursorUi {
             self.next_trail = Some(following);
         }
 
-        let target = if self.shown && self.position.is_some() {
-            1.0
-        } else {
-            0.0
-        };
-        if self.alpha != target {
-            let fade = if target > self.alpha {
-                FADE_IN
-            } else {
-                FADE_OUT
-            };
-            let delta = step.as_secs_f64() / fade.as_secs_f64();
-            self.alpha = if target > self.alpha {
-                (self.alpha + delta).min(target)
-            } else {
-                (self.alpha - delta).max(target)
-            };
+        let shown = self.shown && self.position.is_some();
+        let before = self.fade.opacity();
+        let fading = self.fade.step(step, shown);
+        if self.fade.opacity() != before {
             without_implicit_animation(|| {
-                let _ = send_void_f32(self.pointer, c"setOpacity:", self.alpha as f32);
+                let _ = send_void_f32(self.pointer, c"setOpacity:", self.fade.opacity() as f32);
             });
         }
         let rippling = self.ripples.iter().any(|(_, until)| now < *until);
-        let needed = self.alpha > 0.0 || target > 0.0 || rippling;
+        let needed = shown || self.fade.opacity() > 0.0 || rippling;
         if needed && !self.ordered {
             let _ = send_void(self.window, c"orderFrontRegardless");
             self.ordered = true;
@@ -243,7 +238,7 @@ impl CursorUi {
             let _ = send_void_id(self.window, c"orderOut:", ptr::null_mut());
             self.ordered = false;
         }
-        self.motion.is_moving() || self.motion.is_pressed() || self.alpha != target || rippling
+        self.motion.is_moving() || self.motion.is_pressed() || fading || rippling
     }
 
     fn place(&mut self, now: Instant) {
@@ -293,14 +288,16 @@ impl CursorUi {
         match effect {
             Effect::Click => {
                 animate(self.glow, c"opacity", 1.0, 0.0, 0.45, false);
-                animate(
-                    self.pointer,
-                    c"transform.scale",
-                    1.0,
-                    PRESSED_SCALE,
-                    0.09,
-                    true,
-                );
+                if !self.reduced {
+                    animate(
+                        self.pointer,
+                        c"transform.scale",
+                        1.0,
+                        PRESSED_SCALE,
+                        0.09,
+                        true,
+                    );
+                }
                 self.ripple(Ripple::Click, now);
             }
             Effect::Press => {
@@ -319,7 +316,7 @@ impl CursorUi {
         let Some(point) = self.position else {
             return;
         };
-        let (from, to, opacity, duration, line_width) = kind.animation();
+        let (from, to, opacity, duration, line_width) = kind.animation(self.reduced);
         let layer = match self.ripples.iter().position(|(_, until)| now >= *until) {
             Some(free) => Some(free),
             None if self.ripples.len() < RIPPLE_POOL => new_ripple(self.accent).map(|layer| {
@@ -396,6 +393,13 @@ fn without_implicit_animation(change: impl FnOnce()) {
     if let Some(transaction) = transaction.filter(|_| began) {
         let _ = send_void(transaction, c"commit");
     }
+}
+
+fn reduce_motion() -> bool {
+    class(c"NSWorkspace")
+        .and_then(|workspace| send_id(workspace, c"sharedWorkspace"))
+        .and_then(|workspace| send_bool(workspace, c"accessibilityDisplayShouldReduceMotion"))
+        .unwrap_or(false)
 }
 
 fn circle_path(center: f64, radius: f64) -> Option<Id> {
