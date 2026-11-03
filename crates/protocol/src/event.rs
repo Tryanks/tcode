@@ -158,7 +158,9 @@ pub enum ServerEvent {
     /// position of a stored row of the log, and a row without a readable
     /// record stands for none; the host may also merge or drop records whose
     /// effect a later record in the log repeats, so `records` can be shorter
-    /// than the range.
+    /// than the range. A reply to a subscription ends at `total`: it starts
+    /// at the subscriber's cursor when what follows that fits one reply, and
+    /// is otherwise the log's tail, as a subscriber without a cursor gets.
     SessionSnapshot {
         from: u64,
         end: u64,

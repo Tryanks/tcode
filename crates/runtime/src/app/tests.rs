@@ -9104,6 +9104,88 @@ fn usage_projection_survives_a_partial_history_window() {
     });
 }
 
+/// A client back at a thread asks for what followed its cursor. What fits
+/// one reply continues the cursor; what does not is answered, in the same one
+/// reply, with the tail a client opening the thread fresh gets, so the client
+/// is at the end of the log after one round trip either way.
+#[test]
+fn a_cursor_is_answered_in_one_reply_that_reaches_the_end_of_the_log() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-cursor-reply");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    // Each of the three long warnings takes most of half a reply.
+    let long = |index: usize| format!("{index}{}", "x".repeat(200 * 1024));
+    let messages: Vec<String> = ["first".to_owned()]
+        .into_iter()
+        .chain((0..3).map(long))
+        .chain(["last".to_owned()])
+        .collect();
+    let records = messages
+        .iter()
+        .enumerate()
+        .map(|(ts, message)| SessionEventRecord {
+            origin: None,
+            author: None,
+            ts: Some(ts as u64),
+            event: AgentEvent::Warning {
+                message: message.clone(),
+            },
+            elided: None,
+        });
+    state.update(cx, |state, _| {
+        state
+            .event_records
+            .insert("away".into(), session_log(records));
+    });
+    let reply = |messages: &[HostMessage], id: u64| -> serde_json::Value {
+        let event = messages
+            .iter()
+            .find(|message| {
+                matches!(message, HostMessage::Event(EventEnvelope { request_id: Some(request), .. }) if *request == id)
+            })
+            .expect("a snapshot answers the subscription");
+        serde_json::from_str(&tcode_protocol::encode_line(event).unwrap()).unwrap()
+    };
+    let warning = |ts: usize| serde_json::json!({"ts": ts, "event": {"type": "warning", "message": messages[ts]}});
+
+    // The client held the first row; the three long warnings and the last
+    // one do not fit a reply.
+    let behind = reply(
+        &through_pipe(&state, cx, 1, subscribe_events("away", Some(1))),
+        1,
+    );
+    assert_eq!(
+        behind,
+        serde_json::json!({"type": "event", "content": {
+            "request_id": 1,
+            "topic": {"type": "session_events", "content": {"session_id": "away"}},
+            "event": {"type": "session_snapshot", "content": {
+                "from": 2, "end": 5,
+                "records": [warning(2), warning(3), warning(4)],
+                "total": 5, "total_turns": 0, "truncated": true,
+            }},
+        }}),
+    );
+
+    // Held through the second long warning, the rest fits.
+    let near = reply(
+        &through_pipe(&state, cx, 2, subscribe_events("away", Some(3))),
+        2,
+    );
+    assert_eq!(
+        near,
+        serde_json::json!({"type": "event", "content": {
+            "request_id": 2,
+            "topic": {"type": "session_events", "content": {"session_id": "away"}},
+            "event": {"type": "session_snapshot", "content": {
+                "from": 3, "end": 5,
+                "records": [warning(3), warning(4)],
+                "total": 5, "total_turns": 0, "truncated": false,
+            }},
+        }}),
+    );
+}
+
 #[test]
 fn session_history_snapshot_pages_and_absolute_tail_cursors() {
     let cx = &mut TestAppContext::default();
@@ -9560,25 +9642,18 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
         };
         assert!(truncated);
         assert_eq!(page, records[from as usize..]);
-        let snapshot = events_reply(
-            state,
-            &tcode_protocol::Subscription {
-                after: Some(0),
-                ..subscription
-            },
+        // A cursor whose rest overflows the budget gets that same tail.
+        assert_eq!(
+            events_reply(
+                state,
+                &tcode_protocol::Subscription {
+                    after: Some(0),
+                    ..subscription.clone()
+                },
+            )
+            .event,
+            events_reply(state, &subscription).event
         );
-        let ServerEvent::SessionSnapshot {
-            from,
-            records: tail,
-            truncated,
-            ..
-        } = snapshot.event
-        else {
-            panic!("tail")
-        };
-        assert_eq!(from, 0);
-        assert!(truncated);
-        assert_eq!(tail, records[..tail.len()]);
         let mut records = records;
         records[9].event = AgentEvent::Warning {
             message: "x".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
