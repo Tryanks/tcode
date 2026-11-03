@@ -6054,6 +6054,54 @@ mod tests {
         assert!(cx.debug_bounds("pending-delivery-bubble").is_some());
     }
 
+    /// A message on its way to one thread shows in the pane showing that
+    /// thread, whichever pane has the keyboard, and in no other.
+    #[gpui::test]
+    fn a_pending_delivery_shows_only_in_its_threads_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        serve_thread(&host, "thread-2");
+        cx.simulate_keystrokes("secondary-2");
+        await_restore_update(&shell, cx, |store| {
+            store.active_session_id().as_deref() == Some("thread-2") && !store.chat_loading()
+        });
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        store_of(&shell, cx).update(cx, |store, _| {
+            store.send_turn_for("thread-2".into(), "On its way".into(), Vec::new())
+        });
+        let pane_of = |cx: &mut VisualTestContext| {
+            let bubble = cx
+                .debug_bounds("pending-delivery-bubble")
+                .expect("the message on its way");
+            shell.read_with(cx, |shell, cx| {
+                shell
+                    .attachment
+                    .as_ref()
+                    .expect("attached")
+                    .panes(cx)
+                    .iter()
+                    .find(|pane| pane.read(cx).bounds().contains(&bubble.center()))
+                    .and_then(|pane| pane.read(cx).session_id().map(str::to_owned))
+            })
+        };
+        for (key, focused) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
+            cx.simulate_keystrokes(key);
+            await_restore_update(&shell, cx, |store| {
+                store.active_session_id().as_deref() == Some(focused)
+            });
+            crate::test_frames::draw_settled(cx);
+            assert_eq!(
+                pane_of(cx).as_deref(),
+                Some("thread-2"),
+                "with {focused} focused"
+            );
+        }
+    }
+
     fn await_restore_update(
         shell: &Entity<AppShell>,
         cx: &mut VisualTestContext,
