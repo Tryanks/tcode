@@ -593,6 +593,33 @@ pub(crate) fn show_beside(
     })
 }
 
+/// Go back from `session_id` to `parent` where another pane shows `parent`:
+/// `session_id`'s pane closes and the keyboard goes to `parent`'s. False
+/// where no pane closes: the compact layout, `session_id` in no pane or
+/// `parent` in no other.
+pub(crate) fn close_into(
+    session_id: &str,
+    parent: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(shell) = current_shell(cx) else {
+        return false;
+    };
+    shell.update(cx, |shell, cx| {
+        if shell.compact(cx) {
+            return false;
+        }
+        let (Some(pane), Some(into)) = (
+            shell.pane_showing(session_id, cx),
+            shell.pane_showing(parent, cx),
+        ) else {
+            return false;
+        };
+        pane != into && shell.close_pane_into(&pane, |_, _| Some(into), window, cx)
+    })
+}
+
 /// What fills one panel of a layout about to be installed.
 #[derive(Clone)]
 enum Slot {
@@ -1776,30 +1803,53 @@ impl AppShell {
         let Some(pane) = self.acting_pane(window, cx) else {
             return;
         };
+        self.close_pane_into(
+            &pane,
+            |panes, at| {
+                // Base hands the keyboard on only when it removes the group,
+                // which the glide puts off; this is the order it would pick in:
+                // the panes after this one in the layout, then those before it,
+                // nearest first.
+                panes[at + 1..]
+                    .first()
+                    .or_else(|| panes[..at].last())
+                    .cloned()
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Close `pane` as [`Self::close_pane`] does, handing the keyboard to the
+    /// pane `next` picks from the layout's panes and `pane`'s place among
+    /// them. False where `pane` cannot close: it is the last one, or its
+    /// group will not close.
+    fn close_pane_into(
+        &mut self,
+        pane: &Entity<ThreadPanel>,
+        next: impl FnOnce(&[Entity<ThreadPanel>], usize) -> Option<Entity<ThreadPanel>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(attachment) = self.attachment.as_mut() else {
-            return;
+            return false;
         };
         let Some(group) = pane.read(cx).group() else {
-            return;
+            return false;
         };
         attachment.zoom.zoom_out();
         let panes = attachment.panes(cx);
         if panes.len() < 2 || !group.read(cx).is_closable(cx) {
-            return;
+            return false;
         }
-        // Base hands the keyboard on only when it removes the group, which
-        // the glide puts off; this is the order it would pick in: the panes
-        // after this one in the layout, then those before it, nearest first.
-        let at = panes.iter().position(|held| *held == pane).unwrap_or(0);
-        let next = panes[at + 1..]
-            .first()
-            .or_else(|| panes[..at].last())
-            .cloned();
-        self.glide_out(&pane, cx);
+        let at = panes.iter().position(|held| held == pane).unwrap_or(0);
+        let next = next(&panes, at);
+        self.glide_out(pane, cx);
         if let Some(next) = next {
             window.focus(&next.focus_handle(cx), cx);
             self.pane_focused(next, window, cx);
         }
+        true
     }
 
     /// Start `pane` leaving the column: it turns inert and its slot glides
@@ -7873,6 +7923,107 @@ mod tests {
         });
         settle(cx);
         assert!(cx.debug_bounds("subagent-summary-spawn-1").is_some());
+    }
+
+    /// [`mount_panes`] with `agent-1` dispatched by `thread-1`.
+    fn mount_lead_with_agent(
+        cx: &mut TestAppContext,
+    ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+        let (shell, host, cx) = mount_panes(cx);
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("panes_index sends a snapshot");
+        };
+        let mut agent = index.sessions[1].clone();
+        agent.id = "agent-1".into();
+        agent.title = "agent-1".into();
+        agent.parent_session_id = Some("thread-1".into());
+        agent.created_at = 3;
+        index.sessions.push(agent);
+        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+        await_restore_update(&shell, cx, |store| store.thread_meta("agent-1").is_some());
+        draw(cx);
+        (shell, host, cx)
+    }
+
+    /// Let the panes' and panels' motion land.
+    fn settle_panes(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+    }
+
+    /// Open `agent-1` from its lead's Agents panel, and serve it.
+    fn open_agent_from_panel(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        cx: &mut VisualTestContext,
+    ) {
+        let row = cx
+            .debug_bounds("agent-row-agent-1")
+            .expect("the agent's row in the Agents panel");
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        draw(cx);
+        serve_thread(host, "agent-1");
+        await_restore_update(shell, cx, |store| !store.chat_loading());
+        settle_panes(cx);
+    }
+
+    /// Press the agent's header link back to its lead.
+    fn press_back_to_lead(cx: &mut VisualTestContext) {
+        let back = cx
+            .debug_bounds("agent-parent-link")
+            .expect("the agent's way back to its lead");
+        cx.simulate_mouse_move(back.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        draw(cx);
+        settle_panes(cx);
+    }
+
+    /// An agent opened from its lead's Agents panel opens beside the lead;
+    /// Back closes the agent's pane, and the lead's pane, the keyboard and
+    /// the lead's Agents panel are back where they were before it opened.
+    /// Opening and going back again leaves the same layout each time, as
+    /// does closing the agent's pane with ⇧⌘W instead.
+    #[gpui::test]
+    fn back_from_an_agent_beside_its_lead_closes_its_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.toggle_agents_panel(cx));
+        settle_panes(cx);
+        let panes = pane_bounds(&shell, cx);
+        let panel = cx.debug_bounds("right-panel").expect("the Agents panel");
+        assert_eq!(panes.len(), 1);
+        assert!(panes[0].right() <= panel.left(), "{panes:?}, {panel:?}");
+
+        for round in 0..3 {
+            open_agent_from_panel(&shell, &host, cx);
+            assert_eq!(
+                pane_threads(&shell, cx),
+                [Some("thread-1".into()), Some("agent-1".into())],
+                "round {round}"
+            );
+            if round < 2 {
+                press_back_to_lead(cx);
+            } else {
+                cx.simulate_keystrokes("secondary-shift-w");
+                settle_panes(cx);
+            }
+            assert_eq!(
+                pane_threads(&shell, cx),
+                [Some("thread-1".into())],
+                "round {round}"
+            );
+            assert_eq!(pane_bounds(&shell, cx), panes, "round {round}");
+            assert_eq!(cx.debug_bounds("right-panel"), Some(panel), "round {round}");
+            assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
+            store.read_with(cx, |store, _| {
+                assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+                assert!(!store.is_thread_open("agent-1"), "round {round}");
+            });
+        }
     }
 
     /// Choose the palette's action `label`, in whatever language the host's

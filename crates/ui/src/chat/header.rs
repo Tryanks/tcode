@@ -379,11 +379,19 @@ impl ChatView {
                 })
                 .aria_label(name.clone())
                 .tooltip(name)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let parent_id = parent_id.clone();
-                    this.workspace_store
-                        .update(cx, |store, cx| store.select_session(parent_id, cx));
-                }))
+                .on_click({
+                    let store = self.workspace_store.clone();
+                    let session_id = self.session_id.clone();
+                    move |_, window, cx| {
+                        crate::agents_panel::back_to_lead(
+                            &store,
+                            session_id.as_deref(),
+                            parent_id.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                })
                 .into_any_element(),
         )
     }
