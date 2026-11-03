@@ -7340,7 +7340,7 @@ mod tests {
                 }
                 cx.simulate_mouse_up(to, MouseButton::Left, none);
                 draw(cx);
-                cx.simulate_keystrokes("cmd-c");
+                cx.simulate_keystrokes("secondary-c");
                 draw(cx);
                 let copied = cx.read_from_clipboard().and_then(|item| item.text());
                 cx.update(|window, _| assert!(!focus.is_focused(window), "{copied:?}"));
@@ -10084,8 +10084,11 @@ mod tests {
             .debug_bounds("pane-close")
             .expect("the pane's close button");
         let top = pane_bounds(cx)[0];
+        // Where this build draws the window's caption buttons, the top
+        // pane's header ends with them, after its own controls.
+        let end = top.right() - px(crate::window_caption::RIGHT_PANEL_CAPTION_WIDTH);
         assert!(
-            top.contains(&close.center()) && top.right() - close.right() < px(12.),
+            top.contains(&close.center()) && close.right() <= end && end - close.right() < px(12.),
             "at the right end of the top pane's header: {close:?} in {top:?}"
         );
 
