@@ -8,15 +8,26 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, RenderOnce, Role, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, Window, div, prelude::FluentBuilder as _,
+    px,
 };
-use gpui_base::h_flex;
+use gpui_base::{h_flex, v_flex};
+use tcode_core::settlement::AgentExecution;
 
-use crate::agents_panel::{AgentLine, Agents};
+use crate::agents_panel::{AgentLine, AgentState, Agents};
 use crate::chat::ChatView;
+use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
-/// How long a row takes to fold in or out, or to move to a new place.
+/// How long a row takes to fold in or out, or to move to a new place, and
+/// a line of it to fold in or out under its title.
 const ROWS: Duration = Duration::from_millis(200);
+
+/// How long an agent's state word takes to cross-fade to its next.
+const CHANGE: Duration = Duration::from_millis(200);
+
+/// The width the status mark is centred in, which the lines under the
+/// title are indented by.
+const MARK: f32 = 16.;
 
 fn agents(chat: &ChatView, cx: &App) -> Option<Agents> {
     let lead = chat.session_id.as_deref()?;
@@ -45,7 +56,9 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
 
 /// What the card shows open, laid out at the rail's width: a row for each
 /// agent, with its state, its title and how long it has run, opening it on
-/// a click. Agents that leave the list fold away as they stood.
+/// a click; under the title, what of its state word, model, effort, branch
+/// and result is reported. Agents that leave the list fold away as they
+/// stood.
 pub(super) fn body(
     chat: &ChatView,
     window: &mut Window,
@@ -55,7 +68,9 @@ pub(super) fn body(
         .motion
         .keep::<Rc<RefCell<Vec<AgentLine>>>>("rail-agents-lines");
     if let Some(agents) = agents(chat, cx) {
-        last.replace(agents.lines());
+        let store = chat.workspace_store.read(cx);
+        let lead = chat.session_id.as_deref().unwrap_or_default();
+        last.replace(agents.with_results(store, lead).lines());
     }
     let lines = last.borrow().clone();
     if lines.is_empty() {
@@ -93,11 +108,8 @@ fn row(
         line.title.clone()
     };
     let radius = crate::material::radius_card(cx);
-    let label = match line.execution {
-        Some(execution) => format!(
-            "{title} · {}",
-            crate::agents_panel::execution_label(execution)
-        ),
+    let label = match line.state {
+        Some(state) => format!("{title} · {}", state.label()),
         None => title.clone(),
     };
     let elapsed = match (line.running_since, &line.elapsed) {
@@ -111,9 +123,122 @@ fn row(
         (None, Some(elapsed)) => Some(elapsed.clone().into_any_element()),
         (None, None) => None,
     };
+    let title_line = h_flex()
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .items_center()
+        .text_body(false, cx)
+        .child(h_flex().flex_none().w(px(MARK)).justify_center().child(
+            crate::agents_panel::status_mark(&line.key, line.execution, window, cx),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(crate::widgets::fade_text(title)),
+        )
+        .children(elapsed.map(|elapsed| {
+            div()
+                .flex_none()
+                .whitespace_nowrap()
+                .text_secondary(false, cx)
+                .child(elapsed)
+        }));
+    // Under the title, indented to it: each line folds in as what it says
+    // is first reported, and away once it no longer is.
+    let under = |content: AnyElement| {
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .child(div().flex_none().w(px(MARK)))
+            .child(div().flex_1().min_w_0().child(content))
+    };
+    let facts: Vec<String> = [line.model.clone(), line.effort.clone()]
+        .into_iter()
+        .flatten()
+        .chain(line.branch.as_ref().map(|branch| format!("↳ {branch}")))
+        .collect();
+    let about =
+        (line.state.is_some() || !facts.is_empty()).then(|| (line.state, facts.join(" · ")));
+    let about = crate::motion::shown(
+        SharedString::from(format!("rail-agent-about-{}", line.key)),
+        about,
+        ROWS,
+        window,
+        cx,
+    )
+    .map(|shown| {
+        let (state, facts) = shown.value.clone();
+        let muted = cx.theme().muted_foreground;
+        let word = state.map(|state| {
+            crate::motion::cross_fade_part(
+                SharedString::from(format!("rail-agent-state-{}", line.key)),
+                state,
+                CHANGE,
+                window,
+                cx,
+                |state: &AgentState, _, cx| {
+                    div()
+                        .whitespace_nowrap()
+                        .text_color(state.color(cx))
+                        .child(state.label())
+                        .into_any_element()
+                },
+            )
+        });
+        let separator = word.is_some() && !facts.is_empty();
+        shown.fold(under(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .text_secondary(false, cx)
+                .text_color(muted)
+                .children(word.map(|word| div().flex_none().child(word)))
+                .when(separator, |line| line.child(div().flex_none().child("·")))
+                .when(!facts.is_empty(), |line| {
+                    line.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(facts)),
+                    )
+                })
+                .into_any_element(),
+        ))
+    });
+    let failed = line.execution == Some(AgentExecution::Failed);
+    let result = crate::motion::shown(
+        SharedString::from(format!("rail-agent-result-{}", line.key)),
+        line.preview.clone(),
+        ROWS,
+        window,
+        cx,
+    )
+    .map(|shown| {
+        shown.fold(under(
+            div()
+                .w_full()
+                .pt_0p5()
+                .text_secondary(false, cx)
+                .line_clamp(2)
+                .overflow_hidden()
+                .text_color(if failed {
+                    cx.theme().danger
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .child(crate::widgets::fade_text(shown.value.clone()))
+                .into_any_element(),
+        ))
+    });
     let key = line.key.clone();
     crate::material::accessible_clickable(
-        h_flex(),
+        v_flex(),
         SharedString::from(format!("rail-agent-{}", line.key)),
         Role::Button,
         label,
@@ -125,31 +250,11 @@ fn row(
     .min_w_0()
     .px_1()
     .py_1()
-    .gap_2()
-    .items_center()
     .rounded(radius)
-    .text_body(false, cx)
     .child(crate::material::row_hover(radius, cx))
-    .child(crate::agents_panel::status_mark(
-        &line.key,
-        line.execution,
-        window,
-        cx,
-    ))
-    .child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .child(crate::widgets::fade_text(title)),
-    )
-    .children(elapsed.map(|elapsed| {
-        div()
-            .flex_none()
-            .whitespace_nowrap()
-            .text_secondary(false, cx)
-            .child(elapsed)
-    }))
+    .child(title_line)
+    .children(about)
+    .children(result)
     .when_some(line.open.clone(), |row, id| {
         let store = store.clone();
         row.cursor_pointer().on_click(move |_, window, cx| {
