@@ -272,19 +272,7 @@ pub(crate) fn perform_action_with_feedback(
             Ok(keyboard_result_with_optional_foreground(
                 root,
                 attempt,
-                |root| {
-                    let focus_guard = FocusGuard::acquire(root);
-                    if !focus_guard.is_ready() {
-                        return Err(BackendError::new(
-                            BackendErrorCode::OperationFailed,
-                            "foreground HID retry could not activate and raise the target window",
-                        ));
-                    }
-                    if let Some((x, y)) = click_point {
-                        input::click(x, y, super::MouseButton::Left, 1)?;
-                    }
-                    input::type_text(text)
-                },
+                |root| foreground_keyboard(root, click_point, || input::foreground_type_text(text)),
                 "Unicode keyboard events",
             ))
         }
@@ -318,19 +306,7 @@ pub(crate) fn perform_action_with_feedback(
             Ok(keyboard_result_with_optional_foreground(
                 root,
                 attempt,
-                |root| {
-                    let focus_guard = FocusGuard::acquire(root);
-                    if !focus_guard.is_ready() {
-                        return Err(BackendError::new(
-                            BackendErrorCode::OperationFailed,
-                            "foreground HID retry could not activate and raise the target window",
-                        ));
-                    }
-                    if let Some((x, y)) = click_point {
-                        input::click(x, y, super::MouseButton::Left, 1)?;
-                    }
-                    input::keypress(keys)
-                },
+                |root| foreground_keyboard(root, click_point, || input::foreground_keypress(keys)),
                 "keyboard events",
             ))
         }
@@ -410,6 +386,31 @@ fn background(
     action(&dispatcher)
 }
 
+/// The opt-in foreground retry activates the target app and types through the
+/// HID stream, which reaches only the now-frontmost app. It never posts a
+/// pointer event: when the target refused AX focus and would need a click to
+/// take it, the retry is refused instead.
+fn foreground_keyboard(
+    root: &RootInfo,
+    click_point: Option<(f64, f64)>,
+    send: impl FnOnce() -> Result<(), BackendError>,
+) -> Result<(), BackendError> {
+    if click_point.is_some() {
+        return Err(BackendError::new(
+            BackendErrorCode::OperationFailed,
+            "the target refused AX focus, and the foreground keyboard retry never clicks to focus it",
+        ));
+    }
+    let focus_guard = FocusGuard::acquire(root);
+    if !focus_guard.is_ready() {
+        return Err(BackendError::new(
+            BackendErrorCode::OperationFailed,
+            "foreground keyboard retry could not activate and raise the target window",
+        ));
+    }
+    send()
+}
+
 fn keyboard_result_with_optional_foreground(
     root: &RootInfo,
     background_attempt: Result<(), BackendError>,
@@ -425,13 +426,13 @@ fn keyboard_result_with_optional_foreground(
             match foreground_attempt(root) {
                 Ok(()) => ActionResult::unknown(
                     format!(
-                        "background PID delivery failed ({background_error}); {action_name} were retried through foreground HID delivery"
+                        "background PID delivery failed ({background_error}); the target app was activated and {action_name} were retried through foreground HID keyboard delivery; no pointer events were sent"
                     ),
                     Delivery::ForegroundHid,
                 ),
                 Err(foreground_error) => ActionResult::didnt(
                     format!(
-                        "background PID delivery failed ({background_error}); foreground HID retry also failed: {foreground_error}"
+                        "background PID delivery failed ({background_error}); foreground keyboard retry also failed: {foreground_error}"
                     ),
                     Delivery::None,
                 ),

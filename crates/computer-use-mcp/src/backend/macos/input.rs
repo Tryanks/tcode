@@ -9,25 +9,6 @@ use core_graphics::geometry::CGPoint;
 
 use super::super::{BackendError, BackendErrorCode, KeyModifiers, MouseButton, parse_key_chord};
 
-pub(super) fn click(
-    x: f64,
-    y: f64,
-    button: MouseButton,
-    click_count: u32,
-) -> Result<(), BackendError> {
-    for (click_index, (down_event, up_event)) in click_events(x, y, button, click_count)?
-        .into_iter()
-        .enumerate()
-    {
-        down_event.post(CGEventTapLocation::HID);
-        up_event.post(CGEventTapLocation::HID);
-        if click_index + 1 < click_count as usize {
-            std::thread::sleep(Duration::from_millis(45));
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn scroll_event(x: f64, y: f64) -> Result<CGEvent, BackendError> {
     if !x.is_finite() || !y.is_finite() {
         return Err(invalid("scroll deltas must be finite"));
@@ -84,7 +65,10 @@ pub(super) fn drag_events(
     Ok(events)
 }
 
-pub(super) fn keypress(keys: &[String]) -> Result<(), BackendError> {
+// Only the opt-in foreground keyboard retry types through the HID stream, once
+// the target app is verified frontmost; it never posts pointer events.
+#[allow(clippy::disallowed_methods)]
+pub(super) fn foreground_keypress(keys: &[String]) -> Result<(), BackendError> {
     for event in keypress_events(keys)? {
         event.post(CGEventTapLocation::HID);
     }
@@ -103,7 +87,8 @@ pub(super) fn keypress_events(keys: &[String]) -> Result<[CGEvent; 2], BackendEr
     Ok([down, up])
 }
 
-pub(super) fn type_text(text: &str) -> Result<(), BackendError> {
+#[allow(clippy::disallowed_methods)] // As foreground_keypress.
+pub(super) fn foreground_type_text(text: &str) -> Result<(), BackendError> {
     for [down, up] in text_event_pairs(text)? {
         down.post(CGEventTapLocation::HID);
         up.post(CGEventTapLocation::HID);

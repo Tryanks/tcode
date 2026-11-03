@@ -43,7 +43,10 @@
 //!   target process without stealing focus, and relies on optional private
 //!   routing APIs, so delivery never implies the application changed.
 //!   `allow_foreground_fallback` (default off) lets only `type_text` and
-//!   `keypress` retry through foreground activation; pointer actions never do.
+//!   `keypress` retry as keyboard input after activating the target app; that
+//!   retry posts no pointer events, and pointer actions never fall back.
+//!   No action moves the user's pointer: `clippy.toml` refuses the global
+//!   input APIs outside that one keyboard retry.
 //!   `show_agent_cursor` (default on) drives the action overlay in
 //!   `backend::macos::overlay`, visible only while no other application
 //!   window covers the action point on the target window.
