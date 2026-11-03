@@ -1,26 +1,28 @@
-//! An agent opened from its lead, shown inside the lead's own chat: beside
-//! the lead's timeline and composer where the body has room for both, over
-//! them otherwise. The lead's header stays; the agent has a header of its
-//! own. The store records which agent is beside which lead
-//! ([`WorkspaceStore::side_thread_for`]); the lead's chat hosts it, holding
-//! the agent's thread open and its timeline leased while it draws it.
+//! An agent opened from its lead, shown inside the lead's own chat: on a
+//! card in the side rail's place where the body has room for it beside the
+//! lead's column, over the lead's timeline and composer otherwise. The
+//! lead's header stays; the agent has a header of its own. The store records
+//! which agent is beside which lead ([`WorkspaceStore::side_thread_for`]);
+//! the lead's chat hosts it, holding the agent's thread open and its
+//! timeline leased while it draws it.
 
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, Styled as _, WeakEntity, Window, div,
-    prelude::FluentBuilder as _, px, relative,
+    AnyElement, App, AppContext as _, Context, DragMoveEvent, Entity, EntityId,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px, relative,
 };
-use gpui_base::ResizableState;
+use gpui_base::{ResizeHandleContext, ResizeHandleState};
 
 use super::ChatView;
 use crate::icon::IconName;
-use crate::motion::resize_glide::{Panel, ResizeGlide};
+use crate::material::CHAT_RAIL_GAP;
+use crate::motion::Colour;
+use crate::motion::owned::Owned;
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
+use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
@@ -29,12 +31,8 @@ gpui::actions!(tcode_chat, [CloseSide]);
 /// The key context of an agent shown beside its lead, where Escape closes it.
 pub(crate) const SIDE_CONTEXT: &str = "ChatSide";
 
-/// The narrowest an agent beside its lead reads at: a side panel's narrowest
-/// content. The body splits once it holds three, so the lead keeps two.
-const SIDE_MIN_WIDTH: f32 = crate::material::PANEL_CONTENT_MIN_WIDTH;
-
-/// The share of the body an agent beside its lead takes until its divider is
-/// dragged.
+/// The share of the body an agent's card beside its lead takes until its
+/// edge is dragged.
 const SIDE_SHARE: f32 = 1. / 3.;
 
 /// How long the agent takes to slide over the lead, or off it.
@@ -44,27 +42,20 @@ const SLIDE: Duration = Duration::from_millis(250);
 const SWAP: Duration = Duration::from_millis(200);
 
 /// How long what the side header shows only some of the time takes to come
-/// in or go.
+/// in or go, and the agent's card to come into the rail's place or leave it.
 const SHOW: Duration = Duration::from_millis(200);
+
+/// The grip of the card's edge: the sheet grabber's length, standing.
+const GRIP_LENGTH: f32 = 36.;
+const GRIP_WIDTH: f32 = 4.;
 
 /// Where an agent beside its lead is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SideMode {
-    /// In the right part of the body, beside the lead's timeline.
-    Split,
+    /// On a card in the side rail's place, right of the lead's column.
+    Slot,
     /// Over the lead's timeline and composer, under the lead's header.
     Overlay,
-}
-
-impl SideMode {
-    /// Where an agent goes in a body `width` wide.
-    fn of(width: Pixels) -> Self {
-        if width >= px(3. * SIDE_MIN_WIDTH) {
-            Self::Split
-        } else {
-            Self::Overlay
-        }
-    }
 }
 
 /// An agent's chat hosted by its lead's.
@@ -81,31 +72,50 @@ struct SideHost {
 pub(super) struct Side {
     /// The agent shown.
     host: Option<SideHost>,
-    /// The agent last shown, drawn until it has slid, shrunk or faded away.
+    /// The agent last shown, drawn until it has slid or faded away.
     leaving: Option<SideHost>,
-    /// The split of the lead's body with the agent, gliding it in and out.
-    split: Entity<ResizableState>,
-    glide: ResizeGlide,
-    /// The agent's share of the split, as its divider was last dragged; kept
-    /// by the view only, never saved.
-    share: Rc<Cell<f32>>,
+    /// The share of the body the agent's card takes, as its edge was last
+    /// dragged; kept by the view only, never saved.
+    share: f32,
     /// Where the agent drawn was last drawn: a leaving one stays there.
     slot: SideMode,
     sync_pending: bool,
 }
 
 impl Side {
-    pub(super) fn new(scene: &crate::motion::Epoch, cx: &mut App) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             host: None,
             leaving: None,
-            split: cx.new(|_| ResizableState::default()),
-            glide: ResizeGlide::new("chat-side-split", gpui::Axis::Horizontal).in_scene(scene),
-            share: Rc::new(Cell::new(SIDE_SHARE)),
-            slot: SideMode::Split,
+            share: SIDE_SHARE,
+            slot: SideMode::Slot,
             sync_pending: false,
         }
     }
+}
+
+/// A drag of the edge of the agent's card beside the lead `0`, which only
+/// that lead's chat follows.
+#[derive(Clone, Copy)]
+struct SideEdgeDrag(EntityId);
+
+impl Render for SideEdgeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// One frame of the agent beside the thread: see [`ChatView::render_side`].
+#[derive(Default)]
+pub(super) struct SideFrame {
+    /// Its card in the rail's place, while it is there or fading out of it.
+    pub(super) card: Option<AnyElement>,
+    /// It over the lead, while it is there or sliding on or off.
+    overlay: Option<AnyElement>,
+    /// How far over the lead it is.
+    over: f32,
+    /// Whether what is over the lead is leaving it.
+    leaving: bool,
 }
 
 /// What makes a chat an agent's shown beside its lead.
@@ -132,7 +142,7 @@ impl ChatView {
         chat.side_of = Some(SideOf {
             lead,
             lead_session,
-            mode: SideMode::Split,
+            mode: SideMode::Slot,
         });
         chat.set_session(Some(session_id), cx);
         chat
@@ -143,17 +153,23 @@ impl ChatView {
         self.side_of.is_some()
     }
 
+    /// Whether the view is an agent drawn on the card beside its lead, which
+    /// paints the surface under it.
+    pub(super) fn on_side_card(&self) -> bool {
+        self.side_of
+            .as_ref()
+            .is_some_and(|of| of.mode == SideMode::Slot)
+    }
+
     /// The agent shown beside the thread.
     pub(crate) fn side_session_id(&self) -> Option<&str> {
         self.side.host.as_ref().map(|host| host.session_id.as_str())
     }
 
-    /// Whether an agent shows beside the thread in a body `width` wide,
-    /// taking the room the side rail would have.
-    pub(super) fn side_open(&self, width: Pixels, cx: &App) -> bool {
-        self.side.host.is_some()
-            && !self.window_state.read(cx).compact
-            && SideMode::of(width) == SideMode::Split
+    /// The share of the body the agent beside the thread takes in the
+    /// rail's place, if one is shown: never in the compact layout.
+    pub(super) fn side_share(&self, cx: &App) -> Option<f32> {
+        (self.side.host.is_some() && !self.window_state.read(cx).compact).then_some(self.side.share)
     }
 
     /// The agent the store records beside this view's thread, where the
@@ -311,39 +327,24 @@ impl ChatView {
         }
     }
 
-    /// `main`, the thread's timeline, deliveries and composer in a body
-    /// `width` wide, with the agent beside it: in a split with it where
-    /// the body holds three of the agent's narrowest, over it otherwise.
-    /// One split whether or not an agent shows, so `main` keeps its place
-    /// in the tree as one comes and goes.
-    pub(super) fn render_with_side(
-        &mut self,
-        main: AnyElement,
-        width: Pixels,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// This frame's agent beside the thread, laid out by the body's layout
+    /// (`self.body`): its card in the rail's place, for the timeline to
+    /// hold, and what slides over the lead, for [`Self::cover_with_side`].
+    pub(super) fn render_side(&mut self, window: &mut Window, cx: &mut Context<Self>) -> SideFrame {
         if self.side_of.is_some() {
-            return main;
+            return SideFrame::default();
         }
         let compact = self.window_state.read(cx).compact;
-        let mode = SideMode::of(width);
+        let mode = if self.body.side() {
+            SideMode::Slot
+        } else {
+            SideMode::Overlay
+        };
         let open = self.side.host.is_some() && !compact;
         if open {
             self.side.slot = mode;
         }
-        let largest = (width - px(super::HEADER_COMPACT_MIN_WIDTH)).max(px(SIDE_MIN_WIDTH));
-        let side_width = (width * self.side.share.get()).clamp(px(SIDE_MIN_WIDTH), largest);
-        let frame = self.side.glide.sample(
-            &[
-                Panel::flex(true),
-                Panel::sized(side_width, open && mode == SideMode::Split),
-            ],
-            !compact,
-            &self.side.split,
-            window,
-            cx,
-        );
+        let presence = self.body.side_presence();
         // gpui-base has no slide-over for one surface replacing another; the
         // agent comes in over the lead as the pull request page comes in
         // over its list (`PullRequestsPanel::render`).
@@ -360,7 +361,7 @@ impl ChatView {
         });
         let settled = match self.side.host {
             Some(_) => swap >= 1.,
-            None => !frame.mounted(1) && over <= 0.,
+            None => presence <= 0. && over <= 0.,
         };
         if (settled || compact)
             && let Some(left) = self.side.leaving.take()
@@ -370,7 +371,7 @@ impl ChatView {
         }
 
         // Drawn once a frame, in the one place it was last put; the other
-        // place, still sliding or shrinking, holds an empty surface.
+        // place, still sliding or fading, holds an empty surface.
         let slot = self.side.slot;
         if let Some(host) = &self.side.host {
             host.chat.update(cx, |chat, _| {
@@ -384,38 +385,97 @@ impl ChatView {
             if slot == here { live.take() } else { None }
                 .unwrap_or_else(|| div().size_full().into_any_element())
         };
-        let split_side = frame.mounted(1).then(|| take_live(SideMode::Split));
+        // The card stays while it fades out empty, so it never goes in the
+        // frame the agent crosses over the lead.
+        let card = (presence > 0.).then(|| {
+            let content = take_live(SideMode::Slot);
+            self.render_side_card(content, cx)
+        });
         // Drawn from the frame it is asked for, at nothing, so the keyboard
         // given to it has somewhere to be.
         let overlay = (over > 0. || (open && mode == SideMode::Overlay))
             .then(|| take_live(SideMode::Overlay));
+        SideFrame {
+            card,
+            overlay,
+            over,
+            leaving: !(open && mode == SideMode::Overlay),
+        }
+    }
 
-        let share = self.side.share.clone();
-        let group = gpui_base::h_resizable("chat-side-split")
-            .with_state(&self.side.split)
-            .on_resize(move |state, _, cx| {
-                if let [lead, side] = state.read(cx).sizes()[..] {
-                    let total = lead + side;
-                    if total > px(0.) {
-                        share.set(side / total);
-                    }
-                }
-            })
-            .child(
-                gpui_base::resizable_panel()
-                    .size_range(frame.range(0, gpui_base::PANEL_MIN_SIZE..Pixels::MAX))
-                    .child(frame.hold(0, main)),
-            )
-            // Not `children`: the group's replaces the panels added before.
-            .when_some(split_side, |group, side| {
-                group.child(
-                    gpui_base::resizable_panel()
-                        .size(side_width)
-                        .size_range(frame.range(1, px(SIDE_MIN_WIDTH)..largest))
-                        .child(frame.hold(1, side)),
+    /// The agent's card in the rail's place, holding `content`, its leading
+    /// edge dragged to widen or narrow it.
+    fn render_side_card(&self, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let shown = self.body.side();
+        // gpui-base's resize handle straddles the leading edge of what holds
+        // it; held by nothing as wide, it straddles the middle of the gap
+        // left of the card, which the drag measures the card's width from.
+        let edge = shown.then(|| {
+            let motion = self.motion.clone();
+            let lead = cx.entity_id();
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(-CHAT_RAIL_GAP / 2.))
+                .child(
+                    gpui_base::resize_handle::<SideEdgeDrag, SideEdgeDrag>(
+                        "chat-side-edge",
+                        gpui::Axis::Horizontal,
+                    )
+                    .with_appearance(std::rc::Rc::new(
+                        move |handle: &ResizeHandleContext, window: &mut Window, cx: &mut App| {
+                            Some(side_grip(&motion, handle, window, cx))
+                        },
+                    ))
+                    .on_drag(SideEdgeDrag(lead), |drag, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| *drag)
+                    }),
                 )
-            });
-        let leaving = !(open && mode == SideMode::Overlay);
+        });
+        super::rail::slot(self.body.side_width(), self.body.side_presence(), cx)
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<SideEdgeDrag>, _, cx| {
+                    if event.drag(cx).0 != cx.entity_id() {
+                        return;
+                    }
+                    let width =
+                        event.bounds.right() - event.event.position.x - px(CHAT_RAIL_GAP / 2.);
+                    let share = this.body.side_share_at(width);
+                    if share != this.side.share {
+                        this.side.share = share;
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(
+                crate::material::card_raised(cx)
+                    .debug_selector(|| "chat-side-card".into())
+                    .p_0()
+                    .gap_0()
+                    .size_full()
+                    .overflow_hidden()
+                    .child(content),
+            )
+            .children(edge)
+            .when(!shown, |card| card.child(crate::motion::shield()))
+            .into_any_element()
+    }
+
+    /// `main`, the thread's timeline, deliveries and composer, under the
+    /// agent sliding over it in `side`. Always the same elements around
+    /// `main`, so it keeps its place in the tree as an agent comes and goes.
+    pub(super) fn cover_with_side(
+        &self,
+        main: AnyElement,
+        side: SideFrame,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.side_of.is_some() {
+            return main;
+        }
+        let over = side.over;
         div()
             .relative()
             .size_full()
@@ -430,9 +490,9 @@ impl ChatView {
                     .left(relative(-0.25 * over))
                     .right(relative(0.25 * over))
                     .when(over >= 1., |lead| lead.invisible())
-                    .child(group),
+                    .child(main),
             )
-            .when_some(overlay, |body, overlay| {
+            .when_some(side.overlay, |body, overlay| {
                 body.child(
                     div()
                         .absolute()
@@ -440,7 +500,7 @@ impl ChatView {
                         .bottom_0()
                         .left(relative(1. - over))
                         .right(relative(over - 1.))
-                        .opacity(if leaving { 1. } else { over })
+                        .opacity(if side.leaving { 1. } else { over })
                         .bg(crate::material::content_surface(cx))
                         .occlude()
                         .child(overlay),
@@ -548,7 +608,7 @@ impl ChatView {
             .motion
             .shown(
                 "side-close",
-                (of.mode == SideMode::Split).then_some(()),
+                (of.mode == SideMode::Slot).then_some(()),
                 SHOW,
                 window,
                 cx,
@@ -587,6 +647,50 @@ impl ChatView {
                 .into_any_element(),
         )
     }
+}
+
+/// What the edge of the agent's card paints in the gap left of the card: no
+/// line, for the gap is the divider, and a short pill centred in it, fading
+/// in while the pointer is on the edge and firming while it holds it.
+///
+/// gpui-base's handle paints a hairline in the middle of its band; its
+/// appearance is the caller's to replace, and this is laid out in that
+/// one-pixel middle, centred on its leading side.
+fn side_grip(
+    motion: &Owned,
+    handle: &ResizeHandleContext,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let fill = match handle.state() {
+        ResizeHandleState::Idle => muted.opacity(0.),
+        ResizeHandleState::Hovered => muted.opacity(0.3),
+        ResizeHandleState::Pressed | ResizeHandleState::Dragging => muted.opacity(0.6),
+    };
+    let fill = motion.transition(
+        "side-grip",
+        Colour(fill),
+        crate::material::HOVER,
+        window,
+        cx,
+    );
+    div()
+        .flex_none()
+        .h_full()
+        .w(px(GRIP_WIDTH))
+        .ml(px(-GRIP_WIDTH / 2.))
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .debug_selector(|| "chat-side-grip".into())
+                .w_full()
+                .h(px(GRIP_LENGTH))
+                .rounded_full()
+                .bg(fill.0),
+        )
+        .into_any_element()
 }
 
 /// Close `host`'s thread if the host opened it and no pane shows it now.

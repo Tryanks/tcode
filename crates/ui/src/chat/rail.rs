@@ -22,8 +22,7 @@ use super::ChatView;
 use crate::icon::{Icon, IconName};
 use crate::material::{
     CARD_INSET, CHAT_CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING, CHAT_RAIL_EDGE, CHAT_RAIL_GAP,
-    CHAT_RAIL_MIN_WIDTH, CHAT_RAIL_NARROWEST, CHAT_RAIL_SPAN, CHAT_RAIL_WIDE_MIN_WIDTH,
-    CHAT_RAIL_WIDEST,
+    CHAT_RAIL_NARROWEST, CHAT_RAIL_WIDEST, PANEL_CONTENT_MIN_WIDTH,
 };
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
@@ -33,13 +32,18 @@ use crate::typography::TextRole as _;
 /// body to fold open or shut.
 const SHOW: Duration = Duration::from_millis(200);
 
-/// How far right of its place the rail comes in from and leaves to.
+/// How far right of its place what takes the slot comes in from and leaves
+/// to.
 const SLIDE: f32 = 16.;
 
-/// How the thread's body sits at its width: whether its side rail shows, how
-/// wide it is, and how far the content column moves left to make room for it.
+/// How the thread's body sits at its width: what takes the slot right of its
+/// content column (the side rail, or an agent shown beside the thread on a
+/// card), how wide that is, and how far the content column moves left to
+/// make room for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct BodyLayout {
+    /// The body's width.
+    body: Pixels,
     /// See [`Self::rail`].
     rail: bool,
     /// See [`Self::width`].
@@ -48,35 +52,55 @@ pub(super) struct BodyLayout {
     reach: Pixels,
     /// How far in the rail is, from absent to at rest.
     presence: f32,
+    /// See [`Self::side`].
+    side: bool,
+    /// See [`Self::side_width`].
+    side_width: Pixels,
+    /// The right inset that keeps the column clear of the agent's card.
+    side_reach: Pixels,
+    /// How far in the agent's card is.
+    side_presence: f32,
 }
 
 impl BodyLayout {
-    /// The layout of a body `width` wide, below its header. In a body wide
-    /// enough to hold the narrowest rail in the gutter right of the centred
-    /// column the column never moves for it, and the rail fills that gutter
-    /// up to its widest; narrower, the rail is at its narrowest and the
-    /// column moves left just as far as the rail needs, and never so far
-    /// that it narrows; narrower still, or compact, there is no rail.
-    pub(super) fn of(width: Pixels, has_cards: bool, side_open: bool, compact: bool) -> Self {
-        let width = f32::from(width);
-        let room = (width - CHAT_CONTENT_MAX_WIDTH) / 2. - CHAT_RAIL_GAP - CHAT_RAIL_EDGE;
-        let reach = if compact {
-            0.
-        } else {
-            (CHAT_RAIL_WIDE_MIN_WIDTH - width)
-                .clamp(0., CHAT_RAIL_SPAN - CHAT_CONTENT_MIN_PADDING)
-                .min((width - CHAT_CONTENT_MAX_WIDTH - 2. * CHAT_CONTENT_MIN_PADDING).max(0.))
-        };
+    /// The layout of a body `width` wide, below its header, with an agent
+    /// beside the thread at `side_share` of it, if one is. Whatever takes
+    /// the slot right of the column sits in the gutter right of the centred
+    /// column where it fits there, and the column never moves for it;
+    /// narrower, the column moves left just as far as it needs, and never so
+    /// far that it narrows; narrower still, or compact, nothing takes the
+    /// slot. The rail fills its gutter up to its widest; the agent's card
+    /// takes its share, within its narrowest and what the column leaves, and
+    /// the rail gives way to it.
+    pub(super) fn of(
+        width: Pixels,
+        has_cards: bool,
+        side_share: Option<f32>,
+        compact: bool,
+    ) -> Self {
+        let body = f32::from(width);
+        let room = (body - CHAT_CONTENT_MAX_WIDTH) / 2. - CHAT_RAIL_GAP - CHAT_RAIL_EDGE;
+        let rail_width = room.clamp(CHAT_RAIL_NARROWEST, CHAT_RAIL_WIDEST);
+        let widest_side = side_widest(body);
+        let side_width = side_share.map_or(PANEL_CONTENT_MIN_WIDTH, |share| {
+            (body * share).min(widest_side).max(PANEL_CONTENT_MIN_WIDTH)
+        });
+        let side = !compact && side_share.is_some() && fits(body, PANEL_CONTENT_MIN_WIDTH);
         Self {
-            rail: !compact && width >= CHAT_RAIL_MIN_WIDTH && has_cards && !side_open,
-            width: px(room.clamp(CHAT_RAIL_NARROWEST, CHAT_RAIL_WIDEST)),
-            reach: px(reach),
+            body: width,
+            rail: !compact && fits(body, CHAT_RAIL_NARROWEST) && has_cards && !side,
+            width: px(rail_width),
+            reach: px(if compact { 0. } else { reach(body, rail_width) }),
             presence: 0.,
+            side,
+            side_width: px(side_width),
+            side_reach: px(if compact { 0. } else { reach(body, side_width) }),
+            side_presence: 0.,
         }
     }
 
-    /// Whether the rail shows: it fits, has a card to show, and no subagent
-    /// beside the thread takes its room.
+    /// Whether the rail shows: it fits, has a card to show, and no agent
+    /// beside the thread takes its slot.
     pub(super) fn rail(&self) -> bool {
         self.rail
     }
@@ -86,18 +110,102 @@ impl BodyLayout {
         self.width
     }
 
-    /// The layout with its rail `presence` of the way in.
-    pub(super) fn at(self, presence: f32) -> Self {
-        Self { presence, ..self }
+    /// Whether an agent beside the thread takes the rail's slot: one is,
+    /// and its card fits there at its narrowest. One that does not fit
+    /// covers the thread instead.
+    pub(super) fn side(&self) -> bool {
+        self.side
+    }
+
+    /// How wide the agent's card in the slot is.
+    pub(super) fn side_width(&self) -> Pixels {
+        self.side_width
+    }
+
+    /// How far in the agent's card is, from absent to at rest.
+    pub(super) fn side_presence(&self) -> f32 {
+        self.side_presence
+    }
+
+    /// The share of the body an agent's card dragged to `width` takes,
+    /// within the widths it can have.
+    pub(super) fn side_share_at(&self, width: Pixels) -> f32 {
+        let body = f32::from(self.body);
+        if body <= 0. {
+            return 0.;
+        }
+        f32::from(width)
+            .min(side_widest(body))
+            .max(PANEL_CONTENT_MIN_WIDTH)
+            / body
+    }
+
+    /// The layout with its rail `presence` and the agent's card
+    /// `side_presence` of the way in.
+    pub(super) fn at(self, presence: f32, side_presence: f32) -> Self {
+        Self {
+            presence,
+            side_presence,
+            ..self
+        }
     }
 
     /// The right inset the rows, the deliveries, the composer and the jump
-    /// to the latest row add to their own, so the column centres left of the
-    /// rail. Applied as padding only: the list and the column keep their
-    /// widths, so no row is measured again as the rail comes and goes.
+    /// to the latest row add to their own, so the column centres left of
+    /// what takes the slot; while one gives way to the other, it moves from
+    /// one's inset to the other's. Applied as padding only: the list and the
+    /// column keep their widths, so no row is measured again as the slot
+    /// changes hands.
     pub(super) fn shift(&self) -> Pixels {
-        self.reach * self.presence
+        let rail = self.reach * self.presence;
+        let side = self.side_reach * self.side_presence;
+        let both = self.presence + self.side_presence;
+        if both > 1. {
+            (rail + side) / both
+        } else {
+            rail + side
+        }
     }
+}
+
+/// What the slot takes from the body for something `width` wide in it: its
+/// gap from the column and its edge.
+fn span(width: f32) -> f32 {
+    width + CHAT_RAIL_GAP + CHAT_RAIL_EDGE
+}
+
+/// Whether something `width` wide fits in the slot of a body `body` wide,
+/// beside the widest column moved left as far as the page inset.
+fn fits(body: f32, width: f32) -> bool {
+    body >= CHAT_CONTENT_MAX_WIDTH + CHAT_CONTENT_MIN_PADDING + span(width)
+}
+
+/// How far the column moves left in a body `body` wide for something
+/// `width` wide in the slot: nothing while it fits in the gutter right of
+/// the centred column, and never so far that the column narrows.
+fn reach(body: f32, width: f32) -> f32 {
+    (CHAT_CONTENT_MAX_WIDTH + 2. * span(width) - body)
+        .clamp(0., span(width) - CHAT_CONTENT_MIN_PADDING)
+        .min((body - CHAT_CONTENT_MAX_WIDTH - 2. * CHAT_CONTENT_MIN_PADDING).max(0.))
+}
+
+/// The widest an agent's card in the slot of a body `body` wide is: as wide
+/// as the widest column leaves.
+fn side_widest(body: f32) -> f32 {
+    body - CHAT_CONTENT_MAX_WIDTH - CHAT_CONTENT_MIN_PADDING - CHAT_RAIL_GAP - CHAT_RAIL_EDGE
+}
+
+/// The slot right of the content column, over the timeline's right gutter,
+/// that the rail or an agent's card takes, `width` wide and `presence` of
+/// the way in: it fades and slides in from the right, and out to it.
+pub(super) fn slot(width: Pixels, presence: f32, cx: &App) -> gpui::Div {
+    div()
+        .absolute()
+        .top(super::timeline_inset(cx))
+        .bottom(px(CHAT_CONTENT_MIN_PADDING))
+        .right(px(CHAT_RAIL_EDGE - SLIDE * (1. - presence)))
+        .w(width)
+        .opacity(presence)
 }
 
 /// A card the rail can show, in the order it shows them.
@@ -266,13 +374,7 @@ impl ChatView {
                 .overflow_y_scroll(),
         );
         Some(
-            div()
-                .absolute()
-                .top(super::timeline_inset(cx))
-                .bottom(px(CHAT_CONTENT_MIN_PADDING))
-                .right(px(CHAT_RAIL_EDGE - SLIDE * (1. - presence)))
-                .w(self.body.width)
-                .opacity(presence)
+            slot(self.body.width, presence, cx)
                 .debug_selector(|| "chat-rail".into())
                 .child(stack)
                 .when(!self.body.rail, |rail| rail.child(crate::motion::shield()))

@@ -8230,11 +8230,14 @@ mod tests {
     }
 
     /// An agent opened from its lead's Agents panel shows beside the lead in
-    /// the lead's own pane: the right third of the body under the lead's
-    /// header, the lead keeping the store's focus. Close takes it away, and
-    /// the lead's pane, the keyboard and the lead's Agents panel are back
-    /// where they were before it opened, with the agent's thread closed.
-    /// Opening and closing again leaves the same layout each time.
+    /// the lead's own pane: on a card in the side rail's place, under the
+    /// lead's header, at the rail's edge and a third of the pane wide, the
+    /// lead's column keeping its width clear of it, and the lead keeping the
+    /// store's focus. Close takes it away, and the lead's pane, its column,
+    /// the keyboard and the lead's Agents panel are back where they were
+    /// before it opened, with the agent's thread closed. Opening and closing
+    /// again leaves the same layout each time. The card's edge, dragged,
+    /// widens it, and the lead's column keeps its width.
     #[gpui::test]
     fn an_agent_opens_beside_its_lead_in_the_leads_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -8247,6 +8250,9 @@ mod tests {
         assert_eq!(panes.len(), 1);
         assert!(panes[0].right() <= panel.left(), "{panes:?}, {panel:?}");
         let header = cx.debug_bounds("chat-title").expect("the lead's header");
+        let column = cx
+            .debug_bounds("composer-card")
+            .expect("the lead's composer");
 
         for round in 0..3 {
             open_agent_from_panel(&shell, &host, cx);
@@ -8260,15 +8266,30 @@ mod tests {
             let side = cx
                 .debug_bounds("chat-side-header")
                 .expect("the agent beside its lead");
-            assert!(side.top() >= header.bottom(), "{side:?} under {header:?}");
+            let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
             assert!(
-                side.right() <= pane.right() && pane.right() - side.right() < px(4.),
-                "{side:?} at the end of {pane:?}"
+                card.top() >= header.bottom() && card.bottom() < pane.bottom(),
+                "{card:?} under {header:?} in {pane:?}"
             );
             assert!(
-                (side.size.width * 3. - pane.size.width).abs() < pane.size.width * 0.03,
-                "{side:?} is a third of {pane:?}"
+                side.left() >= card.left()
+                    && side.right() <= card.right()
+                    && side.top() >= card.top(),
+                "{side:?} on {card:?}"
             );
+            assert!(
+                (pane.right() - px(crate::material::CHAT_RAIL_EDGE) - card.right()).abs() < px(1.),
+                "{card:?} at the rail's edge of {pane:?}"
+            );
+            assert!(
+                (card.size.width * 3. - pane.size.width).abs() < pane.size.width * 0.03,
+                "{card:?} is a third of {pane:?}"
+            );
+            let lead = cx
+                .debug_bounds("composer-card")
+                .expect("the lead's composer");
+            assert_eq!(lead.size.width, column.size.width, "round {round}");
+            assert!(lead.right() < card.left(), "{lead:?} clear of {card:?}");
             assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
             store.read_with(cx, |store, _| {
                 assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
@@ -8286,6 +8307,11 @@ mod tests {
                 "round {round}"
             );
             assert_eq!(pane_bounds(&shell, cx), panes, "round {round}");
+            assert_eq!(
+                cx.debug_bounds("composer-card"),
+                Some(column),
+                "round {round}"
+            );
             assert_eq!(cx.debug_bounds("right-panel"), Some(panel), "round {round}");
             assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
             store.read_with(cx, |store, _| {
@@ -8293,6 +8319,46 @@ mod tests {
                 assert!(!store.is_thread_open("agent-1"), "round {round}");
             });
         }
+
+        open_agent_from_panel(&shell, &host, cx);
+        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
+        let lead = cx
+            .debug_bounds("composer-card")
+            .expect("the lead's composer");
+        let grip = cx
+            .debug_bounds("chat-side-grip")
+            .expect("the grip of the card's edge");
+        assert!(
+            lead.right() <= grip.left() && grip.right() <= card.left(),
+            "{grip:?} in the gap between {lead:?} and {card:?}"
+        );
+        let edge = grip.center();
+        let to = edge - gpui::point(px(10.), px(0.));
+        let none = gpui::Modifiers::default();
+        cx.simulate_mouse_move(edge, None, none);
+        draw(cx);
+        cx.simulate_mouse_down(edge, MouseButton::Left, none);
+        draw(cx);
+        for step in [edge - gpui::point(px(4.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), none);
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        draw(cx);
+        let dragged = cx.debug_bounds("chat-side-card").expect("the agent's card");
+        assert_eq!(dragged.right(), card.right());
+        assert!(
+            (dragged.left() - (card.left() - px(10.))).abs() < px(1.),
+            "{dragged:?} widened from {card:?} as far as its edge went"
+        );
+        let lead = cx
+            .debug_bounds("composer-card")
+            .expect("the lead's composer");
+        assert_eq!(lead.size.width, column.size.width);
+        assert!(
+            lead.right() < dragged.left(),
+            "{lead:?} clear of {dragged:?}"
+        );
     }
 
     /// On a tablet: an agent beside its lead is neither drawn nor held open
