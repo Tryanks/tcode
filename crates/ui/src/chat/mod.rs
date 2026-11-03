@@ -130,8 +130,8 @@ pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
 };
 
-/// Which of the window's edges a conversation's header runs along, and so
-/// which window chrome it makes room for.
+/// Which of the window's top corners a conversation's header runs into, and
+/// so which window chrome it makes room for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WindowEdges {
     /// Where macOS draws the traffic lights over a collapsed sidebar.
