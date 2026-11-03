@@ -258,6 +258,12 @@ pub use wire::{
 // end of the log: the records after its cursor when they fit one window,
 // otherwise the baseline a subscription without a cursor gets; a client no
 // longer asks again from where a truncated continuation ended.
+// A tool_call item arrives canonical from every provider, history included:
+// the tool's text in output and its inline images in image_reads. Codex's
+// sleep and image generation arrive as the sleep and image_generation tool
+// calls instead of other items, and Grok's MCP calls are named server/tool.
+// In the store, an item row's envelope carries item_version 1; a row without
+// it is converted to that form when read.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]
