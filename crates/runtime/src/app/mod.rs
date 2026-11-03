@@ -15,7 +15,7 @@ use agent::{
     SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models, permission_control,
 };
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::host::{HostCx, HostEvent, HostTask};
 use crate::terminal::{
@@ -220,13 +220,6 @@ impl TimelineLoad {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct TerminalPreferences {
-    open: bool,
-    height: f32,
-    count: usize,
-}
-
 #[derive(Debug, Clone, Copy)]
 enum TerminalSpawnAction {
     Open,
@@ -402,8 +395,6 @@ pub struct AppState {
     nested_subagent_spawns: HashMap<(String, String), subagents::NestedSpawn>,
     pub settings: Settings,
     pub providers: ProviderCatalog,
-    terminal_preferences_path: PathBuf,
-    terminal_preferences: HashMap<String, TerminalPreferences>,
     next_terminal_spawn_id: u64,
     pending_terminal_spawns: HashMap<String, HashMap<u64, TerminalSpawnAction>>,
     next_start_generation: u64,
@@ -523,11 +514,10 @@ impl AppState {
             tcode_services::relaunch::take(store.root()),
             computer_use_mcp::permissions::check(),
         );
-        let terminal_preferences_path = store.root().join("terminal-ui.json");
-        let terminal_preferences = std::fs::read(&terminal_preferences_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        // Older builds kept each conversation's terminal drawer here and
+        // reopened it with fresh shells on load; a drawer now lives only with
+        // its running terminals.
+        let _ = std::fs::remove_file(store.root().join("terminal-ui.json"));
         // Seed the model picker from the persisted cache so it is instant and
         // works offline; a background refresh (see `refresh_model_catalogs`)
         // updates it once the providers respond.
@@ -610,8 +600,6 @@ impl AppState {
             nested_subagent_spawns: HashMap::new(),
             settings,
             providers: ProviderCatalog::new(model_catalogs, provider_secret_names),
-            terminal_preferences_path,
-            terminal_preferences,
             next_terminal_spawn_id: 0,
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
@@ -657,7 +645,6 @@ impl AppState {
             let writer = StoreWriter::new(
                 self.store.clone(),
                 self.settings_store.clone(),
-                self.terminal_preferences_path.clone(),
                 self.store_write_failures.clone(),
             );
             // Its own thread: every commit blocks on the database's fsync.

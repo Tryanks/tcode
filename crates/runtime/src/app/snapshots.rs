@@ -1086,7 +1086,6 @@ impl AppState {
                 )
             })
         });
-        let terminal_preferences = self.terminal_preferences_for(session);
         let (approvals, user_input) = self.open_requests(session_id, session);
         // The provider reports the window it was launched with; a selection
         // made since then caps the meter until the restart that applies it.
@@ -1142,10 +1141,8 @@ impl AppState {
             active_terminal_id: session.terminal_workspace.active_id,
             terminal_splits: session.terminal_workspace.splits.clone(),
             terminal_contexts: session.terminal_workspace.contexts.clone(),
-            terminal_open: terminal_preferences.is_some_and(|preferences| preferences.open),
-            terminal_height: terminal_preferences
-                .map(|preferences| preferences.height.clamp(120., 600.))
-                .unwrap_or(240.),
+            terminal_open: session.terminal_workspace.open,
+            terminal_height: session.terminal_workspace.height.clamp(120., 600.),
             delivery_in_flight: session.delivery_in_flight,
             activity: activity.session_activity(meta, Some(session)),
             stopping: session.interrupt_requested,

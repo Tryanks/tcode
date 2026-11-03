@@ -7182,9 +7182,8 @@ fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening
     );
 }
 
-/// A project's unsent draft is keyed by the project, so deleting the project
-/// drops the draft's parked terminal workspace and its persisted terminal
-/// preferences instead of leaving them behind forever.
+/// Deleting a project kills the PTY its unsent draft left running off screen
+/// instead of leaving it behind forever.
 #[test]
 fn deleting_a_project_clears_its_drafts_terminal_state() {
     let cx = &mut TestAppContext::default();
@@ -7194,20 +7193,12 @@ fn deleting_a_project_clears_its_drafts_terminal_state() {
 
     state.update(cx, |state, cx| {
         state.start_draft("doomed".into(), root.clone(), cx);
-        let draft_id = state.selected.clone().expect("draft selected");
-        state.host.set_terminal_height(&draft_id, 320., cx);
-        state.host.park_active(&draft_id, cx);
     });
+    let draft_id = state.read(|state| state.selected.clone().expect("draft selected"));
+    open_terminal_drawer(&state, cx, 1, &draft_id);
+    state.update(cx, |state, cx| state.host.park_active(&draft_id, cx));
     let destination = ConversationDestination::ProjectDraft("doomed".into());
-    state.read(|state| {
-        assert!(state.host.terminal_workspaces.contains_key(&destination));
-        assert!(
-            state
-                .host
-                .terminal_preferences
-                .contains_key(&destination.preference_key())
-        );
-    });
+    state.read(|state| assert!(state.host.terminal_workspaces.contains_key(&destination)));
 
     state.update(cx, |state, cx| state.host.delete_project("doomed", cx));
     cx.run_until_parked();
@@ -7217,12 +7208,219 @@ fn deleting_a_project_clears_its_drafts_terminal_state() {
             !state.host.terminal_workspaces.contains_key(&destination),
             "the deleted project's draft kept its terminal workspace"
         );
+    });
+}
+
+/// A stored thread whose working directory exists, so a terminal can start in
+/// it.
+fn stored_terminal_thread(store: &SessionStore) -> String {
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let meta = SessionMeta::new(ProviderKind::Codex, cwd, None);
+    store.upsert_meta(&meta).unwrap();
+    meta.id
+}
+
+fn session_status_topic(session_id: &str) -> Subscription {
+    Subscription {
+        known_index: None,
+        topic: Topic::SessionStatus {
+            session_id: session_id.to_owned(),
+        },
+        after: None,
+    }
+}
+
+/// Show the conversation on a client's screen, as client message `id`, and
+/// return the status the host answered with.
+fn load_conversation(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    id: u64,
+    session_id: &str,
+) -> SessionStatus {
+    state.deliver(
+        cx,
+        id,
+        tcode_protocol::ClientPayload::Subscribe(session_status_topic(session_id)),
+    );
+    cx.run_until_sent(|message| match message {
+        HostMessage::Event(EventEnvelope {
+            request_id: Some(reply),
+            event: ServerEvent::SessionStatusReplaced(status),
+            ..
+        }) if *reply == id => Some(status.as_ref().clone()),
+        _ => None,
+    })
+    .0
+}
+
+fn leave_conversation(state: &TestEntity, cx: &mut TestAppContext, id: u64, session_id: &str) {
+    state.deliver(
+        cx,
+        id,
+        tcode_protocol::ClientPayload::Unsubscribe(session_status_topic(session_id)),
+    );
+    cx.run_until_parked();
+}
+
+fn open_terminal_drawer(state: &TestEntity, cx: &mut TestAppContext, id: u64, session_id: &str) {
+    state.dispatch_command(
+        cx,
+        id,
+        Command::ToggleTerminalPanel {
+            session_id: session_id.to_owned(),
+        },
+    );
+    cx.run_until(|state| {
+        state
+            .resident(session_id)
+            .is_some_and(|thread| !thread.terminal_workspace.terminals.is_empty())
+    });
+}
+
+fn assert_drawer_closed_without_terminals(state: &TestEntity, status: &SessionStatus) {
+    assert!(!status.terminal_open, "the drawer is open");
+    assert_eq!(status.terminal_height, 240.);
+    assert!(status.terminals.is_empty());
+    state.read(|state| {
         assert!(
-            state.host.terminal_preferences.is_empty(),
-            "the deleted project's draft kept terminal preferences: {:?}",
-            state.host.terminal_preferences
+            !state
+                .pending_terminal_spawns
+                .contains_key(&status.session_id),
+            "a terminal is starting that nobody asked for"
         );
     });
+}
+
+/// Earlier builds reopened, with fresh shells, every drawer
+/// `terminal-ui.json` marked open once its conversation loaded. Its entries
+/// are ignored and the file is removed.
+#[test]
+fn a_conversation_loads_with_its_drawer_closed_despite_an_older_builds_terminal_file() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-legacy-terminal-ui");
+    let id = stored_terminal_thread(&test_store);
+    let legacy = test_store.root().join("terminal-ui.json");
+    std::fs::write(
+        &legacy,
+        format!(
+            r#"{{
+  "{id}": {{ "open": true, "height": 320.0, "count": 2 }},
+  "draft:project": {{ "open": false, "height": 240.0, "count": 0 }}
+}}"#
+        ),
+    )
+    .unwrap();
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    assert!(!legacy.exists(), "the older build's terminal file is kept");
+
+    let status = load_conversation(&state, cx, 1, &id);
+    assert_drawer_closed_without_terminals(&state, &status);
+}
+
+/// A conversation left with a terminal running comes back with its drawer as
+/// it was: open, at its height, with the same terminals. One whose shells
+/// have all exited comes back closed, without them.
+#[test]
+fn only_a_running_terminal_reopens_the_drawer_when_its_conversation_loads() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-terminal-restore");
+    let id = stored_terminal_thread(&test_store);
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+
+    load_conversation(&state, cx, 1, &id);
+    open_terminal_drawer(&state, cx, 2, &id);
+    state.dispatch_command(
+        cx,
+        3,
+        Command::NewTerminal {
+            session_id: id.clone(),
+        },
+    );
+    cx.run_until(|state| {
+        state
+            .resident(&id)
+            .is_some_and(|thread| thread.terminal_workspace.terminals.len() == 2)
+    });
+    state.dispatch_command(
+        cx,
+        4,
+        Command::SetTerminalHeight {
+            session_id: id.clone(),
+            height: 320.,
+        },
+    );
+    let left = load_conversation(&state, cx, 5, &id).terminals;
+    leave_conversation(&state, cx, 6, &id);
+
+    let status = load_conversation(&state, cx, 7, &id);
+    assert!(status.terminal_open);
+    assert_eq!(status.terminal_height, 320.);
+    assert_eq!(
+        status.terminals.iter().map(|t| t.id).collect::<Vec<_>>(),
+        left.iter().map(|t| t.id).collect::<Vec<_>>()
+    );
+
+    for (request, terminal) in (8..).zip(&left) {
+        state.dispatch_command(
+            cx,
+            request,
+            Command::TerminalInput {
+                terminal_id: terminal.id,
+                bytes: b"exit\r".to_vec(),
+            },
+        );
+    }
+    cx.run_until(|state| {
+        left.iter().all(|terminal| {
+            state
+                .terminal_handle(terminal.id)
+                .is_some_and(|handle| handle.exited())
+        })
+    });
+    leave_conversation(&state, cx, 20, &id);
+
+    let status = load_conversation(&state, cx, 21, &id);
+    assert_drawer_closed_without_terminals(&state, &status);
+    assert!(!test_store.root().join("terminal-ui.json").exists());
+}
+
+/// Closing a conversation's last terminal forgets its drawer: it comes back
+/// neither open nor at the height it had.
+#[test]
+fn closing_the_last_terminal_forgets_the_drawer() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-terminal-close-last");
+    let id = stored_terminal_thread(&test_store);
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+
+    load_conversation(&state, cx, 1, &id);
+    open_terminal_drawer(&state, cx, 2, &id);
+    state.dispatch_command(
+        cx,
+        3,
+        Command::SetTerminalHeight {
+            session_id: id.clone(),
+            height: 320.,
+        },
+    );
+    let terminal_id = load_conversation(&state, cx, 4, &id).terminals[0].id;
+    state.dispatch_command(
+        cx,
+        5,
+        Command::CloseTerminal {
+            session_id: id.clone(),
+            terminal_id,
+        },
+    );
+    let status = load_conversation(&state, cx, 6, &id);
+    assert_drawer_closed_without_terminals(&state, &status);
+
+    leave_conversation(&state, cx, 7, &id);
+    let status = load_conversation(&state, cx, 8, &id);
+    assert_drawer_closed_without_terminals(&state, &status);
+    assert!(!test_store.root().join("terminal-ui.json").exists());
 }
 
 #[test]

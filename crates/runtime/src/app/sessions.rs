@@ -415,13 +415,6 @@ impl AppState {
                 let draft_destination =
                     ConversationDestination::ProjectDraft(project_id.to_string());
                 self.terminal_workspaces.remove(&draft_destination);
-                if self
-                    .terminal_preferences
-                    .remove(&draft_destination.preference_key())
-                    .is_some()
-                {
-                    self.write_terminal_preferences(cx);
-                }
                 self.enqueue_store_write(StoreWrite::RemoveProject(project_id.to_string()), cx);
                 self.settings
                     .collapsed_projects
@@ -1623,7 +1616,6 @@ impl AppState {
             .filter(|meta| deleted.contains(meta.id.as_str()))
             .cloned()
             .collect();
-        let mut terminal_preferences_changed = false;
         for id in ids {
             self.clear_approvals(id);
             if self.residents.live.contains_key(id) {
@@ -1634,13 +1626,9 @@ impl AppState {
             self.drop_background(id, cx);
             self.terminal_workspaces
                 .remove(&ConversationDestination::Thread(id.clone()));
-            terminal_preferences_changed |= self.terminal_preferences.remove(id).is_some();
             self.revoke_orchestrate_child_registration(id);
             self.close_orchestrator_children(id, cx);
             self.settings.last_visited.remove(id);
-        }
-        if terminal_preferences_changed {
-            self.write_terminal_preferences(cx);
         }
         if metas
             .iter()
@@ -1749,13 +1737,6 @@ impl AppState {
         }
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
         self.terminal_workspaces.remove(&draft_destination);
-        if self
-            .terminal_preferences
-            .remove(&draft_destination.preference_key())
-            .is_some()
-        {
-            self.write_terminal_preferences(cx);
-        }
         let mut ids = Vec::new();
         let mut seen = HashSet::new();
         for session_id in session_ids {
@@ -2118,8 +2099,7 @@ impl AppState {
         {
             draft.meta.option_selections.push(selection);
         }
-        let terminal_preferences = self.terminal_preferences_for(&draft);
-        let restored_terminal = self.restore_terminal_workspace(&mut draft);
+        self.restore_terminal_workspace(&mut draft);
         let session_id = draft.meta.id.clone();
         self.thread_activity
             .insert(session_id.clone(), Default::default());
@@ -2130,9 +2110,6 @@ impl AppState {
         if let Some(active) = self.resident(&session_id) {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
         }
-        if !restored_terminal {
-            self.reopen_persisted_terminals(&session_id, terminal_preferences, cx);
-        }
         self.refresh_git_status(&session_id, cx);
         session_id
     }
@@ -2140,14 +2117,6 @@ impl AppState {
     /// Persist the active draft as a real session.
     /// The session id is preserved, so its already-recorded events line up.
     pub(super) fn commit_draft(&mut self, target_id: &str, cx: &mut HostCx) {
-        let preference_migration = self.resident(target_id).and_then(|active| {
-            active.draft.then(|| {
-                (
-                    conversation_destination(active).preference_key(),
-                    active.meta.id.clone(),
-                )
-            })
-        });
         if let Some(active) = self.resident_mut(target_id)
             && active.draft
         {
@@ -2175,12 +2144,6 @@ impl AppState {
                 cx,
             );
             self.upsert_session_in_memory(meta);
-        }
-        if let Some((draft_key, session_key)) = preference_migration
-            && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
-        {
-            self.terminal_preferences.insert(session_key, preferences);
-            self.write_terminal_preferences(cx);
         }
     }
 
@@ -2297,8 +2260,7 @@ impl AppState {
                 parked.turn_in_flight,
                 parked.queue.len()
             );
-            let terminal_preferences = self.terminal_preferences_for(&parked);
-            let restored_terminal = self.restore_terminal_workspace(&mut parked);
+            self.restore_terminal_workspace(&mut parked);
             let mark_idle = !parked.draft
                 && matches!(parked.runtime, Runtime::Idle)
                 && !parked.turn_in_flight
@@ -2316,9 +2278,6 @@ impl AppState {
                 TimelineLoadTarget::Active { mark_idle },
                 cx,
             );
-            if !restored_terminal {
-                self.reopen_persisted_terminals(session_id, terminal_preferences, cx);
-            }
             // Anything still queued that can go now, goes now.
             if self.dispatch_next_queued(session_id, cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
@@ -2341,17 +2300,13 @@ impl AppState {
         let session_id = meta.id.clone();
         let provider_commands = self.cached_provider_commands_for(&meta);
         let mut active = ActiveSession::new(meta, false, provider_commands);
-        let terminal_preferences = self.terminal_preferences_for(&active);
-        let restored_terminal = self.restore_terminal_workspace(&mut active);
+        self.restore_terminal_workspace(&mut active);
         self.residents.live.insert(session_id.clone(), active);
         self.schedule_timeline_load(
             session_id.clone(),
             TimelineLoadTarget::Active { mark_idle: true },
             cx,
         );
-        if !restored_terminal {
-            self.reopen_persisted_terminals(&session_id, terminal_preferences, cx);
-        }
         self.refresh_git_status(&session_id, cx);
     }
 }
