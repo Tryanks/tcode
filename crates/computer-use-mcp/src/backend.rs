@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::outline::{Frame, UiNode};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod cursor;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -171,6 +171,8 @@ pub enum ActionOutcome {
 pub enum Delivery {
     Ax,
     BackgroundPid,
+    /// Window messages posted to the target's own windows (Windows).
+    WindowMessage,
     ForegroundHid,
     #[default]
     None,
@@ -253,14 +255,18 @@ pub use macos::{observe, perform_action};
 pub(crate) fn set_feedback_enabled(enabled: bool) {
     #[cfg(target_os = "macos")]
     macos::set_feedback_enabled(enabled);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    windows::set_feedback_enabled(enabled);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = enabled;
 }
 
 pub(crate) fn clear_feedback(owner: Option<u64>, action: Option<u64>) {
     #[cfg(target_os = "macos")]
     macos::clear_feedback(owner, action);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    windows::clear_feedback(owner, action);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (owner, action);
 }
 #[cfg(target_os = "windows")]
@@ -277,7 +283,11 @@ pub(crate) fn perform_action_with_feedback(
     {
         macos::perform_action_with_feedback(root, request, Some(feedback), paced)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::perform_action_with_feedback(root, request, Some(feedback), paced)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (feedback, paced);
         perform_action(root, request)
@@ -572,6 +582,7 @@ mod tests {
         for (delivery, expected) in [
             (Delivery::Ax, "ax"),
             (Delivery::BackgroundPid, "background_pid"),
+            (Delivery::WindowMessage, "window_message"),
             (Delivery::ForegroundHid, "foreground_hid"),
             (Delivery::None, "none"),
         ] {

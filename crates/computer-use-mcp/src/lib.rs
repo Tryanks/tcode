@@ -29,8 +29,8 @@
 //! - `act_ui` reports `worked` / `didnt` / `unknown` per step, stops at the
 //!   first failure, and never treats event delivery alone as semantic success
 //!   when an `expect` was given. Each step reports its `delivery` (`ax`,
-//!   `background_pid`, `foreground_hid`, `none`) and the transaction its
-//!   `activation` (`none`, `background`, `foreground`).
+//!   `background_pid`, `window_message`, `foreground_hid`, `none`) and the
+//!   transaction its `activation` (`none`, `background`, `foreground`).
 //! - Model-visible text is capped; oversized results return a preview plus a
 //!   continuation ref for `read_text`.
 //! - A window of at least 20,000 square points whose outline exposes fewer
@@ -45,11 +45,15 @@
 //!   `allow_foreground_fallback` (default off) lets only `type_text` and
 //!   `keypress` retry as keyboard input after activating the target app; that
 //!   retry posts no pointer events, and pointer actions never fall back.
-//!   No action moves the user's pointer: `clippy.toml` refuses the global
-//!   input APIs outside that one keyboard retry.
-//!   `show_agent_cursor` (default on) drives the action overlay in
-//!   `backend::macos::overlay`, visible only while no other application
-//!   window covers the action point on the target window.
+//! - Windows tries UI Automation patterns first and otherwise posts window
+//!   messages to the target's own windows (`backend::windows::input`, which
+//!   names what posted messages cannot reach); it never activates a window
+//!   except through UI Automation focus.
+//! - No action moves the user's pointer: `clippy.toml` refuses the global
+//!   input APIs outside that one macOS keyboard retry. `show_agent_cursor`
+//!   (default on) draws the agent cursor (`backend::cursor`, drawn by each
+//!   platform's overlay), visible only while no other application's window
+//!   covers the action point on the target window.
 //! - macOS needs Accessibility (`AXIsProcessTrusted`) and, for screenshots,
 //!   Screen Recording (`CGPreflightScreenCaptureAccess`); `permissions`
 //!   checks and requests them, and Screen Recording grants that need a

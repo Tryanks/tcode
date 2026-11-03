@@ -30,6 +30,8 @@ core-foundation = "0.10"
 core-graphics = { version = "0.25", features = ["elcapitan", "highsierra"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# uiautomation 0.25 does not build without "input" (core.rs imports
+# inputs::MouseButton unconditionally); clippy.toml refuses its input calls.
 uiautomation = { version = "0.25", default-features = false, features = [
     "control",
     "input",
@@ -41,7 +43,9 @@ windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -68,7 +68,7 @@ pub(crate) struct FeedbackRun {
 }
 
 impl FeedbackRun {
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub(crate) fn ticket(&self) -> FeedbackTicket {
         self.ticket.clone()
     }
