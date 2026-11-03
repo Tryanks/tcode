@@ -8086,7 +8086,11 @@ mod tests {
         cx.simulate_click(row.center(), gpui::Modifiers::default());
         draw(cx);
         serve_thread(host, "agent-1");
-        await_restore_update(shell, cx, |store| !store.chat_loading());
+        // The app applies what the host sent as it arrives; an agent come
+        // back to draws from what was kept until its window lands.
+        await_restore_update(shell, cx, |store| {
+            !store.chat_loading() && store.timeline_settled_for("agent-1")
+        });
         settle_panes(cx);
     }
 
@@ -11659,10 +11663,10 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        store.update(cx, |store, cx| {
-            store.drain_host_events_for_test(cx);
-            store.select_session("thread-1".into(), cx);
-        });
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        // The thread is opened and the host describes it, so the chat draws
+        // it with its composer.
+        deliver_thread(&shell, &host, "thread-1", false, cx);
 
         resize(cx, 1024.);
         shell.read_with(cx, |shell, cx| {
@@ -12472,8 +12476,7 @@ mod tests {
 
     /// The composer is drawn under another parent as a tablet crosses the
     /// breakpoint, which also takes the checkout row under its card away:
-    /// the row folds out, the card settling down over it, rather than going
-    /// at once.
+    /// the row folds out rather than going at once.
     #[gpui::test]
     fn the_checkout_row_folds_out_across_the_breakpoint(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -12501,14 +12504,16 @@ mod tests {
         draw_until(&shell, cx, &host, "composer-checkout", None);
         crate::test_frames::draw_settled(cx);
 
-        // How far below the card the composer reaches: the checkout row's
-        // share of it.
-        let under_card = |cx: &mut VisualTestContext| {
+        // The checkout row's share of the composer's height: from the row's
+        // top, where its fold starts, to the composer's bottom. The compact
+        // settings drawer folds in under the card meanwhile, so the card's
+        // own place is not the row's.
+        let checkout_share = |cx: &mut VisualTestContext| {
             let composer = cx.debug_bounds("chat-composer").expect("the composer");
-            let card = cx.debug_bounds("composer-card").expect("the card");
-            composer.bottom() - card.bottom()
+            cx.debug_bounds("composer-checkout")
+                .map_or(px(0.), |row| composer.bottom() - row.top())
         };
-        let [start, gliding, end] = across_breakpoint(cx, 899., under_card);
+        let [start, gliding, end] = across_breakpoint(cx, 899., checkout_share);
         assert!(
             start > gliding && gliding > end,
             "{gliding:?} between {start:?} and {end:?}"
@@ -15472,8 +15477,7 @@ mod tests {
             frame(cx, |window, cx| {
                 let thumb = cx.theme().scrollbar_thumb;
                 let scale = window.scale_factor();
-                window
-                    .painted_quads()
+                crate::test_frames::painted_quads(window)
                     .iter()
                     .filter(|quad| {
                         let width = quad.bounds.size.width.0 / scale;
@@ -15498,11 +15502,15 @@ mod tests {
             touch_phase: gpui::TouchPhase::Moved,
             ..Default::default()
         });
+        let scrolled = cx.executor().now();
         crate::test_frames::draw_settled(cx);
         assert_eq!(thumb(cx), 1., "shown as the list scrolls");
-        // The hold after the scroll ends, and the scrollbar starts out.
+        // The hold after the scroll ends, and the scrollbar starts out. The
+        // hold runs from the scroll, so the frames that faded it in count.
         let motion = cx.update(|_, cx| cx.global::<gpui_base::Theme>().scrollbar.motion());
-        cx.executor().advance_clock(motion.idle());
+        let shown_for = cx.executor().now().saturating_duration_since(scrolled);
+        cx.executor()
+            .advance_clock(motion.idle().saturating_sub(shown_for));
         draw(cx);
         cx.executor().advance_clock(motion.exit() / 2);
         draw(cx);
