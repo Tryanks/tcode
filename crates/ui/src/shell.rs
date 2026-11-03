@@ -14493,6 +14493,108 @@ mod tests {
         assert_eq!(button_fill("diff-panel", cx), on, "it comes to rest lit");
     }
 
+    /// How opaque the title tint of a narrow pane's header is painted: none
+    /// when it is not drawn.
+    fn title_tint(cx: &mut VisualTestContext) -> f32 {
+        let Some(tint) = cx.debug_bounds("pane-tint") else {
+            return 0.;
+        };
+        cx.update(|window, _| {
+            let tint = tint.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| {
+                    quad.bounds.contains(&tint.center())
+                        && (quad.bounds.size.width.0 - tint.size.width.0).abs() < 1.
+                        && (quad.bounds.size.height.0 - tint.size.height.0).abs() < 1.
+                })
+                .filter_map(|quad| quad.background.as_solid().map(|fill| fill.a))
+                .fold(0., f32::max)
+        })
+    }
+
+    /// Beside another pane, a header narrowed into its overflow tier tints
+    /// its title area with its pane's colour, fading in and carrying on as a
+    /// split draws the pane's group under a new parent part way, and fading
+    /// out as the window widens it again. With motion reduced it comes and
+    /// goes at once.
+    #[gpui::test]
+    fn a_narrow_panes_title_tint_fades_with_its_tier(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        settle_frames(cx);
+        let _ = sent(&host);
+        cx.simulate_keystrokes("secondary-d");
+        settle_frames(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_frames(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert_eq!(title_tint(cx), 0., "a wide header has no tint");
+
+        // The panes follow the narrower window over a few frames; the tint
+        // comes as the header folds.
+        resize(cx, 1200.);
+        for _ in 0..30 {
+            if cx.debug_bounds("header-overflow").is_some() {
+                break;
+            }
+            display_frame(cx);
+        }
+        assert!(
+            cx.debug_bounds("header-overflow").is_some(),
+            "the header folded into its overflow tier"
+        );
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        draw(cx);
+        let early = title_tint(cx);
+        cx.simulate_keystrokes("secondary-shift-d");
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), None, None]
+        );
+        display_frame(cx);
+        let coming = title_tint(cx);
+        settle_frames(cx);
+        let full = title_tint(cx);
+        assert!(full > 0.05, "the title area is tinted: {full}");
+        assert!(
+            0. < early && early < coming && coming < full,
+            "the tint fades in through the split: {early} -> {coming} -> {full}"
+        );
+
+        // Each frame's tint as the window goes to `width`, until it rests.
+        let follow = |width: f32, cx: &mut VisualTestContext| {
+            resize(cx, width);
+            let mut seen = vec![title_tint(cx)];
+            for _ in 0..30 {
+                display_frame(cx);
+                seen.push(title_tint(cx));
+            }
+            seen
+        };
+        let seen = follow(2000., cx);
+        assert!(
+            seen.iter().any(|tint| 0. < *tint && *tint < full),
+            "the tint fades out: {seen:?}"
+        );
+        assert_eq!(seen.last(), Some(&0.), "a wide header has no tint");
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        for (width, rest) in [(1200., full), (2000., 0.)] {
+            let seen = follow(width, cx);
+            assert!(
+                seen.iter().all(|tint| *tint == 0. || *tint == full),
+                "with motion reduced the tint comes and goes at once: {seen:?}"
+            );
+            assert_eq!(seen.last(), Some(&rest));
+        }
+    }
+
     /// A tablet turning compact draws the conversation on the compact
     /// thread page, under another parent than the wide layout's pane: the
     /// command opening and its output growing carry on from where they were.
