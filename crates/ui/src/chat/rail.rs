@@ -7,6 +7,7 @@ mod plan;
 pub(super) mod screen;
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::{
@@ -20,8 +21,9 @@ use tcode_core::ui::RightTab;
 use super::ChatView;
 use crate::icon::{Icon, IconName};
 use crate::material::{
-    CARD_INSET, CHAT_CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING, CHAT_RAIL_EDGE,
-    CHAT_RAIL_MIN_WIDTH, CHAT_RAIL_SPAN, CHAT_RAIL_WIDE_MIN_WIDTH, CHAT_RAIL_WIDTH,
+    CARD_INSET, CHAT_CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING, CHAT_RAIL_EDGE, CHAT_RAIL_GAP,
+    CHAT_RAIL_MIN_WIDTH, CHAT_RAIL_NARROWEST, CHAT_RAIL_SPAN, CHAT_RAIL_WIDE_MIN_WIDTH,
+    CHAT_RAIL_WIDEST,
 };
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
@@ -34,12 +36,14 @@ const SHOW: Duration = Duration::from_millis(200);
 /// How far right of its place the rail comes in from and leaves to.
 const SLIDE: f32 = 16.;
 
-/// How the thread's body sits at its width: whether its side rail shows, and
-/// how far the content column moves left to make room for it.
+/// How the thread's body sits at its width: whether its side rail shows, how
+/// wide it is, and how far the content column moves left to make room for it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct BodyLayout {
     /// See [`Self::rail`].
     rail: bool,
+    /// See [`Self::width`].
+    width: Pixels,
     /// The right inset that keeps the column clear of the rail all the way in.
     reach: Pixels,
     /// How far in the rail is, from absent to at rest.
@@ -48,12 +52,14 @@ pub(super) struct BodyLayout {
 
 impl BodyLayout {
     /// The layout of a body `width` wide, below its header. In a body wide
-    /// enough to hold the rail in the gutter right of the centred column the
-    /// column never moves for it; narrower, it moves left just as far as the
-    /// rail needs, and never so far that it narrows; narrower still, or
-    /// compact, there is no rail.
+    /// enough to hold the narrowest rail in the gutter right of the centred
+    /// column the column never moves for it, and the rail fills that gutter
+    /// up to its widest; narrower, the rail is at its narrowest and the
+    /// column moves left just as far as the rail needs, and never so far
+    /// that it narrows; narrower still, or compact, there is no rail.
     pub(super) fn of(width: Pixels, has_cards: bool, side_open: bool, compact: bool) -> Self {
         let width = f32::from(width);
+        let room = (width - CHAT_CONTENT_MAX_WIDTH) / 2. - CHAT_RAIL_GAP - CHAT_RAIL_EDGE;
         let reach = if compact {
             0.
         } else {
@@ -63,6 +69,7 @@ impl BodyLayout {
         };
         Self {
             rail: !compact && width >= CHAT_RAIL_MIN_WIDTH && has_cards && !side_open,
+            width: px(room.clamp(CHAT_RAIL_NARROWEST, CHAT_RAIL_WIDEST)),
             reach: px(reach),
             presence: 0.,
         }
@@ -72,6 +79,11 @@ impl BodyLayout {
     /// beside the thread takes its room.
     pub(super) fn rail(&self) -> bool {
         self.rail
+    }
+
+    /// How wide the rail is, which its cards lay out their bodies at.
+    pub(super) fn width(&self) -> Pixels {
+        self.width
     }
 
     /// The layout with its rail `presence` of the way in.
@@ -108,6 +120,26 @@ impl RailCard {
             Self::Screen => "screen",
             Self::Changes => "changes",
         }
+    }
+
+    /// Whether the card shows open until the reader shuts it, rather than
+    /// shut until the reader opens it.
+    fn open_at_first(self) -> bool {
+        matches!(self, Self::Agents)
+    }
+
+    /// Its key in the view's expansion state, which holds the cards the
+    /// reader turned from how they show at first.
+    fn expansion_key(self) -> String {
+        if self.open_at_first() {
+            format!("rail-shut:{}", self.key())
+        } else {
+            format!("rail:{}", self.key())
+        }
+    }
+
+    fn open(self, expanded: &HashSet<String>) -> bool {
+        expanded.contains(&self.expansion_key()) != self.open_at_first()
     }
 
     fn title(self) -> Cow<'static, str> {
@@ -239,7 +271,7 @@ impl ChatView {
                 .top(super::timeline_inset(cx))
                 .bottom(px(CHAT_CONTENT_MIN_PADDING))
                 .right(px(CHAT_RAIL_EDGE - SLIDE * (1. - presence)))
-                .w(px(CHAT_RAIL_WIDTH))
+                .w(self.body.width)
                 .opacity(presence)
                 .debug_selector(|| "chat-rail".into())
                 .child(stack)
@@ -258,8 +290,8 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let key = card.key();
-        let open_key = format!("rail:{key}");
-        let open = self.expanded.contains(&open_key);
+        let open_key = card.expansion_key();
+        let open = card.open(&self.expanded);
         let muted = cx.theme().muted_foreground;
         let title = card.title();
         let header = crate::material::accessible_clickable(
