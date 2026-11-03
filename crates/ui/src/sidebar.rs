@@ -6150,10 +6150,22 @@ mod tests {
         });
         draw(cx);
         if compact {
-            let trigger = cx
-                .debug_bounds("compact-row-rename-thread")
-                .unwrap()
-                .center();
+            let row = cx.debug_bounds("compact-row-rename-thread").unwrap();
+            let trigger = row.center();
+            // How much of the list hover fill is painted over the row.
+            let held = |cx: &mut VisualTestContext| {
+                cx.update(|window, cx| {
+                    let fill = cx.theme().list_hover;
+                    let bounds = row.scale(window.scale_factor());
+                    crate::test_frames::painted_quads(window)
+                        .iter()
+                        .filter(|quad| quad.bounds == bounds)
+                        .filter_map(|quad| quad.background.as_solid())
+                        .filter(|painted| painted.h == fill.h && painted.l == fill.l)
+                        .map(|painted| painted.a / fill.a)
+                        .fold(0., f32::max)
+                })
+            };
             let touch = |cx: &mut VisualTestContext, phase, position| {
                 cx.simulate_event(gpui::TouchEvent {
                     id: gpui::TouchId(1),
@@ -6172,14 +6184,20 @@ mod tests {
             cx.run_until_parked();
             draw(cx);
             touch(cx, gpui::TouchPhase::Ended, trigger);
+            crate::test_frames::draw_settled(cx);
+            assert_eq!(
+                held(cx),
+                1.,
+                "the row a long press opened the menu from stays marked once the finger lifts"
+            );
             let rename = cx
                 .debug_bounds("menu-item-0")
                 .expect("thread menu opens")
                 .center();
             touch(cx, gpui::TouchPhase::Started, rename);
             touch(cx, gpui::TouchPhase::Ended, rename);
-            cx.run_until_parked();
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
+            assert_eq!(held(cx), 0., "the mark leaves with the menu");
             cx.simulate_input(" edited");
             assert_eq!(
                 sidebar.read_with(cx, |sidebar, cx| sidebar
