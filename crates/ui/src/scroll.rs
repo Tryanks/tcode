@@ -518,7 +518,9 @@ impl RenderOnce for VirtualList {
                 // GPUI sizes a list that shrinks to its rows by measuring them
                 // at their widest, so a wrapping row would be measured as one
                 // line. Rows keep the width the list last laid out at, and a
-                // new width lays the list out again.
+                // new width lays the list out again. GPUI's `list` places its
+                // rows at its left edge, applying only its vertical padding,
+                // so each row carries the left padding itself.
                 let bounds = state.viewport_bounds();
                 let mut style = gpui::Style::default();
                 style.refine(&self.style);
@@ -526,7 +528,7 @@ impl RenderOnce for VirtualList {
                     .padding
                     .to_pixels(bounds.size.into(), window.rem_size());
                 let width = bounds.size.width;
-                let row_width = (width > px(0.)).then(|| width - padding.left - padding.right);
+                let row_width = (width > px(0.)).then(|| width - padding.right);
                 width_probe = Some(width_probe_for(state.clone(), width));
                 let mut motion = motion;
                 let render = move |index, window: &mut Window, cx: &mut App| {
@@ -560,10 +562,11 @@ impl RenderOnce for VirtualList {
                         },
                         None => row,
                     };
-                    match row_width {
-                        Some(width) => div().w(width).child(row).into_any_element(),
-                        None => row,
-                    }
+                    div()
+                        .pl(padding.left)
+                        .when_some(row_width, |cell, width| cell.w(width))
+                        .child(row)
+                        .into_any_element()
                 };
                 let viewport = list(state.clone(), render)
                     .with_sizing_behavior(ListSizingBehavior::Infer)

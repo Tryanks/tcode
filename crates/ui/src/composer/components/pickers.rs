@@ -869,6 +869,7 @@ fn render_model_pane(
     });
     let list = div()
         .id("model-picker-list")
+        .debug_selector(|| "model-picker-list".into())
         .role(Role::ListBox)
         .aria_label(crate::tr!("composer.model_results"))
         .flex()
@@ -1118,6 +1119,9 @@ fn render_model_row(
     let accessible_label = crate::tr!("composer.model_option", model = name.clone()).into_owned();
     crate::material::menu_item_frame(compact, crate::material::ItemFill::Hover, cx)
         .id(("model-row", index))
+        .when(is_current, |row| {
+            row.debug_selector(|| "model-row-current".into())
+        })
         .role(Role::ListBoxOption)
         .aria_label(accessible_label)
         .aria_selected(is_current)
