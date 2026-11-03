@@ -259,6 +259,8 @@ pub struct ChatView {
     painted_tail_start: Option<usize>,
     /// Open/closed keys for collapsibles other than activity details.
     expanded: HashSet<String>,
+    /// The screenshots the rail's Screen card steps through.
+    screen: rail::screen::Screenshots,
     auto_activity_expansions: AutoActivityExpansions,
     command_panels: RefCell<CommandPanelCache>,
     inline_diffs: InlineDiffCache,
@@ -461,6 +463,7 @@ impl ChatView {
             painted_rows: Rc::default(),
             painted_tail_start: None,
             expanded: HashSet::new(),
+            screen: Default::default(),
             auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
             inline_diffs: InlineDiffCache::new(),
