@@ -501,7 +501,11 @@ mod tests {
                 kind: ApprovalOptionKind::AllowOnce,
             }],
         );
-        let (rest, hover) = cx.update(|_, cx| (cx.theme().background, cx.theme().muted));
+        let (rest, hover) = cx.update(|_, cx| {
+            let theme = cx.theme();
+            let hover = crate::widgets::button::tinted(theme.background, theme.muted);
+            (theme.background, hover)
+        });
         let away = cx
             .debug_bounds("approval-option-once")
             .expect("option")

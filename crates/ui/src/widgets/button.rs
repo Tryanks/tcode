@@ -323,42 +323,36 @@ impl RenderOnce for Button {
         );
         let theme = cx.theme();
         let transparent = theme.background.opacity(0.);
+        // `None` hovers as the theme's hover tint over the rest fill.
         let (bg, fg, hover, border) = match self.variant {
-            ButtonVariant::Default => {
-                (theme.background, theme.foreground, theme.muted, theme.input)
-            }
+            ButtonVariant::Default => (theme.background, theme.foreground, None, theme.input),
             ButtonVariant::Primary => (
                 theme.primary,
                 theme.primary_foreground,
-                theme.primary.opacity(0.85),
+                Some(theme.primary.opacity(0.85)),
                 theme.primary,
             ),
-            ButtonVariant::Secondary => (
-                theme.secondary,
-                theme.foreground,
-                theme.secondary_active,
-                theme.border,
-            ),
+            ButtonVariant::Secondary => (theme.secondary, theme.foreground, None, theme.border),
             ButtonVariant::Danger => (
                 theme.danger.opacity(0.2),
                 theme.danger,
-                theme.danger.opacity(0.3),
+                Some(theme.danger.opacity(0.3)),
                 theme.danger,
             ),
             ButtonVariant::Success => (
                 theme.success.opacity(0.2),
                 theme.success,
-                theme.success.opacity(0.3),
+                Some(theme.success.opacity(0.3)),
                 theme.success,
             ),
             // Transparent at rest; the hairline only shows with `.outline()`
             // (border width is 0 otherwise), which is how select/dropdown
             // triggers read as interactive controls.
-            ButtonVariant::Ghost => (transparent, theme.foreground, theme.muted, theme.border),
+            ButtonVariant::Ghost => (transparent, theme.foreground, None, theme.border),
             ButtonVariant::Text => (
                 transparent,
                 theme.foreground.opacity(0.9),
-                theme.muted,
+                None,
                 transparent,
             ),
         };
@@ -373,6 +367,9 @@ impl RenderOnce for Button {
         } else {
             (bg, fg)
         };
+        // In place of a nearly opaque rest fill, the faint tint alone would
+        // paint almost what the rest fill does.
+        let hover = hover.unwrap_or_else(|| tinted(bg, theme.muted));
         let corners = match self.rounded {
             ButtonRounded::Medium => Corners::all(theme.tokens.radius.md),
             ButtonRounded::Chip => Corners::all(crate::material::radius_chip(cx)),
@@ -558,6 +555,14 @@ impl RenderOnce for Button {
         )
         .opacity(dimmed)
     }
+}
+
+/// `tint` laid over `fill`, as the window paints the one over the other: the
+/// premultiplied mix toward the tint's own colour, as far as its alpha goes.
+pub(crate) fn tinted(fill: gpui::Hsla, tint: gpui::Hsla) -> gpui::Hsla {
+    crate::motion::Colour(fill)
+        .interpolate(&crate::motion::Colour(gpui::Hsla { a: 1., ..tint }), tint.a)
+        .0
 }
 
 /// Where a [`Button`]'s clocks are kept: under its element path, or in its
@@ -766,14 +771,17 @@ pub(crate) mod tests {
     }
 
     /// A button whose rest fill is nearly opaque and whose hover fill is a
-    /// faint tint of another colour, as the default button's are, glides
-    /// between what each paints rather than through a darker colour than
-    /// either.
+    /// faint tint of another colour laid over it, as the default button's
+    /// are, glides between what each paints rather than through a darker
+    /// colour than either.
     #[gpui::test]
     fn a_button_glides_between_its_rest_and_hover_fills(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         let (_, cx) = cx.add_window_view(|_, _| Buttons);
-        let (rest, hover) = cx.update(|_, cx| (cx.theme().background, cx.theme().muted));
+        let (rest, hover) = cx.update(|_, cx| {
+            let theme = cx.theme();
+            (theme.background, tinted(theme.background, theme.muted))
+        });
         assert_hover_glides("allow", rest, hover, point(px(400.), px(400.)), cx);
     }
 }
