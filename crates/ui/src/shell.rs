@@ -6952,22 +6952,11 @@ mod tests {
         cx.update(|window, _| assert!(focus.is_focused(window), "tap composer resumes editing"));
     }
 
-    /// A tablet that rotates through phone widths and back: the read-only
-    /// child composer stays visible and inert at every width, and the parent
-    /// draft is intact when its thread is reopened.
-    #[gpui::test]
-    fn native_subagent_composer_is_visible_inert_and_restores_parent_draft(
-        cx: &mut TestAppContext,
-    ) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
-        let (shell, host, _, cx) =
-            mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
-        restore_index(&shell, &host, true, cx);
-        restore_status(&shell, &host, cx);
-        let store = store_of(&shell, cx);
-        let composer = shell.read_with(cx, |shell, cx| {
+    fn composer_of(
+        shell: &Entity<AppShell>,
+        cx: &VisualTestContext,
+    ) -> Entity<crate::composer::Composer> {
+        shell.read_with(cx, |shell, cx| {
             shell
                 .attachment
                 .as_ref()
@@ -6975,117 +6964,177 @@ mod tests {
                 .chat(cx)
                 .read(cx)
                 .composer()
-        });
-        let deliver = |session: &str, readonly: bool, cx: &mut VisualTestContext| {
-            let mut meta = tcode_core::project::SessionMeta::new(
-                agent::ProviderKind::Codex,
-                "/project".into(),
-                Some("child-model".into()),
-            );
-            meta.id = session.into();
-            meta.native_subagent = readonly.then(|| "spawn-1".into());
-            let mut status = session_status(session, std::path::Path::new("/project"));
-            status.requested_model = meta.model.clone();
-            status.activity.turn_running = readonly;
-            status.conversation_read_only = readonly;
-            status.provider_option_selections = vec![agent::OptionSelection {
-                id: "reasoningEffort".into(),
-                value: serde_json::json!("high"),
-            }];
-            store.update(cx, |store, cx| store.select_session(session.into(), cx));
-            for (topic, event) in [
-                (
-                    Topic::Settings,
-                    ServerEvent::SettingsSnapshot(Default::default()),
-                ),
-                (Topic::Index, ServerEvent::IndexUpsertSession(meta)),
-                (
-                    Topic::SessionStatus {
-                        session_id: session.into(),
-                    },
-                    ServerEvent::SessionStatusReplaced(Box::new(status)),
-                ),
-                (
-                    Topic::SessionPlan {
-                        session_id: session.into(),
-                    },
-                    ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
-                        session_id: session.into(),
-                        steps: Vec::new(),
-                    }),
-                ),
-                (
-                    Topic::SessionEvents {
-                        session_id: session.into(),
-                    },
-                    ServerEvent::SessionSnapshot {
-                        total: 0,
-                        total_turns: 0,
-                        truncated: false,
-                        from: 0,
-                        end: 0,
-                        records: vec![],
-                    },
-                ),
-            ] {
-                host.incoming
-                    .try_send(
-                        encode_line(&HostMessage::Event(EventEnvelope {
-                            request_id: None,
-                            topic,
-                            event,
-                        }))
-                        .unwrap(),
-                    )
-                    .unwrap();
-            }
-            await_restore_update(&shell, cx, |store| !store.chat_loading());
+        })
+    }
+
+    /// Select `session` with the host describing it: a native subagent's
+    /// thread, which the host makes read-only and which is running, or an
+    /// ordinary one.
+    fn deliver_thread(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        session: &str,
+        subagent: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            "/project".into(),
+            Some("child-model".into()),
+        );
+        meta.id = session.into();
+        meta.native_subagent = subagent.then(|| "spawn-1".into());
+        let mut status = session_status(session, std::path::Path::new("/project"));
+        status.requested_model = meta.model.clone();
+        status.activity.turn_running = subagent;
+        status.conversation_read_only = subagent;
+        status.provider_option_selections = vec![agent::OptionSelection {
+            id: "reasoningEffort".into(),
+            value: serde_json::json!("high"),
+        }];
+        store_of(shell, cx).update(cx, |store, cx| store.select_session(session.into(), cx));
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (Topic::Index, ServerEvent::IndexUpsertSession(meta)),
+            (
+                Topic::SessionStatus {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
+            ),
+            (
+                Topic::SessionPlan {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
+                    session_id: session.into(),
+                    steps: Vec::new(),
+                }),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                    from: 0,
+                    end: 0,
+                    records: vec![],
+                },
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        await_restore_update(shell, cx, |store| !store.chat_loading());
+    }
+
+    /// A tablet that rotates through phone widths and back: a subagent's
+    /// thread draws its model, effort, context and permission in one row,
+    /// with no card, field, send or settings drawer, so its timeline reaches
+    /// lower than the lead's; nothing pressed or typed there sends, and the
+    /// lead's draft is intact when its thread is reopened.
+    #[gpui::test]
+    fn a_subagent_thread_composer_is_its_settings_read_only(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (shell, host, _, cx) =
+            mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        let composer = composer_of(&shell, cx);
+        let show = |cx: &mut VisualTestContext| {
+            shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
         };
-        deliver("thread-a", false, cx);
+        deliver_thread(&shell, &host, "thread-a", false, cx);
         cx.update(|window, cx| {
             composer.update(cx, |composer, cx| {
                 composer.set_draft("parent draft", window, cx);
             })
         });
         draw(cx);
-        deliver("child", true, cx);
         for width in [1200., 760., 393.] {
+            deliver_thread(&shell, &host, "thread-a", false, cx);
             resize(cx, width);
-            shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
-            cx.executor().advance_clock(Duration::from_millis(250));
-            draw(cx);
-            sent(&host);
+            show(cx);
             assert!(cx.debug_bounds("composer-card").is_some());
+            let lead = cx
+                .debug_bounds("chat-composer")
+                .expect("the lead's composer");
+
+            deliver_thread(&shell, &host, "child", true, cx);
+            show(cx);
+            sent(&host);
+            for absent in [
+                "composer-card",
+                "composer-settings-drawer",
+                "send-message",
+                "stop-turn",
+                "steer-turn",
+                "attach-menu",
+                "overflow-controls",
+            ] {
+                assert!(
+                    cx.debug_bounds(absent).is_none(),
+                    "{absent} is drawn at {width}"
+                );
+            }
+            let row = cx
+                .debug_bounds("composer-subagent")
+                .expect("the subagent's settings");
             for selector in [
                 "model-picker",
                 "traits-chip",
+                "context-meter",
                 "permission-chip",
-                "send-message",
             ] {
                 let bounds = cx.debug_bounds(selector).expect(selector);
-                assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+                assert!(
+                    bounds.size.width > px(0.) && row.contains(&bounds.center()),
+                    "{selector} is not in the row at {width}: {bounds:?} in {row:?}"
+                );
                 cx.simulate_click(bounds.center(), gpui::Modifiers::default());
                 draw(cx);
+                for pane in ["permission-pane", "context-pane"] {
+                    assert!(
+                        cx.debug_bounds(pane).is_none(),
+                        "{selector} opened {pane} at {width}"
+                    );
+                }
             }
-            let card = cx.debug_bounds("composer-card").unwrap();
-            cx.simulate_click(
-                card.origin + gpui::point(px(20.), px(20.)),
-                gpui::Modifiers::default(),
+            let child = cx.debug_bounds("chat-composer").unwrap();
+            assert_eq!(child.bottom(), lead.bottom());
+            assert!(
+                child.top() > lead.top(),
+                "the timeline does not take the field's height at {width}: {child:?} against {lead:?}"
             );
+            cx.simulate_click(row.center(), gpui::Modifiers::default());
             cx.simulate_keystrokes("x shift-tab enter");
             draw(cx);
-            assert_eq!(
-                composer.read_with(cx, |composer, cx| composer.draft(cx)),
-                ""
-            );
             assert!(
                 sent(&host)
                     .iter()
                     .all(|payload| !matches!(payload, ClientPayload::Command(_))),
-                "disabled composer must not send commands"
+                "a subagent's composer must not send commands"
             );
         }
-        deliver("thread-a", false, cx);
+        deliver_thread(&shell, &host, "thread-a", false, cx);
         resize(cx, 1200.);
         assert_eq!(
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
@@ -7104,6 +7153,69 @@ mod tests {
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "parent draftx"
         );
+    }
+
+    /// A desktop pane whose field has the keyboard turning to a subagent's
+    /// thread: the keyboard stays in the pane, on the settings row, where a
+    /// key types nothing and sends nothing; back on the lead, the field has
+    /// it again and types.
+    #[gpui::test]
+    fn a_subagent_thread_keeps_the_keyboard_in_its_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let (shell, host, _, cx) =
+            mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        let composer = composer_of(&shell, cx);
+        for width in [1200., 600.] {
+            deliver_thread(&shell, &host, "thread-a", false, cx);
+            resize(cx, width);
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+            let field = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+            let card = cx.debug_bounds("composer-card").expect("the lead's card");
+            cx.simulate_click(
+                gpui::point(card.center().x, card.top() + px(16.)),
+                gpui::Modifiers::default(),
+            );
+            draw(cx);
+            cx.update(|window, _| assert!(field.is_focused(window), "the lead's field types"));
+
+            deliver_thread(&shell, &host, "child", true, cx);
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+            sent(&host);
+            cx.update(|window, cx| {
+                let composer = composer.read(cx);
+                assert!(!composer.input_focus_handle(cx).is_focused(window));
+                assert!(composer.has_keyboard(window, cx));
+            });
+            assert_eq!(
+                keyboard_pane(&shell, cx),
+                Some(0),
+                "the keyboard left the pane at {width}"
+            );
+            cx.simulate_keystrokes("x y enter");
+            draw(cx);
+            assert!(
+                sent(&host)
+                    .iter()
+                    .all(|payload| !matches!(payload, ClientPayload::Command(_))),
+                "a key on a subagent's thread sent a command at {width}"
+            );
+
+            deliver_thread(&shell, &host, "thread-a", false, cx);
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+            cx.update(|window, _| assert!(field.is_focused(window), "the field has it back"));
+            cx.simulate_keystrokes("z");
+            draw(cx);
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                "z".repeat(if width == 1200. { 1 } else { 2 })
+            );
+        }
     }
 
     #[gpui::test]
@@ -7864,7 +7976,21 @@ mod tests {
         cx.simulate_click(open.center(), gpui::Modifiers::default());
         draw(cx);
         serve_thread(&host, "mirror");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        // The host makes a native subagent's thread read-only.
+        let mut status = session_status("mirror", std::path::Path::new(PANES_CWD));
+        status.conversation_read_only = true;
+        send_events(
+            &host,
+            vec![(
+                Topic::SessionStatus {
+                    session_id: "mirror".into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
+            )],
+        );
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading() && store.native_subagent_readonly_for(Some("mirror"))
+        });
         draw(cx);
         assert_eq!(
             pane_threads(&shell, cx),
@@ -7872,6 +7998,18 @@ mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert!(cx.debug_bounds("subagent-shown").is_some());
+        // The agent's pane keeps the keyboard on its settings row, which has
+        // no field: a key types nowhere, and the pane's shortcuts still work.
+        assert!(cx.debug_bounds("composer-subagent").is_some());
+        sent(&host);
+        cx.simulate_keystrokes("x enter");
+        draw(cx);
+        assert!(
+            sent(&host)
+                .iter()
+                .all(|payload| !matches!(payload, ClientPayload::Command(_)))
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
 
         cx.simulate_keystrokes("secondary-alt-left");
         draw(cx);

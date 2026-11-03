@@ -214,6 +214,8 @@ pub struct Composer {
     /// Mic button + live dictation session (see `components::voice`).
     #[cfg(feature = "voice")]
     voice: Voice,
+    /// Where the keyboard rests in a subagent's thread, which has no field.
+    focus_handle: gpui::FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -221,29 +223,58 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
     fn interactive(&self, cx: &App) -> bool {
-        !self
-            .workspace_store
-            .read(cx)
-            .native_subagent_readonly_for(self.session_id.as_deref())
+        !self.subagent(cx)
             && !matches!(self.workspace_store.read(cx).connection_state(),
             tcode_client::ConnectionState::Offline { reason } if reason.is_terminal())
     }
 
+    /// Whether the thread is a native subagent's, which only its lead
+    /// writes to: the composer shows its settings, read-only, and no field.
+    fn subagent(&self, cx: &App) -> bool {
+        self.workspace_store
+            .read(cx)
+            .composer_state_for(self.session_id.as_deref())
+            .conversation_read_only
+    }
+
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.interactive(cx) && !crate::window_seam::is_mobile(cx) {
+        if crate::window_seam::is_mobile(cx) {
+            return;
+        }
+        if self.subagent(cx) {
+            self.focus_handle.focus(window, cx);
+        } else if self.interactive(cx) {
             self.input.update(cx, |input, cx| input.focus(window, cx));
         }
     }
 
-    /// Whether the keyboard is in the field of a conversation that takes
-    /// text, which the card's hairline shows.
+    /// Whether the keyboard is in the composer: in the field of a
+    /// conversation that takes text, which the card's hairline shows, or on
+    /// a subagent's row.
     pub(crate) fn has_keyboard(&self, window: &Window, cx: &App) -> bool {
-        !self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .conversation_read_only
-            && self.input.read(cx).focus_handle(cx).is_focused(window)
+        if self.subagent(cx) {
+            self.focus_handle.is_focused(window)
+        } else {
+            self.input.read(cx).focus_handle(cx).is_focused(window)
+        }
+    }
+
+    /// The keyboard follows the composer's shape: out of the field a
+    /// subagent's thread does not draw, which would leave it nowhere, and
+    /// back into the field from the row when the thread takes text again.
+    fn sync_keyboard(&self, subagent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let field = self.input.read(cx).focus_handle(cx);
+        let target = if subagent && field.is_focused(window) {
+            self.focus_handle.clone()
+        } else if !subagent
+            && self.focus_handle.is_focused(window)
+            && !crate::window_seam::is_mobile(cx)
+        {
+            field
+        } else {
+            return;
+        };
+        window.defer(cx, move |window, cx| target.focus(window, cx));
     }
 
     #[cfg(test)]
@@ -416,6 +447,7 @@ impl Composer {
             steer_gesture: None,
             #[cfg(feature = "voice")]
             voice,
+            focus_handle: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
     }
@@ -659,12 +691,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .conversation_read_only
-        {
+        if self.subagent(cx) {
             return;
         }
         if self.compact
@@ -1193,35 +1220,6 @@ impl Composer {
         )
         .render(h_flex().items_center())
     }
-
-    fn render_primary_action(
-        &self,
-        turn_running: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        if self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .conversation_read_only
-        {
-            return Button::new("send-message")
-                .motion(&self.button_motion())
-                .debug_selector(|| "send-message".into())
-                .ghost()
-                .disabled(true)
-                .aria_label(crate::tr!("composer.send").into_owned())
-                .with_size(px(if self.compact {
-                    crate::material::TOUCH_TARGET
-                } else {
-                    SEND_SIZE
-                }))
-                .icon(IconName::ArrowUp)
-                .into_any_element();
-        }
-        self.render_send_or_stop(turn_running, window, cx)
-    }
 }
 
 /// What the compact send control shows.
@@ -1489,7 +1487,8 @@ impl Render for Composer {
             .workspace_store
             .read(cx)
             .composer_state_for(self.session_id.as_deref());
-        let readonly = composer_state.conversation_read_only;
+        let subagent = composer_state.conversation_read_only;
+        self.sync_keyboard(subagent, window, cx);
         let turn_running = composer_state.turn_running;
         let approval = composer_state.pending_approval;
         let approval_count = composer_state.pending_approval_count;
@@ -1506,19 +1505,27 @@ impl Render for Composer {
             .gap_1()
             .items_center();
 
+        // A subagent's thread shows what it runs with and takes nothing: its
+        // settings stay, read-only, and the field, send and mic go, so the
+        // timeline keeps their height.
         #[cfg(feature = "voice")]
-        let mic = if readonly {
-            None
-        } else {
-            self.render_mic_button(cx)
-        };
+        let mic = self.render_mic_button(cx);
         #[cfg(not(feature = "voice"))]
         let mic: Option<AnyElement> = None;
+        let mic = self
+            .motion
+            .shown(
+                self.motion_key("mic"),
+                (!subagent && mic.is_some()).then_some(()),
+                window,
+                cx,
+            )
+            .and_then(|shown| mic.map(|mic| shown.fold_across(mic)));
 
         // The platform picker is the phone's only way in; desktops paste and
-        // drop, and the readonly and offline states have nothing to add to.
+        // drop, and the subagent and offline states have nothing to add to.
         let attach_shown = self.compact
-            && !readonly
+            && !subagent
             && self.interactive(cx)
             && cx
                 .try_global::<crate::remote::ClientAttachment>()
@@ -1574,11 +1581,46 @@ impl Render for Composer {
                 .gap_1()
                 .items_center()
         };
-        let primary = div()
-            .flex_none()
-            .child(self.render_primary_action(turn_running, window, cx));
+        let primary = self
+            .motion
+            .shown(
+                self.motion_key("primary"),
+                (!subagent).then_some(()),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                shown.fold_across(div().flex_none().child(self.render_send_or_stop(
+                    turn_running,
+                    window,
+                    cx,
+                )))
+            });
         let mut reflow_scope = None;
-        let control_row = if self.compact || (readonly && compact) {
+        let control_row = if self.compact {
+            // The phone keeps the permission and the context meter in the
+            // drawer under the card; a subagent's thread has no card, so they
+            // join the row.
+            let beside = |part: &'static str,
+                          build: &mut dyn FnMut(&mut Context<Self>) -> AnyElement,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                self.motion
+                    .shown(
+                        self.motion_key(format_args!("control-row-{part}")),
+                        subagent.then_some(()),
+                        window,
+                        cx,
+                    )
+                    .map(|shown| shown.fold_across_gap(px(4.), build(cx)))
+            };
+            let meter = beside("meter", &mut |cx| self.render_context_meter(cx), window, cx);
+            let permission = beside(
+                "permission",
+                &mut |cx| self.render_permission_picker(cx),
+                window,
+                cx,
+            );
             control_row_base
                 .child(
                     leading()
@@ -1600,17 +1642,20 @@ impl Render for Composer {
                                     shown.fold_across_gap(px(4.), picker)
                                 }),
                         )
+                        .children(meter)
+                        .children(permission)
                         .child(div().flex_1())
                         .children(mic),
                 )
-                .child(primary)
+                .children(primary)
         } else {
             // A row that folds narrows the traits, permission and divider
             // away and the overflow in, and glides the context meter and
             // the mic to their places on the frame that folds it. Each part
             // after the model carries the gap before it, so a gap goes with
-            // its part.
-            let folded = compact;
+            // its part. A subagent's row has nothing to fold into: its four
+            // controls stay, the model's name giving way first.
+            let folded = compact && !subagent;
             let reflow = self.motion.reflow_in(
                 self.motion_key("control-row"),
                 u64::from(folded),
@@ -1652,7 +1697,7 @@ impl Render for Composer {
                 });
             let divider = fold(
                 "divider",
-                !folded,
+                !folded && !subagent,
                 &mut |_| divider().into_any_element(),
                 window,
                 cx,
@@ -1694,7 +1739,7 @@ impl Render for Composer {
                         .children(mic.map(|mic| reflow.part("mic", gapped(mic))))
                         .children(meter_end),
                 )
-                .child(primary);
+                .children(primary);
             reflow_scope = Some(reflow);
             row
         };
@@ -1714,9 +1759,7 @@ impl Render for Composer {
             None => control_row.into_any_element(),
         };
 
-        let desired_placeholder = if readonly {
-            crate::tr!("chat.subagent_readonly")
-        } else if self.compact && !self.interactive(cx) {
+        let desired_placeholder = if self.compact && !self.interactive(cx) {
             crate::tr!("mobile.offline_message")
         } else if composer_state.pending_plan.is_some() {
             crate::tr!("composer.plan_feedback_placeholder")
@@ -1752,7 +1795,7 @@ impl Render for Composer {
         // The keyboard turns the hairline primary, gliding there and back.
         // Geometry stays fixed: focus never changes border width, radius, or
         // layout.
-        let composer_focused = self.has_keyboard(window, cx);
+        let composer_focused = !subagent && self.has_keyboard(window, cx);
         let hairline = self.motion.transition(
             self.motion_key("hairline"),
             if composer_focused {
@@ -1764,20 +1807,73 @@ impl Render for Composer {
             window,
             cx,
         );
+        // A subagent's row keeps the card's place but none of its frame:
+        // the hairline, the fill, the shadow and the space above and below
+        // the controls fade and close as the field folds away.
+        let frame = self.motion.transition(
+            self.motion_key("card-frame"),
+            if subagent { 0f32 } else { 1. },
+            &crate::motion::owned::Curve::settle(),
+            window,
+            cx,
+        );
+        let draft = self
+            .motion
+            .shown(
+                self.motion_key("draft"),
+                (!subagent).then_some(()),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                shown.fold(
+                    v_flex()
+                        .w_full()
+                        .pb_1p5()
+                        .child(chip_rows)
+                        .child(
+                            crate::motion::SizeGlide::new(
+                                &draft_glide,
+                                Textarea::new(&self.input)
+                                    .placeholder(desired_placeholder)
+                                    .disabled(subagent)
+                                    .appearance(false),
+                            )
+                            .on_change(draft_key),
+                        )
+                        .child(self.render_image_strip(window, cx)),
+                )
+            });
         let card = v_flex()
-            .debug_selector(|| "composer-card".into())
+            .debug_selector(move || {
+                if subagent {
+                    "composer-subagent".into()
+                } else {
+                    "composer-card".into()
+                }
+            })
             .w_full()
-            .p(px(6.))
+            .px(px(6.))
+            .py(px(6. * frame))
             .rounded(if self.compact {
                 px(16.)
             } else {
                 crate::material::radius_composer(cx)
             })
             .border_1()
-            .border_color(hairline)
+            .border_color(hairline.opacity(frame))
             // The editor needs an opaque fill over the translucent canvas.
-            .bg(cx.theme().popover)
+            .bg(cx.theme().popover.opacity(frame))
             .shadow_md()
+            .map(|mut card| {
+                for shadow in card.style().box_shadow.iter_mut().flatten() {
+                    shadow.color.a *= frame;
+                }
+                card
+            })
+            // Nothing here takes text, so the keyboard rests on the row: the
+            // pane keeps it, its shortcuts work, and a key types nowhere.
+            .when(subagent, |card| card.track_focus(&self.focus_handle))
             // The editor binds Secondary+V to Paste, which consumes the keystroke
             // before any key-down listener runs — so image paste must intercept
             // the Paste *action* in the capture phase. Swallow it only when the
@@ -1846,19 +1942,8 @@ impl Render for Composer {
                     });
                 },
             )
-            .child(chip_rows)
-            .child(
-                crate::motion::SizeGlide::new(
-                    &draft_glide,
-                    Textarea::new(&self.input)
-                        .placeholder(desired_placeholder)
-                        .disabled(readonly)
-                        .appearance(false),
-                )
-                .on_change(draft_key),
-            )
-            .child(self.render_image_strip(window, cx))
-            .child(div().w_full().pt_1p5().child(control_row));
+            .children(draft)
+            .child(div().w_full().child(control_row));
 
         // The panels above the card, each folding in as it comes and away,
         // drawn as it was, as it goes.
@@ -1932,7 +2017,7 @@ impl Render for Composer {
                 self.motion_key("checkout"),
                 composer_state
                     .checkout
-                    .filter(|_| !self.compact && !readonly),
+                    .filter(|_| !self.compact && !subagent),
                 window,
                 cx,
             )
@@ -1944,6 +2029,35 @@ impl Render for Composer {
                         .w_full()
                         .pt_2()
                         .child(row),
+                )
+            });
+        // The phone's permission and context meter under the card; a
+        // subagent's row carries them itself.
+        let drawer = self
+            .motion
+            .shown(
+                self.motion_key("settings-drawer"),
+                (self.compact && !subagent).then_some(()),
+                window,
+                cx,
+            )
+            .map(|shown| {
+                shown.fold(
+                    h_flex()
+                        .debug_selector(|| "composer-settings-drawer".into())
+                        .mx_2()
+                        .px_1()
+                        .min_w_0()
+                        .gap_1()
+                        .items_center()
+                        .rounded_b(px(12.))
+                        .border_1()
+                        .border_t_0()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().muted)
+                        .child(self.render_permission_picker(cx))
+                        .child(div().flex_1())
+                        .child(self.render_context_meter(cx)),
                 )
             });
 
@@ -1968,28 +2082,7 @@ impl Render for Composer {
                     .w_full()
                     .max_w(px(crate::chat::CONTENT_MAX_WIDTH))
                     .children(panels)
-                    .child(v_flex().w_full().child(card).when(
-                        self.compact || (readonly && compact),
-                        |el| {
-                            el.child(
-                                h_flex()
-                                    .debug_selector(|| "composer-settings-drawer".into())
-                                    .mx_2()
-                                    .px_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .items_center()
-                                    .rounded_b(px(12.))
-                                    .border_1()
-                                    .border_t_0()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().muted)
-                                    .child(self.render_permission_picker(cx))
-                                    .child(div().flex_1())
-                                    .child(self.render_context_meter(cx)),
-                            )
-                        },
-                    ))
+                    .child(v_flex().w_full().child(card).children(drawer))
                     .children(checkout),
             )
     }
