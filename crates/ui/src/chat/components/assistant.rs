@@ -460,7 +460,9 @@ mod tests {
                 .all(|alpha| *alpha == rest),
             "the burst comes whole once the fade has played"
         );
-        frames_requested(cx);
+        // The words after the last chip are still fading in; the display
+        // keeps delivering frames until the window stops asking.
+        draw_settled(cx);
         draw(cx);
         assert_eq!(frames_requested(cx), 0, "a played fade asks for frames");
     }
