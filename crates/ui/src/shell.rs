@@ -9737,6 +9737,64 @@ mod tests {
         assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
     }
 
+    /// A click in a pane whose thread is still loading gives it the keyboard,
+    /// so what is typed next goes there once it has loaded, not to the pane
+    /// that had the keyboard before.
+    #[gpui::test]
+    fn a_click_on_a_loading_pane_gives_it_the_keyboard(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        let row = cx
+            .debug_bounds("sidebar-thread-thread-2")
+            .expect("the thread's row");
+        let alt = gpui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        cx.simulate_mouse_move(row.center(), None, alt);
+        draw(cx);
+        cx.simulate_click(row.center(), alt);
+        settle_panes(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_panes(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        assert!(
+            store.read_with(cx, |store, _| store.chat_loading_for(Some("thread-2"))),
+            "the right pane's thread has not been answered"
+        );
+
+        let right = pane_bounds(&shell, cx)[1];
+        cx.simulate_mouse_move(right.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(right.center(), gpui::Modifiers::default());
+        settle_panes(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            Some("thread-2".into())
+        );
+
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
+        settle_panes(cx);
+        cx.simulate_input("typed as it loaded");
+        draw(cx);
+        let drafts: Vec<_> = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).chat().read(cx).composer().read(cx).draft(cx))
+                .collect()
+        });
+        assert_eq!(drafts, ["", "typed as it loaded"]);
+    }
+
     /// ⇧⌥⌘← exchanges the right pane's thread with the left one's, a
     /// half-written message going along with it, and the keyboard stays in
     /// the right pane, now on the left one's thread; each pane keeps its

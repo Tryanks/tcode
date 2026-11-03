@@ -185,6 +185,8 @@ pub struct ChatView {
     /// page over the thread it replaces): the surface takes each state at
     /// once rather than fading too.
     held: bool,
+    /// Whether the last frame drew the thread, and with it the composer.
+    composer_drawn: bool,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -374,9 +376,13 @@ impl ChatView {
                 this.dismiss_highlight(cx);
             }),
             // A press on the view's blank space focuses the view itself; the
-            // keyboard goes on to the composer, as it does from the pane.
+            // keyboard goes on to the composer, as it does from the pane. A
+            // composer not drawn yet, while the thread loads, is in no pane:
+            // the keyboard would be nowhere on screen and the pane pressed
+            // would not take the store's focus, so the view keeps it until
+            // the composer is drawn.
             cx.on_focus(&focus_handle, window, |this, window, cx| {
-                if this.session_id.is_some() {
+                if this.session_id.is_some() && this.composer_drawn {
                     this.focus_composer(window, cx);
                 }
             }),
@@ -457,6 +463,7 @@ impl ChatView {
             motion: crate::motion::owned::Owned::in_scene(&scene),
             scene_shown: false,
             held: false,
+            composer_drawn: false,
             scene_at: cx.background_executor().now(),
             window_state,
             composer,
@@ -795,6 +802,12 @@ impl Render for ChatView {
                     .into_any_element(),
             ));
         }
+        let composer_drawn = active.is_some() && !loading;
+        if composer_drawn && !self.composer_drawn && self.focus_handle.is_focused(window) {
+            // The keyboard the view kept while the thread loaded.
+            cx.defer_in(window, |this, window, cx| this.focus_composer(window, cx));
+        }
+        self.composer_drawn = composer_drawn;
         if let Some(active) = active.filter(|_| !loading) {
             layers.push((
                 SURFACE_THREAD,
