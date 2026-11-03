@@ -143,10 +143,8 @@ impl MarkdownState {
         cx: &mut Context<Self>,
     ) -> Self {
         let owner = cx.entity_id();
-        cx.on_release(move |state, cx| {
+        cx.on_release(move |_, cx| {
             render::clear_code_measurements(owner, cx);
-            state.diagrams = mermaid::Diagrams::default();
-            mermaid::release_retired(cx);
         })
         .detach();
         let parsed = parsed_document.root;
@@ -395,7 +393,7 @@ impl MarkdownState {
                     .unwrap_or(&path);
                 return host_file(PathBuf::from(path));
             }
-            return ImageSource::from(uri.clone()).into();
+            return crate::store::remote_image(uri.clone()).into();
         }
         let path = match self.base_dir() {
             Some(base_dir) => base_dir.join(path),
@@ -832,7 +830,6 @@ impl Render for MarkdownState {
         if diagrams.moving || !gliding.is_empty() {
             window.request_animation_frame();
         }
-        mermaid::release_retired(cx);
         self.fade_frame = self
             .stream_fade
             .frame(cx.background_executor().now(), cx.reduce_motion());

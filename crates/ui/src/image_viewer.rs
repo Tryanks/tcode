@@ -11,9 +11,9 @@ use std::time::Instant;
 use gpui::{
     App, AppContext as _, Bounds, ClickEvent, Context, FocusHandle, ImageSource,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement as _, PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollEvent,
-    SharedString, Size, StatefulInteractiveElement as _, Styled as _, TouchPhase, Window, actions,
-    div, img, point, prelude::FluentBuilder as _, px, size,
+    ParentElement as _, PinchEvent, Pixels, Point, Render, ScrollDelta, ScrollEvent, SharedString,
+    Size, StatefulInteractiveElement as _, Styled as _, TouchPhase, Window, actions, div, img,
+    point, prelude::FluentBuilder as _, px, size,
 };
 use gpui_base::motion::{Interpolate, Transition, transition};
 #[cfg(target_family = "wasm")]
@@ -144,13 +144,6 @@ pub(crate) fn open(
                 viewer
             }
         };
-        // A window keeps a drawn image's texture until it is dropped.
-        cx.on_release(|viewer, cx| {
-            if let Some(original) = viewer.original.take() {
-                cx.drop_image(original, None);
-            }
-        })
-        .detach();
         let namespace = cx
             .try_global::<crate::store::images::HostImages>()
             .map(|images| images.namespace);
@@ -284,7 +277,6 @@ pub(crate) struct ImageViewer {
     failed: bool,
     target: Option<tcode_protocol::OriginalTarget>,
     remote_progress: bool,
-    original: Option<Arc<RenderImage>>,
     /// The preview the original replaced, and when: it stays under the
     /// original while the original fades in over it.
     replaced: Option<(ImageSource, Instant)>,
@@ -310,7 +302,6 @@ impl ImageViewer {
             failed: false,
             target: None,
             remote_progress: false,
-            original: None,
             replaced: None,
             original_state: None,
             transfer: None,
@@ -402,12 +393,9 @@ impl ImageViewer {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(original) => {
-                        let preview = std::mem::replace(
-                            &mut this.source,
-                            ImageSource::Render(original.clone()),
-                        );
+                        let original = crate::store::images::Owned::new(original, cx).source();
+                        let preview = std::mem::replace(&mut this.source, original);
                         this.replaced = Some((preview, cx.background_executor().now()));
-                        this.original = Some(original);
                         this.original_state = Some(OriginalState::Complete);
                     }
                     Err(error) => {
@@ -950,7 +938,7 @@ impl Render for ImageViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, TouchPhase, VisualTestContext};
+    use gpui::{Modifiers, RenderImage, TestAppContext, TouchPhase, VisualTestContext};
     use image::{Frame, ImageBuffer, Rgba};
 
     struct Body;
