@@ -12,7 +12,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
-use gpui::{App, ListState, px};
+use gpui::{App, ListState, Window, px};
 
 use crate::motion::list_rows::{Around, ListRows};
 
@@ -141,9 +141,9 @@ impl<V: Clone> RowPresence<V> {
         self.rows.around(key, cx)
     }
 
-    /// Lets go of what has come in and gone; the rows the gone ones folded
-    /// against are measured again.
-    pub(super) fn settle(&mut self, list: &ListState, cx: &App) {
-        self.rows.settle_list(list, &self.keys, cx);
+    /// Lets go of what has come in and gone; the rows whose height that
+    /// changed are measured again.
+    pub(super) fn settle(&mut self, list: &ListState, window: &mut Window, cx: &App) {
+        self.rows.settle_list(list, &self.keys, window, cx);
     }
 }

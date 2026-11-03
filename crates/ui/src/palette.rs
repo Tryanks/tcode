@@ -928,6 +928,13 @@ impl Render for CommandPalette {
         }
         let exiting = !open;
         let results = self.results(window, cx);
+        // Rows are keyed by their index.
+        for row in self.arrived.settle(window, cx) {
+            let row = row as usize;
+            if row < results.rows.len() {
+                self.list_state.remeasure_items(row..row + 1);
+            }
+        }
         self.list_scroll.step(&self.list_state, window, cx);
         let total = results.items.len();
         if total > 0 && self.selected >= total {

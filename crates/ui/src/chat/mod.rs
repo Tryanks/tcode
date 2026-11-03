@@ -606,7 +606,7 @@ impl Render for ChatView {
         }
         self.inline_diffs.sweep();
         let now = cx.background_executor().now();
-        for key in self.rows_motion.settle(now) {
+        for key in self.rows_motion.settle(window, cx) {
             if let Some(row) = self.rows.iter().position(|row| row.identity == key) {
                 self.list_state.remeasure_items(row..row + 1);
             }

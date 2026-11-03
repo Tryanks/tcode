@@ -34,7 +34,9 @@
 //!    rebuilt from its value through [`RowGlide::leaving`], which takes no
 //!    input. While either moves it asks for frames.
 //! 3. Each render the owner calls [`ListRows::settle`] and remeasures the
-//!    rows it names, whose folds have gone.
+//!    rows it names, whose motion has ended: `list` measures only the rows
+//!    in and near its view, so a row its motion moved out of view would keep,
+//!    and the list's height and scroll range with it, the height it had there.
 //!
 //! The list itself is never spliced late: a leaving row is out of the model
 //! and the `ListState` at once, so indices, the reader's anchor and the
@@ -140,6 +142,9 @@ pub(crate) struct Left<'a, V> {
 pub(crate) struct ListRows<A, V> {
     arrivals: HashMap<u64, Arrived<A>>,
     leaving: Vec<Leaving<V>>,
+    /// Rows whose motion was let go of before it ended, which the next
+    /// [`Self::settle`] names.
+    ended: Vec<u64>,
     /// How long a row takes to come in or fold away.
     duration: Duration,
     /// The scene of the list's surface: a new one's rows, whose keys may
@@ -155,6 +160,7 @@ impl<A, V> ListRows<A, V> {
         Self {
             arrivals: HashMap::new(),
             leaving: Vec::new(),
+            ended: Vec::new(),
             duration,
             scene: Default::default(),
         }
@@ -169,9 +175,16 @@ impl<A, V> ListRows<A, V> {
     /// Forgets the last scene's stamps, once a new scene reaches the rows.
     fn enter(&mut self) {
         if self.scene.entered() {
-            self.arrivals.clear();
-            self.leaving.clear();
+            self.let_go();
         }
+    }
+
+    /// Everything in place at once, the rows it moved named by the next
+    /// [`Self::settle`].
+    fn let_go(&mut self) {
+        self.ended.extend(self.arrivals.drain().map(|(key, _)| key));
+        self.ended
+            .extend(self.leaving.drain(..).map(|left| left.attach.key()));
     }
 }
 
@@ -183,6 +196,7 @@ impl<A: Copy, V> ListRows<A, V> {
         let mut at = at;
         if let Some(index) = self.leaving.iter().position(|left| left.key == key) {
             let left = self.leaving.remove(index);
+            self.ended.push(left.attach.key());
             let shown = 1. - eased(at.saturating_duration_since(left.at), self.duration);
             at = at
                 .checked_sub(elapsed_for(shown, self.duration))
@@ -251,27 +265,39 @@ impl<A: Copy, V> ListRows<A, V> {
     }
 
     /// Lets go of the arrivals that have come in and the rows that have
-    /// folded away, returning the rows those folded against: their heights
-    /// changed, so the list measures them again.
-    pub(crate) fn settle(&mut self, now: Instant) -> Vec<u64> {
+    /// folded away, returning the rows whose height their motion changed
+    /// and changes no more: those that came in, those the folded rows were
+    /// drawn against, and those whose motion was let go of since the last
+    /// settle. The list measures them again. While rows still move it asks
+    /// for frames: a row moved out of view is not drawn, so asks for none.
+    pub(crate) fn settle(&mut self, window: &mut Window, cx: &App) -> Vec<u64> {
+        let now = cx.background_executor().now();
         self.enter();
-        self.arrivals.retain(|_, arrived| !arrived.settled(now));
-        let mut folded = Vec::new();
+        let mut ended = std::mem::take(&mut self.ended);
+        self.arrivals.retain(|key, arrived| {
+            let settled = arrived.settled(now);
+            if settled {
+                ended.push(*key);
+            }
+            !settled
+        });
         self.leaving.retain(|left| {
             let gone = now.saturating_duration_since(left.at) >= self.duration;
             if gone {
-                folded.push(left.attach.key());
+                ended.push(left.attach.key());
             }
             !gone
         });
-        folded
+        if !self.arrivals.is_empty() || !self.leaving.is_empty() {
+            window.request_animation_frame();
+        }
+        ended
     }
 
     /// Everything in place at once: a list that changed without the reader
     /// seeing it happen.
     pub(crate) fn clear(&mut self) {
-        self.arrivals.clear();
-        self.leaving.clear();
+        self.let_go();
     }
 
     /// Stamps what replacing the rows keyed `old` with the rows keyed `new`
@@ -328,12 +354,16 @@ impl<A: Copy, V> ListRows<A, V> {
         }
     }
 
-    /// [`Self::settle`] for a list drawn from `keys`: the rows that folded
-    /// away leave their survivors' measured heights stale, so `list` measures
-    /// those again.
-    pub(crate) fn settle_list(&mut self, list: &gpui::ListState, keys: &[u64], cx: &App) {
-        let now = cx.background_executor().now();
-        for key in self.settle(now) {
+    /// [`Self::settle`] for a list drawn from `keys`, which measures again
+    /// the rows it names.
+    pub(crate) fn settle_list(
+        &mut self,
+        list: &gpui::ListState,
+        keys: &[u64],
+        window: &mut Window,
+        cx: &App,
+    ) {
+        for key in self.settle(window, cx) {
             if let Some(index) = keys.iter().position(|row| *row == key) {
                 list.remeasure_items(index..index + 1);
             }
