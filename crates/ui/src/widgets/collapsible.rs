@@ -2,7 +2,6 @@ use gpui::{
     AnyElement, App, Div, ElementId, IntoElement, ParentElement as _, RenderOnce, StyleRefinement,
     Styled, Window, div, prelude::FluentBuilder as _,
 };
-use gpui_base::motion::{Transition, transition};
 
 use crate::icon::{Icon, IconName};
 
@@ -53,10 +52,13 @@ impl Styled for Collapsible {
 impl RenderOnce for Collapsible {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let open = self.open.then_some(());
-        let fold = match &self.motion {
-            Some(motion) => motion.shown(self.id.to_string(), open, window, cx),
-            None => crate::motion::shown(self.id, open, window, cx),
-        };
+        let fold = crate::motion::Clock::from(self.motion.as_ref()).shown(
+            self.id,
+            open,
+            &crate::motion::Curve::settle(),
+            window,
+            cx,
+        );
         self.base
             .when_some(fold.zip(self.content), |base, (fold, content)| {
                 base.child(fold.fold(content))
@@ -112,22 +114,13 @@ impl Chevron {
 
     fn turned(self, window: &mut Window, cx: &mut App) -> Icon {
         let target = if self.open { 1. } else { 0. };
-        let turn = match &self.motion {
-            Some(motion) => motion.transition(
-                format!("{}/chevron", self.id),
-                target,
-                &crate::motion::owned::Curve::settle(),
-                window,
-                cx,
-            ),
-            None => transition(
-                (self.id, "chevron"),
-                target,
-                Transition::new(crate::edge_back::SETTLE),
-                window,
-                cx,
-            ),
-        };
+        let turn = crate::motion::Clock::from(self.motion.as_ref()).transition(
+            (self.id, "chevron"),
+            target,
+            &crate::motion::Curve::settle(),
+            window,
+            cx,
+        );
         self.icon
             .rotate(gpui::radians(turn * std::f32::consts::FRAC_PI_2))
     }

@@ -745,7 +745,7 @@ fn elided_control(
         crate::motion::Sampled::new(move |window, cx| {
             let control_id = SharedString::from(format!("load-output-{id}"));
             let mut on_load = on_load;
-            motion.cross_fade_value(
+            motion.cross_fade(
                 format!("load-output-state-{id}"),
                 current.clone(),
                 window,

@@ -122,8 +122,8 @@ impl<E: IntoElement + Styled + 'static> Element for FittedImage<E> {
         }
         // The picture fades in over its tile once it decodes, and the block
         // glides from the tile's size to the picture's.
-        let arrived = crate::motion::image_arrival_owned(
-            &self.motion,
+        let arrived = crate::motion::image_arrival(
+            crate::motion::Clock::from(&self.motion),
             format!("markdown-image-{}", self.path),
             &self.source,
             window,

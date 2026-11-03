@@ -571,7 +571,7 @@ where
         let fill = fill_motion.transition(
             fill_key,
             if selected { active } else { active.opacity(0.) },
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );

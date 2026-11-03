@@ -241,7 +241,7 @@ pub(super) fn actions_pinned(
     view.read(cx).motion().transition(
         format!("{path}/actions/compact"),
         if compact { 1f32 } else { 0. },
-        &crate::motion::owned::Curve::settle(),
+        &crate::motion::Curve::settle(),
         window,
         cx,
     )

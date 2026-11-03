@@ -2245,7 +2245,13 @@ pub(super) fn avatar_image(
     let image = source.map(|source| {
         let id = SharedString::from(format!("pr-avatar-{login}-{size}"));
         crate::motion::Sampled::new(move |window, cx| {
-            let arrived = crate::motion::image_arrival(id, &source, window, cx);
+            let arrived = crate::motion::image_arrival(
+                crate::motion::Clock::Element,
+                id,
+                &source,
+                window,
+                cx,
+            );
             Avatar::new()
                 .absolute()
                 .inset_0()

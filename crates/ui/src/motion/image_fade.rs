@@ -62,40 +62,23 @@ pub(crate) fn image_load(source: &ImageSource, window: &mut Window, cx: &mut App
 }
 
 /// The opacity to draw `source`'s `img` (and so its fallback) at, over what
-/// stands in for it: 0 while it decodes, rising to 1 over `SETTLE` once it
+/// stands in for it: 0 while it decodes, rising to 1 along `curve` once it
 /// has. A picture already decoded when it is first drawn — a page of
 /// history, a thread opened again — is whole at once; reduced motion shows
-/// it whole the frame it lands. `id` names the picture's place.
+/// it whole the frame it lands. `id` names the picture's place; `clock`
+/// keeps its fade.
 pub(crate) fn image_arrival(
+    clock: super::Clock<'_>,
     id: impl Into<ElementId>,
     source: &ImageSource,
     window: &mut Window,
     cx: &mut App,
 ) -> f32 {
     let settled = image_load(source, window, cx).settled();
-    gpui_base::motion::transition(
+    clock.transition(
         super::child_id(&id.into(), "image-arrival"),
         if settled { 1f32 } else { 0. },
-        super::settle(),
-        window,
-        cx,
-    )
-}
-
-/// [`image_arrival`] with its clock kept by `motion` under `key`, so a
-/// picture fading in carries on when its view is drawn under a new parent.
-pub(crate) fn image_arrival_owned(
-    motion: &super::owned::Owned,
-    key: impl Into<gpui::SharedString>,
-    source: &ImageSource,
-    window: &mut Window,
-    cx: &mut App,
-) -> f32 {
-    let settled = image_load(source, window, cx).settled();
-    motion.transition(
-        format!("{}/image-arrival", key.into()),
-        if settled { 1f32 } else { 0. },
-        &super::owned::Curve::settle(),
+        &super::Curve::settle(),
         window,
         cx,
     )
@@ -129,7 +112,13 @@ mod tests {
 
     impl Render for Tile {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let arrived = super::image_arrival("tile", &self.source, window, cx);
+            let arrived = super::image_arrival(
+                super::super::Clock::Element,
+                "tile",
+                &self.source,
+                window,
+                cx,
+            );
             self.drawn.borrow_mut().push(arrived);
             div().size(px(120.)).child(
                 img(self.source.clone())

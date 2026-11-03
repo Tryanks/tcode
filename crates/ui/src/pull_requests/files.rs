@@ -1449,7 +1449,7 @@ impl PullRequestView {
         let column = self.motion.transition(
             "file-column",
             if wide { 1f32 } else { 0. },
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );

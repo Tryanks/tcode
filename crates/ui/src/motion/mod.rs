@@ -5,7 +5,7 @@ use gpui::{
     ParentElement as _, Pixels, Size, Stateful, StatefulInteractiveElement as _, Styled as _,
     Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::motion::{Presence, PresenceSample, Transition, TransitionId, transition};
+use gpui_base::motion::{PresenceSample, Transition, TransitionId, transition};
 
 pub(crate) use gpui_base::motion::PresencePhase;
 pub(crate) use scene::Scene;
@@ -24,7 +24,7 @@ pub(crate) mod list_rows;
 mod list_scroll;
 mod size_glide;
 
-pub(crate) use image_fade::{image_arrival, image_arrival_owned, image_load};
+pub(crate) use image_fade::{image_arrival, image_load};
 pub(crate) use keyed::{keyed, keyed_across};
 pub(crate) use list_flip::ListFlip;
 pub(crate) use list_hover::ListHover;
@@ -41,6 +41,61 @@ pub(crate) use reflow::reflow;
 pub(crate) mod resize_glide;
 
 pub(crate) mod owned;
+pub(crate) use owned::Clock;
+
+/// How a value travels to a new target: over a duration, easing out as
+/// gpui-base's `Transition::new` does. gpui-base has no default duration
+/// ("base components do not install default motion"), so whoever owns a
+/// behaviour names the duration it takes and hands it to the sampler.
+#[derive(Clone)]
+pub(crate) struct Curve {
+    duration: std::time::Duration,
+    easing: gpui_base::motion::Easing,
+}
+
+impl Curve {
+    pub(crate) fn new(duration: std::time::Duration) -> Self {
+        Self {
+            duration,
+            easing: gpui_base::motion::Easing::Custom(std::rc::Rc::new(
+                gpui_base::animation::ease_out_cubic,
+            )),
+        }
+    }
+
+    pub(crate) fn duration(&self) -> std::time::Duration {
+        self.duration
+    }
+
+    pub(crate) fn easing(&self) -> gpui_base::motion::Easing {
+        self.easing.clone()
+    }
+
+    /// The curve as gpui-base's transition policy.
+    pub(crate) fn transition(&self) -> Transition {
+        Transition::new(self.duration).easing(self.easing.clone())
+    }
+
+    /// How far the curve has come `elapsed` after it started, from 0 to 1,
+    /// for motion that keeps its own clock.
+    pub(crate) fn progress(&self, elapsed: std::time::Duration) -> f32 {
+        gpui_base::motion::Timing::new(self.duration)
+            .ease(self.easing.clone())
+            .sample(elapsed)
+            .directed_progress
+    }
+
+    /// [`settle`]'s curve.
+    pub(crate) fn settle() -> Self {
+        Self::new(crate::edge_back::SETTLE)
+    }
+}
+
+impl From<std::time::Duration> for Curve {
+    fn from(duration: std::time::Duration) -> Self {
+        Self::new(duration)
+    }
+}
 
 /// How far a surface rises while it appears, and sinks while it leaves.
 pub(crate) const LIFT: Pixels = px(6.);
@@ -54,9 +109,8 @@ pub(crate) fn appear(
     window: &mut Window,
     cx: &mut App,
 ) -> PresenceSample {
-    Presence::new(id, present)
-        .transition(Transition::new(crate::edge_back::SETTLE))
-        .sample(window, cx)
+    let id: ElementId = id.into().into();
+    Clock::Element.appear(id, present, &Curve::settle(), window, cx)
 }
 
 /// The vertical offset at `progress`: [`LIFT`] away from rest when absent,
@@ -77,12 +131,7 @@ pub(crate) fn settle() -> Transition {
 /// How far [`settle`] has come `elapsed` after it started, from 0 to 1, for
 /// motion that keeps its own clock: its easing over its duration.
 pub(crate) fn settle_progress(elapsed: std::time::Duration) -> f32 {
-    gpui_base::motion::Timing::new(crate::edge_back::SETTLE)
-        .ease(gpui_base::motion::Easing::Custom(std::rc::Rc::new(
-            gpui_base::animation::ease_out_cubic,
-        )))
-        .sample(elapsed)
-        .directed_progress
+    Curve::settle().progress(elapsed)
 }
 
 /// A colour as a glide carries it: mixed over premultiplied alpha
@@ -106,7 +155,7 @@ impl gpui_base::motion::Interpolate for Colour {
 pub(crate) const FOLLOW: gpui_base::motion::Spring =
     gpui_base::motion::Spring::new(crate::edge_back::SETTLE).with_epsilon(0.25);
 
-fn child_id(id: &ElementId, channel: &'static str) -> ElementId {
+fn child_id(id: &ElementId, channel: impl Into<gpui::SharedString>) -> ElementId {
     ElementId::NamedChild(std::sync::Arc::new(id.clone()), channel.into())
 }
 
@@ -139,42 +188,7 @@ pub(crate) fn shown<T: Clone + PartialEq + 'static>(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Shown<T>> {
-    let id = id.into();
-    let progress = transition(
-        child_id(&id, "shown"),
-        if value.is_some() { 1. } else { 0. },
-        settle(),
-        window,
-        cx,
-    );
-    let kept = window.use_keyed_state(child_id(&id, "shown-value"), cx, |_, _| None::<T>);
-    match value {
-        Some(value) => {
-            if kept.read(cx).as_ref() != Some(&value) {
-                kept.update(cx, |kept, _| *kept = Some(value.clone()));
-            }
-            Some(Shown {
-                id,
-                value,
-                progress,
-                leaving: false,
-                measure: None,
-            })
-        }
-        None if progress > 0. => kept.read(cx).clone().map(|value| Shown {
-            id,
-            value,
-            progress,
-            leaving: true,
-            measure: None,
-        }),
-        None => {
-            if kept.read(cx).is_some() {
-                kept.update(cx, |kept, _| *kept = None);
-            }
-            None
-        }
-    }
+    Clock::Element.shown(id, value, &Curve::settle(), window, cx)
 }
 
 impl<T> Shown<T> {
@@ -471,13 +485,6 @@ impl gpui::Element for Reveal {
     }
 }
 
-#[derive(Clone)]
-struct Swap<T> {
-    current: T,
-    generation: u64,
-    previous: Option<(T, u64)>,
-}
-
 /// Content that changes to another of its states — a status, a QR for a new
 /// link — cross-fading from the one it showed. Each state is drawn under
 /// its own slot, which it keeps while it fades out on top of the next.
@@ -489,7 +496,7 @@ pub(crate) fn cross_fade<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
     cx: &mut C,
     build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
 ) -> AnyElement {
-    swap(id.into(), value, true, window, cx, build)
+    Clock::Element.cross_fade(id, value, &Curve::settle(), window, cx, build)
 }
 
 /// [`cross_fade`] for a part of a control — its glyph, its status — which
@@ -502,57 +509,7 @@ pub(crate) fn cross_fade_part<T: Clone + PartialEq + 'static, C: BorrowMut<App>>
     cx: &mut C,
     build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
 ) -> AnyElement {
-    swap(id.into(), value, false, window, cx, build)
-}
-
-fn swap<T: Clone + PartialEq + 'static, C: BorrowMut<App>>(
-    id: ElementId,
-    value: T,
-    shield: bool,
-    window: &mut Window,
-    cx: &mut C,
-    mut build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
-) -> AnyElement {
-    let app: &mut App = cx.borrow_mut();
-    let state = window.use_keyed_state(child_id(&id, "cross-fade"), app, |_, _| Swap {
-        current: value.clone(),
-        generation: 0,
-        previous: None,
-    });
-    if state.read(app).current != value {
-        state.update(app, |swap, _| {
-            let current = std::mem::replace(&mut swap.current, value.clone());
-            swap.previous = Some((current, swap.generation));
-            swap.generation += 1;
-        });
-    }
-    let swap = state.read(app).clone();
-    let slot = |generation: u64| {
-        ElementId::NamedChild(
-            std::sync::Arc::new(id.clone()),
-            generation.to_string().into(),
-        )
-    };
-    let progress = match swap.previous {
-        Some(_) => {
-            let sample = gpui_base::motion::Presence::new(slot(swap.generation), true)
-                .transition(settle())
-                .sample(window, app);
-            if sample.phase == PresencePhase::Present {
-                state.update(app, |swap, _| swap.previous = None);
-                1.
-            } else {
-                sample.progress
-            }
-        }
-        None => 1.,
-    };
-    let current = build(&swap.current, window, cx);
-    let previous = swap
-        .previous
-        .filter(|_| progress < 1.)
-        .map(|(value, generation)| (build(&value, window, cx), generation));
-    draw_change(id, (current, swap.generation), previous, progress, shield)
+    Clock::Element.cross_fade_part(id, value, &Curve::settle(), window, cx, build)
 }
 
 /// A [`cross_fade`]'s frame: the `current` state, of its generation, coming
@@ -617,10 +574,10 @@ fn hover_fill_over(
 ) -> (gpui::Hsla, impl Fn(&bool, &mut Window, &mut App) + 'static) {
     let id = id.into();
     let (hovered, on_hover) = hovered(id.clone(), window, cx);
-    let fill = transition(
+    let fill = Clock::Element.transition(
         child_id(&id, "hover-fill"),
         Colour(if hovered { hover } else { rest }),
-        settle(),
+        &Curve::settle(),
         window,
         cx,
     );
@@ -691,7 +648,7 @@ pub(crate) fn hover_layer_owned(
             .transition(
                 format!("{key}/hover-fill"),
                 Colour(if hovered { hover } else { rest }),
-                &owned::Curve::settle(),
+                &Curve::settle(),
                 window,
                 cx,
             )
@@ -733,27 +690,7 @@ impl CrossFade {
         window: &mut Window,
         cx: &mut App,
     ) -> Self {
-        let id = id.into();
-        let opacity = (0..count)
-            .map(|layer| {
-                transition(
-                    (id.clone(), format!("layer-{layer}")),
-                    if layer == current { 1. } else { 0. },
-                    Transition::new(crate::edge_back::SETTLE),
-                    window,
-                    cx,
-                )
-            })
-            .collect();
-        Self {
-            id,
-            current,
-            opacity,
-            fill: false,
-            span: false,
-            column: false,
-            staged: None,
-        }
+        Clock::Element.layers(id, current, count, &Curve::settle(), window, cx)
     }
 
     /// Layers at the opacities their owner sampled from a clock it keeps,

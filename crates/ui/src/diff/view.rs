@@ -754,7 +754,7 @@ impl DiffPanel {
             self.motion.transition(
                 "tab-icons",
                 if icons { 1f32 } else { 0. },
-                &crate::motion::owned::Curve::settle(),
+                &crate::motion::Curve::settle(),
                 window,
                 cx,
             )
@@ -1449,7 +1449,7 @@ impl DiffPanel {
                 } else {
                     px(0.)
                 },
-                &crate::motion::owned::Curve::settle(),
+                &crate::motion::Curve::settle(),
                 window,
                 cx,
             ))

@@ -138,7 +138,7 @@ fn agents_cue_dot(
     let color = motion.transition(
         "agents-cue-color",
         shown.value,
-        &crate::motion::owned::Curve::settle(),
+        &crate::motion::Curve::settle(),
         window,
         cx,
     );
@@ -169,7 +169,7 @@ fn cue_in_pill(
     let color = motion.transition(
         "agents-pill-cue-color",
         shown.value,
-        &crate::motion::owned::Curve::settle(),
+        &crate::motion::Curve::settle(),
         window,
         cx,
     );
@@ -606,7 +606,7 @@ impl ChatView {
                 let colour = motion.transition(
                     "pane-tint-colour",
                     tint.value,
-                    &crate::motion::owned::Curve::settle(),
+                    &crate::motion::Curve::settle(),
                     window,
                     cx,
                 );
@@ -635,7 +635,7 @@ impl ChatView {
             } else {
                 cx.theme().tokens.spacing.sm
             },
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );

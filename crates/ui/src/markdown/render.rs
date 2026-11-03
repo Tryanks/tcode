@@ -847,7 +847,7 @@ fn pending_images(
                         let arrived = state.read(cx).motion().transition(
                             slot.clone(),
                             if standing { 0f32 } else { 1. },
-                            &crate::motion::owned::Curve::settle(),
+                            &crate::motion::Curve::settle(),
                             window,
                             cx,
                         );

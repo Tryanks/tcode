@@ -16,13 +16,11 @@ use std::{
     sync::Arc,
 };
 
+use super::{Clock, Curve, Shown};
 use gpui::{
     AnyElement, App, Bounds, ElementId, IntoElement, ParentElement, Pixels, Point, SharedString,
     Window, px,
 };
-use gpui_base::motion::{MotionStatus, spring, transition, transition_with_status};
-
-use super::{FOLLOW, Shown, settle};
 
 /// Where each participant of one scope was laid out on the last frame that
 /// drew it, relative to the scope's own origin, by a row key that is stable
@@ -65,10 +63,10 @@ impl FlipBounds {
 /// How far from its laid-out place to draw a participant whose layout just
 /// jumped by `jump` (old place minus new; zero on a frame it did not): the
 /// jump is added to whatever offset it was still carrying, which then springs
-/// back to zero on [`FOLLOW`], keeping its velocity through a later jump.
-/// Keyed by `id` under the element sampling it; reduced motion draws it in
-/// place at once.
+/// back to zero over [`FLIP`], keeping its velocity through a later jump.
+/// Kept by `clock` under `id`; reduced motion draws it in place at once.
 pub(crate) fn flip_offset(
+    clock: Clock<'_>,
     id: impl Into<ElementId>,
     jump: Point<Pixels>,
     window: &mut Window,
@@ -77,34 +75,20 @@ pub(crate) fn flip_offset(
     let id = id.into();
     // The spring tracks minus the sum of every jump, so a new jump moves its
     // target and leaves its position, which is the offset still to travel.
-    let jumps = window.use_keyed_state(super::child_id(&id, "flip-jumps"), cx, |_, _| {
-        Point::<Pixels>::default()
-    });
-    if jump != Point::default() {
-        jumps.update(cx, |jumps, _| *jumps += jump);
-    }
-    let jumps = *jumps.read(cx);
-    let x = spring((id.clone(), "flip-x"), -jumps.x, FOLLOW, window, cx);
-    let y = spring((id, "flip-y"), -jumps.y, FOLLOW, window, cx);
-    Point::new(x + jumps.x, y + jumps.y)
-}
-
-/// [`flip_offset`] with its jumps and springs kept by `motion`.
-fn owned_flip_offset(
-    motion: &super::owned::Owned,
-    jump: Point<Pixels>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Point<Pixels> {
-    let jumps = motion.keep::<Rc<Cell<Point<Pixels>>>>("flip-jumps");
+    let jumps: Rc<Cell<Point<Pixels>>> = clock.keep(super::child_id(&id, "flip-jumps"), window, cx);
     if jump != Point::default() {
         jumps.set(jumps.get() + jump);
     }
     let jumps = jumps.get();
-    let x = motion.follow("flip-x", f32::from(-jumps.x), window, cx);
-    let y = motion.follow("flip-y", f32::from(-jumps.y), window, cx);
-    Point::new(px(x) + jumps.x, px(y) + jumps.y)
+    let mut follow = |axis: &'static str, jump: Pixels| {
+        let id = super::child_id(&id, axis);
+        px(clock.follow(id, f32::from(-jump), FLIP, window, cx)) + jump
+    };
+    Point::new(follow("flip-x", jumps.x), follow("flip-y", jumps.y))
 }
+
+/// How long a row that changed places takes to spring to its new one.
+pub(crate) const FLIP: std::time::Duration = crate::edge_back::SETTLE;
 
 struct ListState<T> {
     /// The keys drawn last frame, in order, those leaving included.
@@ -150,7 +134,15 @@ pub(crate) fn keyed<T: Clone + 'static, C: BorrowMut<App>>(
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    keyed_along(id.into(), None, Fold::Down, items, window, cx, build)
+    keyed_along(
+        id.into(),
+        Clock::Element,
+        Fold::Down,
+        items,
+        window,
+        cx,
+        build,
+    )
 }
 
 /// [`keyed`] for rows that sit side by side — chips, tabs, buttons in a row
@@ -165,7 +157,7 @@ pub(crate) fn keyed_across<T: Clone + 'static, C: BorrowMut<App>>(
 ) -> Keyed {
     keyed_along(
         id.into(),
-        None,
+        Clock::Element,
         Fold::Across(px(0.)),
         items,
         window,
@@ -196,7 +188,7 @@ pub(crate) fn keyed_in<T: Clone + 'static, C: BorrowMut<App>>(
     cx: &mut C,
     build: impl FnMut(&SharedString, &T, &mut Window, &mut C) -> AnyElement,
 ) -> Keyed {
-    keyed_along(id.into(), None, fold, items, window, cx, build)
+    keyed_along(id.into(), Clock::Element, fold, items, window, cx, build)
 }
 
 /// [`keyed_in`] with every row's clock, value, fold and glide kept by
@@ -216,7 +208,7 @@ pub(crate) fn keyed_owned<T: Clone + 'static, C: BorrowMut<App>>(
     let id = ElementId::from(key.clone());
     keyed_along(
         id,
-        Some(&motion.scope(&key)),
+        Clock::Owned(&motion.scope(&key)),
         fold,
         items,
         window,
@@ -227,7 +219,7 @@ pub(crate) fn keyed_owned<T: Clone + 'static, C: BorrowMut<App>>(
 
 fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
     id: ElementId,
-    motion: Option<&super::owned::Owned>,
+    clock: Clock<'_>,
     fold: Fold,
     items: impl IntoIterator<Item = (SharedString, T)>,
     window: &mut Window,
@@ -236,16 +228,9 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
 ) -> Keyed {
     let items: Vec<(SharedString, T)> = items.into_iter().collect();
     let app: &mut App = cx.borrow_mut();
-    let state = match motion {
-        Some(motion) => motion.keep::<Kept<T>>("list").0,
-        None => window
-            .use_keyed_state(super::child_id(&id, "keyed"), app, |_, _| {
-                Kept::<T>::default()
-            })
-            .read(app)
-            .0
-            .clone(),
-    };
+    let state = clock
+        .keep::<Kept<T>>(super::child_id(&id, "keyed"), window, app)
+        .0;
     let (drawn, started, bounds) = {
         let state = state.borrow();
         (state.drawn.clone(), state.started, state.bounds.clone())
@@ -274,28 +259,12 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
         // in rather than starting at rest.
         let arrives = here && started && !drawn.contains(&key);
         let target = if here { 1f32 } else { 0. };
-        let (progress, settled) = match motion {
-            Some(motion) => {
-                let presence = format!("{key}/presence");
-                let curve = super::owned::Curve::settle();
-                if arrives {
-                    motion.transition(presence.clone(), 0f32, &curve, window, app);
-                }
-                let progress = motion.transition(presence, target, &curve, window, app);
-                (progress, progress == target)
-            }
-            None => {
-                let presence = (row_id(&key), "presence");
-                if arrives {
-                    transition(presence.clone(), 0f32, settle(), window, app);
-                }
-                let sample = transition_with_status(presence, target, settle(), window, app);
-                (
-                    sample.value,
-                    matches!(sample.status, MotionStatus::Finished | MotionStatus::Idle),
-                )
-            }
-        };
+        let presence = super::child_id(&row_id(&key), "presence");
+        let curve = Curve::settle();
+        if arrives {
+            clock.transition(presence.clone(), 0f32, &curve, window, app);
+        }
+        let (progress, settled) = clock.glide(presence, target, &curve, window, app);
         let gone = !here && progress <= 0. && settled;
         if !gone {
             rows.push((key, here, progress));
@@ -327,17 +296,26 @@ fn keyed_along<T: Clone + 'static, C: BorrowMut<App>>(
             let value = values.remove(&key)?;
             let id = row_id(&key);
             let content = build(&key, &value, window, cx);
+            let measure = match clock {
+                Clock::Element => None,
+                Clock::Owned(_) => {
+                    Some(clock.keep(super::child_id(&id, "measure"), window, cx.borrow_mut()))
+                }
+            };
             let shown = Shown {
                 id: id.clone(),
                 value: (),
                 progress,
                 leaving: !here,
-                measure: motion.map(|motion| motion.keep(format!("{key}/measure"))),
+                measure,
             };
             Some(
                 FlipRow {
                     id,
-                    motion: motion.map(|motion| motion.scope(&key)),
+                    motion: match clock {
+                        Clock::Element => None,
+                        Clock::Owned(motion) => Some(motion.scope(&key)),
+                    },
                     key,
                     jumped,
                     wraps: matches!(fold, Fold::Across(_)),
@@ -506,10 +484,13 @@ impl gpui::Element for FlipRow {
         } else {
             Point::default()
         };
-        let offset = match &self.motion {
-            Some(motion) => owned_flip_offset(motion, jump, window, cx),
-            None => flip_offset(self.id.clone(), jump, window, cx),
-        };
+        let offset = flip_offset(
+            Clock::from(self.motion.as_ref()),
+            self.id.clone(),
+            jump,
+            window,
+            cx,
+        );
         window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
     }
 

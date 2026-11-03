@@ -40,10 +40,14 @@ fn divider_in(
         let build = |label: &String, _: &mut gpui::Window, _: &mut App| {
             div().child(label.clone()).into_any_element()
         };
-        match motion {
-            Some(motion) => motion.cross_fade_value(label_id, label, window, cx, build),
-            None => crate::motion::cross_fade(label_id, label, window, cx, build),
-        }
+        crate::motion::Clock::from(motion.as_ref()).cross_fade(
+            label_id,
+            label,
+            &crate::motion::Curve::settle(),
+            window,
+            cx,
+            build,
+        )
     });
     h_flex()
         .id(id)

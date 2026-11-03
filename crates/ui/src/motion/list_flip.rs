@@ -132,7 +132,7 @@ impl gpui::Element for FlipRow {
             .map(|was| was - bounds.origin)
             .filter(|jump| jump.x.abs() >= px(1.) || jump.y.abs() >= px(1.))
             .unwrap_or_default();
-        let offset = flip_offset(self.id.clone(), jump, window, cx);
+        let offset = flip_offset(super::Clock::Element, self.id.clone(), jump, window, cx);
         window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
     }
 

@@ -64,7 +64,7 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, Style, Styled as _,
     Window, div, point, prelude::FluentBuilder as _, px, relative, size,
 };
-use gpui_base::motion::{Easing, MotionStatus, Timing};
+use gpui_base::motion::{Easing, Timing};
 
 /// How a row that arrived while the reader was looking came in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -718,32 +718,11 @@ impl Element for RowGlide {
                     // glides to. Height that changes during a glide rides on
                     // it, a frame late.
                     (Some(measured), Some(target)) if state.retarget || state.gliding => {
-                        let (glided, gliding) = match &self.owner {
-                            Some(owner) => {
-                                let glided = owner.motion.transition(
-                                    "tail",
-                                    target,
-                                    &super::owned::Curve::settle(),
-                                    window,
-                                    cx,
-                                );
-                                (glided, glided != target)
-                            }
-                            None => {
-                                let glided = gpui_base::motion::transition_with_status(
-                                    "tail",
-                                    target,
-                                    super::settle(),
-                                    window,
-                                    cx,
-                                );
-                                let gliding = matches!(
-                                    glided.status,
-                                    MotionStatus::Delayed | MotionStatus::Running
-                                );
-                                (glided.value, gliding)
-                            }
-                        };
+                        let clock =
+                            super::Clock::from(self.owner.as_ref().map(|owner| &owner.motion));
+                        let (glided, settled) =
+                            clock.glide("tail", target, &super::Curve::settle(), window, cx);
+                        let gliding = !settled;
                         self.measured(global_id, window, |state| state.gliding = gliding);
                         Some(((glided + measured - target).max(px(0.)), px(0.)))
                     }

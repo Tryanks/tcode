@@ -471,7 +471,7 @@ impl ChatView {
             let hover = self.hover.clone();
             status = Some(self.shared.element(
                 status_key,
-                motion.cross_fade_value(
+                motion.cross_fade(
                     format!("turn-status-{index}"),
                     turn.running,
                     window,

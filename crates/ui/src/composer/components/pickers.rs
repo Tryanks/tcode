@@ -470,7 +470,7 @@ impl Composer {
             .child(div().size(px(16.)).child({
                 let motion = self.motion.scope(self.motion_key("context-ring"));
                 crate::motion::Sampled::new(move |window, cx| {
-                    let curve = crate::motion::owned::Curve::settle();
+                    let curve = crate::motion::Curve::settle();
                     let pct = motion.transition("pct", pct.unwrap_or(0.0), &curve, window, cx);
                     let color = motion.transition("color", ring_color, &curve, window, cx);
                     crate::widgets::ring::ring_canvas(pct, color, track).into_any_element()

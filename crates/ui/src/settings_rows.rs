@@ -43,7 +43,7 @@ pub(crate) fn content_column(
         } else {
             spacing.xl
         },
-        &crate::motion::owned::Curve::settle(),
+        &crate::motion::Curve::settle(),
         window,
         cx,
     );

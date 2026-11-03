@@ -531,11 +531,11 @@ impl Render for ThreadPanel {
         let waiting = self.among_others && (self.session_id.is_none() || self.awaiting);
         let content = self
             .motion
-            .cross_fade(
+            .layers(
                 "pane-content",
                 if waiting { WAITING } else { CHAT },
                 2,
-                &crate::motion::owned::Curve::settle(),
+                &crate::motion::Curve::settle(),
                 window,
                 cx,
             )
@@ -853,7 +853,7 @@ impl TabGroupRenderer for ThreadTabs {
         let outline = motion.transition(
             "outline",
             outline,
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );
