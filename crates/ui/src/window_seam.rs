@@ -57,21 +57,15 @@ pub(crate) fn content_insets_gliding(
     cx: &mut App,
 ) -> Edges<Pixels> {
     let target = content_insets(window);
-    let mut edge = |name: &'static str, value: Pixels| match owner {
-        Some(owner) => owner.transition(
-            format!("{id}/{name}"),
-            value,
-            &crate::motion::owned::Curve::settle(),
-            window,
-            cx,
-        ),
-        None => gpui_base::motion::transition(
+    let clock = crate::motion::Clock::from(owner);
+    let mut edge = |name: &'static str, value: Pixels| {
+        clock.transition(
             gpui::ElementId::NamedChild(std::sync::Arc::new(id.into()), name.into()),
             value,
-            crate::motion::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
-        ),
+        )
     };
     Edges {
         top: edge("top", target.top),

@@ -703,11 +703,11 @@ impl Render for ChatView {
         };
         let fade = self
             .motion
-            .cross_fade(
+            .layers(
                 "chat-surface",
                 surface,
                 4,
-                &crate::motion::owned::Curve::settle(),
+                &crate::motion::Curve::settle(),
                 window,
                 cx,
             )
@@ -916,7 +916,7 @@ impl ChatView {
                 } else {
                     cx.theme().muted_foreground
                 },
-                &crate::motion::owned::Curve::settle(),
+                &crate::motion::Curve::settle(),
                 window,
                 cx,
             );
@@ -933,7 +933,7 @@ impl ChatView {
             });
             let status = motion.shown("status", status, window, cx).map(|status| {
                 let (danger, muted) = (cx.theme().danger, cx.theme().muted_foreground);
-                let line = motion.cross_fade_value(
+                let line = motion.cross_fade(
                     "status-line",
                     status.value.clone(),
                     window,

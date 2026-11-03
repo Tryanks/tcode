@@ -538,8 +538,8 @@ impl Composer {
         let path = image.path.clone();
         // The picture fades in once it decodes.
         let preview: gpui::ImageSource = crate::store::image_preview(path.clone(), 18., false);
-        let arrival = crate::motion::image_arrival_owned(
-            &self.motion,
+        let arrival = crate::motion::image_arrival(
+            crate::motion::Clock::from(&self.motion),
             self.motion_key(format_args!("thumb-arrival-{key}")),
             &preview,
             window,

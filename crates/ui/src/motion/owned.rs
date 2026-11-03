@@ -1,16 +1,18 @@
-//! Motion whose state a view keeps, so it survives the element tree moving
-//! the view.
+//! Where motion keeps its clocks: in element state, or in a store a view
+//! holds, so it survives the element tree moving the view.
 //!
-//! gpui-base's `transition` (and so `shown`, `CrossFade::new` and every
-//! sampler built on it) keeps its clock in keyed element state, keyed by the
-//! full id path from the window root. A view drawn under another parent
-//! starts all of it over at its target: gpui-base's dock re-parents a tab
-//! group whenever its tree changes (see `panes::ThreadPanes`), so a pane's
-//! fade under way when its group moved snapped to its end. [`Owned`] keeps the same clocks in a
-//! store the view holds, sampled with gpui-base's `Timing` against the
-//! executor's clock as `transition` samples its own, and settled at once
-//! under reduced motion as `transition` settles. Remove it once gpui-base's
-//! samplers can key their state by an owner instead of an element path.
+//! gpui-base's `transition` (and so every sampler built on it) keeps its
+//! clock in keyed element state, keyed by the full id path from the window
+//! root. A view drawn under another parent starts all of it over at its
+//! target: gpui-base's dock re-parents a tab group whenever its tree changes
+//! (see `panes::ThreadPanes`), so a pane's fade under way when its group
+//! moved snapped to its end. [`Owned`] keeps the same clocks in a store the
+//! view holds, sampled with gpui-base's `Timing` against the executor's
+//! clock, timing a glide and a reversal by the rule gpui-base's `transition`
+//! uses, and settled at once under reduced motion as `transition` settles.
+//! Every sampler is written once over a [`Clock`]; its `Element` arm is
+//! gpui-base's own. Remove [`Owned`] once gpui-base's samplers can key their
+//! state by an owner instead of an element path.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -20,62 +22,389 @@ use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
 
-use gpui::{App, SharedString, Window};
-use gpui_base::motion::{Easing, Interpolate, Timing};
+use gpui::{AnyElement, App, ElementId, SharedString, Window};
+use gpui_base::motion::{
+    Interpolate, MotionStatus, Presence, PresencePhase, PresenceSample, Timing,
+};
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
-use super::CrossFade;
+use super::{CrossFade, Curve, Measure, Shown, child_id};
 
-/// How a value owned by an [`Owned`] store travels to a new target.
-#[derive(Clone)]
-pub(crate) struct Curve {
-    duration: Duration,
-    easing: Easing,
+/// Where a sampler keeps its clocks and what it remembers between frames.
+#[derive(Clone, Copy)]
+pub(crate) enum Clock<'a> {
+    /// In keyed element state under the sampling element's id path, as
+    /// gpui-base keeps its own.
+    Element,
+    /// In a view's store, so motion under way carries on when the view is
+    /// drawn under a new parent.
+    Owned(&'a Owned),
 }
 
-impl Curve {
-    pub(crate) fn new(duration: Duration, easing: Easing) -> Self {
-        Self { duration, easing }
+impl<'a> From<&'a Owned> for Clock<'a> {
+    fn from(owned: &'a Owned) -> Self {
+        Self::Owned(owned)
+    }
+}
+
+impl<'a> From<Option<&'a Owned>> for Clock<'a> {
+    fn from(owned: Option<&'a Owned>) -> Self {
+        owned.map_or(Self::Element, Self::Owned)
+    }
+}
+
+impl Clock<'_> {
+    /// The value now of a glide toward `target` along `curve`, and whether
+    /// it is at rest: the first target is taken at once; a later one is
+    /// glided to from wherever the value is when it changes.
+    pub(crate) fn glide<T>(
+        self,
+        id: impl Into<ElementId>,
+        target: T,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (T, bool)
+    where
+        T: Interpolate + PartialEq + 'static,
+    {
+        match self {
+            Self::Element => {
+                let sample = gpui_base::motion::transition_with_status(
+                    id.into(),
+                    target,
+                    curve.transition(),
+                    window,
+                    cx,
+                );
+                let moving = matches!(sample.status, MotionStatus::Delayed | MotionStatus::Running);
+                (sample.value, !moving)
+            }
+            Self::Owned(owned) => owned.glide(owned.key(id), target, curve, window, cx),
+        }
     }
 
-    /// [`super::settle`]'s curve: `SETTLE`, easing out.
-    pub(crate) fn settle() -> Self {
-        Self::new(
-            crate::edge_back::SETTLE,
-            Easing::Custom(Rc::new(gpui_base::animation::ease_out_cubic)),
-        )
+    /// [`Self::glide`]'s value alone.
+    pub(crate) fn transition<T>(
+        self,
+        id: impl Into<ElementId>,
+        target: T,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> T
+    where
+        T: Interpolate + PartialEq + 'static,
+    {
+        self.glide(id, target, curve, window, cx).0
     }
+
+    /// gpui-base's presence: how far in something that comes and goes is,
+    /// coming in from nothing the first time it is present.
+    pub(crate) fn appear(
+        self,
+        id: impl Into<ElementId>,
+        present: bool,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> PresenceSample {
+        match self {
+            Self::Element => Presence::new(id.into(), present)
+                .transition(curve.transition())
+                .sample(window, cx),
+            Self::Owned(owned) => {
+                let key = owned.key(id);
+                owned.seed(key.clone(), 0f32, cx.background_executor().now());
+                let target = if present { 1f32 } else { 0. };
+                let (progress, settled) = owned.glide(key, target, curve, window, cx);
+                let phase = match (present, settled) {
+                    (true, true) => PresencePhase::Present,
+                    (true, false) => PresencePhase::Entering,
+                    (false, false) => PresencePhase::Exiting,
+                    (false, true) => PresencePhase::Absent,
+                };
+                PresenceSample {
+                    phase,
+                    progress,
+                    status: if settled {
+                        MotionStatus::Finished
+                    } else {
+                        MotionStatus::Running
+                    },
+                }
+            }
+        }
+    }
+
+    /// The handle kept under `id`: made the first time it is asked for, the
+    /// same one every time after, for state a sampler shares through clones.
+    pub(crate) fn keep<T: Clone + Default + 'static>(
+        self,
+        id: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> T {
+        match self {
+            Self::Element => window
+                .use_keyed_state(id.into(), cx, |_, _| T::default())
+                .read(cx)
+                .clone(),
+            Self::Owned(owned) => owned.kept(owned.key(id)),
+        }
+    }
+
+    /// gpui-base's `spring` for a position in pixels, responding over
+    /// `response` and at rest a quarter pixel away: the value now of a
+    /// position springing toward `target`, which a new target redirects with
+    /// the velocity it has. The first target is taken at once; reduced
+    /// motion takes every target at once.
+    pub(crate) fn follow(
+        self,
+        id: impl Into<ElementId>,
+        target: f32,
+        response: Duration,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> f32 {
+        match self {
+            Self::Element => gpui_base::motion::spring(
+                id.into(),
+                target,
+                gpui_base::motion::Spring::new(response).with_epsilon(FOLLOW_EPSILON),
+                window,
+                cx,
+            ),
+            Self::Owned(owned) => owned.follow(owned.key(id), target, response, window, cx),
+        }
+    }
+
+    /// Something a page shows only some of the time: what to draw, and how
+    /// far in it is, along `curve`. Once `value` is `None` the last value it
+    /// had is kept until it has gone, so whatever leaves is drawn as it was.
+    /// A page that opens with it shows it at rest. The caller draws the
+    /// result through [`Shown::fold`] or [`Shown::fade`] whenever this is
+    /// `Some`, at the same place in the tree, so the element keeps its ids
+    /// while it comes and goes.
+    pub(crate) fn shown<T: Clone + PartialEq + 'static>(
+        self,
+        id: impl Into<ElementId>,
+        value: Option<T>,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Shown<T>> {
+        let id = id.into();
+        let target = if value.is_some() { 1f32 } else { 0. };
+        let progress = self.transition(child_id(&id, "shown"), target, curve, window, cx);
+        let kept: Rc<RefCell<Option<T>>> = self.keep(child_id(&id, "shown-value"), window, cx);
+        let measure = match self {
+            Self::Element => None,
+            Self::Owned(_) => Some(self.keep::<Measure>(child_id(&id, "measure"), window, cx)),
+        };
+        let mut kept = kept.borrow_mut();
+        let (value, leaving) = match value {
+            Some(value) => {
+                if kept.as_ref() != Some(&value) {
+                    *kept = Some(value.clone());
+                }
+                (value, false)
+            }
+            None if progress > 0. => (kept.clone()?, true),
+            None => {
+                *kept = None;
+                return None;
+            }
+        };
+        Some(Shown {
+            id,
+            value,
+            progress,
+            leaving,
+            measure,
+        })
+    }
+
+    /// How far in, from 0 to 1, what `value` names is: a value other than
+    /// the last one asked about comes in along `curve`, the first is in at
+    /// once. For something drawn in another's place (a section, a page) that
+    /// fades in.
+    pub(crate) fn entered<T: PartialEq + 'static>(
+        self,
+        id: impl Into<ElementId>,
+        value: T,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> f32 {
+        let id = id.into();
+        let kept: Rc<RefCell<Option<(T, u64)>>> =
+            self.keep(child_id(&id, "entered-value"), window, cx);
+        let (generation, changed) = {
+            let mut kept = kept.borrow_mut();
+            match &mut *kept {
+                Some((held, generation)) if *held != value => {
+                    *held = value;
+                    *generation += 1;
+                    (*generation, true)
+                }
+                Some((_, generation)) => (*generation, false),
+                None => {
+                    *kept = Some((value, 0));
+                    (0, false)
+                }
+            }
+        };
+        let clock = |generation: u64| child_id(&id, format!("entered-{generation}"));
+        if changed {
+            // Each value has a clock of its own, which starts from nothing.
+            if let Self::Owned(owned) = self {
+                owned.forget_exact(owned.key(clock(generation - 1)));
+            }
+            self.transition(clock(generation), 0f32, curve, window, cx);
+        }
+        self.transition(clock(generation), 1f32, curve, window, cx)
+    }
+
+    /// Layer `current` of `count` coming in along `curve` while the others
+    /// fade out: a [`CrossFade`] over this clock. `id` is also the region's
+    /// element id.
+    pub(crate) fn layers(
+        self,
+        id: impl Into<ElementId>,
+        current: usize,
+        count: usize,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> CrossFade {
+        let id = id.into();
+        let opacity = (0..count)
+            .map(|layer| {
+                let target = if layer == current { 1. } else { 0. };
+                self.transition(
+                    child_id(&id, format!("layer-{layer}")),
+                    target,
+                    curve,
+                    window,
+                    cx,
+                )
+            })
+            .collect();
+        CrossFade::sampled(id, current, opacity)
+    }
+
+    /// Content that changes to another of its states (a status, a QR for a
+    /// new link) cross-fading along `curve` from the one it showed. Each
+    /// state is drawn under its own slot, which it keeps while it fades out
+    /// on top of the next, taking no input. `cx` is the caller's own
+    /// context, so a view's `build` can make listeners.
+    pub(crate) fn cross_fade<T: Clone + PartialEq + 'static, C: std::borrow::BorrowMut<App>>(
+        self,
+        id: impl Into<ElementId>,
+        value: T,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut C,
+        build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
+    ) -> AnyElement {
+        self.swap(id.into(), value, true, curve, window, cx, build)
+    }
+
+    /// [`Self::cross_fade`] for a part of a control (its glyph, its status),
+    /// which takes no input of its own: what leaves covers nothing, so a
+    /// press during the fade still reaches the control.
+    pub(crate) fn cross_fade_part<
+        T: Clone + PartialEq + 'static,
+        C: std::borrow::BorrowMut<App>,
+    >(
+        self,
+        id: impl Into<ElementId>,
+        value: T,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut C,
+        build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
+    ) -> AnyElement {
+        self.swap(id.into(), value, false, curve, window, cx, build)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn swap<T: Clone + PartialEq + 'static, C: std::borrow::BorrowMut<App>>(
+        self,
+        id: ElementId,
+        value: T,
+        shield: bool,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &mut C,
+        mut build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
+    ) -> AnyElement {
+        let app: &mut App = std::borrow::BorrowMut::borrow_mut(cx);
+        let state: Rc<RefCell<Option<Change<T>>>> =
+            self.keep(child_id(&id, "cross-fade"), window, app);
+        let generation = {
+            let mut state = state.borrow_mut();
+            let change = state.get_or_insert_with(|| Change {
+                current: value.clone(),
+                generation: 0,
+                previous: None,
+            });
+            if change.current != value {
+                let current = std::mem::replace(&mut change.current, value);
+                change.previous = Some((current, change.generation));
+                change.generation += 1;
+            }
+            change.generation
+        };
+        let progress = self.entered(
+            child_id(&id, "cross-fade-in"),
+            generation,
+            curve,
+            window,
+            app,
+        );
+        let (current, previous) = {
+            let mut state = state.borrow_mut();
+            let change = state.as_mut().expect("kept above");
+            if progress >= 1. {
+                change.previous = None;
+            }
+            (change.current.clone(), change.previous.clone())
+        };
+        let current = build(&current, window, cx);
+        let previous = previous.map(|(value, generation)| (build(&value, window, cx), generation));
+        super::draw_change(id, (current, generation), previous, progress, shield)
+    }
+}
+
+/// How near its target, in pixels, [`Clock::follow`]'s spring comes to rest.
+const FOLLOW_EPSILON: f32 = 0.25;
+
+/// What [`Clock::cross_fade`] keeps: the value shown, and the one it
+/// replaced while that fades out.
+struct Change<T> {
+    current: T,
+    generation: u64,
+    previous: Option<(T, u64)>,
 }
 
 /// The motion state of one view, by key: clone it into whatever samples it
 /// (a renderer drawing the view's frame); every clone is the same store.
 #[derive(Clone, Default)]
 pub(crate) struct Owned {
-    values: Rc<RefCell<HashMap<Key, Entry>>>,
+    values: Rc<RefCell<HashMap<SharedString, Entry>>>,
     /// What this handle's keys are kept under: nothing for the store's own,
     /// a part's name for [`Self::scope`]'s.
     prefix: SharedString,
 }
-
-/// A value's key and, for a cross-fade, its layer.
-type Key = (SharedString, usize);
 
 struct Entry {
     value: Box<dyn Any>,
     /// Sampled or kept since the last [`Owned::sweep`].
     seen: bool,
 }
-
-/// The channel of a key [`Owned::keep`] holds a handle under, apart from
-/// every layer of a glide.
-const KEPT: usize = usize::MAX;
-
-/// The channel of a key [`Owned::cross_fade_value`] keeps its values under.
-const CHANGED: usize = usize::MAX - 1;
-
-/// The channel of a key [`Owned::follow`] keeps its spring under.
-const FOLLOWED: usize = usize::MAX - 2;
 
 /// A spring [`Owned::follow`] keeps: where it is, how fast it moves, where
 /// it was heading over the frame that last advanced it, and when that was.
@@ -90,21 +419,18 @@ struct Glide<T> {
     target: T,
     started_at: Instant,
     duration: Duration,
-    /// The share of a full glide this one takes: below one when it turned
-    /// back part of the way, so it returns in the time it had travelled.
+    /// gpui-base's `reversing_factor`: the share of a full glide this one
+    /// takes, below one when it turned back part of the way, so it returns
+    /// in the time it had travelled.
     share: f32,
 }
 
-/// What [`Owned::cross_fade_value`] keeps: the value shown, and the one it
-/// replaced while that fades out.
-struct Change<T> {
-    current: T,
-    generation: u64,
-    previous: Option<(T, u64)>,
-    started_at: Instant,
-}
-
 impl Owned {
+    /// This store as the clock its samplers keep.
+    pub(crate) fn clock(&self) -> Clock<'_> {
+        Clock::Owned(self)
+    }
+
     /// The same store, its keys under `part`: for parts of a view drawn
     /// more than once, or by code that names its keys without knowing its
     /// neighbours' (a message's Markdown, a row drawn again as it leaves).
@@ -143,22 +469,28 @@ impl Owned {
     /// changes some other way (a view a host holds unseen, to fade it in
     /// itself).
     pub(crate) fn forget(&self, key: impl Into<SharedString>) {
-        let key = self.key(key);
-        self.values.borrow_mut().retain(|(held, _), _| *held != key);
+        let key = self.key(key.into());
+        let channel = format!("{key}-");
+        self.values
+            .borrow_mut()
+            .retain(|held, _| *held != key && !held.starts_with(&channel));
     }
 
-    fn key(&self, key: impl Into<SharedString>) -> SharedString {
-        let key = key.into();
+    fn forget_exact(&self, key: SharedString) {
+        self.values.borrow_mut().remove(&key);
+    }
+
+    /// The key `id` is kept under in this handle's scope.
+    fn key(&self, id: impl Into<ElementId>) -> SharedString {
+        let id = id.into();
         if self.prefix.is_empty() {
-            key
+            id.to_string().into()
         } else {
-            format!("{}{key}", self.prefix).into()
+            format!("{}{id}", self.prefix).into()
         }
     }
 
-    /// The value now of a glide toward `target` over `curve`: the first
-    /// target is taken at once; a later one is glided to from wherever the
-    /// value is when it changes.
+    /// [`Clock::transition`] kept here.
     pub(crate) fn transition<T>(
         &self,
         key: impl Into<SharedString>,
@@ -170,241 +502,103 @@ impl Owned {
     where
         T: Interpolate + PartialEq + 'static,
     {
-        self.sample((self.key(key), 0), target, curve, window, cx)
+        self.glide(self.key(key.into()), target, curve, window, cx)
+            .0
     }
 
-    /// [`CrossFade`] with its layers' opacities kept here: layer `current`
-    /// of `count` fades in over `curve` while the others fade out. `key`
-    /// is also the region's element id.
-    pub(crate) fn cross_fade(
+    /// [`Clock::layers`] kept here.
+    pub(crate) fn layers(
         &self,
         key: impl Into<SharedString>,
         current: usize,
         count: usize,
         curve: &Curve,
         window: &mut Window,
-        cx: &App,
+        cx: &mut App,
     ) -> CrossFade {
-        let key = self.key(key);
-        let opacity = (0..count)
-            .map(|layer| {
-                let target = if layer == current { 1. } else { 0. };
-                self.sample((key.clone(), layer), target, curve, window, cx)
-            })
-            .collect();
-        CrossFade::sampled(key, current, opacity)
+        self.clock()
+            .layers(key.into(), current, count, curve, window, cx)
     }
 
-    /// [`super::cross_fade`] with the values it shows and its clock kept
-    /// here: content that changes to another of its states fades in over
-    /// the one it showed, which takes no input while it goes. `key` also
-    /// names its elements.
-    pub(crate) fn cross_fade_value<T, C>(
+    /// [`Clock::cross_fade`] kept here.
+    pub(crate) fn cross_fade<T, C>(
         &self,
         key: impl Into<SharedString>,
         value: T,
         window: &mut Window,
         cx: &mut C,
-        build: impl FnMut(&T, &mut Window, &mut C) -> gpui::AnyElement,
-    ) -> gpui::AnyElement
+        build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
+    ) -> AnyElement
     where
         T: Clone + PartialEq + 'static,
         C: std::borrow::BorrowMut<App>,
     {
-        self.change(key.into(), value, true, window, cx, build)
+        self.clock()
+            .cross_fade(key.into(), value, &Curve::settle(), window, cx, build)
     }
 
-    /// [`super::cross_fade_part`] kept here: [`Self::cross_fade_value`] for
-    /// a part of a control (its glyph, its status), whose leaving state
-    /// covers nothing, so a press during the fade still reaches the control.
+    /// [`Clock::cross_fade_part`] kept here.
     pub(crate) fn cross_fade_part<T, C>(
         &self,
         key: impl Into<SharedString>,
         value: T,
         window: &mut Window,
         cx: &mut C,
-        build: impl FnMut(&T, &mut Window, &mut C) -> gpui::AnyElement,
-    ) -> gpui::AnyElement
+        build: impl FnMut(&T, &mut Window, &mut C) -> AnyElement,
+    ) -> AnyElement
     where
         T: Clone + PartialEq + 'static,
         C: std::borrow::BorrowMut<App>,
     {
-        self.change(key.into(), value, false, window, cx, build)
+        self.clock()
+            .cross_fade_part(key.into(), value, &Curve::settle(), window, cx, build)
     }
 
-    fn change<T, C>(
-        &self,
-        key: SharedString,
-        value: T,
-        shield: bool,
-        window: &mut Window,
-        cx: &mut C,
-        mut build: impl FnMut(&T, &mut Window, &mut C) -> gpui::AnyElement,
-    ) -> gpui::AnyElement
-    where
-        T: Clone + PartialEq + 'static,
-        C: std::borrow::BorrowMut<App>,
-    {
-        let key = self.key(key);
-        let (now, reduce) = {
-            let app: &mut App = cx.borrow_mut();
-            (app.background_executor().now(), app.reduce_motion())
-        };
-        let (current, generation, previous, progress) = {
-            let mut values = self.values.borrow_mut();
-            let entry = Self::entry(&mut values, (key.clone(), CHANGED), || Change {
-                current: value.clone(),
-                generation: 0,
-                previous: None,
-                started_at: now,
-            });
-            if !entry.is::<Change<T>>() {
-                *entry = Box::new(Change {
-                    current: value.clone(),
-                    generation: 0,
-                    previous: None::<(T, u64)>,
-                    started_at: now,
-                });
-            }
-            let change = entry.downcast_mut::<Change<T>>().expect("checked above");
-            if change.current != value {
-                let current = std::mem::replace(&mut change.current, value.clone());
-                change.previous = Some((current, change.generation));
-                change.generation += 1;
-                change.started_at = now;
-            }
-            let progress = if change.previous.is_none() || reduce {
-                1.
-            } else {
-                super::settle_progress(now.saturating_duration_since(change.started_at))
-            };
-            if progress >= 1. {
-                change.previous = None;
-            }
-            (
-                change.current.clone(),
-                change.generation,
-                change.previous.clone(),
-                progress,
-            )
-        };
-        if progress < 1. {
-            window.request_animation_frame();
-        }
-        let current = build(&current, window, cx);
-        let previous = previous.map(|(value, generation)| (build(&value, window, cx), generation));
-        super::draw_change(
-            key.into(),
-            (current, generation),
-            previous,
-            progress,
-            shield,
-        )
-    }
-
-    /// [`super::shown`] with its clock, the last value it had and its fold's
-    /// measurement kept here: something a page shows only some of the time,
-    /// drawn through [`Shown::fold`](super::Shown::fold) and its kin, that
-    /// carries on coming or going when the view is drawn under a new parent.
-    /// `key` is also its element id.
+    /// [`Clock::shown`] kept here, its fold's measurement too.
     pub(crate) fn shown<T: Clone + PartialEq + 'static>(
         &self,
         key: impl Into<SharedString>,
         value: Option<T>,
         window: &mut Window,
-        cx: &App,
-    ) -> Option<super::Shown<T>> {
-        let key = self.key(key);
-        let target = if value.is_some() { 1f32 } else { 0. };
-        let progress = self.sample((key.clone(), 0), target, &Curve::settle(), window, cx);
-        let mut values = self.values.borrow_mut();
-        let measure = Self::entry(&mut values, (key.clone(), 2), super::Measure::default)
-            .downcast_ref::<super::Measure>()
-            .expect("a fold's measurement")
-            .clone();
-        let kept = Self::entry(&mut values, (key.clone(), 1), || None::<T>)
-            .downcast_mut::<Option<T>>()
-            .expect("a shown value of one type");
-        let (value, leaving) = match value {
-            Some(value) => {
-                *kept = Some(value.clone());
-                (value, false)
-            }
-            None if progress > 0. => (kept.clone()?, true),
-            None => {
-                *kept = None;
-                return None;
-            }
-        };
-        Some(super::Shown {
-            id: key.into(),
-            value,
-            progress,
-            leaving,
-            measure: Some(measure),
-        })
+        cx: &mut App,
+    ) -> Option<Shown<T>> {
+        self.clock()
+            .shown(key.into(), value, &Curve::settle(), window, cx)
     }
 
-    /// [`super::appear`]'s progress with its clock kept here: how far in,
-    /// from 0 to 1, something that comes and goes is, coming in from nothing
-    /// the first time it is present as gpui-base's presence does, and
-    /// carrying on when the view is drawn under a new parent.
+    /// [`Clock::appear`]'s progress kept here.
     pub(crate) fn appear(
         &self,
         key: impl Into<SharedString>,
         present: bool,
         window: &mut Window,
-        cx: &App,
+        cx: &mut App,
     ) -> f32 {
-        let key = (self.key(key), 0);
-        let curve = Curve::settle();
-        Self::entry(&mut self.values.borrow_mut(), key.clone(), || Glide {
-            from: 0f32,
-            target: 0f32,
-            started_at: cx.background_executor().now(),
-            duration: curve.duration,
-            share: 1.,
-        });
-        self.sample(key, if present { 1. } else { 0. }, &curve, window, cx)
+        self.clock()
+            .appear(key.into(), present, &Curve::settle(), window, cx)
+            .progress
     }
 
-    /// How far in, from 0 to 1, what `value` names is: a value other than
-    /// the last one asked about comes in over [`Curve::settle`], the first
-    /// is in at once. For something drawn in another's place (a section, a
-    /// page) that fades in, and carries on fading when the view is drawn
-    /// under a new parent, where [`super::appear`] would start it over.
+    /// [`Clock::entered`] kept here.
     pub(crate) fn entered<T: PartialEq + 'static>(
         &self,
         key: impl Into<SharedString>,
         value: T,
         window: &mut Window,
-        cx: &App,
+        cx: &mut App,
     ) -> f32 {
-        let key = self.key(key);
-        let mut values = self.values.borrow_mut();
-        let kept = Self::entry(&mut values, (key.clone(), 1), || None::<T>)
-            .downcast_mut::<Option<T>>()
-            .expect("an entered value of one type");
-        let changed = kept.as_ref().is_some_and(|kept| *kept != value);
-        *kept = Some(value);
-        if changed {
-            *Self::entry(&mut values, (key.clone(), 0), || ()) = Box::new(Glide {
-                from: 0f32,
-                target: 0f32,
-                started_at: cx.background_executor().now(),
-                duration: Curve::settle().duration,
-                share: 1.,
-            });
-        }
-        drop(values);
-        self.sample((key, 0), 1f32, &Curve::settle(), window, cx)
+        self.clock()
+            .entered(key.into(), value, &Curve::settle(), window, cx)
     }
 
     /// The handle kept under `key`: made the first time it is asked for,
     /// the same one every time after, for state a sampler shares through
     /// clones (a [`super::GlideState`], a [`super::reflow::ReflowState`]).
     pub(crate) fn keep<T: Clone + Default + 'static>(&self, key: impl Into<SharedString>) -> T {
-        let key = (self.key(key), KEPT);
+        self.kept(self.key(key.into()))
+    }
+
+    fn kept<T: Clone + Default + 'static>(&self, key: SharedString) -> T {
         let mut values = self.values.borrow_mut();
         let entry = Self::entry(&mut values, key, T::default);
         if !entry.is::<T>() {
@@ -455,12 +649,12 @@ impl Owned {
         current: usize,
         count: usize,
         window: &mut Window,
-        cx: &App,
+        cx: &mut App,
     ) -> Swap {
         let key = key.into();
         Swap {
             fade: self
-                .cross_fade(key.clone(), current, count, &Curve::settle(), window, cx)
+                .layers(key.clone(), current, count, &Curve::settle(), window, cx)
                 .span(),
             height: self.glide_state(key),
             current,
@@ -468,17 +662,15 @@ impl Owned {
         }
     }
 
-    /// gpui-base's `spring` on [`super::FOLLOW`] with its state kept here:
-    /// the value now of a position springing toward `target`, which a new
-    /// target redirects with the velocity it has. The first target is taken
-    /// at once; reduced motion takes every target at once. gpui-base keeps a
-    /// spring's state by element path and builds its physics privately, so
-    /// this steps GPUI's spring with the parameters `FOLLOW` names (its
-    /// response, critically damped, its tolerance), as gpui-base steps it.
-    pub(crate) fn follow(
+    /// [`Clock::follow`] kept here. gpui-base keeps a spring's state by
+    /// element path and builds its physics privately, so this steps GPUI's
+    /// spring with the parameters gpui-base's `Spring::new(response)` names
+    /// (its response, critically damped), as gpui-base steps it.
+    fn follow(
         &self,
-        key: impl Into<SharedString>,
+        key: SharedString,
         target: f32,
+        response: Duration,
         window: &mut Window,
         cx: &App,
     ) -> f32 {
@@ -492,7 +684,7 @@ impl Owned {
             target,
             updated_at: now,
         };
-        let entry = Self::entry(&mut values, (self.key(key), FOLLOWED), || at_rest(target));
+        let entry = Self::entry(&mut values, key, || at_rest(target));
         if !entry.is::<Follow>() {
             *entry = Box::new(at_rest(target));
         }
@@ -502,13 +694,13 @@ impl Owned {
             *follow = at_rest(target);
             return target;
         }
-        let frequency = std::f32::consts::TAU / crate::edge_back::SETTLE.as_secs_f32();
+        let frequency = std::f32::consts::TAU / response.as_secs_f32();
         let config = gpui::SpringConfig::new(frequency * frequency, 2. * frequency, 1.);
         let elapsed = now
             .saturating_duration_since(follow.updated_at)
             .as_secs_f32();
         let stepped = config.step(follow.state, follow.target, elapsed);
-        if config.is_settled(stepped, target, super::FOLLOW.epsilon()) {
+        if config.is_settled(stepped, target, FOLLOW_EPSILON) {
             *follow = at_rest(target);
             return target;
         }
@@ -523,8 +715,8 @@ impl Owned {
 
     /// The value under `key`, made by `init` the first time, marked seen.
     fn entry<T: 'static>(
-        values: &mut HashMap<Key, Entry>,
-        key: Key,
+        values: &mut HashMap<SharedString, Entry>,
+        key: SharedString,
         init: impl FnOnce() -> T,
     ) -> &mut Box<dyn Any> {
         let entry = values.entry(key).or_insert_with(|| Entry {
@@ -535,7 +727,26 @@ impl Owned {
         &mut entry.value
     }
 
-    fn sample<T>(&self, key: Key, target: T, curve: &Curve, window: &mut Window, cx: &App) -> T
+    /// Starts `key`'s glide at `from` when it has none, so its first target
+    /// is glided to rather than taken at once.
+    fn seed<T: Interpolate + PartialEq + 'static>(&self, key: SharedString, from: T, now: Instant) {
+        Self::entry(&mut self.values.borrow_mut(), key, || Glide {
+            from: from.clone(),
+            target: from,
+            started_at: now,
+            duration: Duration::ZERO,
+            share: 1.,
+        });
+    }
+
+    fn glide<T>(
+        &self,
+        key: SharedString,
+        target: T,
+        curve: &Curve,
+        window: &mut Window,
+        cx: &App,
+    ) -> (T, bool)
     where
         T: Interpolate + PartialEq + 'static,
     {
@@ -545,7 +756,7 @@ impl Owned {
             from: target.clone(),
             target: target.clone(),
             started_at: now,
-            duration: curve.duration,
+            duration: curve.duration(),
             share: 1.,
         };
         let entry = Self::entry(&mut values, key, || at_rest(&target));
@@ -553,14 +764,14 @@ impl Owned {
             *entry = Box::new(at_rest(&target));
         }
         let glide = entry.downcast_mut::<Glide<T>>().expect("checked above");
-        if cx.reduce_motion() || curve.duration.is_zero() {
+        if cx.reduce_motion() || curve.duration().is_zero() {
             if glide.from != target || glide.target != target {
                 *glide = at_rest(&target);
             }
-            return target;
+            return (target, true);
         }
         let sample = Timing::new(glide.duration)
-            .ease(curve.easing.clone())
+            .ease(curve.easing())
             .sample(now.saturating_duration_since(glide.started_at));
         // A finished glide is at its target exactly, as gpui-base's is, not
         // wherever interpolating all the way rounds to.
@@ -572,6 +783,8 @@ impl Owned {
                 .interpolate(&glide.target, sample.directed_progress)
         };
         if glide.target != target {
+            // gpui-base's reversal: turning back toward where the glide
+            // started takes the share of a full glide it had travelled.
             let share = if target == glide.from {
                 (sample.directed_progress * glide.share + (1. - glide.share)).clamp(0., 1.)
             } else {
@@ -581,20 +794,21 @@ impl Owned {
                 from: value.clone(),
                 target,
                 started_at: now,
-                duration: curve.duration.mul_f32(share),
+                duration: curve.duration().mul_f32(share),
                 share,
             };
             window.request_animation_frame();
-            return value;
+            return (value, false);
         }
         if glide.from != glide.target {
             if sample.finished {
                 glide.from = glide.target.clone();
             } else {
                 window.request_animation_frame();
+                return (value, false);
             }
         }
-        value
+        (value, true)
     }
 }
 

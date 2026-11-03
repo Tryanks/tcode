@@ -270,7 +270,13 @@ impl Render for DragGhosts {
                 Flight::Carried => {
                     // At rest from the start, so the jump on release is
                     // travelled rather than adopted.
-                    flip_offset(child_id(&id, "flight"), Point::default(), window, cx);
+                    flip_offset(
+                        super::Clock::Element,
+                        child_id(&id, "flight"),
+                        Point::default(),
+                        window,
+                        cx,
+                    );
                     (pointer - ghost.grab, 1., false)
                 }
                 Flight::Landing { into, toward } => {
@@ -283,7 +289,13 @@ impl Render for DragGhosts {
                     // where it is.
                     let jump = toward.map_or(ghost.at, |(_, last)| last) - target;
                     *toward = Some((heading, target));
-                    let offset = flip_offset(child_id(&id, "flight"), jump, window, cx);
+                    let offset = flip_offset(
+                        super::Clock::Element,
+                        child_id(&id, "flight"),
+                        jump,
+                        window,
+                        cx,
+                    );
                     // Over its slot it hands over to the row in the second
                     // half of its descent, by when it is nearly there;
                     // elsewhere it fades as it goes.

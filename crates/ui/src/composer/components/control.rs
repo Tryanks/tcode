@@ -35,7 +35,7 @@ impl Composer {
     ) -> AnyElement {
         let count = pending.count;
         let session_id = pending.session_id.clone();
-        self.motion.cross_fade_value(
+        self.motion.cross_fade(
             self.motion_key("control-request"),
             pending.request.clone(),
             window,

@@ -512,13 +512,11 @@ impl Element for Scrollbar {
         let hitbox = window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.insert_hitbox(bounds, HitboxBehavior::Normal)
         });
-        let shared = match &self.owner {
-            Some(owner) => owner.keep::<Shared>(format!("scrollbar/{}", self.id)),
-            None => window
-                .use_state(cx, |_, _| Shared::default())
-                .read(cx)
-                .clone(),
-        };
+        let shared = crate::motion::Clock::from(self.owner.as_ref()).keep::<Shared>(
+            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "scrollbar".into()),
+            window,
+            cx,
+        );
 
         let now = cx.background_executor().now();
         let base = cx.global::<gpui_base::Theme>();

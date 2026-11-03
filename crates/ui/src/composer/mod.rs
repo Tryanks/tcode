@@ -967,7 +967,7 @@ impl Composer {
         };
         let touch = px(crate::material::TOUCH_TARGET);
         let buttons = self.button_motion();
-        let button = self.motion.cross_fade_value(
+        let button = self.motion.cross_fade(
             self.motion_key("compact-action"),
             mode,
             window,
@@ -1045,7 +1045,7 @@ impl Composer {
                     } else {
                         cx.theme().muted_foreground
                     },
-                    &crate::motion::owned::Curve::settle(),
+                    &crate::motion::Curve::settle(),
                     window,
                     cx,
                 );
@@ -1798,7 +1798,7 @@ impl Render for Composer {
             } else {
                 cx.theme().border
             },
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );
@@ -1808,7 +1808,7 @@ impl Render for Composer {
         let frame = self.motion.transition(
             self.motion_key("card-frame"),
             if subagent { 0f32 } else { 1. },
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );

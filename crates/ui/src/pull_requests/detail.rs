@@ -1398,7 +1398,7 @@ impl PullRequestView {
             } else {
                 0.
             },
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );

@@ -239,7 +239,7 @@ impl ChatView {
                     } else {
                         highlight.opacity(0.)
                     },
-                    &crate::motion::owned::Curve::settle(),
+                    &crate::motion::Curve::settle(),
                     window,
                     cx,
                 );

@@ -180,8 +180,13 @@ pub(crate) fn item_tile(
                 let motion = motion.clone();
                 // The picture fades in over the tile's fill once it decodes.
                 move |window, cx| {
-                    let arrived =
-                        crate::motion::image_arrival_owned(&motion, id, &source, window, cx);
+                    let arrived = crate::motion::image_arrival(
+                        crate::motion::Clock::from(&motion),
+                        id,
+                        &source,
+                        window,
+                        cx,
+                    );
                     img(source)
                         .id("tool-image")
                         .w_full()

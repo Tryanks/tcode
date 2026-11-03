@@ -1622,7 +1622,7 @@ impl Render for PluginsSettingsPanel {
             } else {
                 material::section_gap(cx)
             },
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );

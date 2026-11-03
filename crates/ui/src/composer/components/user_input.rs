@@ -140,7 +140,7 @@ impl Composer {
                 let turn = self.motion.transition(
                     self.motion_key(format_args!("ui-toggle-{request_id}")),
                     if expanded { 1f32 } else { 0. },
-                    &crate::motion::owned::Curve::settle(),
+                    &crate::motion::Curve::settle(),
                     window,
                     cx,
                 );
@@ -187,7 +187,7 @@ impl Composer {
             let preview = self.motion.transition(
                 self.motion_key(format_args!("ui-preview-{request_id}")),
                 if expanded { 0f32 } else { 1. },
-                &crate::motion::owned::Curve::settle(),
+                &crate::motion::Curve::settle(),
                 window,
                 cx,
             );
@@ -277,7 +277,7 @@ impl Composer {
             .w_full()
             .gap_0()
             .child(strip);
-        let body = self.motion.cross_fade_value(
+        let body = self.motion.cross_fade(
             self.motion_key(format_args!("ui-question-{request_id}")),
             index,
             window,
@@ -432,7 +432,7 @@ impl Composer {
                     question.id
                 )),
                 if is_selected { 1f32 } else { 0. },
-                &crate::motion::owned::Curve::settle(),
+                &crate::motion::Curve::settle(),
                 window,
                 cx,
             );
@@ -453,7 +453,7 @@ impl Composer {
                         question.id
                     )),
                     if is_selected { primary } else { muted },
-                    &crate::motion::owned::Curve::settle(),
+                    &crate::motion::Curve::settle(),
                     window,
                     cx,
                 ))

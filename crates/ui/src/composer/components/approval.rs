@@ -15,7 +15,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.motion.cross_fade_value(
+        self.motion.cross_fade(
             self.motion_key("approval-request"),
             request.clone(),
             window,

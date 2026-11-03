@@ -10,7 +10,7 @@ use gpui::{
     IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
     StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::motion::{Interpolate, Transition, transition};
+use gpui_base::motion::Interpolate;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -438,16 +438,14 @@ impl RenderOnce for Button {
                 Some(icon) => icon.into_any_element(),
                 None => leaving.clone().path(shown.clone()).into_any_element(),
             };
-            match &clocks.motion {
-                Some(motion) => motion.cross_fade_part("icon", shown, window, cx, build),
-                None => crate::motion::cross_fade_part(
-                    ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "icon".into()),
-                    shown,
-                    window,
-                    cx,
-                    build,
-                ),
-            }
+            clocks.clock().cross_fade_part(
+                clocks.channel("icon"),
+                shown,
+                &crate::motion::Curve::settle(),
+                window,
+                cx,
+                build,
+            )
         });
         let content =
             gpui_base::h_flex()
@@ -565,16 +563,23 @@ pub(crate) fn tinted(fill: gpui::Hsla, tint: gpui::Hsla) -> gpui::Hsla {
         .0
 }
 
-/// Where a [`Button`]'s clocks are kept: under its element path, or in its
-/// view's store when the view keeps them ([`Button::motion`]).
+/// Where a [`Button`]'s clocks are kept, and the id its channels are
+/// named under.
 struct Clocks {
     id: ElementId,
     motion: Option<crate::motion::owned::Owned>,
 }
 
 impl Clocks {
-    /// The value now of the button's `channel` gliding to `target` over
-    /// `SETTLE`.
+    fn clock(&self) -> crate::motion::Clock<'_> {
+        crate::motion::Clock::from(self.motion.as_ref())
+    }
+
+    fn channel(&self, channel: &'static str) -> ElementId {
+        ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), channel.into())
+    }
+
+    /// The value now of the button's `channel` gliding to `target`.
     fn transition<T>(
         &self,
         channel: &'static str,
@@ -585,22 +590,13 @@ impl Clocks {
     where
         T: Interpolate + PartialEq + 'static,
     {
-        match &self.motion {
-            Some(motion) => motion.transition(
-                channel,
-                target,
-                &crate::motion::owned::Curve::settle(),
-                window,
-                cx,
-            ),
-            None => transition(
-                (self.id.clone(), channel),
-                target,
-                Transition::new(crate::edge_back::SETTLE),
-                window,
-                cx,
-            ),
-        }
+        self.clock().transition(
+            self.channel(channel),
+            target,
+            &crate::motion::Curve::settle(),
+            window,
+            cx,
+        )
     }
 }
 

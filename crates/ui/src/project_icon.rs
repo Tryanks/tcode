@@ -70,7 +70,13 @@ struct Artwork {
 impl RenderOnce for Artwork {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let size = self.size;
-        let arrived = crate::motion::image_arrival(self.id, &self.source, window, cx);
+        let arrived = crate::motion::image_arrival(
+            crate::motion::Clock::Element,
+            self.id,
+            &self.source,
+            window,
+            cx,
+        );
         img(self.source)
             .size(px(size))
             .flex_none()
@@ -250,6 +256,7 @@ impl Picker {
         } else {
             let source = images::icon_thumbnail(path.clone());
             let arrived = crate::motion::image_arrival(
+                crate::motion::Clock::Element,
                 SharedString::from(format!("icon-thumbnail-{}", entry.name)),
                 &source,
                 window,

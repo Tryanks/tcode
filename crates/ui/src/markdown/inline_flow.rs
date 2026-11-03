@@ -177,8 +177,8 @@ impl InlineFlow {
     ) -> AnyElement {
         let source = view.read(cx).image_source(url);
         // The picture fades in over the line once it decodes.
-        let arrived = crate::motion::image_arrival_owned(
-            &view.read(cx).motion(),
+        let arrived = crate::motion::image_arrival(
+            crate::motion::Clock::from(&view.read(cx).motion()),
             path.to_owned(),
             &source,
             window,

@@ -1802,7 +1802,7 @@ impl PullRequestsPanel {
         let share = self.motion.transition(
             "pr-agent-tools-share",
             if fill { 1f32 } else { 0. },
-            &crate::motion::owned::Curve::settle(),
+            &crate::motion::Curve::settle(),
             window,
             cx,
         );
