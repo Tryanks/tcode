@@ -1549,6 +1549,61 @@ fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
     );
 }
 
+/// A Codex sleep, image view and image generation recorded as `Other`
+/// before the adapter mapped them, as tcode.db holds them (the picture
+/// swapped for a 1x1 one), read back as the items a new row holds.
+#[test]
+fn codex_items_recorded_as_other_read_back_as_their_items() {
+    const LOG: &str = include_str!("fixtures/legacy-codex-items.jsonl");
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "legacy".into();
+    store.upsert_meta(&meta).unwrap();
+    store
+        .apply(&[Mutation::replace_event_log("legacy", LOG.into())])
+        .unwrap();
+    let contents: Vec<_> = store
+        .read_events("legacy")
+        .unwrap()
+        .into_iter()
+        .map(|record| match record.event {
+            AgentEvent::ItemCompleted(item) => item.content,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        contents,
+        [
+            agent::ItemContent::ToolCall {
+                image_reads: Vec::new(),
+                name: "sleep".into(),
+                input: serde_json::json!({"duration_ms": 20000}),
+                output: None,
+                status: agent::ItemStatus::Completed,
+            },
+            agent::ItemContent::ImageRead {
+                path: "/tmp/tcode-before.png".into(),
+                image: None,
+            },
+            agent::ItemContent::ToolCall {
+                image_reads: vec![agent::Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==".into(),
+                    source_path: Some("/Users/me/.codex/generated_images/01a196f6-db20-7941-b9de-d73415937480/exec-89f575db-4c35-4d77-a024-611fdd5d1d50.png".into()),
+                }],
+                name: "image_generation".into(),
+                input: serde_json::json!({
+                    "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
+                    "input_images": ["/Users/me/project/assets/reference.png"],
+                }),
+                output: None,
+                status: agent::ItemStatus::Completed,
+            },
+        ]
+    );
+}
+
 /// A tool call recorded now is stamped as canonical and reads back as it
 /// was recorded, so a reopened thread shows what the live one did, even
 /// when the tool's text is itself in a provider's block shape.

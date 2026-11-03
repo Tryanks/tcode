@@ -2236,7 +2236,7 @@ impl Actor {
                     value.get("type").and_then(Value::as_str),
                     Some("contextCompaction")
                 )
-                && let Some(mut item) = map_item(value)
+                && let Some(mut item) = lifecycle_item(method, value)
             {
                 self.capture_read_image(&mut item).await;
                 let thread_id = thread_id.expect("child notification has a thread id");
@@ -2399,7 +2399,7 @@ impl Actor {
                     }
                     _ => {}
                 }
-                if let Some(mut item) = item_value.and_then(map_item) {
+                if let Some(mut item) = item_value.and_then(|value| lifecycle_item(method, value)) {
                     self.capture_read_image(&mut item).await;
                     if let Some(subagent) = self.subagents.get(&item.id) {
                         let status = if method == "item/completed" {
@@ -3653,6 +3653,16 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         "webSearch" => ItemContent::WebSearch {
             query: string_field(item, "query"),
         },
+        // The display item of the `clock.sleep` call, which a rollout records
+        // as that call with its arguments.
+        "sleep" => ItemContent::ToolCall {
+            image_reads: Vec::new(),
+            name: "sleep".into(),
+            input: json!({ "duration_ms": item.get("durationMs").cloned().unwrap_or(Value::Null) }),
+            output: None,
+            status: map_status(item.get("status").and_then(Value::as_str)),
+        },
+        "imageGeneration" => image_generation(item),
         _ => ItemContent::Other {
             provider_kind: provider_kind.into(),
             summary: serde_json::to_string(item).unwrap_or_else(|_| provider_kind.into()),
@@ -3663,6 +3673,100 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
         parent_item_id: None,
         content,
     })
+}
+
+/// [`map_item`] for an `item/*` notification. A sleep carries no status of
+/// its own, so it has finished when it completes.
+fn lifecycle_item(method: &str, value: &Value) -> Option<ThreadItem> {
+    let mut item = map_item(value)?;
+    if method == "item/completed"
+        && value.get("status").is_none()
+        && let ItemContent::ToolCall { status, .. } = &mut item.content
+    {
+        *status = ItemStatus::Completed;
+    }
+    Some(item)
+}
+
+/// An `imageGeneration` item as the call of the hosted `image_generation`
+/// tool: the prompt the picture was generated from, the local images it was
+/// given, and the picture, kept where Codex saved it. A rollout records the
+/// same call with the same fields (`image_generation_call`), and the
+/// importer reads it through this.
+pub fn image_generation(item: &Value) -> ItemContent {
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    };
+    let picture = text("result")
+        .and_then(|data| crate::tool_output::image(Some("image/png"), data))
+        .map(|picture| Attachment {
+            source_path: text("savedPath").map(str::to_owned),
+            ..picture
+        });
+    let mut input = serde_json::Map::new();
+    if let Some(prompt) = text("revisedPrompt") {
+        input.insert("revised_prompt".into(), prompt.into());
+    }
+    let inputs: Vec<Value> = item
+        .get("inputImages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|image| image.get("path").cloned())
+        .collect();
+    if !inputs.is_empty() {
+        input.insert("input_images".into(), Value::Array(inputs));
+    }
+    let failure = item.get("failure").filter(|failure| !failure.is_null());
+    let status = match map_status(item.get("status").and_then(Value::as_str)) {
+        _ if failure.is_some() => ItemStatus::Failed,
+        // A rollout keeps `generating` on a generation whose picture arrived.
+        ItemStatus::InProgress if picture.is_some() => ItemStatus::Completed,
+        status => status,
+    };
+    ItemContent::ToolCall {
+        image_reads: picture.into_iter().collect(),
+        name: "image_generation".into(),
+        input: Value::Object(input),
+        output: failure.map(Value::to_string),
+        status,
+    }
+}
+
+/// An item the adapter recorded as `Other` before it mapped its kind, as it
+/// maps it now. Its summary is the item as the app-server sent it (the
+/// importer wrote an image generation in the same shape); `completed` when
+/// it was recorded as completed.
+pub fn normalize_legacy_item(item: &mut ThreadItem, completed: bool) {
+    let ItemContent::Other {
+        provider_kind,
+        summary,
+    } = &item.content
+    else {
+        return;
+    };
+    if !matches!(
+        provider_kind.as_str(),
+        "sleep" | "imageView" | "imageGeneration"
+    ) {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(summary) else {
+        return;
+    };
+    if value.get("type").and_then(Value::as_str) != Some(provider_kind.as_str()) {
+        return;
+    }
+    let method = if completed {
+        "item/completed"
+    } else {
+        "item/updated"
+    };
+    if let Some(mapped) = lifecycle_item(method, &value) {
+        item.content = mapped.content;
+    }
 }
 
 fn collab_tool_input(item: &Value) -> Value {
@@ -6340,10 +6444,74 @@ mod tests {
             matches!(image.content, ItemContent::ImageRead { path, .. } if path == "/tmp/screenshot.png")
         );
 
-        let unknown = map_item(&json!({"type":"sleep","id":"sleep-1","durationMs":10})).unwrap();
+        let unknown = map_item(&json!({"type":"hookPrompt","id":"hook-1"})).unwrap();
         assert!(
-            matches!(unknown.content, ItemContent::Other { ref provider_kind, .. } if provider_kind == "sleep")
+            matches!(unknown.content, ItemContent::Other { ref provider_kind, .. } if provider_kind == "hookPrompt")
         );
+    }
+
+    /// A sleep and an image generation, as Codex sent them, arrive as the
+    /// calls a rollout records them as: the sleep finished once it
+    /// completes, the picture an image the call holds, kept where Codex
+    /// saved it. A row recorded before they were mapped reads back the same.
+    #[test]
+    fn sleeps_and_image_generations_arrive_as_their_calls() {
+        let sleep = json!({"type":"sleep","id":"call_wmvrnLAr0GTnBoYQog6Gvjq0","durationMs":20000});
+        let call = |status| ItemContent::ToolCall {
+            image_reads: Vec::new(),
+            name: "sleep".into(),
+            input: json!({"duration_ms": 20000}),
+            output: None,
+            status,
+        };
+        assert_eq!(
+            lifecycle_item("item/started", &sleep).unwrap().content,
+            call(ItemStatus::InProgress)
+        );
+        assert_eq!(
+            lifecycle_item("item/completed", &sleep).unwrap().content,
+            call(ItemStatus::Completed)
+        );
+
+        let picture = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let saved = "/Users/me/.codex/generated_images/01a196f6-db20-7941-b9de-d73415937480/exec-89f575db-4c35-4d77-a024-611fdd5d1d50.png";
+        let generation = json!({"type":"imageGeneration","id":"exec-89f575db-4c35-4d77-a024-611fdd5d1d50","status":"completed","revisedPrompt":"Edit the reference image: keep the subject, make the background transparent.","result":picture,"transparentBackground":true,"failure":null,"savedPath":saved,"inputImages":[{"path":"/Users/me/project/assets/reference.png","sha256":"f5000811e1aa0c2f9f23baeb7fc932e2d4e41974204fb409ece85cd70197840d"}],"generationId":"695e31e3-b3a3-4def-afce-27493b36fb7e","startedAtMs":1_793_534_383_829_u64,"completedAtMs":1_793_534_414_873_u64});
+        let generated = ItemContent::ToolCall {
+            image_reads: vec![Attachment {
+                media_type: "image/png".into(),
+                data_base64: picture.into(),
+                source_path: Some(saved.into()),
+            }],
+            name: "image_generation".into(),
+            input: json!({
+                "revised_prompt": "Edit the reference image: keep the subject, make the background transparent.",
+                "input_images": ["/Users/me/project/assets/reference.png"],
+            }),
+            output: None,
+            status: ItemStatus::Completed,
+        };
+        assert_eq!(
+            lifecycle_item("item/completed", &generation)
+                .unwrap()
+                .content,
+            generated
+        );
+
+        for (value, content) in [
+            (sleep, call(ItemStatus::Completed)),
+            (generation, generated),
+        ] {
+            let mut legacy = ThreadItem {
+                id: "legacy".into(),
+                parent_item_id: None,
+                content: ItemContent::Other {
+                    provider_kind: value["type"].as_str().unwrap().into(),
+                    summary: value.to_string(),
+                },
+            };
+            normalize_legacy_item(&mut legacy, true);
+            assert_eq!(legacy.content, content);
+        }
     }
 
     #[test]
