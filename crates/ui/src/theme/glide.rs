@@ -61,9 +61,9 @@ pub fn glide_mode(mode: ThemeMode, window: &mut Window, cx: &mut App) {
     let generation = glide.generation;
     glide.current = Some(Run { from, to, started });
     // The glass behind a translucent window is native and has no palette to
-    // mix; it takes the new appearance at once.
+    // mix; it cross-fades to the new appearance on the glide's frames.
     #[cfg(target_os = "macos")]
-    crate::macos_backdrop::sync_appearance(mode, cx);
+    crate::macos_backdrop::glide_appearance(mode, cx);
     step(generation, window, cx);
 }
 
@@ -98,6 +98,15 @@ fn step(generation: u64, window: &mut Window, cx: &mut App) {
         run.from.mix(&run.to, sample.directed_progress)
     };
     super::install(theme, cx);
+    #[cfg(target_os = "macos")]
+    crate::macos_backdrop::glide_step(
+        if sample.finished {
+            1.
+        } else {
+            sample.directed_progress
+        },
+        cx,
+    );
     window.refresh();
     if !sample.finished {
         window.on_next_frame(move |window, cx| step(generation, window, cx));
