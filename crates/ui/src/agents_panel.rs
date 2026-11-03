@@ -864,6 +864,7 @@ impl AgentsPanel {
             compact,
             cx,
         )
+        .child(self.hover.hitbox(row.key.clone()))
         .child(content)
         .when(compact && !actions.is_empty(), |row_el| {
             let actions: Vec<_> = row
@@ -896,7 +897,6 @@ impl AgentsPanel {
             )
         });
         base.group(group)
-            .on_hover(self.hover.on_hover(row.key.clone()))
             .debug_selector({
                 let key = row.key.clone();
                 move || format!("agent-row-{key}")
