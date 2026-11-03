@@ -261,8 +261,8 @@ fn a_call_no_family_claims_names_its_server_tool_and_argument(cx: &mut TestAppCo
 }
 
 /// A command reads as the command it ran and how it exited: a failure by
-/// its exit code and the first line it printed past the harness's own
-/// `Exit code N`, a declined one as asked for and declined, never run. A
+/// its exit code alone, with no line of what it printed under it while
+/// shut, a declined one as asked for and declined, never run. A
 /// shell run as a tool — Codex's `exec_command` and `write_stdin`, a
 /// subagent's `Bash` — reads the same, its exit code taken from the report
 /// its harness wraps the output in, and opens on that output alone.
@@ -289,18 +289,14 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
         ),
         (
             "toolu_01RNnVjDHfMoqLkL2otV6JiC",
-            ran(
-                "ls /Users/me/project/src",
-                vec![Chip::Exit(1)],
-                Some("ls: /Users/me/project/src: No such file or directory"),
-            ),
+            ran("ls /Users/me/project/src", vec![Chip::Exit(1)], None),
         ),
         (
             "exec-a4d9d295-690b-4905-9427-20acfcd6d992",
             ran(
                 "/bin/zsh -lc \"sed -n '1,130p' .github/scripts/check-architecture.sh\"",
                 vec![Chip::Exit(1)],
-                Some("sed: .github/scripts/check-architecture.sh: No such file or directory"),
+                None,
             ),
         ),
         (
@@ -348,11 +344,8 @@ fn a_command_reads_as_what_it_ran_and_how_it_exited(cx: &mut TestAppContext) {
     thread.open_work_log("toolu_01RQ9kdsaRsD7Vh9QGznNJwT", cx);
     assert!(shows(cx, &format!("tool-status-chip-{declined}")));
     let failed = "toolu_01RNnVjDHfMoqLkL2otV6JiC";
-    assert!(shows(cx, &format!("tool-error-{failed}")));
-    // Open, the body tells the failure; the header's line would repeat it.
-    click(cx, &format!("activity-row-{failed}"));
+    assert!(shows(cx, &format!("tool-chip-{failed}")));
     assert!(!shows(cx, &format!("tool-error-{failed}")));
-    click(cx, &format!("activity-row-{failed}"));
     // A shell run as a tool opens on the same terminal window as a command:
     // its command line over what it printed, verbatim, its harness's report
     // included, all of it in the grid, with nothing more to open.
