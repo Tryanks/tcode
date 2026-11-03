@@ -432,7 +432,7 @@ impl ChatView {
                 window_state.clone(),
                 cx,
             );
-            pull_requests.share_scene(&scene);
+            pull_requests.share_scene(&scene, cx);
             pull_requests
         });
         let agents =
