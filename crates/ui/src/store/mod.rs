@@ -3656,6 +3656,15 @@ impl WorkspaceStore {
             .is_some_and(|id| self.session_loading_for(id))
     }
 
+    /// Whether `session_id`'s timeline is held whole: its log and status
+    /// are here and it is not catching up on records it missed, so what
+    /// draws it now draws what it will go on drawing.
+    pub(crate) fn timeline_settled_for(&self, session_id: &str) -> bool {
+        self.threads.get(session_id).is_some_and(|thread| {
+            thread.timeline.is_some() && thread.status.is_some() && !thread.catching_up
+        })
+    }
+
     pub(super) fn session_loading_for(&self, session_id: &str) -> bool {
         self.threads
             .get(session_id)

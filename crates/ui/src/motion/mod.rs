@@ -686,6 +686,7 @@ pub(crate) struct CrossFade {
     fill: bool,
     span: bool,
     column: bool,
+    staged: Option<usize>,
 }
 
 impl CrossFade {
@@ -715,6 +716,7 @@ impl CrossFade {
             fill: false,
             span: false,
             column: false,
+            staged: None,
         }
     }
 
@@ -729,6 +731,7 @@ impl CrossFade {
             fill: false,
             span: false,
             column: false,
+            staged: None,
         }
     }
 
@@ -752,9 +755,25 @@ impl CrossFade {
         self
     }
 
+    /// Draws `layer` even while it is out: unseen and covered, so it lays
+    /// itself out and readies what it shows (a thread's rows measured, its
+    /// Markdown built) before it fades in, in the place it will fade in from.
+    pub(crate) fn stage(mut self, layer: usize) -> Self {
+        self.staged = Some(layer);
+        self
+    }
+
+    /// The opacity `layer` is drawn at this frame.
+    #[cfg(test)]
+    pub(crate) fn opacity(&self, layer: usize) -> f32 {
+        self.opacity.get(layer).copied().unwrap_or_default()
+    }
+
     /// Whether `layer` is drawn this frame, so only those are built.
     pub(crate) fn shows(&self, layer: usize) -> bool {
-        layer == self.current || self.opacity.get(layer).is_some_and(|opacity| *opacity > 0.)
+        layer == self.current
+            || self.staged == Some(layer)
+            || self.opacity.get(layer).is_some_and(|opacity| *opacity > 0.)
     }
 
     /// The region holding `layers`, each tagged with its index; layers that
