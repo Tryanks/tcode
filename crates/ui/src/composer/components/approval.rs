@@ -279,22 +279,22 @@ impl Composer {
                         option.kind,
                         ApprovalOptionKind::RejectOnce | ApprovalOptionKind::RejectAlways
                     );
-                    let button = Button::new(gpui::SharedString::from(format!(
-                        "approval-option-{}",
-                        option.id
-                    )))
-                    .chip()
-                    .touch(self.compact)
-                    .disabled(!self.interactive(cx) || pending)
-                    .label(option.label.clone())
-                    .when(rejects, |button| button.danger().outline())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.respond(
-                            request_id.clone(),
-                            ApprovalDecision::Option(option_id.clone()),
-                            cx,
-                        );
-                    }));
+                    let id = gpui::SharedString::from(format!("approval-option-{}", option.id));
+                    let button = Button::new(id.clone())
+                        .motion(&self.button_motion())
+                        .debug_selector(move || id.to_string())
+                        .chip()
+                        .touch(self.compact)
+                        .disabled(!self.interactive(cx) || pending)
+                        .label(option.label.clone())
+                        .when(rejects, |button| button.danger().outline())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.respond(
+                                request_id.clone(),
+                                ApprovalDecision::Option(option_id.clone()),
+                                cx,
+                            );
+                        }));
                     options = options.child(button);
                 }
                 h_flex()
@@ -304,6 +304,7 @@ impl Composer {
                     .child(options)
                     .child(
                         Button::new("approval-cancel")
+                            .motion(&self.button_motion())
                             .ghost()
                             .chip()
                             .touch(self.compact)
@@ -345,6 +346,32 @@ mod tests {
         compact: bool,
         paths: impl Iterator<Item = String>,
     ) -> &mut VisualTestContext {
+        let changes = paths
+            .map(|path| agent::FileChange {
+                path,
+                kind: agent::FileChangeKind::Modify,
+                diff: None,
+            })
+            .collect();
+        composer_with_request(
+            cx,
+            compact,
+            ApprovalKind::FileChange {
+                changes,
+                reason: None,
+            },
+            Vec::new(),
+        )
+    }
+
+    /// A composer, phone or desktop, whose session awaits approval of `kind`
+    /// with `options`.
+    fn composer_with_request(
+        cx: &mut TestAppContext,
+        compact: bool,
+        kind: ApprovalKind,
+        options: Vec<agent::ApprovalOption>,
+    ) -> &mut VisualTestContext {
         cx.update(crate::theme::init);
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(crate::store::tests::scratch_root(
@@ -354,32 +381,16 @@ mod tests {
             tcode_runtime::pipe::HostServices::default(),
         )
         .unwrap();
-        let changes = paths
-            .map(|path| agent::FileChange {
-                path,
-                kind: agent::FileChangeKind::Modify,
-                diff: None,
-            })
-            .collect();
         let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
             let id = state.start_draft("approval-list".into(), std::env::temp_dir(), cx);
-            for event in [
-                agent::AgentEvent::TurnStarted {
-                    turn_id: "turn".into(),
-                },
-                agent::AgentEvent::ApprovalRequested(ApprovalRequest {
-                    id: "patch".into(),
-                    parent_item_id: None,
-                    turn_id: None,
-                    kind: ApprovalKind::FileChange {
-                        changes,
-                        reason: None,
-                    },
-                    options: Vec::new(),
-                }),
-            ] {
-                state.provider_event_for_test(&id, event, cx);
-            }
+            let request = ApprovalRequest {
+                id: "patch".into(),
+                parent_item_id: None,
+                turn_id: None,
+                kind,
+                options,
+            };
+            state.provider_event_for_test(&id, agent::AgentEvent::ApprovalRequested(request), cx);
             (id.clone(), state.residents.live[&id].timeline.clone())
         }))
         .unwrap();
@@ -468,6 +479,40 @@ mod tests {
         assert!(
             second.bottom() <= detail.bottom(),
             "a short list grows to show every path"
+        );
+    }
+
+    /// An option of a command's request, a default button kept on the
+    /// composer's clock, glides to its hover fill under the pointer and
+    /// holds it, and glides back as the pointer leaves.
+    #[gpui::test]
+    fn an_approval_option_glides_to_its_hover_fill_and_back(cx: &mut TestAppContext) {
+        let cx = composer_with_request(
+            cx,
+            false,
+            ApprovalKind::ExecCommand {
+                command: "cargo test".into(),
+                cwd: None,
+                reason: None,
+            },
+            vec![agent::ApprovalOption {
+                id: "once".into(),
+                label: "Allow once".into(),
+                kind: ApprovalOptionKind::AllowOnce,
+            }],
+        );
+        let (rest, hover) = cx.update(|_, cx| (cx.theme().background, cx.theme().muted));
+        let away = cx
+            .debug_bounds("approval-option-once")
+            .expect("option")
+            .origin
+            - point(px(40.), px(40.));
+        crate::widgets::button::tests::assert_hover_glides(
+            "approval-option-once",
+            rest,
+            hover,
+            away,
+            cx,
         );
     }
 
