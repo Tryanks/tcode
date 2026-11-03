@@ -563,6 +563,7 @@ pub(crate) struct CrossFade {
     span: bool,
     column: bool,
     staged: Option<usize>,
+    keyboard: Option<gpui::FocusHandle>,
 }
 
 impl CrossFade {
@@ -589,6 +590,7 @@ impl CrossFade {
             span: false,
             column: false,
             staged: None,
+            keyboard: None,
         }
     }
 
@@ -620,6 +622,17 @@ impl CrossFade {
         self
     }
 
+    /// A press anywhere in the region gives the keyboard to `focus`, the
+    /// handle its owner tracks. A leaving or staged layer's shield occludes
+    /// every hitbox painted before it, the owner's own among them, so
+    /// GPUI's focus-on-press, which asks the owner's hitbox whether it is
+    /// hovered, never sees a press over the shield; the shield takes the
+    /// press for the owner instead, so what it covers still gets none.
+    pub(crate) fn keyboard(mut self, focus: gpui::FocusHandle) -> Self {
+        self.keyboard = Some(focus);
+        self
+    }
+
     /// Whether `layer` is drawn this frame, so only those are built.
     pub(crate) fn shows(&self, layer: usize) -> bool {
         layer == self.current
@@ -640,6 +653,7 @@ impl CrossFade {
         // The current layer is drawn last, over the leaving ones' shields.
         layers.sort_by_key(|(layer, _)| *layer == self.current);
         let (fill, span, column) = (self.fill, self.span, self.column);
+        let keyboard = self.keyboard.clone();
         div()
             .id(self.id.clone())
             .relative()
@@ -668,7 +682,18 @@ impl CrossFade {
                         }
                     })
                     .child(content)
-                    .when(leaving, |el| el.child(shield()))
+                    .when(leaving, |el| {
+                        el.child(shield().when_some(keyboard.clone(), |shield, focus| {
+                            // As GPUI's own focus-on-press: a press something
+                            // drawn over the shield took is left to it.
+                            shield.on_any_mouse_down(move |_, window, cx| {
+                                if !window.default_prevented() {
+                                    window.focus(&focus, cx);
+                                    window.prevent_default();
+                                }
+                            })
+                        }))
+                    })
             }))
     }
 }
