@@ -992,7 +992,7 @@ impl ChatView {
         self.terminal_glide_compact = compact;
         let glide = self.terminal_glide.sample(
             &[
-                crate::motion::resize_glide::Panel::flex(true).reflowing(),
+                crate::motion::resize_glide::Panel::flex(true),
                 crate::motion::resize_glide::Panel::sized(px(terminal_height), terminal_open),
             ],
             animate,

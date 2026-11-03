@@ -18,7 +18,6 @@ pub(crate) struct Panel {
     /// `None` for a panel that takes what the others leave.
     size: Option<Pixels>,
     shown: bool,
-    reflows: bool,
     kept: bool,
 }
 
@@ -28,7 +27,6 @@ impl Panel {
         Self {
             size: Some(size),
             shown,
-            reflows: false,
             kept: false,
         }
     }
@@ -38,18 +36,8 @@ impl Panel {
         Self {
             size: None,
             shown,
-            reflows: false,
             kept: false,
         }
-    }
-
-    /// Lay the panel's content out at the size it is drawn at on every frame
-    /// of a glide, rather than at its widest: for content whose layout
-    /// follows its size cheaply and should be seen to, such as a column
-    /// whose foot rides up as a drawer opens below it.
-    pub(crate) fn reflowing(mut self) -> Self {
-        self.reflows = true;
-        self
     }
 
     /// Keep the panel in the group while it is not shown, at nothing, and
@@ -107,10 +95,15 @@ struct Glide {
     from: Vec<Pixels>,
     /// `None` for a panel that takes what the others leave.
     to: Vec<Option<Pixels>>,
-    /// Each panel's widest size over the glide. Its content is laid out at
-    /// that and clipped, so it reflows once, when the glide starts, rather
-    /// than on every frame.
+    /// Each panel's widest size over the glide. A panel growing out of
+    /// nothing or shrinking into it has its content laid out at that and
+    /// clipped, so it slides in or out whole.
     widest: Vec<Pixels>,
+    /// Whether the panel is shown at both ends of the glide. Its content is
+    /// laid out at the size it is drawn at on every frame: it has no edge to
+    /// slide from, and held at its widest it would jump to its new layout at
+    /// one end.
+    follows: Vec<bool>,
     mounted: Vec<bool>,
     now: Vec<Pixels>,
 }
@@ -261,14 +254,14 @@ impl ResizeGlide {
                 },
                 (true, Some(_)) => Pin::Sized {
                     size: glide.now[ix],
-                    hold: match panels[ix].reflows {
+                    hold: match glide.follows[ix] {
                         true => glide.now[ix],
                         false => glide.widest[ix],
                     },
                     end: first_flex.is_some_and(|flex| ix < flex),
                 },
                 (true, None) => Pin::Flex {
-                    hold: (!panels[ix].reflows).then_some(glide.widest[ix]),
+                    hold: (!glide.follows[ix]).then_some(glide.widest[ix]),
                 },
             })
             .collect();
@@ -315,7 +308,7 @@ impl ResizeGlide {
             .count();
         let rest = (extent - to.iter().flatten().copied().sum::<Pixels>()).max(px(0.));
         let flex_size = rest / flexes.max(1) as f32;
-        let widest = panels
+        let (widest, follows) = panels
             .iter()
             .zip(&current)
             .zip(&to)
@@ -326,9 +319,9 @@ impl ResizeGlide {
                     None if panel.shown => flex_size,
                     None => px(0.),
                 };
-                before.max(after)
+                (before.max(after), before > px(0.) && after > px(0.))
             })
-            .collect();
+            .unzip();
         let from: Vec<Pixels> = current
             .iter()
             .map(|current| current.unwrap_or_default())
@@ -340,6 +333,7 @@ impl ResizeGlide {
             from,
             to,
             widest,
+            follows,
             mounted: current
                 .iter()
                 .zip(panels)
@@ -391,10 +385,11 @@ impl ResizeFrame {
         }
     }
 
-    /// Panel `ix`'s content: laid out at its widest size while the group
-    /// glides and clipped to the panel, kept to the edge it slides in from,
-    /// and measured, so a glide knows where it starts. Always the same elements, so the content keeps what it
-    /// holds by its place in the tree.
+    /// Panel `ix`'s content: while the group glides, laid out at the size
+    /// it is drawn at when it is shown at both ends, and otherwise at its
+    /// widest, clipped to the panel and kept to the edge it slides in from;
+    /// measured, so a glide knows where it starts. Always the same elements,
+    /// so the content keeps what it holds by its place in the tree.
     pub(crate) fn hold(&self, ix: usize, content: impl IntoElement) -> AnyElement {
         let (hold, end) = match self.pins.get(ix) {
             Some(Pin::Sized { hold, end, .. }) => (Some(*hold), *end),
