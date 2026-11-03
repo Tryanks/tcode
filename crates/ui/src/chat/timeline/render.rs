@@ -637,7 +637,12 @@ impl ChatView {
         });
     }
 
-    fn open_diff(&mut self, turn: usize, path: Option<String>, cx: &mut Context<Self>) {
+    pub(in crate::chat) fn open_diff(
+        &mut self,
+        turn: usize,
+        path: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.workspace_store.update(cx, |store, cx| match path {
             Some(path) => store.open_diff_for_file(turn, path, cx),
             None => store.open_diff_for_turn(turn, cx),

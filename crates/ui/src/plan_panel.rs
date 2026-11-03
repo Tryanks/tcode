@@ -4,9 +4,9 @@ use crate::typography::TextRole as _;
 use crate::widgets::spinner::Spinner;
 use agent::{PlanStep, PlanStepStatus};
 use gpui::{
-    AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 
@@ -48,118 +48,6 @@ impl PlanPanel {
             last_steps: Vec::new(),
             _subscriptions: subscriptions,
         }
-    }
-
-    /// The steps, keyed by their text: a plan the agent rewrites folds the
-    /// steps it dropped away as they stood and folds new ones in, and the
-    /// steps it kept glide to their new places, carrying their state.
-    fn render_steps(
-        &self,
-        steps: &[PlanStep],
-        compact: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut seen = std::collections::HashMap::<&str, usize>::new();
-        let keyed = steps.iter().map(|step| {
-            let repeat = seen.entry(step.step.as_str()).or_default();
-            let key = SharedString::from(format!("{repeat}:{}", step.step));
-            *repeat += 1;
-            (key, step.clone())
-        });
-        let steps_col =
-            crate::motion::keyed("plan-steps", keyed, ROWS, window, cx, |key, step, _, cx| {
-                self.render_step(key, step, compact, cx)
-            })
-            .render(v_flex().w_full().min_w_0().gap_1());
-        let steps_col = material::rail_detail(steps_col, cx);
-        v_flex()
-            .w_full()
-            .gap_1()
-            .child(
-                div()
-                    .pt_1()
-                    .text_caption(cx)
-                    .child(crate::tr!("tasks.steps")),
-            )
-            .child(steps_col)
-            .into_any_element()
-    }
-
-    fn render_step(
-        &self,
-        key: &SharedString,
-        step: &PlanStep,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let foreground = cx.theme().foreground;
-        let primary = cx.theme().primary;
-        let status = step.status;
-        // The marker cross-fades as the step moves on, and a finished step's
-        // text fades to muted as it is struck through.
-        let marker_id = SharedString::from(format!("plan-step-marker-{key}"));
-        let text_id = SharedString::from(format!("plan-step-text-{key}"));
-        let marker = crate::motion::Sampled::new(move |window, cx| {
-            crate::motion::cross_fade_part(
-                marker_id,
-                status,
-                CHANGE,
-                window,
-                cx,
-                move |status, _, _| match status {
-                    PlanStepStatus::Completed => Icon::new(IconName::CircleCheck)
-                        .text_color(muted)
-                        .into_any_element(),
-                    PlanStepStatus::InProgress => Spinner::new().color(primary).into_any_element(),
-                    PlanStepStatus::Pending => Icon::new(IconName::CircleDot)
-                        .text_color(muted)
-                        .into_any_element(),
-                },
-            )
-        });
-        let completed = status == PlanStepStatus::Completed;
-        let label = step.step.clone();
-        let text = crate::motion::Sampled::new(move |window, cx| {
-            let color = gpui_base::motion::transition(
-                text_id,
-                if completed { muted } else { foreground },
-                gpui_base::motion::Transition::new(GLIDE),
-                window,
-                cx,
-            );
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_color(color)
-                .when(completed, |text| text.line_through())
-                .child(label)
-                .into_any_element()
-        });
-
-        let key = key.clone();
-        h_flex()
-            .id(SharedString::from(format!("plan-step-{key}")))
-            .debug_selector(move || format!("plan-step-{key}"))
-            .w_full()
-            .py_1()
-            .gap_2()
-            .items_start()
-            .text_body(compact, cx)
-            .child(
-                // One body line tall, so the marker centres on the first line.
-                h_flex()
-                    .flex_none()
-                    .h(if compact {
-                        cx.theme().tokens.typography.md.line_height
-                    } else {
-                        cx.theme().tokens.typography.sm.line_height
-                    })
-                    .child(marker),
-            )
-            .child(text)
-            .into_any_element()
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -210,7 +98,21 @@ impl Render for PlanPanel {
                 .px(px(inset))
                 .py_3()
                 .gap_3()
-                .child(self.render_steps(&steps, compact, window, cx));
+                .child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(
+                            div()
+                                .pt_1()
+                                .text_caption(cx)
+                                .child(crate::tr!("tasks.steps")),
+                        )
+                        .child(material::rail_detail(
+                            render_steps("plan-steps", &steps, compact, window, cx),
+                            cx,
+                        )),
+                );
             layers.push((
                 1,
                 v_flex()
@@ -232,6 +134,99 @@ impl Render for PlanPanel {
         }
         v_flex().size_full().child(fade.render(layers).size_full())
     }
+}
+
+/// A plan's steps, keyed by their text: a plan the agent rewrites folds the
+/// steps it dropped away as they stood and folds new ones in, and the steps
+/// it kept glide to their new places, carrying their state.
+pub(crate) fn render_steps(
+    id: &'static str,
+    steps: &[PlanStep],
+    compact: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let mut seen = std::collections::HashMap::<&str, usize>::new();
+    let keyed = steps.iter().map(|step| {
+        let repeat = seen.entry(step.step.as_str()).or_default();
+        let key = SharedString::from(format!("{repeat}:{}", step.step));
+        *repeat += 1;
+        (key, step.clone())
+    });
+    crate::motion::keyed(id, keyed, ROWS, window, cx, |key, step, _, cx| {
+        render_step(key, step, compact, cx)
+    })
+    .render(v_flex().w_full().min_w_0().gap_1())
+}
+
+fn render_step(key: &SharedString, step: &PlanStep, compact: bool, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let foreground = cx.theme().foreground;
+    let primary = cx.theme().primary;
+    let status = step.status;
+    // The marker cross-fades as the step moves on, and a finished step's
+    // text fades to muted as it is struck through.
+    let marker_id = SharedString::from(format!("plan-step-marker-{key}"));
+    let text_id = SharedString::from(format!("plan-step-text-{key}"));
+    let marker = crate::motion::Sampled::new(move |window, cx| {
+        crate::motion::cross_fade_part(
+            marker_id,
+            status,
+            CHANGE,
+            window,
+            cx,
+            move |status, _, _| match status {
+                PlanStepStatus::Completed => Icon::new(IconName::CircleCheck)
+                    .text_color(muted)
+                    .into_any_element(),
+                PlanStepStatus::InProgress => Spinner::new().color(primary).into_any_element(),
+                PlanStepStatus::Pending => Icon::new(IconName::CircleDot)
+                    .text_color(muted)
+                    .into_any_element(),
+            },
+        )
+    });
+    let completed = status == PlanStepStatus::Completed;
+    let label = step.step.clone();
+    let text = crate::motion::Sampled::new(move |window, cx| {
+        let color = gpui_base::motion::transition(
+            text_id,
+            if completed { muted } else { foreground },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        div()
+            .flex_1()
+            .min_w_0()
+            .text_color(color)
+            .when(completed, |text| text.line_through())
+            .child(label)
+            .into_any_element()
+    });
+
+    let key = key.clone();
+    h_flex()
+        .id(SharedString::from(format!("plan-step-{key}")))
+        .debug_selector(move || format!("plan-step-{key}"))
+        .w_full()
+        .py_1()
+        .gap_2()
+        .items_start()
+        .text_body(compact, cx)
+        .child(
+            // One body line tall, so the marker centres on the first line.
+            h_flex()
+                .flex_none()
+                .h(if compact {
+                    cx.theme().tokens.typography.md.line_height
+                } else {
+                    cx.theme().tokens.typography.sm.line_height
+                })
+                .child(marker),
+        )
+        .child(text)
+        .into_any_element()
 }
 
 #[cfg(test)]

@@ -298,7 +298,20 @@ impl ChatView {
                 .min_w_0()
                 .overflow_hidden()
                 .text_secondary(false, cx)
-                .children(card.summary(self, cx).map(crate::widgets::fade_text)),
+                // A new summary cross-fades over the one it replaces.
+                .child(self.motion.cross_fade_part(
+                    format!("rail-card-summary-{key}"),
+                    card.summary(self, cx),
+                    SHOW,
+                    window,
+                    cx,
+                    |summary, _, _| match summary {
+                        Some(summary) => {
+                            crate::widgets::fade_text(summary.clone()).into_any_element()
+                        }
+                        None => div().into_any_element(),
+                    },
+                )),
         )
         .child(
             crate::widgets::Chevron::new(SharedString::from(format!("rail-chevron-{key}")), open)
