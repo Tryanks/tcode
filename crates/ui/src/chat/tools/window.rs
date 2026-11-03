@@ -198,13 +198,19 @@ pub(in crate::chat) fn first_line(text: &str) -> Option<String> {
 }
 
 /// The line a failed call is told by: the header's own, else the first line
-/// of what it returned.
+/// of what it returned. A call whose header shows its exit code has none:
+/// the code says it failed, and the open body what it printed.
 pub(in crate::chat) fn failure_line(
     header: &Header,
     status: ItemStatus,
     output: Option<&str>,
 ) -> Option<String> {
-    if status != ItemStatus::Failed {
+    if status != ItemStatus::Failed
+        || header
+            .chips
+            .iter()
+            .any(|chip| matches!(chip, Chip::Exit(_)))
+    {
         return None;
     }
     header.error.clone().or_else(|| output.and_then(first_line))
