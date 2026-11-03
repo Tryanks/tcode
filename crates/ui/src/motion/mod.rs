@@ -596,8 +596,8 @@ impl CrossFade {
         self
     }
 
-    /// A leaving layer keeps the region's width, so content that sizes
-    /// itself to the width it is given stays as it was while it leaves.
+    /// A leaving layer is held to the region's width, not widened by
+    /// content wider than the region.
     pub(crate) fn span(mut self) -> Self {
         self.span = true;
         self
@@ -652,7 +652,14 @@ impl CrossFade {
                         if fill {
                             el.absolute().inset_0()
                         } else if leaving {
-                            el.absolute().top_0().left_0().when(span, |el| el.right_0())
+                            // As wide as the region at least, as it was while
+                            // current: out of flow, a row that fills the width
+                            // it is given would shrink to its content.
+                            el.absolute()
+                                .top_0()
+                                .left_0()
+                                .min_w_full()
+                                .when(span, |el| el.right_0())
                         } else if column {
                             el.flex().flex_col().flex_1().min_h_0()
                         } else {
@@ -960,6 +967,57 @@ mod tests {
                 .all(|pair| pair[1] >= pair[0] && pair[1] - pair[0] < px(24.)),
             "the fold was squeezed or jumped: {seen:?}"
         );
+    }
+
+    /// Two states of a region in a column, the first a bar that fills the
+    /// width it is given (a note card, a progress bar).
+    struct Bars {
+        current: usize,
+    }
+
+    impl Render for Bars {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let fade = CrossFade::new("bars", self.current, 2, CHANGE, window, cx);
+            let mut layers = Vec::new();
+            if fade.shows(0) {
+                layers.push((
+                    0,
+                    div()
+                        .debug_selector(|| "bar".into())
+                        .w_full()
+                        .h(px(20.))
+                        .into_any_element(),
+                ));
+            }
+            if fade.shows(1) {
+                layers.push((1, div().h(px(10.)).into_any_element()));
+            }
+            div()
+                .w(px(300.))
+                .flex()
+                .flex_col()
+                .child(fade.render(layers))
+        }
+    }
+
+    /// A state that filled its region's width keeps filling it while it
+    /// fades out, rather than shrinking to its content.
+    #[gpui::test]
+    fn a_leaving_state_keeps_the_width_it_filled(cx: &mut TestAppContext) {
+        use crate::test_frames::draw;
+        let (bars, cx) = cx.add_window_view(|_, _| Bars { current: 0 });
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        draw(cx);
+        assert_eq!(cx.debug_bounds("bar").unwrap().size.width, px(300.));
+        bars.update(cx, |bars, cx| {
+            bars.current = 1;
+            cx.notify();
+        });
+        draw(cx);
+        cx.executor().advance_clock(CHANGE / 4);
+        draw(cx);
+        let leaving = cx.debug_bounds("bar").expect("drawn while it leaves");
+        assert_eq!(leaving.size.width, px(300.));
     }
 
     /// A chip between two neighbours in a row with a gap.
