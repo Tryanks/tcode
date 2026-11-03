@@ -1229,12 +1229,20 @@ mod tests {
             "expected downward auto-scroll, got {scrolled:?}"
         );
 
-        // The release stops it.
-        cx.simulate_mouse_up(
-            point(px(5.), bottom - px(8.)),
-            MouseButton::Left,
-            Modifiers::default(),
+        // Past the window's bottom it keeps scrolling, faster.
+        let outside = point(px(5.), bottom + px(60.));
+        cx.simulate_mouse_move(outside, Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(48));
+        cx.run_until_parked();
+        let faster = deltas(cx)[scrolled.len()..].to_vec();
+        assert!(
+            !faster.is_empty() && faster.iter().all(|delta| *delta < scrolled[0]),
+            "expected faster auto-scroll than {scrolled:?}, got {faster:?}"
         );
+
+        // The release, there too, stops it.
+        cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
         draw(cx);
         let settled = deltas(cx).len();
         cx.executor().advance_clock(Duration::from_millis(64));
