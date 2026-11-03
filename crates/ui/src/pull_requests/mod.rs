@@ -65,7 +65,8 @@ gpui::actions!(
     [OpenLinkDialog, OpenSourceControl, ShowAgentTools]
 );
 
-fn appearance(state: PullRequestBadgeState, cx: &App) -> (IconName, Hsla, &'static str) {
+/// The glyph, colour and locale key a pull request's state shows in.
+pub(crate) fn appearance(state: PullRequestBadgeState, cx: &App) -> (IconName, Hsla, &'static str) {
     match state {
         PullRequestBadgeState::Open => (
             IconName::GitPullRequest,
@@ -104,6 +105,60 @@ fn row_state(
         (None, Some(PullRequestState::Closed)) => PullRequestBadgeState::Closed,
         (snapshot, _) => PullRequestBadgeState::of(snapshot),
     }
+}
+/// The glyph, colour and locale key a pull request's checks rollup shows in.
+pub(crate) fn checks_appearance(checks: ChecksState, cx: &App) -> (IconName, Hsla, &'static str) {
+    match checks {
+        ChecksState::Passing => (
+            IconName::CircleCheck,
+            cx.theme().success,
+            "pull_requests.checks_passing",
+        ),
+        ChecksState::Failing => (
+            IconName::CircleX,
+            cx.theme().danger,
+            "pull_requests.checks_failing",
+        ),
+        ChecksState::Pending => (
+            IconName::CircleDashed,
+            cx.theme().warning,
+            "pull_requests.checks_pending",
+        ),
+    }
+}
+/// The glyph, colour and locale key a pull request's review decision shows in.
+pub(crate) fn review_appearance(
+    review: ReviewDecision,
+    cx: &App,
+) -> (IconName, Hsla, &'static str) {
+    match review {
+        ReviewDecision::Approved => (
+            IconName::BadgeCheck,
+            cx.theme().success,
+            "pull_requests.review_approved",
+        ),
+        ReviewDecision::ChangesRequested => (
+            IconName::MessageSquareWarning,
+            cx.theme().danger,
+            "pull_requests.review_changes_requested",
+        ),
+        ReviewDecision::Required => (
+            IconName::MessageSquareMore,
+            cx.theme().muted_foreground,
+            "pull_requests.review_required",
+        ),
+    }
+}
+/// Opens `key` in thread `id`'s Pull requests tab, with that thread focused.
+pub(crate) fn open_in_thread(
+    store: &mut WorkspaceStore,
+    id: &str,
+    key: PullRequestKey,
+    cx: &mut Context<WorkspaceStore>,
+) {
+    store.select_session(id.to_owned(), cx);
+    store.open_tab_for(id, RightTab::PullRequests, cx);
+    store.set_open_pull_request(id, Some(key), cx);
 }
 fn single_number(links: &[ThreadPullRequestLink]) -> Option<u64> {
     links
@@ -362,9 +417,7 @@ pub fn sidebar_badge(
                                 .on_hover(on_hover)
                                 .on_click(move |_, _, cx| {
                                     store.update(cx, |store, cx| {
-                                        store.select_session(id.clone(), cx);
-                                        store.open_tab_for(&id, RightTab::PullRequests, cx);
-                                        store.set_open_pull_request(&id, Some(open.clone()), cx);
+                                        open_in_thread(store, &id, open.clone(), cx)
                                     });
                                 })
                                 .child(Icon::new(glyph).text_color(color))
@@ -1257,23 +1310,7 @@ impl PullRequestsPanel {
             window,
             cx,
         ) {
-            let (icon, color, label) = match check.value {
-                ChecksState::Passing => (
-                    IconName::CircleCheck,
-                    cx.theme().success,
-                    "pull_requests.checks_passing",
-                ),
-                ChecksState::Failing => (
-                    IconName::CircleX,
-                    cx.theme().danger,
-                    "pull_requests.checks_failing",
-                ),
-                ChecksState::Pending => (
-                    IconName::CircleDashed,
-                    cx.theme().warning,
-                    "pull_requests.checks_pending",
-                ),
-            };
+            let (icon, color, label) = checks_appearance(check.value, cx);
             signals = signals.child(
                 check.fold_across(
                     div().pl_1().child(
@@ -1303,23 +1340,7 @@ impl PullRequestsPanel {
             window,
             cx,
         ) {
-            let (icon, color, label) = match review.value {
-                ReviewDecision::Approved => (
-                    IconName::BadgeCheck,
-                    cx.theme().success,
-                    "pull_requests.review_approved",
-                ),
-                ReviewDecision::ChangesRequested => (
-                    IconName::MessageSquareWarning,
-                    cx.theme().danger,
-                    "pull_requests.review_changes_requested",
-                ),
-                ReviewDecision::Required => (
-                    IconName::MessageSquareMore,
-                    cx.theme().muted_foreground,
-                    "pull_requests.review_required",
-                ),
-            };
+            let (icon, color, label) = review_appearance(review.value, cx);
             signals = signals.child(
                 review.fold_across(
                     div().pl_1().child(
