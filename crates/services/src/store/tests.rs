@@ -1548,3 +1548,32 @@ fn tool_output_recorded_in_provider_shapes_reads_back_canonical() {
         ]
     );
 }
+
+/// A tool call recorded now is stamped as canonical and reads back as it
+/// was recorded, so a reopened thread shows what the live one did, even
+/// when the tool's text is itself in a provider's block shape.
+#[test]
+fn a_canonical_tool_call_reads_back_as_recorded() {
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/w"), None);
+    meta.id = "canonical".into();
+    store.upsert_meta(&meta).unwrap();
+    let event = AgentEvent::ItemCompleted(agent::ThreadItem {
+        id: "call".into(),
+        parent_item_id: None,
+        content: agent::ItemContent::ToolCall {
+            image_reads: Vec::new(),
+            name: "tcode_control/read".into(),
+            input: serde_json::json!({}),
+            output: Some("[{\"type\":\"text\",\"text\":\"quoted\"}]".into()),
+            status: agent::ItemStatus::Completed,
+        },
+    });
+    store.append_event("canonical", 5, &event).unwrap();
+    assert_eq!(
+        String::from_utf8(store.read_event_log("canonical").unwrap()).unwrap(),
+        "{\"ts\":5,\"event\":{\"type\":\"item_completed\",\"id\":\"call\",\"content\":{\"kind\":\"tool_call\",\"name\":\"tcode_control/read\",\"input\":{},\"output\":\"[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"quoted\\\"}]\",\"status\":\"completed\"}},\"item_version\":1}\n"
+    );
+    assert_eq!(store.read_events("canonical").unwrap()[0].event, event);
+}

@@ -79,7 +79,14 @@ struct EventEnvelope {
     event: AgentEvent,
     #[serde(default)]
     file_diff_version: Option<u8>,
+    #[serde(default)]
+    item_version: Option<u8>,
 }
+
+/// Stamped on every item row written since adapters record items
+/// canonically: a tool call's `output` is its text, with its images in
+/// `image_reads`. A row without it is read through [`legacy_item`].
+const ITEM_VERSION: u8 = 1;
 
 #[derive(Serialize)]
 struct EventEnvelopeRef<'a> {
@@ -91,6 +98,8 @@ struct EventEnvelopeRef<'a> {
     event: &'a AgentEvent,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_diff_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_version: Option<u8>,
 }
 
 impl<'a> EventEnvelopeRef<'a> {
@@ -100,16 +109,18 @@ impl<'a> EventEnvelopeRef<'a> {
         author: Option<&'a Author>,
         origin: Option<tcode_core::session::MessageOrigin>,
     ) -> Self {
-        let file_change = match event {
+        let (file_change, item) = match event {
             AgentEvent::ItemStarted(item)
             | AgentEvent::ItemUpdated(item)
-            | AgentEvent::ItemCompleted(item) => {
-                matches!(item.content, agent::ItemContent::FileChange { .. })
-            }
-            AgentEvent::ApprovalRequested(request) => {
-                matches!(request.kind, agent::ApprovalKind::FileChange { .. })
-            }
-            _ => false,
+            | AgentEvent::ItemCompleted(item) => (
+                matches!(item.content, agent::ItemContent::FileChange { .. }),
+                true,
+            ),
+            AgentEvent::ApprovalRequested(request) => (
+                matches!(request.kind, agent::ApprovalKind::FileChange { .. }),
+                false,
+            ),
+            _ => (false, false),
         };
         Self {
             origin,
@@ -117,6 +128,7 @@ impl<'a> EventEnvelopeRef<'a> {
             ts,
             event,
             file_diff_version: file_change.then_some(1),
+            item_version: item.then_some(ITEM_VERSION),
         }
     }
 }
@@ -1478,10 +1490,10 @@ impl ParsedRecord {
     }
 }
 
-/// A tool call recorded before every adapter kept results canonical holds
-/// its provider's result shape in `output`; it reads back as the text and
-/// images a new row holds.
-fn canonical_tool_output(event: &mut AgentEvent) {
+/// An item row written before [`ITEM_VERSION`], as a new row holds it. A
+/// tool call recorded before every adapter kept results canonical holds its
+/// provider's result shape in `output`; it reads back as text and images.
+fn legacy_item(event: &mut AgentEvent) {
     if let AgentEvent::ItemStarted(item)
     | AgentEvent::ItemUpdated(item)
     | AgentEvent::ItemCompleted(item) = event
@@ -1501,7 +1513,7 @@ fn canonical_tool_output(event: &mut AgentEvent) {
 }
 
 pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::Error> {
-    let (mut stored, version) = match serde_json::from_str::<EventEnvelope>(line) {
+    let (mut stored, version, item_version) = match serde_json::from_str::<EventEnvelope>(line) {
         Ok(envelope) => (
             StoredEvent {
                 origin: envelope.origin,
@@ -1511,6 +1523,7 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::
                 elided: None,
             },
             envelope.file_diff_version,
+            envelope.item_version,
         ),
         Err(_) => (
             StoredEvent {
@@ -1521,9 +1534,12 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::
                 elided: None,
             },
             None,
+            None,
         ),
     };
-    canonical_tool_output(&mut stored.event);
+    if item_version.is_none() {
+        legacy_item(&mut stored.event);
+    }
     let legacy_file_diff = version.is_none()
         && match &stored.event {
             AgentEvent::ItemStarted(item)
