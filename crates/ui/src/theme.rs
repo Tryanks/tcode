@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 pub use crate::highlight::HighlightTheme;
 pub use glide::glide_mode;
+pub(crate) use glide::mix;
 
 mod glide;
 
