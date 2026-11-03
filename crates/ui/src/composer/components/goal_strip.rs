@@ -22,7 +22,7 @@ pub(crate) fn status_label(status: GoalStatus) -> String {
 }
 
 /// The glyph and colour a goal's status shows in.
-pub(crate) fn status_mark(status: GoalStatus, cx: &App) -> (IconName, Hsla) {
+fn status_mark(status: GoalStatus, cx: &App) -> (IconName, Hsla) {
     let theme = cx.theme();
     match status {
         GoalStatus::Active => (IconName::CircleDot, theme.primary),
