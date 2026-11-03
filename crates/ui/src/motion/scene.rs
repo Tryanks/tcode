@@ -6,9 +6,13 @@
 //! opacity show what they share at three quarters, a visible dip. Here the
 //! scene left stays at full opacity beneath the one arriving, which rises
 //! over it, so what the two share holds still and only what differs
-//! dissolves. gpui-base has no such transition, and GPUI cannot draw a
-//! scene into a texture to fade a snapshot of it, so both scenes are drawn
-//! while the new one rises.
+//! dissolves. That holds only where the scene arriving covers the one it
+//! leaves: over a translucent canvas, a column one scene draws where the
+//! other draws a different one shows through it at full strength, so the
+//! owner fades such a part out beneath the scene rising over it
+//! ([`SceneFrame::unshared`]). gpui-base has no such transition, and GPUI
+//! cannot draw a scene into a texture to fade a snapshot of it, so both
+//! scenes are drawn while the new one rises.
 
 use std::hash::{DefaultHasher, Hash, Hasher as _};
 
@@ -119,6 +123,20 @@ impl<K: Clone + Eq + Hash> Scene<K> {
 }
 
 impl<K: Clone + Eq + Hash> SceneFrame<K> {
+    /// The opacity of a part of `scene` that the scenes above it, where
+    /// `shares` says they do not share it, draw differently: it fades out as
+    /// such a scene rises over it and back in as that one falls, while the
+    /// rest of `scene` stays opaque beneath.
+    pub(crate) fn unshared(&self, scene: &K, shares: impl Fn(&K) -> bool) -> f32 {
+        self.layers
+            .iter()
+            .skip_while(|(key, _)| key != scene)
+            .skip(1)
+            .filter(|(above, _)| !shares(above))
+            .map(|(_, opacity)| 1. - opacity)
+            .product()
+    }
+
     /// The scenes to build this frame, bottom to top.
     pub(crate) fn scenes(&self) -> impl Iterator<Item = &K> {
         self.layers.iter().map(|(key, _)| key)
