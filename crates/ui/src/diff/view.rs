@@ -275,6 +275,15 @@ impl DiffPanel {
             .update(cx, |pull_requests, cx| pull_requests.share_scene(scene, cx));
     }
 
+    /// The held turn `turn`'s number in the whole thread: the turns of its
+    /// log before the held ones count too.
+    fn turn_number(&self, session: &str, turn: usize, cx: &App) -> usize {
+        self.workspace_store
+            .read(cx)
+            .absolute_turn_for(Some(session), turn)
+            + 1
+    }
+
     fn selected_scope(&self, session: &str, cx: &App) -> Option<DiffScope> {
         self.scopes
             .get(session)
@@ -1004,7 +1013,9 @@ impl DiffPanel {
             .rev()
             .collect();
         let label = match selected_scope {
-            Some(DiffScope::Turn(turn)) => crate::tr!("diff.turn", count = turn + 1).into_owned(),
+            Some(DiffScope::Turn(turn)) => {
+                crate::tr!("diff.turn", count = self.turn_number(&session, turn, cx)).into_owned()
+            }
             Some(DiffScope::WorkingTree) => crate::tr!("diff.working_tree").into_owned(),
             Some(DiffScope::Branch) => crate::tr!("diff.branch_changes").into_owned(),
             None => crate::tr!("diff.no_changes").into_owned(),
@@ -1383,10 +1394,19 @@ impl DiffPanel {
         if text.is_empty() {
             return;
         }
-        let (section_id, section_title) = match self.cache.as_ref().map(|cache| cache.scope) {
-            Some(DiffScope::Turn(turn)) => (format!("turn:{turn}"), format!("Turn {}", turn + 1)),
-            Some(DiffScope::WorkingTree) => ("unstaged".to_string(), "Working tree".to_string()),
-            Some(DiffScope::Branch) => ("branch".to_string(), "Branch changes".to_string()),
+        let (section_id, section_title) = match self
+            .cache
+            .as_ref()
+            .map(|cache| (cache.scope, cache.session.as_str()))
+        {
+            Some((DiffScope::Turn(turn), session)) => {
+                let number = self.turn_number(session, turn, cx);
+                (format!("turn:{number}"), format!("Turn {number}"))
+            }
+            Some((DiffScope::WorkingTree, _)) => {
+                ("unstaged".to_string(), "Working tree".to_string())
+            }
+            Some((DiffScope::Branch, _)) => ("branch".to_string(), "Branch changes".to_string()),
             None => ("diff".to_string(), "Review".to_string()),
         };
         let comment = ReviewComment::new(
@@ -1660,9 +1680,8 @@ fn turn_row(
     let panel = panel.clone();
     let session = session.to_string();
     let popover = popover.clone();
-    let label: gpui::SharedString = crate::tr!("diff.turn", count = turn + 1)
-        .into_owned()
-        .into();
+    let number = panel.read(cx).turn_number(&session, turn, cx);
+    let label: gpui::SharedString = crate::tr!("diff.turn", count = number).into_owned().into();
     menu_row(
         ("diff-turn-item", turn).into(),
         label.clone(),
