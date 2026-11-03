@@ -605,6 +605,9 @@ struct ContextMenuState {
     menu: Option<Entity<PopupMenu>>,
     /// Dismissed, and kept only to be drawn while it leaves.
     closing: bool,
+    /// Opened by a long press: the finger has lifted off the trigger, so
+    /// nothing but this marks which one the menu acts on.
+    held: bool,
     position: Point<Pixels>,
     _subscription: Option<Subscription>,
     _deferred: Option<gpui_base::DeferredPopover>,
@@ -613,8 +616,9 @@ struct ContextMenuState {
 impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> RenderOnce
     for ContextMenu<T>
 {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
+        let corner_radii = self.trigger.style().corner_radii.clone();
         let state = window.use_keyed_state((self.id.clone(), "context-menu"), cx, |_, _| {
             ContextMenuState::default()
         });
@@ -668,6 +672,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                     state.update(cx, |state, _| {
                         state.menu = Some(menu);
                         state.closing = false;
+                        state.held = long_press;
                         state.position = position;
                         state._subscription = Some(subscription);
                         state._deferred = Some(deferred);
@@ -710,9 +715,14 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             );
         }
         trigger = trigger.child(dismissal.release_listener());
-        let (menu, closing, position) = {
+        let (menu, closing, held, position) = {
             let state = state.read(cx);
-            (state.menu.clone(), state.closing, state.position)
+            (
+                state.menu.clone(),
+                state.closing,
+                state.held,
+                state.position,
+            )
         };
         // Sampled only while there is a menu, so a mounted trigger with
         // none asks for no frames.
@@ -730,6 +740,14 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             && presence.should_render()
         {
             let progress = presence.progress;
+            if held {
+                let mut hold = div()
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().list_hover.opacity(progress));
+                hold.style().corner_radii = corner_radii;
+                trigger = trigger.child(hold);
+            }
             let surface = div()
                 .opacity(progress)
                 .top(crate::motion::lift(progress))
