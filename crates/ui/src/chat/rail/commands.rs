@@ -1,17 +1,16 @@
-//! The commands the thread's agent ran in its latest turn, and those still
-//! running from an earlier one.
+//! The commands the thread's agent ran in its latest turn.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use agent::{ItemContent, ItemStatus};
+use agent::ItemStatus;
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Role,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use gpui_base::{h_flex, v_flex};
-use tcode_core::session::{EntryContent, Timeline};
+use tcode_core::session::Timeline;
 
 use crate::chat::ChatView;
 use crate::chat::model::one_line_with_break_markers;
@@ -77,23 +76,21 @@ pub(in crate::chat) struct Commands {
 }
 
 impl Commands {
-    /// Lists again the commands of `timeline`'s latest turn and those of
-    /// earlier turns still running.
+    /// Lists again the commands of `timeline`'s latest turn. An earlier
+    /// turn's command left in progress is not listed: its turn has ended,
+    /// so nothing the timeline holds says it still runs.
     pub(in crate::chat) fn sync(&mut self, timeline: &Timeline) {
-        let latest = timeline.turns.len().checked_sub(1);
         let mut running = Vec::new();
         let mut settled = Vec::new();
-        for entry in &timeline.entries {
-            let status = match &entry.content {
-                EntryContent::Item(
-                    ItemContent::CommandExecution { status, .. }
-                    | ItemContent::ToolCall { status, .. },
-                ) => *status,
-                _ => continue,
-            };
-            if Some(entry.turn) != latest && status != ItemStatus::InProgress {
-                continue;
-            }
+        let Some(latest) = timeline.turns.len().checked_sub(1) else {
+            *self = Self::default();
+            return;
+        };
+        // Entries are in turn order, so the latest turn's are the last.
+        let start = timeline
+            .entries
+            .partition_point(|entry| entry.turn < latest);
+        for entry in &timeline.entries[start..] {
             let Some(ran) = shell::ran(entry) else {
                 continue;
             };
