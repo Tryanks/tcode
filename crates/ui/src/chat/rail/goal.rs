@@ -1,0 +1,124 @@
+//! The harness's standing goal for the thread, as it reports it.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
+
+use agent::{Goal, GoalStatus};
+use gpui::{
+    AnyElement, App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _,
+    Window, div,
+};
+use gpui_base::{h_flex, v_flex};
+
+use crate::chat::ChatView;
+use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
+
+/// How long a part of the card takes to cross-fade to another of its
+/// states, or to fold in or away.
+const CHANGE: Duration = Duration::from_millis(200);
+
+fn goal<'a>(chat: &ChatView, cx: &'a App) -> Option<&'a Goal> {
+    chat.workspace_store
+        .read(cx)
+        .session_status_for(chat.session_id.as_deref())?
+        .goal
+        .as_ref()
+}
+
+/// Whether the card has something to show for `chat`'s thread now.
+pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
+    goal(chat, cx).is_some()
+}
+
+/// The line the card's header shows beside its title, open or shut: the
+/// goal's status, then the time, tokens and checks it has taken.
+pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
+    let goal = goal(chat, cx)?;
+    let status = crate::composer::goal_status_label(goal.status);
+    let usage = crate::composer::goal_usage_line(goal);
+    Some(
+        if usage.is_empty() {
+            status
+        } else {
+            format!("{status} · {usage}")
+        }
+        .into(),
+    )
+}
+
+/// What the card shows open, laid out at the rail's width: the objective
+/// under its status's glyph, and the latest check's verdict while the goal
+/// is not met. A goal cleared while the card leaves is drawn as it stood.
+pub(super) fn body(
+    chat: &ChatView,
+    window: &mut Window,
+    cx: &mut Context<ChatView>,
+) -> Option<AnyElement> {
+    let last = chat.motion.keep::<Rc<RefCell<Option<Goal>>>>("rail-goal");
+    if let Some(goal) = goal(chat, cx) {
+        last.replace(Some(goal.clone()));
+    }
+    let goal = last.borrow().clone()?;
+    let (icon, color) = crate::composer::goal_status_mark(goal.status, cx);
+    let status = crate::motion::status_icon("rail-goal-status", icon, color, CHANGE, window, cx);
+    let verdict = chat
+        .motion
+        .shown(
+            "rail-goal-last-check",
+            goal.last_check
+                .clone()
+                .filter(|_| goal.status != GoalStatus::Complete),
+            CHANGE,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let reason = shown.value.clone();
+            shown.fold(
+                div()
+                    .w_full()
+                    .pt_1()
+                    .line_clamp(3)
+                    .text_secondary(false, cx)
+                    .child(crate::tr!(
+                        "composer.goal_last_check",
+                        reason = reason.as_str()
+                    )),
+            )
+        });
+    let objective = chat.motion.cross_fade_part(
+        "rail-goal-objective",
+        goal.objective.clone(),
+        CHANGE,
+        window,
+        cx,
+        |objective, _, cx| {
+            div()
+                .w_full()
+                .line_clamp(4)
+                .text_body(false, cx)
+                .text_color(cx.theme().foreground)
+                .child(objective.clone())
+                .into_any_element()
+        },
+    );
+    Some(
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .px_1()
+            .gap_2()
+            .items_start()
+            .child(div().flex_none().pt_0p5().child(status))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(objective)
+                    .children(verdict),
+            )
+            .into_any_element(),
+    )
+}

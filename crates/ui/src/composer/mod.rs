@@ -5,6 +5,11 @@
 mod components;
 pub(crate) mod model;
 
+pub(crate) use components::goal_strip::{
+    status_label as goal_status_label, status_mark as goal_status_mark,
+    usage_line as goal_usage_line,
+};
+
 use components::images::PendingImage;
 use components::steer_gesture::SteerGesture;
 #[cfg(feature = "voice")]

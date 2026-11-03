@@ -3,6 +3,7 @@
 
 mod agents;
 mod changes;
+mod goal;
 mod plan;
 pub(super) mod screen;
 
@@ -211,6 +212,7 @@ pub(super) fn slot(width: Pixels, presence: f32, cx: &App) -> gpui::Div {
 /// A card the rail can show, in the order it shows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RailCard {
+    Goal,
     Plan,
     Agents,
     Screen,
@@ -218,11 +220,18 @@ pub(super) enum RailCard {
 }
 
 impl RailCard {
-    const ALL: [Self; 4] = [Self::Plan, Self::Agents, Self::Screen, Self::Changes];
+    const ALL: [Self; 5] = [
+        Self::Goal,
+        Self::Plan,
+        Self::Agents,
+        Self::Screen,
+        Self::Changes,
+    ];
 
     /// Its key among the rail's cards and in the view's expansion state.
     fn key(self) -> &'static str {
         match self {
+            Self::Goal => "goal",
             Self::Plan => "plan",
             Self::Agents => "agents",
             Self::Screen => "screen",
@@ -233,7 +242,7 @@ impl RailCard {
     /// Whether the card shows open until the reader shuts it, rather than
     /// shut until the reader opens it.
     fn open_at_first(self) -> bool {
-        matches!(self, Self::Agents)
+        matches!(self, Self::Goal | Self::Agents)
     }
 
     /// Its key in the view's expansion state, which holds the cards the
@@ -252,6 +261,7 @@ impl RailCard {
 
     fn title(self) -> Cow<'static, str> {
         match self {
+            Self::Goal => crate::tr!("chat.rail_goal"),
             Self::Plan => crate::tr!("chat.rail_plan"),
             Self::Agents => crate::tr!("chat.rail_agents"),
             Self::Screen => crate::tr!("chat.rail_screen"),
@@ -261,6 +271,7 @@ impl RailCard {
 
     fn icon(self) -> IconName {
         match self {
+            Self::Goal => IconName::CircleDot,
             Self::Plan => IconName::Map,
             Self::Agents => IconName::Bot,
             Self::Screen => IconName::Monitor,
@@ -272,15 +283,16 @@ impl RailCard {
     /// gives way to while it is open.
     fn tab(self) -> Option<RightTab> {
         match self {
+            Self::Goal | Self::Screen => None,
             Self::Plan => Some(RightTab::Plan),
             Self::Agents => Some(RightTab::Agents),
-            Self::Screen => None,
             Self::Changes => Some(RightTab::Diff),
         }
     }
 
     fn present(self, chat: &ChatView, cx: &App) -> bool {
         match self {
+            Self::Goal => goal::present(chat, cx),
             Self::Plan => plan::present(chat, cx),
             Self::Agents => agents::present(chat, cx),
             Self::Screen => screen::present(chat, cx),
@@ -290,6 +302,7 @@ impl RailCard {
 
     fn summary(self, chat: &ChatView, cx: &App) -> Option<SharedString> {
         match self {
+            Self::Goal => goal::summary(chat, cx),
             Self::Plan => plan::summary(chat, cx),
             Self::Agents => agents::summary(chat, cx),
             Self::Screen => screen::summary(chat, cx),
@@ -304,6 +317,7 @@ impl RailCard {
         cx: &mut Context<ChatView>,
     ) -> Option<AnyElement> {
         match self {
+            Self::Goal => goal::body(chat, window, cx),
             Self::Plan => plan::body(chat, window, cx),
             Self::Agents => agents::body(chat, window, cx),
             Self::Screen => screen::body(chat, window, cx),
@@ -481,3 +495,4 @@ impl ChatView {
             .into_any_element()
     }
 }
+

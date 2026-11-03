@@ -82,6 +82,7 @@ chat:
   rail_agents: "Agents"
   rail_screen: "Screen"
   rail_changes: "Changes"
+  rail_goal: "Goal"
   copy: "Copy"
   copied: "Copied!"
   copy_message: "Copy message"
