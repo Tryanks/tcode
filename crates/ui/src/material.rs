@@ -24,18 +24,24 @@ pub(crate) const CHAT_CONTENT_MAX_WIDTH: f32 = 720.;
 /// Minimum horizontal padding around the shared chat/composer content column.
 pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
 /// The narrowest a side panel's content reads at: the right panel's (its
-/// icon tabs and own controls fit in it), and the chat's side rail, which
-/// shows some of the same content.
+/// icon tabs and own controls fit in it).
 pub(crate) const PANEL_CONTENT_MIN_WIDTH: f32 = 320.;
-/// The chat's side rail: as wide as a panel's narrowest content.
-pub(crate) const CHAT_RAIL_WIDTH: f32 = PANEL_CONTENT_MIN_WIDTH;
+/// The chat's side rail at its narrowest: a card header still holds its
+/// title, a few words of summary and its chevron. Kept below a panel's
+/// narrowest so the rail sits beside the centred column of a maximized
+/// 1512pt window with the sidebar open, whose chat is about 1256 wide.
+pub(crate) const CHAT_RAIL_NARROWEST: f32 = 220.;
+/// The chat's side rail at its widest: a wider gutter only widens the room
+/// between the column and the rail, since card rows gain nothing past it.
+pub(crate) const CHAT_RAIL_WIDEST: f32 = 300.;
 /// Between the chat's content column and its side rail.
-pub(crate) const CHAT_RAIL_GAP: f32 = CHAT_CONTENT_MIN_PADDING;
-/// Between the side rail and the chat's right edge, where the timeline's
-/// scrollbar stays clear of it.
-pub(crate) const CHAT_RAIL_EDGE: f32 = CHAT_CONTENT_MIN_PADDING;
-/// The width the side rail takes from the chat, with its gap and its edge.
-pub(crate) const CHAT_RAIL_SPAN: f32 = CHAT_RAIL_WIDTH + CHAT_RAIL_GAP + CHAT_RAIL_EDGE;
+pub(crate) const CHAT_RAIL_GAP: f32 = 16.;
+/// Between the side rail and the chat's right edge: the timeline
+/// scrollbar's track is this wide, so the rail stays clear of it.
+pub(crate) const CHAT_RAIL_EDGE: f32 = 16.;
+/// The least width the side rail takes from the chat, with its gap and its
+/// edge.
+pub(crate) const CHAT_RAIL_SPAN: f32 = CHAT_RAIL_NARROWEST + CHAT_RAIL_GAP + CHAT_RAIL_EDGE;
 /// From this chat width the side rail fits in the gutter right of the
 /// centred column, which never moves for it.
 pub(crate) const CHAT_RAIL_WIDE_MIN_WIDTH: f32 = CHAT_CONTENT_MAX_WIDTH + 2. * CHAT_RAIL_SPAN;

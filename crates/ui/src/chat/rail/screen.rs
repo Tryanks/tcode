@@ -16,7 +16,7 @@ use tcode_core::session::TimelineEntry;
 use crate::chat::ChatView;
 use crate::chat::tools::{Call, desktop};
 use crate::icon::IconName;
-use crate::material::{CARD_INSET, CHAT_RAIL_WIDTH};
+use crate::material::{CARD_INSET, CHAT_RAIL_WIDEST};
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -26,10 +26,14 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 /// cross-fade over the one it replaces.
 const CHANGE: Duration = Duration::from_millis(200);
 
-/// The picture's box: the card's inner width, at the 16:10 most screens
-/// and windows come near; a screenshot of another shape is fitted inside.
-const WIDTH: f32 = CHAT_RAIL_WIDTH - 2. * CARD_INSET;
-const HEIGHT: f32 = WIDTH * 10. / 16.;
+/// The picture box's height for its width: the 16:10 most screens and
+/// windows come near; a screenshot of another shape is fitted inside.
+const ASPECT: f32 = 10. / 16.;
+
+/// The box a preview is decoded for: the picture's at the widest rail, so
+/// resizing the window only scales the picture rather than reading it
+/// again at each width.
+const PREVIEW_WIDTH: f32 = CHAT_RAIL_WIDEST - 2. * CARD_INSET;
 
 /// One screenshot an observation read back.
 #[derive(Clone, Debug, PartialEq)]
@@ -146,13 +150,18 @@ pub(super) fn body(
     let position = screen.position()?;
     let total = screen.shots.len();
     let session_id = chat.session_id.clone()?;
+    // The picture's box is the card's inner width. The cross-fade layers
+    // have no size of their own, so the box and the rows beside it take it
+    // explicitly.
+    let width = f32::from(chat.body.width()) - 2. * CARD_INSET;
+    let height = width * ASPECT;
     let preview = |shot: &Shot| {
         crate::store::item_image_preview(
             session_id.clone(),
             shot.entry_id.clone(),
             shot.index,
-            WIDTH,
-            HEIGHT,
+            PREVIEW_WIDTH,
+            PREVIEW_WIDTH * ASPECT,
         )
     };
     let target = &screen.shots[position];
@@ -191,8 +200,8 @@ pub(super) fn body(
                 cx,
             );
             img(source)
-                .w(px(WIDTH))
-                .h(px(HEIGHT))
+                .w(px(width))
+                .h(px(height))
                 .object_fit(ObjectFit::Contain)
                 .opacity(arrived)
                 .with_fallback(crate::image_viewer::unpreviewed(true, false, cx))
@@ -210,7 +219,7 @@ pub(super) fn body(
                 crate::time::humanize_ago(crate::time::now_secs().saturating_sub(ms / 1000))
             });
             h_flex()
-                .w(px(WIDTH))
+                .w(px(width))
                 .gap(cx.theme().tokens.spacing.sm)
                 .text_secondary(false, cx)
                 .child(
@@ -251,8 +260,8 @@ pub(super) fn body(
     let picture = crate::material::accessible_clickable(
         div()
             .relative()
-            .w(px(WIDTH))
-            .h(px(HEIGHT))
+            .w(px(width))
+            .h(px(height))
             .cursor_pointer()
             .rounded(crate::material::radius_card(cx))
             .overflow_hidden()
@@ -297,7 +306,7 @@ pub(super) fn body(
             );
             fold.fold(
                 h_flex()
-                    .w(px(WIDTH))
+                    .w(px(width))
                     .justify_center()
                     .gap(cx.theme().tokens.spacing.sm)
                     .child(
