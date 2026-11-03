@@ -88,6 +88,13 @@ impl SharedMoves {
         });
     }
 
+    /// Forgets where every element was drawn: the view starts a new scene,
+    /// whose elements are drawn in their places at once, as those of a
+    /// view's first frame are, however their keys match the last scene's.
+    pub(crate) fn clear(&self) {
+        self.0.borrow_mut().placed.clear();
+    }
+
     /// Element `key` is drawn in `site` this frame. If it was drawn in
     /// another site on the last frame, it travels here from there; while it
     /// travels, its transit. Reduced motion puts it here at once.

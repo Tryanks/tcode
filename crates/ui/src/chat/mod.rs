@@ -141,7 +141,8 @@ pub struct ChatView {
     /// or wide, a zoom as it starts and lands, and the dock when it builds
     /// the panes' tree anew, which would start element-keyed motion over at
     /// its end. Swept as the view renders, so what is drawn again after
-    /// a frame without it starts at rest.
+    /// a frame without it starts at rest, and cleared as it shows another
+    /// thread ([`Self::start_scene`]).
     pub(super) motion: crate::motion::owned::Owned,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
@@ -485,6 +486,20 @@ impl ChatView {
         self.session_id = session_id;
         self.timeline_stale = true;
         cx.notify();
+    }
+
+    /// The view shows another thread from this frame: a new scene, which
+    /// nothing moves into from the last one. Its motion is keyed by what
+    /// it draws (a turn's index, a control's name), which another thread
+    /// draws too, so each part of it would carry on from where the last
+    /// thread left its namesake. The same thread drawn under a new parent
+    /// keeps all of it.
+    pub(super) fn start_scene(&mut self) {
+        self.motion.clear();
+        self.shared.clear();
+        self.rows_motion.clear();
+        self.hover.clear();
+        self.terminal_glide.reset();
     }
 }
 
