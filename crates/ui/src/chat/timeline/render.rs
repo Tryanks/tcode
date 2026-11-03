@@ -45,7 +45,7 @@ impl ChatView {
     /// The trailer reads the whole turn (pending steers, the last
     /// timestamp). `pinned` carries the ids of the last user / last assistant
     /// message in the whole timeline: their action rows stay visible instead
-    /// of waiting for a hover, so Copy is never invisible-and-hover-only.
+    /// of waiting for a hover, except a turn footer's, which always waits.
     pub(in crate::chat) fn render_row(
         &mut self,
         args: RowRenderArgs<'_>,
@@ -205,7 +205,6 @@ impl ChatView {
                             components::assistant::EndingActions {
                                 id: entry.id.clone(),
                                 copied,
-                                pinned,
                                 compact,
                             },
                             copy_text.clone(),

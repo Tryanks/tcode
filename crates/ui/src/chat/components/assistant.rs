@@ -7,9 +7,9 @@ use crate::typography::TextRole as _;
 use crate::widgets::copy::copy_button;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity,
+    InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -100,12 +100,12 @@ fn hover_key(id: &str) -> SharedString {
 }
 
 /// The actions of a message that ends its turn, as its turn's footer draws
-/// them: at the message's hover reveal, which the footer takes too.
+/// them: at the message's hover reveal, which the footer takes too, or while
+/// the keyboard is on one of them.
 #[derive(Clone)]
 pub(crate) struct EndingActions {
     pub(crate) id: String,
     pub(crate) copied: bool,
-    pub(crate) pinned: bool,
     pub(crate) compact: bool,
 }
 
@@ -116,20 +116,31 @@ impl EndingActions {
         motion: &crate::motion::owned::Owned,
         on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         window: &mut Window,
-        cx: &App,
+        cx: &mut App,
     ) -> AnyElement {
-        let reveal = if self.pinned || self.compact {
-            1.
-        } else {
-            hover.reveal(&hover_key(&self.id), window, cx)
-        };
         let key = format!("assistant:{}", self.id);
         let selector = format!("copy-{key}");
+        let (focus, focused) = crate::motion::focus_ring::focus_reveal(
+            &ElementId::from(SharedString::from(selector.clone())),
+            true,
+            window,
+            cx,
+        );
+        let reveal = if self.compact {
+            1.
+        } else {
+            hover.reveal(&hover_key(&self.id), window, cx).max(focused)
+        };
         let copy = copy_button(&key, self.copied, self.compact, on_copy, cx)
+            .track_focus(&focus)
             .motion(motion)
             .debug_selector(move || selector);
-        let actions = h_flex().gap(px(2.)).items_center().child(copy);
-        reserve_action_row(actions, reveal, self.pinned, self.compact).into_any_element()
+        // Out by opacity alone, unlike [`reserve_action_row`]: an invisible
+        // control is no tab stop, and focus is what brings it in.
+        action_row(self.compact)
+            .opacity(reveal)
+            .child(h_flex().gap(px(2.)).items_center().child(copy))
+            .into_any_element()
     }
 
     /// The footer's `on_hover`, when its actions wait for one.
@@ -137,7 +148,7 @@ impl EndingActions {
         &self,
         hover: &crate::motion::ListHover,
     ) -> Option<impl Fn(&bool, &mut Window, &mut App) + 'static> {
-        (!self.pinned && !self.compact).then(|| hover.on_hover(hover_key(&self.id)))
+        (!self.compact).then(|| hover.on_hover(hover_key(&self.id)))
     }
 }
 
@@ -217,7 +228,12 @@ pub(crate) fn assistant(
     let below = actions == MessageActions::Below;
     // Only a message with actions takes the timeline's hover, so a row
     // moving under a still pointer redraws nothing it need not.
-    let reveals = actions != MessageActions::None && !pinned && !compact;
+    let reveals = !compact
+        && match actions {
+            MessageActions::None => false,
+            MessageActions::Below => !pinned,
+            MessageActions::InFooter => true,
+        };
     let on_hover = hover.on_hover(hover_key.clone());
     v_flex()
         .id(hover_key.clone())
@@ -256,6 +272,16 @@ pub(crate) fn reserve_action_row(
     pinned: bool,
     compact: bool,
 ) -> Div {
+    action_row(compact)
+        .when(!pinned && !compact, |this| {
+            this.opacity(reveal)
+                .when(reveal <= 0., |this| this.invisible())
+        })
+        .child(actions)
+}
+
+/// The height every message's action row keeps, its actions centred in it.
+fn action_row(compact: bool) -> Div {
     div()
         .h(px(if compact {
             crate::material::TOUCH_TARGET
@@ -264,11 +290,6 @@ pub(crate) fn reserve_action_row(
         }))
         .flex()
         .items_center()
-        .when(!pinned && !compact, |this| {
-            this.opacity(reveal)
-                .when(reveal <= 0., |this| this.invisible())
-        })
-        .child(actions)
 }
 
 #[cfg(test)]
