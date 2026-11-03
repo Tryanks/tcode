@@ -901,9 +901,9 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// The thread under its header, `width` wide: its timeline with the side
-    /// rail over its gutter, its deliveries and its composer, with the
-    /// terminal drawer below when it is open.
+    /// The thread under its header, `width` wide: its timeline, its
+    /// deliveries and its composer, with the side rail (or the agent's card)
+    /// right of their column, and the terminal drawer below when it is open.
     fn render_body(
         &mut self,
         width: gpui::Pixels,
@@ -974,6 +974,9 @@ impl ChatView {
             // tail-resume calculations include it. Keep the inset outside the
             // list so every input path shares the same bottom and pixel offset.
             v_flex()
+                .when(self.is_side(), |timeline| {
+                    timeline.debug_selector(|| "chat-side-timeline".into())
+                })
                 .flex_1()
                 .min_h_0()
                 .relative()
@@ -1128,7 +1131,12 @@ impl ChatView {
         }
 
         let delivery_inset = gpui::rems(1.).to_pixels(window.rem_size());
+        let slots = rail::Slots {
+            below_card: self.composer.read(cx).below_card(),
+            slots: rail.into_iter().chain(side.card.take()).collect(),
+        };
         let main = v_flex()
+            .relative()
             .size_full()
             .min_h_0()
             .on_action(cx.listener(Self::on_link_url))
@@ -1195,8 +1203,6 @@ impl ChatView {
                         .size_full(),
                     )
                     .children(self.render_scroll_pill(show_jump_to_latest, window, cx))
-                    .children(rail)
-                    .children(side.card.take())
                     .children(phone_strip),
             )
             .child(
@@ -1224,7 +1230,8 @@ impl ChatView {
                         cx.listener(|this, _, _, cx| this.dismiss_highlight(cx)),
                     )
                     .child(composer),
-            );
+            )
+            .child(slots);
         let main = self.cover_with_side(main.into_any_element(), side, cx);
 
         // Opening and closing the drawer glide; entering or leaving the

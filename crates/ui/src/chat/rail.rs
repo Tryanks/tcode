@@ -197,17 +197,114 @@ fn side_widest(body: f32) -> f32 {
     body - CHAT_CONTENT_MAX_WIDTH - CHAT_CONTENT_MIN_PADDING - CHAT_RAIL_GAP - CHAT_RAIL_EDGE
 }
 
-/// The slot right of the content column, over the timeline's right gutter,
-/// that the rail or an agent's card takes, `width` wide and `presence` of
-/// the way in: it fades and slides in from the right, and out to it.
+/// The slot right of the content column that the rail or an agent's card
+/// takes, `width` wide and `presence` of the way in, in a [`Slots`]: from
+/// the timeline's top inset down to the bottom of the composer's card. It
+/// fades and slides in from the right, and out to it.
 pub(super) fn slot(width: Pixels, presence: f32, cx: &App) -> gpui::Div {
     div()
         .absolute()
         .top(super::timeline_inset(cx))
-        .bottom(px(CHAT_CONTENT_MIN_PADDING))
+        .bottom_0()
         .right(px(CHAT_RAIL_EDGE - SLIDE * (1. - presence)))
         .w(width)
         .opacity(presence)
+}
+
+/// What takes the slot, over the whole of the thread's body under its
+/// header (`slots`), ending where the composer's card does: `below_card`
+/// above the body's bottom, which the composer measures as it is laid out
+/// ([`crate::composer::Composer::below_card`]). The column beside the slot
+/// keeps clear of it ([`BodyLayout::shift`]), the composer's included.
+///
+/// Taffy cannot place one box by another's descendant, so this is laid out
+/// after the body, from the composer's measurement of this frame; it must
+/// come after the composer among the body's children.
+pub(super) struct Slots {
+    pub(super) below_card: std::rc::Rc<std::cell::Cell<Pixels>>,
+    pub(super) slots: Vec<AnyElement>,
+}
+
+impl gpui::IntoElement for Slots {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for Slots {
+    type RequestLayoutState = ();
+    type PrepaintState = Option<AnyElement>;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        let mut style = gpui::Style {
+            position: gpui::Position::Absolute,
+            ..Default::default()
+        };
+        style.inset = gpui::Edges::all(px(0.).into());
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let height = (bounds.size.height - self.below_card.get()).max(px(0.));
+        let mut slots = div()
+            .relative()
+            .w(bounds.size.width)
+            .h(height)
+            .children(std::mem::take(&mut self.slots))
+            .into_any_element();
+        slots.layout_as_root(
+            gpui::size(
+                gpui::AvailableSpace::Definite(bounds.size.width),
+                gpui::AvailableSpace::Definite(height),
+            ),
+            window,
+            cx,
+        );
+        slots.prepaint_at(bounds.origin, window, cx);
+        Some(slots)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<Pixels>,
+        _: &mut (),
+        slots: &mut Option<AnyElement>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(slots) = slots {
+            slots.paint(window, cx);
+        }
+    }
 }
 
 /// A card the rail can show, in the order it shows them.
@@ -346,7 +443,7 @@ impl ChatView {
             .collect()
     }
 
-    /// The rail over the timeline's right gutter, sliding and fading in and
+    /// The rail in the slot right of the column, sliding and fading in and
     /// out with the layout's presence; `cards` are those it shows now.
     pub(super) fn render_rail(
         &self,

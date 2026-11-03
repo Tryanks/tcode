@@ -8026,7 +8026,25 @@ mod tests {
         draw(cx);
     }
 
-    /// Open `agent-1` from its lead's Agents panel, and serve it.
+    /// `id`'s status as the host reports a native subagent's: read-only,
+    /// so its composer is its settings row and the lead's composer card is
+    /// the one on screen.
+    fn serve_subagent_status(host: &MountedShell, id: &str) {
+        let mut status = session_status(id, std::path::Path::new(PANES_CWD));
+        status.conversation_read_only = true;
+        send_events(
+            host,
+            vec![(
+                Topic::SessionStatus {
+                    session_id: id.into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(status)),
+            )],
+        );
+    }
+
+    /// Open `agent-1` from its lead's Agents panel, and serve it as a
+    /// native subagent with an empty log.
     fn open_agent_from_panel(
         shell: &Entity<AppShell>,
         host: &MountedShell,
@@ -8040,10 +8058,13 @@ mod tests {
         cx.simulate_click(row.center(), gpui::Modifiers::default());
         draw(cx);
         serve_thread(host, "agent-1");
+        serve_subagent_status(host, "agent-1");
         // The app applies what the host sent as it arrives; an agent come
         // back to draws from what was kept until its window lands.
         await_restore_update(shell, cx, |store| {
-            !store.chat_loading() && store.timeline_settled_for("agent-1")
+            !store.chat_loading()
+                && store.timeline_settled_for("agent-1")
+                && store.native_subagent_readonly_for(Some("agent-1"))
         });
         settle_panes(cx);
     }
@@ -8197,6 +8218,211 @@ mod tests {
         assert!(
             lead.right() < dragged.left(),
             "{lead:?} clear of {dragged:?}"
+        );
+    }
+
+    /// The first pane's timeline on screen.
+    fn lead_viewport(shell: &Entity<AppShell>, cx: &VisualTestContext) -> gpui::Bounds<Pixels> {
+        shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .chat()
+                .read(cx)
+                .capture_viewport()
+                .expect("the lead's timeline")
+        })
+    }
+
+    /// The timeline rows drawn with their middles between `left` and
+    /// `right`, top to bottom, with their indices.
+    fn rows_in(
+        left: Pixels,
+        right: Pixels,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(usize, gpui::Bounds<Pixels>)> {
+        (0..400)
+            .filter_map(|index| {
+                let row = cx.debug_bounds(format!("timeline-row-{index}").leak())?;
+                (row.center().x > left && row.center().x < right).then_some((index, row))
+            })
+            .collect()
+    }
+
+    /// A wheel at `at`, as a trackpad's gesture moving the content down
+    /// `by`, and the frames that land it.
+    fn wheel(at: gpui::Point<Pixels>, by: f32, cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        draw(cx);
+        for (phase, delta) in [
+            (gpui::TouchPhase::Started, 0.),
+            (gpui::TouchPhase::Moved, by),
+            (gpui::TouchPhase::Ended, 0.),
+        ] {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: at,
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            draw(cx);
+        }
+        settle_frames(cx);
+    }
+
+    /// The side rail, and an agent's card in its place beside its lead, run
+    /// from the top of the lead's timeline down to the bottom of the lead's
+    /// composer card, from the first frame the card is drawn. On the card,
+    /// the agent's header is at its top, its composer at its bottom and its
+    /// timeline takes the rest; a wheel there scrolls the agent's timeline
+    /// and leaves the lead's where it was. With the lead's terminal drawer
+    /// open, the card ends above it, with the composer. Covering a narrower
+    /// lead, the agent takes the wheel too.
+    #[gpui::test]
+    fn an_agent_beside_its_lead_spans_the_slot_and_takes_the_wheel(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        let store = store_of(&shell, cx);
+        serve_finished_turns(&host, "thread-1", 60, false);
+        await_restore_update(&shell, cx, |store| {
+            store.with_active_timeline(|timeline| timeline.turns.len()) == Some(60)
+        });
+        settle_frames(cx);
+        let slack = px(1.);
+        let rail = cx.debug_bounds("chat-rail").expect("the lead's rail");
+        let lead_card = cx
+            .debug_bounds("composer-card")
+            .expect("the lead's composer");
+        let viewport = lead_viewport(&shell, cx);
+        assert!(
+            (rail.top() - viewport.top()).abs() < slack
+                && (rail.bottom() - lead_card.bottom()).abs() < slack,
+            "{rail:?} from the top of {viewport:?} to the bottom of {lead_card:?}"
+        );
+
+        serve_finished_turns(&host, "agent-1", 30, false);
+        serve_subagent_status(&host, "agent-1");
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(&store, "agent-1".into(), Some("thread-1"), window, cx)
+        });
+        draw(cx);
+        // The first frame that draws the card, however little of it is in.
+        let mut first = None;
+        for _ in 0..10 {
+            first = cx.debug_bounds("chat-side-card");
+            if first.is_some() {
+                break;
+            }
+            display_frame(cx);
+        }
+        let first = first.expect("the agent's card comes in");
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading()
+                && store.timeline_settled_for("agent-1")
+                && store.native_subagent_readonly_for(Some("agent-1"))
+        });
+        settle_frames(cx);
+        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
+        assert_eq!(
+            (first.top(), first.bottom()),
+            (card.top(), card.bottom()),
+            "the card is as tall as it rests from its first frame"
+        );
+        let lead_card = cx
+            .debug_bounds("composer-card")
+            .expect("the lead's composer");
+        let viewport = lead_viewport(&shell, cx);
+        assert!(
+            (card.top() - viewport.top()).abs() < slack
+                && (card.bottom() - lead_card.bottom()).abs() < slack,
+            "{card:?} from the top of {viewport:?} to the bottom of {lead_card:?}"
+        );
+        let header = cx
+            .debug_bounds("chat-side-header")
+            .expect("the agent's header");
+        let timeline = cx
+            .debug_bounds("chat-side-timeline")
+            .expect("the agent's timeline");
+        let composer = cx
+            .debug_bounds("composer-subagent")
+            .expect("the agent's composer");
+        for part in [header, timeline, composer] {
+            assert!(
+                part.left() >= card.left() - slack
+                    && part.right() <= card.right() + slack
+                    && part.top() >= card.top() - slack
+                    && part.bottom() <= card.bottom() + slack,
+                "{part:?} on {card:?}"
+            );
+        }
+        assert!(
+            header.top() - card.top() < px(2.),
+            "{header:?} at the top of {card:?}"
+        );
+        assert!(
+            card.bottom() - composer.bottom() < px(16.),
+            "{composer:?} at the bottom of {card:?}"
+        );
+        assert!(
+            (timeline.top() - header.bottom()).abs() < slack && timeline.bottom() <= composer.top(),
+            "{timeline:?} between {header:?} and {composer:?}"
+        );
+
+        let (lead_row, lead_at) = *rows_in(viewport.left(), card.left(), cx)
+            .last()
+            .expect("the lead's rows");
+        let (agent_row, agent_at) = rows_in(card.left(), card.right(), cx)[0];
+        wheel(timeline.center(), 120., cx);
+        let agent_now = cx
+            .debug_bounds(format!("timeline-row-{agent_row}").leak())
+            .expect("the agent's row");
+        assert!(
+            agent_now.top() > agent_at.top() + px(60.),
+            "the agent's timeline scrolled: {agent_at:?} -> {agent_now:?}"
+        );
+        assert_eq!(
+            cx.debug_bounds(format!("timeline-row-{lead_row}").leak()),
+            Some(lead_at),
+            "the lead's timeline stays where it was"
+        );
+
+        // Over the lead's terminal drawer, the card still ends with the
+        // lead's composer card.
+        store.update(cx, |store, cx| {
+            store.toggle_terminal_panel_for("thread-1".into(), cx)
+        });
+        settle_frames(cx);
+        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
+        let above = cx
+            .debug_bounds("composer-card")
+            .expect("the lead's composer");
+        assert!(
+            above.bottom() < lead_card.bottom() - px(100.),
+            "the drawer opened under {above:?}"
+        );
+        assert!(
+            (card.bottom() - above.bottom()).abs() < slack,
+            "{card:?} ends with {above:?}, above the drawer"
+        );
+        store.update(cx, |store, cx| {
+            store.toggle_terminal_panel_for("thread-1".into(), cx)
+        });
+        settle_frames(cx);
+
+        // Too narrow for the card, the agent covers the lead.
+        resize(cx, 1000.);
+        settle_frames(cx);
+        assert_eq!(cx.debug_bounds("chat-side-card"), None);
+        let timeline = cx
+            .debug_bounds("chat-side-timeline")
+            .expect("the agent's timeline");
+        let (agent_row, agent_at) = rows_in(timeline.left(), timeline.right(), cx)[0];
+        wheel(timeline.center(), 120., cx);
+        let agent_now = cx
+            .debug_bounds(format!("timeline-row-{agent_row}").leak())
+            .expect("the agent's row");
+        assert!(
+            agent_now.top() > agent_at.top() + px(60.),
+            "the agent's timeline scrolled: {agent_at:?} -> {agent_now:?}"
         );
     }
 
