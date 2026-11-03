@@ -809,15 +809,6 @@ impl HostLink {
         self.send_payload(id, ClientPayload::Unsubscribe(subscription))
     }
 
-    /// Request another history window, advancing the cursor already applied locally.
-    pub fn update_after(&self, topic: &Topic, after: u64) -> Result<(), ProtocolError> {
-        let _transition = self.inner.subscription_transition.lock().unwrap();
-        if let Some(subscription) = self.advance_after(topic, after) {
-            self.send_subscription(subscription)?;
-        }
-        Ok(())
-    }
-
     /// Advance recovery memory without asking the host to resend an empty tail.
     pub fn remember_after(&self, topic: &Topic, after: u64) {
         let _transition = self.inner.subscription_transition.lock().unwrap();
@@ -1640,12 +1631,8 @@ mod tests {
         })
         .unwrap();
         outgoing.try_recv().unwrap();
-        link.update_after(&topic, 7).unwrap();
-        let updated = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
-        assert!(matches!(
-            updated.payload,
-            ClientPayload::Subscribe(Subscription { after: Some(7), .. })
-        ));
+        link.remember_after(&topic, 7);
+        assert!(outgoing.try_recv().is_err(), "remembering asks for nothing");
         link.set_connection_state(ConnectionState::Reconnecting {
             attempt: 1,
             reason: None,
@@ -1661,7 +1648,14 @@ mod tests {
         ));
 
         let replay = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
-        assert_eq!(updated.payload, replay.payload);
+        assert_eq!(
+            replay.payload,
+            ClientPayload::Subscribe(Subscription {
+                known_index: None,
+                topic: topic.clone(),
+                after: Some(7),
+            })
+        );
         let queued_reply = EventEnvelope {
             request_id: Some(replay.id),
             topic: topic.clone(),
