@@ -1834,7 +1834,9 @@ impl PullRequestsPanel {
                     .id("pr-agent-tools-scroll")
                     .when(share > 0., |list| list.flex_1().min_h_0())
                     .child(
-                        crate::widgets::Collapsible::new("pr-agent-tools-body", open).content(body),
+                        crate::widgets::Collapsible::new("pr-agent-tools-body", open)
+                            .motion(&self.motion)
+                            .content(body),
                     )
                     .overflow_y_scroll_area(),
             )

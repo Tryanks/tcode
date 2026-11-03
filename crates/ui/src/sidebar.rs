@@ -948,46 +948,20 @@ impl SessionsSidebar {
         }
     }
 
-    /// A list row inside folds, at `factor` of its height, `width` being the
-    /// list's width as it last laid out: the row is drawn
-    /// whole and clipped, fading with the height it has. Every row of a list
-    /// goes through here, so a row keeps its element tree as its folds move.
+    /// A list row inside folds, at `factor` of its height: the row is drawn
+    /// through [`crate::motion::fold`], clipped and fading with the height
+    /// it has. Every row of a list goes through here, so a row keeps its
+    /// element tree as its folds move. `id` names the row, not its index.
     fn fold_row(
         &mut self,
+        id: impl Into<gpui::ElementId>,
         factor: f32,
-        width: gpui::Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
-        render: impl Fn(&mut Self, &mut Window, &mut Context<Self>) -> gpui::AnyElement,
+        render: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> gpui::AnyElement,
     ) -> gpui::AnyElement {
         let row = render(self, window, cx);
-        let item = div().w_full();
-        if factor >= 1. {
-            return item.child(row).into_any_element();
-        }
-        // gpui-base's MotionReveal measures its content as it paints, so a
-        // row the list lays out before painting (one scrolled into view)
-        // would be zero tall for a frame; the row is measured here instead,
-        // only while it moves.
-        let height = if factor > 0. && width > px(0.) {
-            render(self, window, cx)
-                .layout_as_root(
-                    gpui::size(
-                        gpui::AvailableSpace::Definite(width),
-                        gpui::AvailableSpace::MinContent,
-                    ),
-                    window,
-                    cx,
-                )
-                .height
-        } else {
-            px(0.)
-        };
-        item.h(height * factor)
-            .overflow_hidden()
-            .opacity(factor)
-            .child(row)
-            .into_any_element()
+        crate::motion::fold(id, factor.clamp(0., 1.), row)
     }
 
     /// The list's body: while threads load, the skeleton (or the rows still
@@ -4317,7 +4291,6 @@ impl SessionsSidebar {
                     let reveal_model = model.clone();
                     this.compact_scroll.step(&this.compact_list_state, window, cx);
                     this.compact_presence.settle(&this.compact_list_state, cx);
-                    let compact_width = this.compact_list_state.viewport_bounds().size.width;
                     div()
                         .id("compact-thread-list")
                         .debug_selector(|| "compact-thread-list".into())
@@ -4373,10 +4346,10 @@ impl SessionsSidebar {
                                 this.compact_list_state.clone(),
                                 cx.processor(move |this, index: usize, window, cx| {
                                     let factor = model.folds.get(index).copied().unwrap_or(1.);
-                                    let folded = this.fold_row(factor, compact_width, window, cx, |this, window, cx| {
+                                    let name = model.rows[index].key();
+                                    let folded = this.fold_row(SharedString::from(format!("compact-fold-{name}")), factor, window, cx, |this, window, cx| {
                                         this.render_compact_row(&model.rows[index], window, cx)
                                     });
-                                    let name = model.rows[index].key();
                                     let key = presence::row_key(name);
                                     // The row's content glides to its new place; what folds away against it stays with its layout.
                                     let folded = this.compact_flip.row(
@@ -4924,7 +4897,6 @@ impl SessionsSidebar {
             flags,
         });
         self.grouped_drawn = frame.clone();
-        let grouped_width = self.grouped_list_state.viewport_bounds().size.width;
         let flip = self.grouped_flip.clone();
         let thread_list = list(
             self.grouped_list_state.clone(),
@@ -4934,10 +4906,10 @@ impl SessionsSidebar {
                 };
                 let factor = frame.folds.get(index).copied().unwrap_or(1.);
                 let name = row.key(&frame.groups);
-                let folded =
-                    this.fold_row(factor, grouped_width, window, cx, |this, window, cx| {
-                        this.render_grouped_row(index, row, &frame.groups, &frame.flags, window, cx)
-                    });
+                let fold_id = SharedString::from(format!("grouped-fold-{}-{}", name.0, name.1));
+                let folded = this.fold_row(fold_id, factor, window, cx, |this, window, cx| {
+                    this.render_grouped_row(index, row, &frame.groups, &frame.flags, window, cx)
+                });
                 let key = presence::row_key(name);
                 // The row's content glides to its new place; what folds away against it stays with its layout.
                 let folded = flip.row(
@@ -5126,17 +5098,17 @@ impl SessionsSidebar {
             active_id,
         });
         self.flat_drawn = frame.clone();
-        let flat_width = self.flat_list_state.viewport_bounds().size.width;
         let flip = self.flat_flip.clone();
         self.flat_scroll.step(&self.flat_list_state, window, cx);
         let thread_list = list(
             self.flat_list_state.clone(),
             cx.processor(move |this, index: usize, window, cx| {
                 let factor = frame.folds.get(index).copied().unwrap_or(1.);
-                let folded = this.fold_row(factor, flat_width, window, cx, |this, window, cx| {
+                let name = frame.rows.get(index).map_or(("", ""), FlatListRow::key);
+                let fold_id = SharedString::from(format!("flat-fold-{}-{}", name.0, name.1));
+                let folded = this.fold_row(fold_id, factor, window, cx, |this, window, cx| {
                     this.render_flat_row(&frame, index, window, cx)
                 });
-                let name = frame.rows.get(index).map_or(("", ""), FlatListRow::key);
                 let key = presence::row_key(name);
                 // The row's content glides to its new place; what folds away against it stays with its layout.
                 let folded = flip.row(

@@ -358,7 +358,9 @@ impl SettingsPage {
                         SharedString::from(format!("control-project-fold-{}", project.id));
                     let shown =
                         crate::motion::shown(fold_id.clone(), open.then_some(()), window, cx);
-                    let mut fold = crate::widgets::Collapsible::new(fold_id, open).w_full();
+                    let mut fold = crate::widgets::Collapsible::new(fold_id, open)
+                        .motion(&self.motion)
+                        .w_full();
                     if shown.is_some() {
                         let grant = own
                             .cloned()

@@ -224,6 +224,7 @@ impl SettingsPage {
                     "fallback-review-fold",
                     settings.abort_on_model_fallback,
                 )
+                .motion(&self.motion)
                 .w_full()
                 .content(v_flex().w_full().child(advisor).child(model))
                 .into_any_element(),
@@ -279,6 +280,7 @@ impl SettingsPage {
                 "auto-settle-days-fold",
                 settings.auto_settle_after_days.is_some(),
             )
+            .motion(&self.motion)
             .w_full()
             .content({
                 let row = self.flip_row("auto-settle-days", cx);
@@ -709,6 +711,7 @@ impl Render for ProjectRulesEditor {
                 "project-auto-settle-days-fold",
                 matches!(self.draft.auto_settle_after_days, Some(Some(_))),
             )
+            .motion(&self.motion)
             .w_full()
             .content(
                 v_flex()

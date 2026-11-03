@@ -375,6 +375,7 @@ impl Composer {
                 self.motion_id(format_args!("ui-answer-{request_id}")),
                 expanded,
             )
+            .motion(&self.motion)
             .w_full()
             .content(
                 v_flex()

@@ -1,18 +1,23 @@
 use gpui::{
-    App, ElementId, IntoElement, ParentElement as _, RenderOnce, StyleRefinement, Styled, Window,
-    div, prelude::FluentBuilder as _,
+    AnyElement, App, Div, ElementId, IntoElement, ParentElement as _, RenderOnce, StyleRefinement,
+    Styled, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_base::motion::{Transition, transition};
 
 use crate::icon::{Icon, IconName};
 
-/// A [`gpui_base::Collapsible`] whose content grows open and shrinks shut
-/// over `SETTLE` instead of snapping.
+/// A disclosure's section: its content grows open and shrinks shut through
+/// [`crate::motion::Shown::fold`], the one fold Tcode draws, and is not
+/// built while it is shut.
 #[derive(IntoElement)]
 pub struct Collapsible {
     id: ElementId,
     open: bool,
-    base: gpui_base::Collapsible,
+    base: Div,
+    content: Option<AnyElement>,
+    /// Where its fold is kept when its view keeps it; in element state
+    /// otherwise.
+    motion: Option<crate::motion::owned::Owned>,
 }
 
 impl Collapsible {
@@ -20,15 +25,21 @@ impl Collapsible {
         Self {
             id: id.into(),
             open,
-            base: gpui_base::Collapsible::new(),
+            base: div(),
+            content: None,
+            motion: None,
         }
     }
 
     pub fn content(mut self, content: impl IntoElement) -> Self {
-        // gpui-base's reveal lays its content out as a root of its own, where
-        // content with no width of its own takes its widest line's, not the
-        // region's as it does in flow: give it the region's.
-        self.base = self.base.content(div().w_full().child(content));
+        self.content = Some(content.into_any_element());
+        self
+    }
+
+    /// The section with its fold kept by `motion`, under its id, so it
+    /// carries on folding when its view is drawn under a new parent.
+    pub(crate) fn motion(mut self, motion: &crate::motion::owned::Owned) -> Self {
+        self.motion = Some(motion.clone());
         self
     }
 }
@@ -41,19 +52,14 @@ impl Styled for Collapsible {
 
 impl RenderOnce for Collapsible {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let progress = transition(
-            self.id.clone(),
-            if self.open { 1. } else { 0. },
-            Transition::new(crate::edge_back::SETTLE),
-            window,
-            cx,
-        );
-        // A shut section unmounts its content rather than lay it out, hidden,
-        // every frame.
+        let open = self.open.then_some(());
+        let fold = match &self.motion {
+            Some(motion) => motion.shown(self.id.to_string(), open, window, cx),
+            None => crate::motion::shown(self.id, open, window, cx),
+        };
         self.base
-            .open(self.open)
-            .when(self.open || progress > 0., |base| {
-                base.reveal(self.id, progress)
+            .when_some(fold.zip(self.content), |base, (fold, content)| {
+                base.child(fold.fold(content))
             })
     }
 }
