@@ -1014,7 +1014,11 @@ mod tests {
         ] {
             let work = layout_work(cx, |cx| {
                 root.update(cx, |root, cx| {
-                    root.markdown.update(cx, |md, cx| md.push_str(delta, cx));
+                    root.markdown.update(cx, |md, cx| {
+                        // The chat streams into the live tail of a running turn.
+                        md.set_streaming(true, cx);
+                        md.push_str(delta, cx);
+                    });
                     // The chat remeasures the row of a message that changed.
                     root.list_state.remeasure_items(0..1);
                 });

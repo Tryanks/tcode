@@ -301,7 +301,7 @@ struct Ready {
     attempt: Attempt,
     /// The picture, or for a whole source, the engine's message.
     drawn: Result<Picture, Option<SharedString>>,
-    /// It came of a burst of text that appears at once.
+    /// It came of text that appears at once, or as one document.
     snap: bool,
 }
 
@@ -579,7 +579,8 @@ pub(super) struct Env<'a> {
     /// Swaps snap: motion is reduced, or the document draws for the first
     /// time.
     pub(super) still: bool,
-    /// The latest append was a burst, which appears at once.
+    /// The latest append was not watched arriving word by word: it appears
+    /// at once, or fades in as one document.
     pub(super) burst: bool,
     /// The fences a reader switched to their source.
     pub(super) sources: &'a HashSet<String>,
