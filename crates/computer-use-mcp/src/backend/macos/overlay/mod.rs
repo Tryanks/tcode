@@ -41,7 +41,7 @@ impl Submissions {
             .map(|ticket| (ticket.owner, ticket.action));
         Publication {
             revision: self.revision,
-            expires_at: now + ACTION_LIFETIME,
+            reserved_at: now,
             feedback,
         }
     }
@@ -75,17 +75,21 @@ impl Submissions {
 #[derive(Clone, Debug)]
 pub(crate) struct Publication {
     revision: u64,
-    expires_at: Instant,
+    reserved_at: Instant,
     feedback: Option<crate::feedback::FeedbackTicket>,
 }
 
 impl Publication {
+    /// A call's cursor stays for as long as the call runs, however long its
+    /// actions and verification take, and then lingers. An action outside an
+    /// MCP call is over once it is delivered, so it lingers from its start.
     fn is_current(&self, now: Instant) -> bool {
-        now < self.expires_at
-            && self
-                .feedback
-                .as_ref()
-                .is_none_or(|ticket| ticket.is_current())
+        match &self.feedback {
+            None => now < self.reserved_at + LINGER,
+            Some(ticket) => {
+                ticket.is_current() && ticket.finished().is_none_or(|done| now < done + LINGER)
+            }
+        }
     }
 }
 
@@ -94,9 +98,12 @@ struct QueuedCommand {
     publication: Publication,
 }
 
-// Long enough for the cursor to rest between the agent's steps instead of
-// blinking out, short enough that it retires soon after the agent stops.
-const ACTION_LIFETIME: Duration = Duration::from_secs(8);
+// How long the cursor rests on its last point once a call has finished. The
+// agent's next act_ui only comes after it has read this result and replied,
+// commonly a few seconds later, so a shorter rest would fade the cursor out
+// and back in between the calls of one task; it still leaves soon after the
+// agent stops.
+const LINGER: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverlayActionKind {
@@ -451,7 +458,7 @@ pub(crate) fn verify_native() {
         point: Some((300.0, 200.0)),
         publication: Publication {
             revision: 1,
-            expires_at: Instant::now() + ACTION_LIFETIME,
+            reserved_at: Instant::now(),
             feedback: None,
         },
     };
@@ -512,7 +519,7 @@ mod tests {
         state.set_target(target(submissions().reserve(None, now)));
         state.refresh_visibility(now, Some(true));
         assert!(state.target.is_some());
-        let expired = now + ACTION_LIFETIME + Duration::from_secs(1);
+        let expired = now + LINGER + Duration::from_secs(1);
         state.refresh_visibility(expired, Some(false));
         assert!(
             state.target.is_none(),
@@ -536,16 +543,51 @@ mod tests {
         state.set_target(target(
             submissions.reserve(None, now + Duration::from_millis(500)),
         ));
-        state.refresh_visibility(now + ACTION_LIFETIME, Some(false));
+        state.refresh_visibility(now + LINGER, Some(false));
         assert!(
             state.target.is_some(),
             "a covered target does not retire a live action"
         );
-        state.refresh_visibility(now + ACTION_LIFETIME, None);
+        state.refresh_visibility(now + LINGER, None);
         assert!(
             state.target.is_none(),
             "closed window retires feedback while its app stays open"
         );
+    }
+
+    #[test]
+    fn a_call_keeps_its_cursor_while_it_runs_and_for_the_linger_after_its_response() {
+        let mut state = OverlayState {
+            cursor: None,
+            target: None,
+            poll_armed: true,
+            frame_armed: false,
+        };
+        let mut submissions = submissions();
+        let session = crate::feedback::FeedbackSession::new();
+        let request = tokio_util::sync::CancellationToken::new();
+        let start = Instant::now();
+        let mut run = session.begin(Some(request.clone()));
+        state.set_target(target(submissions.reserve(Some(run.ticket()), start)));
+        state.set_target(target(submissions.reserve(Some(run.ticket()), start)));
+        state.refresh_visibility(start + LINGER * 4, Some(true));
+        assert!(
+            state.target.is_some(),
+            "a call still waiting on its expectation keeps the cursor up"
+        );
+        let before = Instant::now();
+        run.complete();
+        let after = Instant::now();
+        drop(run);
+        // rmcp cancels the request's token as it sends the response.
+        request.cancel();
+        state.refresh_visibility(before + LINGER - Duration::from_millis(1), Some(true));
+        assert!(
+            state.target.is_some(),
+            "the cursor rests on its last point after the call returns"
+        );
+        state.refresh_visibility(after + LINGER, Some(true));
+        assert!(state.target.is_none(), "it retires once the linger is over");
     }
 
     #[test]
@@ -564,7 +606,7 @@ mod tests {
         );
         assert!(submissions.accepts(&newer, now));
         assert!(
-            !submissions.accepts(&newer, now + ACTION_LIFETIME),
+            !submissions.accepts(&newer, now + LINGER),
             "queue delay consumes lifetime"
         );
         submissions.enabled = false;
