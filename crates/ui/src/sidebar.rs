@@ -2107,28 +2107,60 @@ impl SessionsSidebar {
     }
 
     fn render_search_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Opens the palette, so it is a clickable row drawn as an `Input`'s
-        // frame rather than a field that takes text.
-        let theme = cx.theme();
+        let shortcut = crate::widgets::kbd::Kbd::new(gpui::Keystroke {
+            modifiers: gpui::Modifiers::secondary_key(cx),
+            key: "k".into(),
+            key_char: None,
+        });
         div().flex_none().px_2().pb_1().child(
-            crate::material::accessible_clickable(
-                h_flex(),
+            self.search_field(
                 "sidebar-search",
-                Role::Button,
-                crate::tr!("sidebar.search"),
+                crate::tr!("sidebar.search").into(),
+                false,
                 cx,
             )
-            .h(px(crate::material::input_height(false)))
-            .px(px(10.))
-            .gap(theme.tokens.spacing.sm)
+            .child(div().flex_none().child(shortcut)),
+        )
+    }
+
+    /// The search control at the head of either sidebar. It opens the
+    /// palette rather than taking text, so it is a button drawn as a quiet
+    /// search field: an input's height and radius in the muted fill, with no
+    /// border to set it apart from the rows around it, and the search glyph
+    /// and label in the placeholder tone. A pointer brings the rows' hover
+    /// fill in over it; a touch layout, which has no pointer, dims it while
+    /// pressed.
+    fn search_field(
+        &self,
+        id: &'static str,
+        label: SharedString,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> crate::material::Clickable<gpui::Div> {
+        let theme = cx.theme();
+        let (fill, hover, placeholder) = (theme.muted, theme.list_hover, theme.muted_foreground);
+        let gap = theme.tokens.spacing.sm;
+        let radius = crate::material::radius_input(cx);
+        crate::material::accessible_clickable(h_flex(), id, Role::Button, label.clone(), cx)
+            .debug_selector(move || id.into())
+            .relative()
+            .h(px(crate::material::input_height(compact)))
+            .px(crate::material::selectable_row_inset(compact))
+            .gap(gap)
             .items_center()
-            .rounded(crate::material::radius_input(cx))
-            .bg(theme.background)
-            .border_1()
-            .border_color(theme.input)
-            .text_token(&theme.tokens.typography.sm)
-            .text_color(theme.muted_foreground)
+            .rounded(radius)
+            .bg(fill)
+            .text_body(compact, cx)
+            .text_color(placeholder)
             .cursor_pointer()
+            .when(compact, |field| field.active(|s| s.opacity(0.8)))
+            .child(crate::motion::hover_layer(
+                None,
+                hover.opacity(0.),
+                hover,
+                radius,
+                crate::material::HOVER.into(),
+            ))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.window_state
                     .update(cx, |state, cx| state.open_palette(cx));
@@ -2139,19 +2171,8 @@ impl SessionsSidebar {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(crate::widgets::fade_text(crate::tr!("sidebar.search"))),
+                    .child(crate::widgets::fade_text(label)),
             )
-            .child(
-                div().flex_none().child(
-                    crate::widgets::kbd::Kbd::new(gpui::Keystroke {
-                        modifiers: gpui::Modifiers::secondary_key(cx),
-                        key: "k".into(),
-                        key_char: None,
-                    })
-                    .appearance(false),
-                ),
-            ),
-        )
     }
 
     /// The machine this window is on, as the control that leads to Machines.
@@ -4464,41 +4485,18 @@ impl SessionsSidebar {
 
     fn render_compact_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let spacing = &cx.theme().tokens.spacing;
-        // Search-field lookalike: a full-width pill whose text sits at the
-        // leading edge; `Button` centres its content and has no pill form.
+        let (top, bottom) = (spacing.sm, spacing.xs);
         div()
             .flex_none()
             .px(px(COMPACT_PAGE_INSET))
-            .pt(spacing.sm)
-            .pb(spacing.xs)
-            .child(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    "compact-search",
-                    Role::Button,
-                    crate::tr!("mobile.search_threads"),
-                    cx,
-                )
-                .debug_selector(|| "compact-search".into())
-                .h(px(crate::material::input_height(true)))
-                .items_center()
-                .gap(spacing.sm)
-                .px(spacing.md)
-                .text_body(true, cx)
-                .text_color(cx.theme().muted_foreground)
-                .rounded_full()
-                .bg(cx.theme().secondary)
-                .cursor_pointer()
-                .active(|s| s.opacity(0.8))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.window_state
-                        .update(cx, |state, cx| state.open_palette(cx));
-                }))
-                .child(Icon::new(IconName::Search))
-                .child(div().flex_1().min_w_0().overflow_hidden().child(
-                    crate::widgets::fade_text(crate::tr!("mobile.search_threads")),
-                )),
-            )
+            .pt(top)
+            .pb(bottom)
+            .child(self.search_field(
+                "compact-search",
+                crate::tr!("mobile.search_threads").into(),
+                true,
+                cx,
+            ))
     }
 
     fn render_compact_group_header(
