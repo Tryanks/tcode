@@ -8020,9 +8020,11 @@ mod tests {
         (shell, host, cx)
     }
 
-    /// Let the panes' and panels' motion land.
+    /// Let the panes' and panels' motion land: the longest of it is an
+    /// agent's card growing out of what opened it beside its lead, or
+    /// shrinking back into it.
     fn settle_panes(cx: &mut VisualTestContext) {
-        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        cx.executor().advance_clock(Duration::from_millis(800));
         draw(cx);
     }
 
@@ -8322,7 +8324,14 @@ mod tests {
         serve_finished_turns(&host, "agent-1", 30, false);
         serve_subagent_status(&host, "agent-1");
         cx.update(|window, cx| {
-            crate::agents_panel::open_agent(&store, "agent-1".into(), Some("thread-1"), window, cx)
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                Some("thread-1"),
+                None,
+                window,
+                cx,
+            )
         });
         draw(cx);
         // The first frame that draws the card, however little of it is in.
@@ -8446,6 +8455,168 @@ mod tests {
         );
     }
 
+    /// Whether `inner` lies strictly inside the space between `from` and
+    /// `to` on every edge: each of its edges between theirs, apart from
+    /// both.
+    fn strictly_between(
+        inner: gpui::Bounds<Pixels>,
+        from: gpui::Bounds<Pixels>,
+        to: gpui::Bounds<Pixels>,
+    ) -> bool {
+        let between = |at: Pixels, a: Pixels, b: Pixels| at > a.min(b) && at < a.max(b);
+        between(inner.left(), from.left(), to.left())
+            && between(inner.top(), from.top(), to.top())
+            && between(inner.right(), from.right(), to.right())
+            && between(inner.bottom(), from.bottom(), to.bottom())
+    }
+
+    /// Whether `a` and `b` are the same rectangle, within `slack` on every
+    /// edge.
+    fn about(a: gpui::Bounds<Pixels>, b: gpui::Bounds<Pixels>, slack: Pixels) -> bool {
+        (a.left() - b.left()).abs() <= slack
+            && (a.top() - b.top()).abs() <= slack
+            && (a.right() - b.right()).abs() <= slack
+            && (a.bottom() - b.bottom()).abs() <= slack
+    }
+
+    /// Display frames until `selector` is no longer drawn, its bounds on
+    /// each frame that drew it.
+    fn frames_until_gone(
+        selector: &'static str,
+        cx: &mut VisualTestContext,
+    ) -> Vec<gpui::Bounds<Pixels>> {
+        let mut drawn = Vec::new();
+        for _ in 0..80 {
+            match cx.debug_bounds(selector) {
+                Some(bounds) => drawn.push(bounds),
+                None => return drawn,
+            }
+            display_frame(cx);
+        }
+        panic!("{selector} is still drawn after {} frames", drawn.len());
+    }
+
+    /// An agent opened from its row in the lead's rail grows out of the row
+    /// into its card, and shrinks back into the row when it is closed:
+    /// partway, the card lies between the row and its place, and it rests
+    /// in its place; closing, it last draws where the row is, which has come
+    /// back with the rail. Over a lead too narrow for the card, the agent
+    /// grows out of the row to cover the lead; closed once the row is no
+    /// longer on screen, it slides off the lead without shrinking.
+    #[gpui::test]
+    fn an_agent_grows_out_of_its_rail_row_and_back_into_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (_shell, host, cx) = mount_lead_with_agent(cx);
+        serve_finished_turns(&host, "agent-1", 3, false);
+        settle_frames(cx);
+        let press_row = |cx: &mut VisualTestContext| {
+            let row = cx
+                .debug_bounds("rail-agent-agent-1")
+                .expect("the agent's row in the rail");
+            cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+            draw(cx);
+            cx.simulate_click(row.center(), gpui::Modifiers::default());
+            draw(cx);
+            row
+        };
+        let row = press_row(cx);
+        let growing = frames_of("chat-side-card", 50, cx);
+        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
+        assert!(
+            growing
+                .iter()
+                .any(|bounds| strictly_between(*bounds, row, card)),
+            "the card grows from {row:?} to {card:?} through {growing:?}"
+        );
+        assert!(
+            about(growing[0], row, px(40.)),
+            "it starts at {row:?}: {:?}",
+            growing[0]
+        );
+        settle_frames(cx);
+        assert_eq!(cx.debug_bounds("chat-side-card"), Some(card), "at rest");
+        assert!(cx.debug_bounds("chat-side-header").is_some());
+
+        let close = cx.debug_bounds("side-close").expect("Close");
+        cx.simulate_mouse_move(close.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        draw(cx);
+        let shrinking = frames_until_gone("chat-side-card", cx);
+        let row = cx
+            .debug_bounds("rail-agent-agent-1")
+            .expect("the row is back in the rail");
+        let last = *shrinking.last().expect("the card shrinks");
+        assert!(
+            about(last, row, px(2.)),
+            "the card goes into {row:?}, last drawn at {last:?}"
+        );
+        assert!(
+            shrinking
+                .iter()
+                .any(|bounds| strictly_between(*bounds, row, card)),
+            "the card shrinks from {card:?} to {row:?} through {shrinking:?}"
+        );
+
+        // A lead too narrow for the card beside it, with its rail.
+        resize(cx, 1300.);
+        settle_frames(cx);
+        assert!(cx.debug_bounds("chat-rail").is_some(), "the rail fits");
+        let row = press_row(cx);
+        let growing = frames_of("chat-side-cover", 50, cx);
+        let cover = cx
+            .debug_bounds("chat-side-cover")
+            .expect("the agent's cover");
+        assert_eq!(cx.debug_bounds("chat-side-card"), None, "no card");
+        assert!(
+            growing
+                .iter()
+                .any(|bounds| strictly_between(*bounds, row, cover)),
+            "the cover grows from {row:?} to {cover:?} through {growing:?}"
+        );
+        settle_frames(cx);
+        assert_eq!(cx.debug_bounds("chat-side-cover"), Some(cover), "at rest");
+
+        // Narrower still, the rail is gone, and with it the row.
+        resize(cx, 1000.);
+        settle_frames(cx);
+        assert_eq!(cx.debug_bounds("chat-rail"), None, "no rail");
+        let cover = cx
+            .debug_bounds("chat-side-cover")
+            .expect("the agent's cover");
+        let back = cx.debug_bounds("side-back").expect("Back");
+        cx.simulate_mouse_move(back.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        draw(cx);
+        let leaving = frames_until_gone("chat-side-cover", cx);
+        assert!(
+            leaving
+                .iter()
+                .all(|bounds| bounds.size == cover.size && bounds.top() == cover.top()),
+            "the cover keeps its size as it leaves {cover:?}: {leaving:?}"
+        );
+        assert!(
+            leaving.iter().any(|bounds| bounds.left() > cover.left()),
+            "the cover slides off the lead: {leaving:?}"
+        );
+    }
+
+    /// Where `selector` is drawn over the next `frames` display frames.
+    fn frames_of(
+        selector: &'static str,
+        frames: usize,
+        cx: &mut VisualTestContext,
+    ) -> Vec<gpui::Bounds<Pixels>> {
+        (0..frames)
+            .filter_map(|_| {
+                let bounds = cx.debug_bounds(selector);
+                display_frame(cx);
+                bounds
+            })
+            .collect()
+    }
+
     /// On a tablet: an agent beside its lead is neither drawn nor held open
     /// while the window is compact, which shows the lead alone, and is beside
     /// its lead again once the window is wide. An agent opened from its lead
@@ -8480,7 +8651,14 @@ mod tests {
         resize(cx, 600.);
         settle_panes(cx);
         cx.update(|window, cx| {
-            crate::agents_panel::open_agent(&store, "agent-1".into(), Some("thread-1"), window, cx)
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                Some("thread-1"),
+                None,
+                window,
+                cx,
+            )
         });
         draw(cx);
         serve_thread(&host, "agent-1");

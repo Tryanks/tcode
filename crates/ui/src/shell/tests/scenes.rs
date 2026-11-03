@@ -845,7 +845,14 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
     settle_frames(cx);
     serve_finished(&host, "agent-1");
     cx.update(|window, cx| {
-        crate::agents_panel::open_agent(&store, "agent-1".into(), Some("thread-1"), window, cx)
+        crate::agents_panel::open_agent(
+            &store,
+            "agent-1".into(),
+            Some("thread-1"),
+            None,
+            window,
+            cx,
+        )
     });
     arrive(&shell, cx);
     settle_frames(cx);

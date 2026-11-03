@@ -237,6 +237,9 @@ pub struct ChatView {
     /// Where the timeline's shared elements (a steer, a turn's status) were
     /// drawn, so one that moves to another row travels there.
     shared: crate::motion::shared::SharedMoves,
+    /// Where what opens an agent beside the thread was drawn, for the
+    /// agent's card to grow out of it and shrink back into it.
+    side_origins: crate::motion::expand::Origins,
     /// The store's fold count for the thread at the last sync: a different
     /// one means the rows came from a fold, not from a live record.
     timeline_folds: u64,
@@ -480,6 +483,7 @@ impl ChatView {
             rows_motion: crate::motion::list_rows::ListRows::over(ROWS_IN).in_scene(&scene),
             row_folds: Vec::new(),
             shared: crate::motion::shared::SharedMoves::in_scene(&scene),
+            side_origins: crate::motion::expand::Origins::in_scene(&scene),
             timeline_folds: 0,
             rows_regrouped: false,
             shown_deliveries: Vec::new(),
@@ -603,6 +607,7 @@ fn floating_backing(radius: gpui::Pixels, cx: &App) -> gpui::Div {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.sweep();
+        self.side_origins.begin_frame();
         self.request_side_sync(window, cx);
         if self.timeline_stale {
             self.sync_markdown_states(cx);
@@ -1232,7 +1237,7 @@ impl ChatView {
                     .child(composer),
             )
             .child(slots);
-        let main = self.cover_with_side(main.into_any_element(), side, cx);
+        let main = self.cover_with_side(main.into_any_element(), side);
 
         // Opening and closing the drawer glide; entering or leaving the
         // compact layout, which has no drawer, does not.
