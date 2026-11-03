@@ -359,8 +359,11 @@ pub(crate) fn perform_action_with_feedback(
             let (x, y) = action_point(root, request)?;
             Ok(
                 match background(root, |dispatcher| dispatcher.move_mouse(x, y)) {
+                    // AppKit delivers hover through tracking areas, which it
+                    // drives from the real pointer; whether it also feeds them
+                    // an event posted to the process is not established.
                     Ok(()) => ActionResult::unknown(
-                        "mouse-move event was posted directly to the target pid",
+                        "a mouse-move event was posted directly to the target pid; hover that the app tracks with AppKit tracking areas may not respond to it, and the user's own pointer over the window replaces it, so observe to check",
                         Delivery::BackgroundPid,
                     ),
                     Err(error) => ActionResult::didnt(
