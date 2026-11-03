@@ -848,7 +848,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
         crate::agents_panel::open_agent(
             &store,
             "agent-1".into(),
-            Some("thread-1"),
+            crate::shell::side_host_for("thread-1", cx),
             None,
             window,
             cx,

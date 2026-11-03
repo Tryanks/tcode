@@ -346,6 +346,20 @@ impl ChatView {
         self.side_of.is_some()
     }
 
+    /// The chat an agent opened from what this view draws shows beside its
+    /// thread: this view, or for an agent beside its lead, the lead's,
+    /// where the agent opened takes its place. None in the compact layout,
+    /// which shows one thread at a time.
+    pub(crate) fn agent_host(&self, cx: &Context<Self>) -> Option<Entity<ChatView>> {
+        if self.window_state.read(cx).compact {
+            return None;
+        }
+        match &self.side_of {
+            Some(of) => of.lead.upgrade(),
+            None => self.session_id.is_some().then(|| cx.entity()),
+        }
+    }
+
     /// The agent shown beside the thread.
     pub(crate) fn side_session_id(&self) -> Option<&str> {
         self.side.host.as_ref().map(|host| host.session_id.as_str())

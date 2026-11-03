@@ -72,7 +72,7 @@ pub(super) fn body(
         return None;
     }
     let store = chat.workspace_store.clone();
-    let lead = chat.session_id.clone();
+    let host = chat.agent_host(cx);
     let origins = chat.side_origins().clone();
     let rows = lines
         .into_iter()
@@ -84,7 +84,7 @@ pub(super) fn body(
             ROWS,
             window,
             cx,
-            |_, line, window, cx| row(line, &store, lead.clone(), &origins, window, cx),
+            |_, line, window, cx| row(line, &store, host.clone(), &origins, window, cx),
         )
         .render(gpui_base::v_flex().w_full().min_w_0())
         .into_any_element(),
@@ -94,7 +94,7 @@ pub(super) fn body(
 fn row(
     line: &AgentLine,
     store: &Entity<crate::store::WorkspaceStore>,
-    lead: Option<String>,
+    host: Option<Entity<ChatView>>,
     origins: &crate::motion::expand::Origins,
     window: &mut Window,
     cx: &mut App,
@@ -244,7 +244,7 @@ fn row(
             crate::agents_panel::open_agent(
                 &store,
                 id.clone(),
-                lead.as_deref(),
+                host.clone(),
                 Some(origin.clone()),
                 window,
                 cx,

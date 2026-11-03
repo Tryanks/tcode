@@ -18,6 +18,7 @@ use tcode_core::session::EntryContent;
 use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
 use tcode_core::ui::RightTab;
 
+use crate::chat::ChatView;
 use crate::icon::{Icon, IconName};
 use crate::material;
 use crate::overlay::{DialogButtons, OverlayExt as _};
@@ -508,18 +509,23 @@ fn compact(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Open a thread reached from its lead: beside the lead in the lead's own
-/// chat on the desktop, the lead's right panel shut; in the lead's place in the compact layout, which has
-/// no room beside it and goes back with its navigation. A thread a pane
-/// already shows takes the keyboard there instead. An archived agent is
-/// reached the way Settings → Archived Threads reaches every archived
-/// thread: unarchived. Beside the lead, it comes out of `origin`, what was
-/// pressed to open it, as the lead's chat records it
-/// ([`crate::chat::ChatView::side_origins`]).
+/// Open a thread reached from its lead: on the desktop, beside the thread
+/// `host` shows, in `host` itself, that thread's right panel shut; in the
+/// lead's place in the compact layout, which has no host, no room beside
+/// it, and goes back with its navigation. A thread a pane already shows
+/// takes the keyboard there instead. An archived agent is reached the way
+/// Settings → Archived Threads reaches every archived thread: unarchived.
+/// Beside the lead, it comes out of `origin`, what was pressed to open it,
+/// as the host records it ([`ChatView::side_origins`]).
+///
+/// `host` is the chat that drew what was pressed
+/// ([`ChatView::agent_host`]), not one found by the lead's
+/// id: a thread can show in one pane and beside its own lead in another,
+/// and the agent belongs in the pane the press came from.
 pub(crate) fn open_agent(
     store: &Entity<WorkspaceStore>,
     id: String,
-    lead: Option<&str>,
+    host: Option<Entity<ChatView>>,
     origin: Option<SharedString>,
     window: &mut Window,
     cx: &mut App,
@@ -533,15 +539,13 @@ pub(crate) fn open_agent(
             store.unarchive_session(id.clone());
         }
     });
-    let host = lead
-        .filter(|_| !crate::shell::shown_in_pane(&id, cx))
-        .and_then(|lead| crate::shell::side_host_for(lead, cx));
+    let host = host.filter(|_| !crate::shell::shown_in_pane(&id, cx));
     match host {
         Some(host) => {
-            // The lead's right panel lies over the chat, where the agent
+            // The host's right panel lies over the chat, where the agent
             // would show beneath it.
-            if let Some(lead) = lead {
-                store.update(cx, |store, cx| store.close_right_panel_for(Some(lead), cx));
+            if let Some(lead) = host.read(cx).session_id().map(str::to_owned) {
+                store.update(cx, |store, cx| store.close_right_panel_for(Some(&lead), cx));
             }
             host.update(cx, |chat, cx| chat.open_side(id, origin, window, cx));
         }
@@ -733,11 +737,16 @@ impl AgentsPanel {
         if let Some(sheet) = self.sheet.as_ref().and_then(WeakEntity::upgrade) {
             sheet.update(cx, |sheet, cx| sheet.dismiss(window, cx));
         }
-        let lead = self.store.read(cx).active_session_id();
+        // The panel shows the focused thread's agents.
+        let host = self
+            .store
+            .read(cx)
+            .active_session_id()
+            .and_then(|lead| crate::shell::side_host_for(&lead, cx));
         open_agent(
             &self.store,
             action.0.clone(),
-            lead.as_deref(),
+            host,
             Some(panel_origin(action.0.clone())),
             window,
             cx,
