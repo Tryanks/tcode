@@ -1063,24 +1063,8 @@ impl WorkspaceStore {
         self.thread(self.focused_session_id.as_deref())
     }
 
-    #[cfg(test)]
-    fn focused_thread_mut(&mut self) -> Option<&mut ThreadReplica> {
-        let id = self.focused_session_id.clone()?;
-        self.threads.get_mut(&id)
-    }
-
     fn focused_status(&self) -> Option<&SessionStatus> {
         self.thread_status(self.focused_session_id.as_deref())
-    }
-
-    #[cfg(test)]
-    fn focused_timeline(&self) -> Option<&Timeline> {
-        self.thread_timeline(self.focused_session_id.as_deref())
-    }
-
-    #[cfg(test)]
-    fn focused_git(&self) -> Option<&GitStatusStatus> {
-        self.thread_git(self.focused_session_id.as_deref())
     }
 
     fn thread(&self, session_id: Option<&str>) -> Option<&ThreadReplica> {
@@ -5252,7 +5236,7 @@ pub(crate) mod tests {
                 store.session_loading(),
                 "retired load must not replace the skeleton"
             );
-            assert!(store.focused_timeline().is_none());
+            assert!(store.thread_timeline(Some("two")).is_none());
         });
     }
 
@@ -5305,7 +5289,7 @@ pub(crate) mod tests {
                     store.apply_domain_event(&reply(current_id), cx);
                     let held = store.threads["a"].history.as_ref().unwrap();
                     assert_eq!((held.from, held.end), (10, if empty { 12 } else { 14 }));
-                    let timeline = &store.focused_timeline().unwrap();
+                    let timeline = &store.thread_timeline(Some("a")).unwrap();
                     assert_eq!(timeline.entries.len(), 1);
                     assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == if empty { "cached" } else { "cached continued" }));
                     let end = if empty { 12 } else { 14 };
@@ -5317,7 +5301,7 @@ pub(crate) mod tests {
                     store.apply_domain_event(&replacement, cx);
                     let held = store.threads["a"].history.as_ref().unwrap();
                     assert_eq!((held.from, held.end), (end, end + 2));
-                    let timeline = &store.focused_timeline().unwrap();
+                    let timeline = &store.thread_timeline(Some("a")).unwrap();
                     assert_eq!(timeline.entries.len(), 1);
                     assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "replacement"));
                 });
@@ -5432,7 +5416,7 @@ pub(crate) mod tests {
             })
             .unwrap();
             let reconnect_id = host.subscription_request_id(&topic).unwrap();
-            let retained_entry = store.focused_timeline().unwrap().entries[0].clone();
+            let retained_entry = store.thread_timeline(Some("large")).unwrap().entries[0].clone();
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: Some(reconnect_id),
@@ -5455,7 +5439,7 @@ pub(crate) mod tests {
             assert!(
                 std::sync::Arc::ptr_eq(
                     &retained_entry,
-                    &store.focused_timeline().unwrap().entries[0]
+                    &store.thread_timeline(Some("large")).unwrap().entries[0]
                 ),
                 "empty replay must retain the existing timeline"
             );
@@ -6833,7 +6817,7 @@ pub(crate) mod tests {
         driver.wait_until(cx, &workspace, "the kept thread's continuation", |cx| {
             workspace.read_with(cx, |store, _| {
                 held_window(store, kept).is_some_and(|held| held.end == total)
-                    && store.focused_timeline().is_some()
+                    && store.thread_timeline(Some(kept)).is_some()
             })
         });
         let after_reselect = answer(kept, 153);
@@ -6885,7 +6869,7 @@ pub(crate) mod tests {
         open(&mut driver, cx, &fresh, released);
         let fresh = fresh.read_with(cx, |store, _| {
             (
-                store.focused_timeline().cloned(),
+                store.thread_timeline(Some(released)).cloned(),
                 store
                     .focused_thread()
                     .map_or(0, |thread| thread.turn_offset),
@@ -6894,7 +6878,7 @@ pub(crate) mod tests {
         workspace.read_with(cx, |store, _| {
             assert_eq!(
                 (
-                    store.focused_timeline().cloned(),
+                    store.thread_timeline(Some(released)).cloned(),
                     store
                         .focused_thread()
                         .map_or(0, |thread| thread.turn_offset)
@@ -7723,7 +7707,7 @@ pub(crate) mod tests {
             workspace.read_with(cx, |store, _| {
                 store.focused_session_id.as_ref() == Some(&session_id)
                     && store
-                        .focused_timeline()
+                        .thread_timeline(Some(&session_id))
                         .is_some_and(|timeline| timeline.turns.len() == 1)
             })
         });
@@ -7819,7 +7803,9 @@ pub(crate) mod tests {
             },
         );
         let replica = workspace.read_with(cx, |store, _| {
-            let timeline = store.focused_timeline().expect("session replica");
+            let timeline = store
+                .thread_timeline(Some(&session_id))
+                .expect("session replica");
             assert_eq!(store.focused_session_id.as_ref(), Some(&session_id));
             (
                 timeline
@@ -8278,7 +8264,9 @@ pub(crate) mod tests {
         // status, or its late result overwrites the injected one.
         driver.wait_until(cx, &workspace, "initial git probe", |cx| {
             workspace.read_with(cx, |store, _| {
-                store.focused_git().is_some_and(|git| git.status.is_some())
+                store
+                    .thread_git(Some("git-replica"))
+                    .is_some_and(|git| git.status.is_some())
             })
         });
         driver.command(cx, &workspace, Command::ClearRelaunchMarker);
@@ -8323,7 +8311,7 @@ pub(crate) mod tests {
             workspace.read_with(cx, |store, _| {
                 store.providers_replica.providers_checking
                     && store
-                        .focused_git()
+                        .thread_git(Some("git-replica"))
                         .and_then(|git| git.status.as_ref())
                         .is_some_and(|status| status.branch.as_deref() == Some("feature/replica"))
             })
@@ -8338,7 +8326,10 @@ pub(crate) mod tests {
         let (replica_providers, replica_git) = workspace.read_with(cx, |store, _| {
             (
                 store.providers_replica.clone(),
-                store.focused_git().cloned().expect("git replica"),
+                store
+                    .thread_git(Some("git-replica"))
+                    .cloned()
+                    .expect("git replica"),
             )
         });
 
