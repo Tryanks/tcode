@@ -552,6 +552,22 @@ impl RenderOnce for Button {
     }
 }
 
+/// The small × at the right end of a header that closes the surface the
+/// header belongs to: a pane among several, the wide Machines page.
+pub(crate) fn close_button(id: &'static str, tooltip: impl Into<SharedString>) -> Button {
+    let tooltip = tooltip.into();
+    Button::new(id)
+        .debug_selector(move || id.into())
+        // A press must not arm a header's window drag region.
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .ghost()
+        .small()
+        .compact()
+        .icon(crate::icon::IconName::Close)
+        .aria_label(tooltip.clone())
+        .tooltip(tooltip)
+}
+
 /// `tint` laid over `fill`, as the window paints the one over the other: the
 /// premultiplied mix toward the tint's own colour, as far as its alpha goes.
 pub(crate) fn tinted(fill: gpui::Hsla, tint: gpui::Hsla) -> gpui::Hsla {

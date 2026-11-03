@@ -1422,6 +1422,7 @@ remote:
 
 hosts:
   title: "主机"
+  close: "关闭主机页"
   this_computer: "本机"
   this_machine_section: "本机"
   saved: "已添加的主机"

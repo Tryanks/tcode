@@ -1429,6 +1429,7 @@ remote:
 
 hosts:
   title: "Machines"
+  close: "Close Machines"
   this_computer: "This machine"
   this_machine_section: "THIS MACHINE"
   saved: "YOUR MACHINES"
