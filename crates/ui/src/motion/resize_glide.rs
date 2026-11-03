@@ -86,6 +86,9 @@ pub(crate) struct ResizeGlide {
     slots: Vec<Slot>,
     glide: Option<Glide>,
     generation: u64,
+    /// The scene of the surface the group lays out: a new one's panels
+    /// land where it puts them, as the group's first frame does.
+    scene: super::InScene,
 }
 
 #[derive(Default)]
@@ -150,7 +153,14 @@ impl ResizeGlide {
             slots: Vec::new(),
             glide: None,
             generation: 0,
+            scene: Default::default(),
         }
+    }
+
+    /// The group of a surface in `epoch`'s scene.
+    pub(crate) fn in_scene(mut self, epoch: &super::Epoch) -> Self {
+        self.scene = super::InScene::new(epoch);
+        self
     }
 
     /// Lay the group out along `axis` from now on. A glide under way lands;
@@ -182,6 +192,9 @@ impl ResizeGlide {
         window: &mut Window,
         cx: &mut App,
     ) -> ResizeFrame {
+        if self.scene.entered() {
+            self.reset();
+        }
         let axis = self.axis;
         if self.slots.len() != panels.len() {
             self.slots.resize_with(panels.len(), Slot::default);

@@ -190,8 +190,10 @@ pub struct Composer {
     /// The composer's motion, kept here so it carries on when the window
     /// draws the composer under another parent: the chat moves between the
     /// phone's thread page and a pane as the window turns compact or wide,
-    /// and a zoom lifts its pane over the column.
+    /// and a zoom lifts its pane over the column. Kept for the thread it
+    /// shows, its scene's, which its element-keyed motion is drawn under too.
     motion: crate::motion::owned::Owned,
+    scene: crate::motion::Epoch,
     /// The inline trigger (`@`/`/`/`$`) active at the cursor, recomputed on every
     /// input change. Drives the trigger menu.
     active_trigger: Option<ComposerTrigger>,
@@ -320,10 +322,18 @@ impl Composer {
     /// only the thread it shows.
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
         if self.session_id != session_id {
+            self.scene.show(session_id.as_deref());
             self.session_id = session_id;
-            self.motion.clear();
             cx.notify();
         }
+    }
+
+    /// Keep the composer's motion in `scene`, its host's: what the host
+    /// shows is what the composer shows.
+    pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch) {
+        scene.show(self.session_id.as_deref());
+        self.scene = scene.clone();
+        self.motion = crate::motion::owned::Owned::in_scene(scene);
     }
 
     /// Follow the window onto the other layout. Updated in place on purpose: a
@@ -428,10 +438,13 @@ impl Composer {
             (voice, subscriptions)
         };
 
+        let session_id = workspace_store.read(cx).active_session_id();
+        let scene = crate::motion::Epoch::default();
+        scene.show(session_id.as_deref());
         Self {
             compact,
             column_shift: px(0.),
-            session_id: workspace_store.read(cx).active_session_id(),
+            session_id,
             workspace_store,
             input,
             user_input_custom,
@@ -450,7 +463,8 @@ impl Composer {
             ui_expanded: false,
             model_picker_token: 0,
             control_row_narrow: Rc::default(),
-            motion: Default::default(),
+            motion: crate::motion::owned::Owned::in_scene(&scene),
+            scene,
             active_trigger: None,
             menu_highlight: 0,
             menu_rows_seen: Rc::default(),
@@ -1288,23 +1302,17 @@ enum ChipRow {
 }
 
 impl Composer {
-    /// The id of a part's motion for the thread the composer is showing, so
-    /// what one thread showed never folds away over another's.
+    /// The id of a part's motion.
     fn motion_id(&self, part: impl std::fmt::Display) -> gpui::ElementId {
         gpui::ElementId::Name(self.motion_key(part))
     }
 
     /// [`Self::motion_id`] as a key of the composer's own motion.
     fn motion_key(&self, part: impl std::fmt::Display) -> gpui::SharedString {
-        format!(
-            "composer:{}:{part}",
-            self.session_id.as_deref().unwrap_or_default()
-        )
-        .into()
+        format!("composer:{part}").into()
     }
 
-    /// The motion of the composer's buttons ([`Button::motion`]), for the
-    /// thread it is showing.
+    /// The motion of the composer's buttons ([`Button::motion`]).
     fn button_motion(&self) -> crate::motion::owned::Owned {
         self.motion.scope(self.motion_key("buttons"))
     }
@@ -2126,6 +2134,7 @@ impl Render for Composer {
             crate::chat::CONTENT_MIN_PADDING
         });
         v_flex()
+            .id(self.scene.id("composer"))
             .relative()
             .flex_shrink_0()
             .w_full()

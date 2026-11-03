@@ -34,7 +34,13 @@ const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 /// Where a view's shared elements were drawn, by key; kept by the view and
 /// cloned into whatever draws them. Every clone is the same record.
 #[derive(Clone, Default)]
-pub(crate) struct SharedMoves(Rc<RefCell<Moves>>);
+pub(crate) struct SharedMoves {
+    moves: Rc<RefCell<Moves>>,
+    /// The scene of the view whose elements these are: a new one's are
+    /// drawn in their places at once, as those of a view's first frame
+    /// are, however their keys match the last scene's.
+    scene: super::InScene,
+}
 
 #[derive(Default)]
 struct Moves {
@@ -74,11 +80,28 @@ pub(crate) struct Transit {
 }
 
 impl SharedMoves {
+    /// The record of a view in `epoch`.
+    pub(crate) fn in_scene(epoch: &super::Epoch) -> Self {
+        Self {
+            moves: Rc::default(),
+            scene: super::InScene::new(epoch),
+        }
+    }
+
+    /// The record, the last scene's places forgotten.
+    fn moves(&self) -> std::cell::RefMut<'_, Moves> {
+        let mut moves = self.moves.borrow_mut();
+        if self.scene.entered() {
+            moves.placed.clear();
+        }
+        moves
+    }
+
     /// Begins one render of the view, whose shared elements travel inside
     /// `clip`. Places not drawn for a while are forgotten.
     pub(crate) fn begin_frame(&self, clip: Bounds<Pixels>, cx: &App) {
         let now = cx.background_executor().now();
-        let mut moves = self.0.borrow_mut();
+        let mut moves = self.moves();
         moves.frame += 1;
         moves.clip = Some(clip);
         let frame = moves.frame;
@@ -89,13 +112,6 @@ impl SharedMoves {
                     .as_ref()
                     .is_some_and(|travel| !settled(travel, now))
         });
-    }
-
-    /// Forgets where every element was drawn: the view starts a new scene,
-    /// whose elements are drawn in their places at once, as those of a
-    /// view's first frame are, however their keys match the last scene's.
-    pub(crate) fn clear(&self) {
-        self.0.borrow_mut().placed.clear();
     }
 
     /// Element `key` is drawn in `site` this frame. If it was drawn in
@@ -109,7 +125,7 @@ impl SharedMoves {
     ) -> Option<Transit> {
         let now = cx.background_executor().now();
         let reduce = cx.reduce_motion();
-        let mut moves = self.0.borrow_mut();
+        let mut moves = self.moves();
         let frame = moves.frame;
         let placed = moves.placed.entry(key.clone()).or_insert_with(|| Placed {
             site: site.clone(),
@@ -155,7 +171,7 @@ impl SharedMoves {
     /// Whether element `key`, last drawn in `site`, is now drawn elsewhere:
     /// what stays behind in `site` while it folds away is only its place.
     pub(crate) fn departed(&self, key: &SharedString, site: &SharedString) -> bool {
-        let moves = self.0.borrow();
+        let moves = self.moves();
         moves
             .placed
             .get(key)
@@ -230,7 +246,7 @@ impl Element for Shared {
     ) {
         let now = cx.background_executor().now();
         let (travel, clip) = {
-            let mut moves = self.moves.0.borrow_mut();
+            let mut moves = self.moves.moves();
             let clip = moves.clip;
             let travel = moves.placed.get_mut(&self.key).and_then(|placed| {
                 placed.bounds = Some(bounds);

@@ -235,8 +235,13 @@ struct ShellAttachment {
     /// pinned to its 320px floor.
     split: Entity<ResizableState>,
     /// The workspace split's panels gliding as they open, close, expand and
-    /// collapse.
+    /// collapse, in the right panel's scene.
     panel_glide: crate::motion::resize_glide::ResizeGlide,
+    /// The scene of the right panel, which shows the focused thread's tab as
+    /// that thread left it: another thread focused shows its own at once,
+    /// open or shut, docked or floating, never as if the reader had opened
+    /// or closed it, and its content's motion starts at rest.
+    panel_scene: crate::motion::Epoch,
     /// Whether the right panel floated last frame, when it showed beside
     /// the chat.
     right_floated: Option<bool>,
@@ -1288,6 +1293,8 @@ impl AppShell {
         };
 
         let observed_session_id = store.read(cx).active_session_id();
+        let panel_scene = crate::motion::Epoch::default();
+        panel_scene.show(observed_session_id.as_deref());
         let thread_panel = self.new_pane(&store, window, cx);
         let shell = cx.entity().downgrade();
         let drop_landing = Rc::new(Cell::new(None));
@@ -1334,7 +1341,11 @@ impl AppShell {
             drop_landing,
             held_split: None,
             focused_pane: thread_panel,
-            diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
+            diff: cx.new(|cx| {
+                let mut diff = DiffPanel::new(store.clone(), self.window_state.clone(), cx);
+                diff.share_scene(&panel_scene, cx);
+                diff
+            }),
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
             palette: cx.new(|cx| {
@@ -1346,7 +1357,9 @@ impl AppShell {
             panel_glide: crate::motion::resize_glide::ResizeGlide::new(
                 "workspace-panels",
                 gpui::Axis::Horizontal,
-            ),
+            )
+            .in_scene(&panel_scene),
+            panel_scene,
             right_floated: None,
             float_glide: None,
             float_generation: 0,
@@ -5028,13 +5041,22 @@ impl AppShell {
         // "Expanded" (full-width) is a diff-only affordance; the preview tab
         // always shares the split so the webview keeps a stable size.
         let diff_expanded = panel.right_panel_expanded && right_tab != RightTab::Preview;
+        let scene = attachment.panel_scene.clone();
+        let new_scene = scene.show(
+            attachment
+                .link
+                .store
+                .read(cx)
+                .active_session_id()
+                .as_deref(),
+        );
 
         // Which entity fills the right panel: the Preview tab shows the embedded
         // browser; Diff/Plan share the DiffPanel container.
         // Each keeps its own layer, so the one left fades out under the one
         // chosen; a page leaving the Preview fades natively as it is let go.
         let fade = crate::motion::CrossFade::new(
-            "right-panel-body",
+            scene.id("right-panel-body"),
             usize::from(right_tab == RightTab::Preview),
             2,
             CHANGE,
@@ -5127,8 +5149,9 @@ impl AppShell {
             .max(px(RIGHT_PANEL_MIN_WIDTH));
 
         let beside_chat = (diff_open && chat_visible).then_some(right_floats);
-        let floated = std::mem::replace(&mut attachment.right_floated, beside_chat);
-        if beside_chat.is_none() {
+        let floated =
+            std::mem::replace(&mut attachment.right_floated, beside_chat).filter(|_| !new_scene);
+        if beside_chat.is_none() || new_scene {
             attachment.float_glide = None;
         } else if floated.is_some() && floated != beside_chat {
             let from = match (&attachment.float_glide, floated) {
@@ -5149,7 +5172,7 @@ impl AppShell {
             Some(glide) => {
                 let sample = gpui_base::motion::Presence::new(
                     ElementId::NamedChild(
-                        std::sync::Arc::new(ElementId::from("right-panel-float")),
+                        std::sync::Arc::new(scene.id("right-panel-float")),
                         glide.generation.to_string().into(),
                     ),
                     true,
@@ -5185,7 +5208,10 @@ impl AppShell {
         // floats or docks as the room changes glides instead, so its slide
         // starts afresh, at rest, whenever it does.
         let overlay_in = gpui_base::motion::transition(
-            ElementId::NamedInteger("right-panel-overlay-in".into(), attachment.float_generation),
+            ElementId::NamedChild(
+                std::sync::Arc::new(scene.id("right-panel-overlay-in")),
+                attachment.float_generation.to_string().into(),
+            ),
             if floating_panel.is_some() { 1. } else { 0. },
             gpui_base::motion::Transition::new(GLIDE),
             window,

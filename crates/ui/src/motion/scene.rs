@@ -13,12 +13,19 @@
 //! ([`SceneFrame::unshared`]). gpui-base has no such transition, and GPUI
 //! cannot draw a scene into a texture to fade a snapshot of it, so both
 //! scenes are drawn while the new one rises.
+//!
+//! What a surface shows changing to another of its kind (a pane showing
+//! another thread) is a new scene too, which [`Epoch`] names.
 
-use std::hash::{DefaultHasher, Hash, Hasher as _};
+use std::{
+    cell::{Cell, RefCell},
+    hash::{DefaultHasher, Hash, Hasher as _},
+    rc::Rc,
+};
 
 use gpui::{
     AnyElement, App, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    Stateful, Styled as _, Window, div, prelude::FluentBuilder as _,
+    SharedString, Stateful, Styled as _, Window, div, prelude::FluentBuilder as _,
 };
 use gpui_base::motion::{Presence, PresencePhase};
 
@@ -167,5 +174,91 @@ impl<K: Clone + Eq + Hash> SceneFrame<K> {
                         .into_any_element()
                 }),
         )
+    }
+}
+
+/// The scene a surface is in: what it shows (the thread a pane shows, or
+/// the right panel, which shows the focused thread's), counted by its
+/// changes. Everything that keeps the surface's motion keeps it under the
+/// scene, so a scene starts at rest whatever the last one left moving,
+/// however its parts' keys repeat the last one's (a turn's index, a row's
+/// place); and the same thing drawn under a new parent (a zoom, the window
+/// turning compact, the dock building the panes anew, a pane swap moving a
+/// thread) is the same scene, whose motion carries on:
+///
+/// - element-keyed motion (gpui-base's samplers, `use_keyed_state`) is
+///   drawn under [`Self::id`], which names the scene, so its state is the
+///   scene's alone;
+/// - a store that keeps motion outside element state ([`super::owned::Owned`],
+///   [`super::shared::SharedMoves`], [`super::list_rows::ListRows`],
+///   [`super::ListHover`], [`super::resize_glide::ResizeGlide`]) is made
+///   in the scene ([`InScene`]) and forgets what it kept the first time it
+///   is reached in a new one.
+///
+/// Every clone is the same epoch: the parts of one surface that are views
+/// of their own (a conversation's composer, its terminal drawer) share
+/// their host's, and each saying what it shows starts one scene.
+#[derive(Clone, Default)]
+pub(crate) struct Epoch(Rc<EpochState>);
+
+#[derive(Default)]
+struct EpochState {
+    shown: RefCell<Option<SharedString>>,
+    count: Cell<u64>,
+}
+
+impl Epoch {
+    /// The surface shows `what` from now on: a new scene when it showed
+    /// something else, which this returns.
+    pub(crate) fn show(&self, what: Option<&str>) -> bool {
+        let mut shown = self.0.shown.borrow_mut();
+        if shown.as_deref() == what {
+            return false;
+        }
+        *shown = what.map(|what| SharedString::from(what.to_owned()));
+        self.0.count.set(self.0.count.get() + 1);
+        true
+    }
+
+    /// `id` in this scene: the id of the element the surface's motion is
+    /// drawn under.
+    pub(crate) fn id(&self, id: impl Into<ElementId>) -> ElementId {
+        ElementId::NamedChild(
+            std::sync::Arc::new(id.into()),
+            format!("scene-{}", self.count()).into(),
+        )
+    }
+
+    fn count(&self) -> u64 {
+        self.0.count.get()
+    }
+}
+
+/// Where a motion store stands against the [`Epoch`] it belongs to: none
+/// for a store no scene holds. Every clone is the same.
+#[derive(Clone, Default)]
+pub(crate) struct InScene(Option<(Epoch, Rc<Cell<u64>>)>);
+
+impl InScene {
+    /// A store in `epoch`'s scene.
+    pub(crate) fn new(epoch: &Epoch) -> Self {
+        Self(Some((epoch.clone(), Rc::new(Cell::new(epoch.count())))))
+    }
+
+    /// Whether a new scene started since the store was last reached, which
+    /// then forgets everything it kept: from here on it is reached in this
+    /// scene.
+    pub(crate) fn entered(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|(epoch, seen)| seen.replace(epoch.count()) != epoch.count())
+    }
+
+    /// Whether what the store keeps is this scene's, for a reader that
+    /// cannot forget it.
+    pub(crate) fn current(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|(epoch, seen)| seen.get() == epoch.count())
     }
 }

@@ -99,21 +99,16 @@ pub(super) struct Side {
 }
 
 impl Side {
-    pub(super) fn new(cx: &mut App) -> Self {
+    pub(super) fn new(scene: &crate::motion::Epoch, cx: &mut App) -> Self {
         Self {
             host: None,
             leaving: None,
             split: cx.new(|_| ResizableState::default()),
-            glide: ResizeGlide::new("chat-side-split", gpui::Axis::Horizontal),
+            glide: ResizeGlide::new("chat-side-split", gpui::Axis::Horizontal).in_scene(scene),
             share: Rc::new(Cell::new(SIDE_SHARE)),
             slot: SideMode::Split,
             sync_pending: false,
         }
-    }
-
-    /// The lead shows another thread: its split lands where it is.
-    pub(super) fn start_scene(&mut self) {
-        self.glide.reset();
     }
 }
 

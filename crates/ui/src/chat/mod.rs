@@ -161,13 +161,17 @@ pub struct ChatView {
     /// panes' layout changes (see `panes::ThreadPanes`), which would scroll
     /// an element-keyed header back to its start.
     header_scroll: gpui::ScrollHandle,
-    /// The motion of everything the view draws, kept by the view: the
-    /// window draws the conversation under a new parent as it turns compact
-    /// or wide, a zoom as it starts and lands, and the dock when it builds
-    /// the panes' tree anew, which would start element-keyed motion over at
-    /// its end. Swept as the view renders, so what is drawn again after
-    /// a frame without it starts at rest, and cleared as it shows another
-    /// thread ([`Self::start_scene`]).
+    /// The scene of the thread the view shows: everything the view, its
+    /// composer and its terminal drawer draw keeps its motion under it, so
+    /// another thread shown starts all of it at rest, while the same thread
+    /// drawn under a new parent carries on.
+    scene: crate::motion::Epoch,
+    /// The motion of everything the view draws, kept by the view, in its
+    /// scene: the window draws the conversation under a new parent as it
+    /// turns compact or wide, a zoom as it starts and lands, and the dock
+    /// when it builds the panes' tree anew, which would start element-keyed
+    /// motion over at its end. Swept as the view renders, so what is drawn
+    /// again after a frame without it starts at rest.
     pub(super) motion: crate::motion::owned::Owned,
     /// Whether what the view shows has been shown since it was bound
     /// ([`Self::start_scene`]). Until it can be drawn at rest it is laid
@@ -326,6 +330,8 @@ impl ChatView {
     ) -> Self {
         let compact = window_state.read(cx).compact;
         let session_id = workspace_store.read(cx).active_session_id();
+        let scene = crate::motion::Epoch::default();
+        scene.show(session_id.as_deref());
         let composer = cx.new(|cx| {
             if compact {
                 Composer::new_with_layout(workspace_store.clone(), true, window, cx)
@@ -392,7 +398,12 @@ impl ChatView {
                 cx.notify();
             }),
         ];
-        let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
+        let terminal_drawer = cx.new(|cx| {
+            let mut drawer = TerminalDrawer::new(workspace_store.clone(), window, cx);
+            drawer.share_scene(&scene);
+            drawer
+        });
+        composer.update(cx, |composer, _| composer.share_scene(&scene));
         // The drawer is inside the view: the keyboard entering it does not
         // leave the view, but it does leave the transcript.
         subscriptions.push(cx.on_focus_in(
@@ -416,11 +427,13 @@ impl ChatView {
         }));
         subscriptions.push(cx.on_release(|this, cx| this.release_side(cx)));
         let pull_requests = cx.new(|cx| {
-            crate::pull_requests::PullRequestsPanel::new(
+            let mut pull_requests = crate::pull_requests::PullRequestsPanel::new(
                 workspace_store.clone(),
                 window_state.clone(),
                 cx,
-            )
+            );
+            pull_requests.share_scene(&scene);
+            pull_requests
         });
         let agents =
             cx.new(|cx| crate::agents_panel::AgentsPanel::for_sheet(workspace_store.clone(), cx));
@@ -436,7 +449,7 @@ impl ChatView {
             edges: WindowEdges::BOTH,
             pane_close: None,
             header_scroll: gpui::ScrollHandle::default(),
-            motion: Default::default(),
+            motion: crate::motion::owned::Owned::in_scene(&scene),
             scene_shown: false,
             held: false,
             scene_at: cx.background_executor().now(),
@@ -449,10 +462,11 @@ impl ChatView {
             terminal_glide: crate::motion::resize_glide::ResizeGlide::new(
                 "chat-terminal-panels",
                 gpui::Axis::Vertical,
-            ),
+            )
+            .in_scene(&scene),
             terminal_glide_compact: false,
             body: Default::default(),
-            side: side::Side::new(cx),
+            side: side::Side::new(&scene, cx),
             side_of: None,
             list_state,
             timeline_stale: false,
@@ -461,9 +475,9 @@ impl ChatView {
             reservation_scroll_back: None,
             carried_anchor: false,
             rows: Vec::new(),
-            rows_motion: crate::motion::list_rows::ListRows::over(ROWS_IN),
+            rows_motion: crate::motion::list_rows::ListRows::over(ROWS_IN).in_scene(&scene),
             row_folds: Vec::new(),
-            shared: Default::default(),
+            shared: crate::motion::shared::SharedMoves::in_scene(&scene),
             timeline_folds: 0,
             rows_regrouped: false,
             shown_deliveries: Vec::new(),
@@ -485,7 +499,7 @@ impl ChatView {
             inline_diffs: InlineDiffCache::new(),
             full_outputs: HashMap::new(),
             copy_when_loaded: None,
-            hover: crate::motion::ListHover::new(crate::material::HOVER),
+            hover: crate::motion::ListHover::new(crate::material::HOVER).in_scene(&scene),
             list_scroll,
             session_key: None,
             highlighted_turn: None,
@@ -493,6 +507,7 @@ impl ChatView {
             copied: CopiedMark::default(),
             commit_dialog: None,
             capture: None,
+            scene,
             _subscriptions: subscriptions,
         };
         this.sync_markdown_states(cx);
@@ -551,6 +566,7 @@ impl ChatView {
             self.terminal_drawer
                 .update(cx, |drawer, cx| drawer.set_session(session_id.clone(), cx));
         }
+        self.scene.show(session_id.as_deref());
         self.session_id = session_id;
         self.timeline_stale = true;
         // Not yet shown, for a host asking before the view next renders.
@@ -559,23 +575,13 @@ impl ChatView {
         cx.notify();
     }
 
-    /// The view shows another thread from this frame: a new scene, which
-    /// nothing moves into from the last one. Its motion is keyed by what
-    /// it draws (a turn's index, a control's name), which another thread
-    /// draws too, so each part of it would carry on from where the last
-    /// thread left its namesake. The same thread drawn under a new parent
-    /// keeps all of it.
+    /// The view shows another thread from this frame. Its motion is the
+    /// new scene's ([`Self::scene`]); what is left is that it shows once it
+    /// can be drawn at rest, from rows the new thread painted.
     pub(super) fn start_scene(&mut self, cx: &App) {
         self.scene_shown = false;
         self.scene_at = cx.background_executor().now();
-        // Rows painted from here on are the new thread's.
         self.painted_rows.set(None);
-        self.motion.clear();
-        self.shared.clear();
-        self.rows_motion.clear();
-        self.hover.clear();
-        self.terminal_glide.reset();
-        self.side.start_scene();
     }
 }
 
@@ -700,6 +706,7 @@ impl Render for ChatView {
         // The phone reads on T1 paper; the desktop keeps the glass canvas.
         // The header's title menu dispatches these, and the header is a sibling of `main`.
         let root = v_flex()
+            .id(self.scene.id("chat"))
             .size_full()
             .min_w_0()
             .track_focus(&self.focus_handle)

@@ -8,7 +8,7 @@ use gpui::{
 use gpui_base::motion::{PresenceSample, Transition, TransitionId, transition};
 
 pub(crate) use gpui_base::motion::PresencePhase;
-pub(crate) use scene::Scene;
+pub(crate) use scene::{Epoch, InScene, Scene};
 
 mod scene;
 pub(crate) mod shared;

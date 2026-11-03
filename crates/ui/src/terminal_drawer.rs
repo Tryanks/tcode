@@ -379,12 +379,13 @@ pub struct TerminalDrawer {
     split_states: [Entity<gpui_base::ResizableState>; 2],
     /// Glides the second pane open and shut.
     split_glide: crate::motion::resize_glide::ResizeGlide,
-    /// Counts the threads the drawer has shown, naming the element its
-    /// content is drawn under: what it draws keeps its motion (a tab
+    /// The scene of the thread the drawer shows, which names the element
+    /// its content is drawn under: what it draws keeps its motion (a tab
     /// folding in, the selection's glide, a control coming and going) in
     /// element state keyed by that path, so another thread's starts at rest
-    /// rather than from where the last thread's namesakes were.
-    scene: u64,
+    /// rather than from where the last thread's namesakes were. The compact
+    /// window draws the drawer as a page of its own, outside its chat.
+    scene: crate::motion::Epoch,
     /// The split last shown, which a closing pane is drawn from and lies
     /// along.
     last_split: Option<tcode_protocol::TerminalSplitStatus>,
@@ -503,8 +504,11 @@ impl TerminalDrawer {
         // background-thread wakeup during window teardown.
         #[cfg(test)]
         let blink_task = None;
+        let session_id = workspace_store.read(cx).active_session_id();
+        let scene = crate::motion::Epoch::default();
+        scene.show(session_id.as_deref());
         Self {
-            session_id: workspace_store.read(cx).active_session_id(),
+            session_id,
             workspace_store,
             focus_handle,
             key_bar,
@@ -513,11 +517,8 @@ impl TerminalDrawer {
                 cx.new(|_| gpui_base::ResizableState::default()),
                 cx.new(|_| gpui_base::ResizableState::default()),
             ],
-            split_glide: crate::motion::resize_glide::ResizeGlide::new(
-                "terminal-split-glide",
-                gpui::Axis::Horizontal,
-            ),
-            scene: 0,
+            split_glide: split_glide(&scene),
+            scene,
             last_split: None,
             split_shown: false,
             body_size: Rc::default(),
@@ -545,13 +546,20 @@ impl TerminalDrawer {
     /// Show the terminals of `session_id`'s thread, or none.
     pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
         if self.session_id != session_id {
+            self.scene.show(session_id.as_deref());
             self.session_id = session_id;
-            // Another thread's terminals land as they are.
-            self.split_glide.reset();
-            self.scene += 1;
+            // No split of the last thread's closes in this one's.
             self.last_split = None;
             cx.notify();
         }
+    }
+
+    /// Keep the drawer's motion in `scene`, its host's: what the host shows
+    /// is what the drawer shows.
+    pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch) {
+        scene.show(self.session_id.as_deref());
+        self.scene = scene.clone();
+        self.split_glide = split_glide(scene);
     }
 
     pub fn is_size(&self, width: f32, height: f32) -> bool {
@@ -2124,10 +2132,7 @@ impl Render for TerminalDrawer {
         .into_any_element();
 
         v_flex()
-            .id(gpui::ElementId::NamedInteger(
-                "terminal-scene".into(),
-                self.scene,
-            ))
+            .id(self.scene.id("terminal-scene"))
             .size_full()
             .min_h_0()
             .font_family(TERMINAL_FONT_FAMILY)
@@ -2246,6 +2251,12 @@ impl Render for TerminalDrawer {
                 .map(|shown| shown.fold(self.key_bar.clone())),
             )
     }
+}
+
+/// The glide of the drawer's split in `scene`.
+fn split_glide(scene: &crate::motion::Epoch) -> crate::motion::resize_glide::ResizeGlide {
+    crate::motion::resize_glide::ResizeGlide::new("terminal-split-glide", gpui::Axis::Horizontal)
+        .in_scene(scene)
 }
 
 fn snapped_grid_origin(bounds: Bounds<Pixels>, scale_factor: f32) -> Point<Pixels> {

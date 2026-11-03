@@ -142,6 +142,9 @@ pub(crate) struct ListRows<A, V> {
     leaving: Vec<Leaving<V>>,
     /// How long a row takes to come in or fold away.
     duration: Duration,
+    /// The scene of the list's surface: a new one's rows, whose keys may
+    /// match the last one's, are in place at once.
+    scene: super::InScene,
 }
 
 impl<A, V> ListRows<A, V> {
@@ -153,6 +156,21 @@ impl<A, V> ListRows<A, V> {
             arrivals: HashMap::new(),
             leaving: Vec::new(),
             duration,
+            scene: Default::default(),
+        }
+    }
+
+    /// The rows of a list in `epoch`'s scene.
+    pub(crate) fn in_scene(mut self, epoch: &super::Epoch) -> Self {
+        self.scene = super::InScene::new(epoch);
+        self
+    }
+
+    /// Forgets the last scene's stamps, once a new scene reaches the rows.
+    fn enter(&mut self) {
+        if self.scene.entered() {
+            self.arrivals.clear();
+            self.leaving.clear();
         }
     }
 }
@@ -161,6 +179,7 @@ impl<A: Copy, V> ListRows<A, V> {
     /// Row `key` came in `at`. A row still folding away turns back from
     /// where it is.
     pub(crate) fn arrive(&mut self, key: u64, arrival: Arrival, note: A, at: Instant) {
+        self.enter();
         let mut at = at;
         if let Some(index) = self.leaving.iter().position(|left| left.key == key) {
             let left = self.leaving.remove(index);
@@ -184,6 +203,7 @@ impl<A: Copy, V> ListRows<A, V> {
     /// folded away. A row still arriving folds from where it is; rows that
     /// were folding against it fold against `attach` now.
     pub(crate) fn leave(&mut self, key: u64, value: V, attach: Attach, at: Instant) {
+        self.enter();
         let mut start = at;
         if let Some(arrived) = self.arrivals.remove(&key) {
             let shown = arrived.progress(at);
@@ -207,17 +227,18 @@ impl<A: Copy, V> ListRows<A, V> {
 
     /// Row `key`'s arrival and how far in it is, while it comes in.
     pub(crate) fn entering(&self, key: u64, now: Instant) -> Option<(Arrived<A>, f32)> {
-        let arrived = self.arrivals.get(&key)?;
+        let arrived = self.arrivals.get(&key).filter(|_| self.scene.current())?;
         (!arrived.settled(now)).then(|| (*arrived, arrived.progress(now)))
     }
 
     /// The rows folding away against row `key`: those above its content,
     /// then those below, each in the order they stood.
     pub(crate) fn leaving(&self, key: u64, now: Instant) -> (Vec<Left<'_, V>>, Vec<Left<'_, V>>) {
+        let current = self.scene.current();
         let left = |side: fn(u64) -> Attach| {
             self.leaving
                 .iter()
-                .filter(|left| left.attach == side(key))
+                .filter(|left| current && left.attach == side(key))
                 .map(|left| Left {
                     key: left.key,
                     value: &left.value,
@@ -233,6 +254,7 @@ impl<A: Copy, V> ListRows<A, V> {
     /// folded away, returning the rows those folded against: their heights
     /// changed, so the list measures them again.
     pub(crate) fn settle(&mut self, now: Instant) -> Vec<u64> {
+        self.enter();
         self.arrivals.retain(|_, arrived| !arrived.settled(now));
         let mut folded = Vec::new();
         self.leaving.retain(|left| {
