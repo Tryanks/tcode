@@ -431,7 +431,7 @@ impl ComputerUseTools {
             ));
             activation = match (activation, result.delivery) {
                 (_, Delivery::ForegroundHid) => "foreground",
-                ("none", Delivery::BackgroundPid) => "background",
+                ("none", Delivery::BackgroundPid | Delivery::WindowMessage) => "background",
                 (current, _) => current,
             };
             step_results.push(json!({

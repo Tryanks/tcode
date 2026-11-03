@@ -14,4 +14,19 @@ disallowed-methods = [
     { path = "core_graphics::event::CGEvent::post", reason = "a global tap moves the user's pointer and types into whatever has focus; post to the target with CGEvent::post_to_pid" },
     { path = "core_graphics::display::CGDisplay::warp_mouse_cursor_position", reason = "moves the user's pointer; computer use shows its own agent cursor" },
     { path = "core_graphics::display::CGDisplay::move_cursor_to_point", reason = "moves the user's pointer; computer use shows its own agent cursor" },
+    { path = "windows::Win32::UI::WindowsAndMessaging::SetCursorPos", reason = "moves the user's pointer; computer use posts window messages to its target and shows its own agent cursor" },
+    { path = "windows::Win32::UI::Input::KeyboardAndMouse::SendInput", reason = "global input moves the user's pointer and types into whatever has focus; post window messages to the target" },
+    { path = "windows::Win32::UI::Input::KeyboardAndMouse::mouse_event", reason = "global input moves the user's pointer; post window messages to the target" },
+    { path = "windows::Win32::UI::Input::KeyboardAndMouse::keybd_event", reason = "global input types into whatever has focus; post window messages to the target" },
+    { path = "uiautomation::UIElement::click", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::hold_click", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::double_click", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::right_click", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::send_keys", reason = "types into whatever has focus through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::hold_send_keys", reason = "types into whatever has focus through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::send_text", reason = "types into whatever has focus through SendInput; post window messages to the target" },
+]
+disallowed-types = [
+    { path = "uiautomation::inputs::Mouse", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::inputs::Keyboard", reason = "types into whatever has focus through SendInput; post window messages to the target" },
 ]

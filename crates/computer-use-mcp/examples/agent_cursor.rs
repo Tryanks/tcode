@@ -156,5 +156,5 @@ fn main() {
     #[cfg(target_os = "macos")]
     overlay::run();
     #[cfg(not(target_os = "macos"))]
-    println!("the agent cursor is macOS only");
+    println!("this demo drives the macOS overlay");
 }
