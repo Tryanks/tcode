@@ -13346,13 +13346,19 @@ mod tests {
         }
     }
 
-    /// An agent's thread with every right-panel tab, two-digit counts on Agents
-    /// and Pull requests, the longest git label, all five header toggles and a
-    /// link back to a parent whose title is longer than the link shows.
+    /// An agent's thread with every right-panel tab, ten running agents of its
+    /// own, a two-digit count on Pull requests, the longest git label, all five
+    /// header toggles and a link back to a parent whose title is longer than
+    /// the link shows.
     fn mount_crowded_thread(
         cx: &mut TestAppContext,
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
-        let agents = (0..10)
+        mount_thread_with(cx, ten_agents(agent::ItemStatus::InProgress))
+    }
+
+    /// Ten agents of the thread's own, each at `status`.
+    fn ten_agents(status: agent::ItemStatus) -> Vec<agent::AgentEvent> {
+        (0..10)
             .map(|index| {
                 agent::AgentEvent::ItemStarted(agent::ThreadItem {
                     id: format!("agent-{index}"),
@@ -13360,15 +13366,14 @@ mod tests {
                     content: agent::ItemContent::Subagent {
                         agent_type: "explore".into(),
                         description: format!("Survey module {index}"),
-                        status: agent::ItemStatus::InProgress,
+                        status,
                         summary: None,
                         model: None,
                         effort: None,
                     },
                 })
             })
-            .collect();
-        mount_thread_with(cx, agents)
+            .collect()
     }
 
     /// [`mount_crowded_thread`]'s thread with `events` in its log in place of
@@ -13902,7 +13907,7 @@ mod tests {
     #[gpui::test]
     fn the_collapsed_sidebar_slides_in_from_the_edge_and_back(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_crowded_thread(cx);
+        let (shell, host, cx) = mount_thread_with(cx, Vec::new());
         let store = store_of(&shell, cx);
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         resize(cx, 1600.);
@@ -13959,7 +13964,7 @@ mod tests {
     #[gpui::test]
     fn the_terminal_drawer_glides_open_and_closed(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_crowded_thread(cx);
+        let (shell, host, cx) = mount_thread_with(cx, Vec::new());
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
         let composer_bottom = |cx: &mut VisualTestContext| {
@@ -15101,7 +15106,9 @@ mod tests {
     #[gpui::test]
     fn the_chat_header_glides_between_its_tiers(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (_shell, _host, cx) = mount_crowded_thread(cx);
+        // Its agents have finished: a running one's mark turns for as long
+        // as it runs, so the window would never rest.
+        let (_shell, _host, cx) = mount_thread_with(cx, ten_agents(agent::ItemStatus::Completed));
         resize(cx, 1600.);
         crate::test_frames::draw_settled(cx);
         // What the header holds after its title: the git button, the tier's
