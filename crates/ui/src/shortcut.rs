@@ -76,11 +76,19 @@ pub(crate) fn init(cx: &mut App) {
         .map(|(key, _)| secondary(key, NoAction, terminal, cx))
         .collect();
     cx.bind_keys(panes.into_iter().map(|(_, binding)| binding));
-    cx.bind_keys([KeyBinding::new(
-        "escape",
-        crate::panes::ClosePane,
-        Some(crate::panes::WAITING_CONTEXT),
-    )]);
+    cx.bind_keys([
+        KeyBinding::new(
+            "escape",
+            crate::panes::ClosePane,
+            Some(crate::panes::WAITING_CONTEXT),
+        ),
+        // A field's own Escape is bound deeper, and wins.
+        KeyBinding::new(
+            "escape",
+            crate::chat::CloseSide,
+            Some(crate::chat::SIDE_CONTEXT),
+        ),
+    ]);
     cx.bind_keys(blanks);
     cx.bind_keys([
         undo,

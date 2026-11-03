@@ -2423,6 +2423,7 @@ agents:
   readonly: "Managed by %{provider}. Read-only here."
   empty_title: "No agents yet"
   empty_desc: "Agents this thread dispatches appear here."
+  close_side: "Close agent"
   back_to_parent: "Back to %{title}"
   open_child: "Open"
 tabs:

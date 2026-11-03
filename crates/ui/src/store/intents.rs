@@ -484,6 +484,44 @@ impl WorkspaceStore {
         cx.notify();
     }
 
+    /// The agent shown beside `lead` in the lead's chat.
+    pub(crate) fn side_thread_for(&self, lead: &str) -> Option<String> {
+        self.conversation_ui
+            .get(&self.side_destination(lead))?
+            .side_thread
+            .clone()
+    }
+
+    /// Show `side` beside `lead` in the lead's chat, or nothing there. The
+    /// focus stays on the lead: the chat showing it hosts the agent.
+    pub(crate) fn set_side_thread(
+        &mut self,
+        lead: &str,
+        side: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let destination = self.side_destination(lead);
+        let wrap = self.settings_replica.word_wrap_diffs;
+        let ui = self
+            .conversation_ui
+            .entry(destination)
+            .or_insert_with(|| crate::conversation_ui::ConversationUiState::new(wrap, false, 240.));
+        if ui.side_thread != side {
+            ui.side_thread = side;
+            cx.notify();
+        }
+    }
+
+    /// Where `lead`'s conversation state lives, as [`Self::open_tab_for`]
+    /// finds it: also for a lead whose status has not arrived yet.
+    fn side_destination(&self, lead: &str) -> tcode_core::ui::ConversationDestination {
+        self.threads
+            .get(lead)
+            .filter(|thread| thread.open)
+            .and_then(|thread| thread.destination.clone())
+            .unwrap_or_else(|| tcode_core::ui::ConversationDestination::Thread(lead.to_owned()))
+    }
+
     /// Whether a surface shows the thread, so its topics are subscribed.
     pub(crate) fn is_thread_open(&self, session_id: &str) -> bool {
         self.threads

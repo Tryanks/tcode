@@ -573,60 +573,34 @@ pub(crate) fn shows_selection(window: &Window, cx: &App) -> bool {
     })
 }
 
-/// Show a thread reached from `parent` in a pane beside `parent`'s, or the
-/// focused pane's: to its right, or below it where only that has room. False
-/// where no pane shows it then: the compact layout, or no room.
-pub(crate) fn show_beside(
-    session_id: &str,
-    parent: Option<&str>,
-    window: &mut Window,
-    cx: &mut App,
-) -> bool {
-    let Some(shell) = current_shell(cx) else {
-        return false;
-    };
-    shell.update(cx, |shell, cx| {
-        let Some(from) = parent
-            .and_then(|parent| shell.pane_showing(parent, cx))
-            .or_else(|| shell.acting_pane(window, cx))
-        else {
-            return false;
-        };
-        shell.open_in_new_pane(
-            session_id.to_owned(),
-            &from,
-            &[gpui_base::Placement::Right, gpui_base::Placement::Bottom],
-            window,
-            cx,
-        )
-    })
+/// The chat that shows an agent opened from `lead` beside it: the chat of
+/// the pane showing `lead`, or of the pane showing `lead` beside its own
+/// lead, which has room for one agent beside it. None in the compact
+/// layout, which shows one thread at a time.
+pub(crate) fn side_host_for(lead: &str, cx: &App) -> Option<Entity<ChatView>> {
+    let shell = current_shell(cx)?;
+    let shell = shell.read(cx);
+    if shell.compact(cx) {
+        return None;
+    }
+    shell
+        .attachment
+        .as_ref()?
+        .panes(cx)
+        .into_iter()
+        .map(|pane| pane.read(cx).chat())
+        .find(|chat| {
+            let chat = chat.read(cx);
+            chat.session_id() == Some(lead) || chat.side_session_id() == Some(lead)
+        })
 }
 
-/// Go back from `session_id` to `parent` where another pane shows `parent`:
-/// `session_id`'s pane closes and the keyboard goes to `parent`'s. False
-/// where no pane closes: the compact layout, `session_id` in no pane or
-/// `parent` in no other.
-pub(crate) fn close_into(
-    session_id: &str,
-    parent: &str,
-    window: &mut Window,
-    cx: &mut App,
-) -> bool {
-    let Some(shell) = current_shell(cx) else {
-        return false;
-    };
-    shell.update(cx, |shell, cx| {
-        if shell.compact(cx) {
-            return false;
-        }
-        let (Some(pane), Some(into)) = (
-            shell.pane_showing(session_id, cx),
-            shell.pane_showing(parent, cx),
-        ) else {
-            return false;
-        };
-        pane != into && shell.close_pane_into(&pane, |_, _| Some(into), window, cx)
-    })
+/// Whether one of `panes` draws `session_id` beside its own thread, which
+/// keeps it open when a pane showing it as its own goes.
+fn drawn_beside(panes: &[Entity<ThreadPanel>], session_id: &str, cx: &App) -> bool {
+    panes
+        .iter()
+        .any(|pane| pane.read(cx).chat().read(cx).side_session_id() == Some(session_id))
 }
 
 /// What fills one panel of a layout about to be installed.
@@ -1483,6 +1457,7 @@ impl AppShell {
                     }
                     if let Some(left) = left
                         && store.read(cx).is_thread_open(&left)
+                        && !drawn_beside(&panes, &left, cx)
                     {
                         store.update(cx, |store, cx| store.close_thread(&left, cx));
                     }
@@ -1888,12 +1863,14 @@ impl AppShell {
         };
         let area = attachment.thread_panes.clone();
         let store = attachment.link.store.clone();
+        let panes = attachment.panes(cx);
         for pane in attachment.closed_panes(cx) {
             let session_id = pane.read(cx).session_id().map(str::to_owned);
             area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
             if let Some(session_id) = session_id
                 && store.read(cx).is_thread_open(&session_id)
                 && self.pane_showing(&session_id, cx).is_none()
+                && !drawn_beside(&panes, &session_id, cx)
             {
                 store.update(cx, |store, cx| store.close_thread(&session_id, cx));
             }
@@ -2582,9 +2559,11 @@ impl AppShell {
                 cx,
             );
         });
+        let kept: Vec<_> = panes.values().cloned().collect();
         for pane in before {
-            if !panes.values().any(|kept| *kept == pane)
+            if !kept.contains(&pane)
                 && let Some(session_id) = pane.read(cx).session_id().map(str::to_owned)
+                && !drawn_beside(&kept, &session_id, cx)
             {
                 store.update(cx, |store, cx| store.close_thread(&session_id, cx));
             }
@@ -7933,10 +7912,12 @@ mod tests {
     }
 
     /// A press on a subagent's window in its lead's timeline opens the
-    /// agent's thread beside the lead; once shown, the same press moves the
-    /// keyboard to it rather than opening it twice.
+    /// agent's thread beside the lead, in the lead's own pane, with the
+    /// keyboard; Escape from it closes it and gives the keyboard back to the
+    /// lead's composer; once shown, the same press leaves the one agent
+    /// shown rather than opening it twice.
     #[gpui::test]
-    fn a_subagent_window_opens_its_thread_beside_the_lead(cx: &mut TestAppContext) {
+    fn a_subagent_window_opens_its_thread_beside_its_lead(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         // The lead is reopened below, so the host answers it with the log
@@ -8046,14 +8027,32 @@ mod tests {
         await_restore_update(&shell, cx, |store| {
             !store.chat_loading() && store.native_subagent_readonly_for(Some("mirror"))
         });
-        draw(cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), Some("mirror".into())]
-        );
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        // The agent's pane keeps the keyboard on its settings row, which has
-        // no field: a key types nowhere, and the pane's shortcuts still work.
+        settle_panes(cx);
+        let store = store_of(&shell, cx);
+        let lead_typing = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                shell
+                    .read(cx)
+                    .attachment
+                    .as_ref()
+                    .expect("attached")
+                    .all_panes(cx)[0]
+                    .read(cx)
+                    .chat()
+                    .read(cx)
+                    .composer_has_keyboard(window, cx)
+            })
+        };
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert!(cx.debug_bounds("chat-side-header").is_some());
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        assert!(!lead_typing(cx), "the keyboard is with the agent");
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("mirror"));
+        });
+        // The agent's composer is its settings row, which has no field: a
+        // key types nowhere.
         assert!(cx.debug_bounds("composer-subagent").is_some());
         sent(&host);
         cx.simulate_keystrokes("x enter");
@@ -8063,21 +8062,34 @@ mod tests {
                 .iter()
                 .all(|payload| !matches!(payload, ClientPayload::Command(_)))
         );
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
 
-        cx.simulate_keystrokes("secondary-alt-left");
-        draw(cx);
-        assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        let window = cx
-            .debug_bounds("activity-row-spawn-1")
-            .expect("the subagent's window");
-        cx.simulate_click(window.center(), gpui::Modifiers::default());
-        draw(cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), Some("mirror".into())]
+        cx.simulate_keystrokes("escape");
+        settle_panes(cx);
+        assert!(cx.debug_bounds("chat-side-header").is_none());
+        assert!(
+            lead_typing(cx),
+            "the keyboard is back in the lead's composer"
         );
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        store.read_with(cx, |store, _| assert!(!store.is_thread_open("mirror")));
+
+        for press in 0..2 {
+            let window = cx
+                .debug_bounds("activity-row-spawn-1")
+                .expect("the subagent's window");
+            cx.simulate_click(window.center(), gpui::Modifiers::default());
+            settle_panes(cx);
+            assert_eq!(
+                pane_threads(&shell, cx),
+                [Some("thread-1".into())],
+                "press {press}"
+            );
+            assert!(
+                cx.debug_bounds("chat-side-header").is_some(),
+                "press {press}"
+            );
+            assert!(!lead_typing(cx), "press {press}");
+            store.read_with(cx, |store, _| assert!(store.is_thread_open("mirror")));
+        }
     }
 
     /// [`mount_panes`] with `agent-1` dispatched by `thread-1`.
@@ -8128,25 +8140,26 @@ mod tests {
         settle_panes(cx);
     }
 
-    /// Press the agent's header link back to its lead.
-    fn press_back_to_lead(cx: &mut VisualTestContext) {
-        let back = cx
-            .debug_bounds("agent-parent-link")
-            .expect("the agent's way back to its lead");
-        cx.simulate_mouse_move(back.center(), None, gpui::Modifiers::default());
+    /// Press the control `selector` names, and let what it moves land.
+    fn press_control(selector: &'static str, cx: &mut VisualTestContext) {
+        let control = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("no {selector}"));
+        cx.simulate_mouse_move(control.center(), None, gpui::Modifiers::default());
         draw(cx);
-        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        cx.simulate_click(control.center(), gpui::Modifiers::default());
         draw(cx);
         settle_panes(cx);
     }
 
-    /// An agent opened from its lead's Agents panel opens beside the lead;
-    /// Back closes the agent's pane, and the lead's pane, the keyboard and
-    /// the lead's Agents panel are back where they were before it opened.
-    /// Opening and going back again leaves the same layout each time, as
-    /// does closing the agent's pane with ⇧⌘W instead.
+    /// An agent opened from its lead's Agents panel shows beside the lead in
+    /// the lead's own pane: the right third of the body under the lead's
+    /// header, the lead keeping the store's focus. Close takes it away, and
+    /// the lead's pane, the keyboard and the lead's Agents panel are back
+    /// where they were before it opened, with the agent's thread closed.
+    /// Opening and closing again leaves the same layout each time.
     #[gpui::test]
-    fn back_from_an_agent_beside_its_lead_closes_its_pane(cx: &mut TestAppContext) {
+    fn an_agent_opens_beside_its_lead_in_the_leads_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
         let store = store_of(&shell, cx);
@@ -8156,20 +8169,40 @@ mod tests {
         let panel = cx.debug_bounds("right-panel").expect("the Agents panel");
         assert_eq!(panes.len(), 1);
         assert!(panes[0].right() <= panel.left(), "{panes:?}, {panel:?}");
+        let header = cx.debug_bounds("chat-title").expect("the lead's header");
 
         for round in 0..3 {
             open_agent_from_panel(&shell, &host, cx);
             assert_eq!(
                 pane_threads(&shell, cx),
-                [Some("thread-1".into()), Some("agent-1".into())],
+                [Some("thread-1".into())],
                 "round {round}"
             );
-            if round < 2 {
-                press_back_to_lead(cx);
-            } else {
-                cx.simulate_keystrokes("secondary-shift-w");
-                settle_panes(cx);
-            }
+            assert_eq!(pane_bounds(&shell, cx), panes, "round {round}");
+            let pane = panes[0];
+            let side = cx
+                .debug_bounds("chat-side-header")
+                .expect("the agent beside its lead");
+            assert!(side.top() >= header.bottom(), "{side:?} under {header:?}");
+            assert!(
+                side.right() <= pane.right() && pane.right() - side.right() < px(4.),
+                "{side:?} at the end of {pane:?}"
+            );
+            assert!(
+                (side.size.width * 3. - pane.size.width).abs() < pane.size.width * 0.03,
+                "{side:?} is a third of {pane:?}"
+            );
+            assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
+            store.read_with(cx, |store, _| {
+                assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+                assert!(store.is_thread_open("agent-1"), "round {round}");
+            });
+
+            press_control("side-close", cx);
+            assert!(
+                cx.debug_bounds("chat-side-header").is_none(),
+                "round {round}"
+            );
             assert_eq!(
                 pane_threads(&shell, cx),
                 [Some("thread-1".into())],
@@ -8185,12 +8218,13 @@ mod tests {
         }
     }
 
-    /// On a tablet, an agent opened beside its lead, the window then turned
-    /// compact: the compact Back returns to the lead, and the agent's pane,
-    /// which the compact window does not draw, is gone when the window is
-    /// wide again rather than left beside the lead or showing it twice.
+    /// On a tablet: an agent beside its lead is neither drawn nor held open
+    /// while the window is compact, which shows the lead alone, and is beside
+    /// its lead again once the window is wide. An agent opened from its lead
+    /// in the compact window takes the lead's place, and the compact Back
+    /// returns to the lead and closes the agent.
     #[gpui::test]
-    fn back_from_an_agent_in_a_compact_window_returns_to_its_lead(cx: &mut TestAppContext) {
+    fn an_agent_in_a_compact_window_takes_its_leads_place(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
         as_mobile(cx);
@@ -8198,9 +8232,38 @@ mod tests {
         store.update(cx, |store, cx| store.toggle_agents_panel(cx));
         settle_panes(cx);
         open_agent_from_panel(&shell, &host, cx);
+        assert!(cx.debug_bounds("chat-side-header").is_some());
+
         resize(cx, 600.);
         settle_panes(cx);
         assert!(shell.read_with(cx, |shell, cx| shell.compact(cx)));
+        assert!(cx.debug_bounds("chat-side-header").is_none());
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert!(!store.is_thread_open("agent-1"));
+        });
+        resize(cx, 2000.);
+        settle_panes(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert!(cx.debug_bounds("chat-side-header").is_some());
+        store.read_with(cx, |store, _| assert!(store.is_thread_open("agent-1")));
+        press_control("side-close", cx);
+
+        resize(cx, 600.);
+        settle_panes(cx);
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(&store, "agent-1".into(), Some("thread-1"), window, cx)
+        });
+        draw(cx);
+        serve_thread(&host, "agent-1");
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading() && store.timeline_settled_for("agent-1")
+        });
+        settle_panes(cx);
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("agent-1"));
+        });
+        assert!(cx.debug_bounds("chat-side-header").is_none());
 
         let back = cx.debug_bounds("compact-back").expect("the compact Back");
         cx.simulate_click(back.center(), gpui::Modifiers::default());
@@ -8210,9 +8273,6 @@ mod tests {
             assert!(!store.is_thread_open("agent-1"));
         });
         assert!(cx.debug_bounds("compact-thread-page").is_some());
-        resize(cx, 2000.);
-        settle_panes(cx);
-        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
     }
 
     /// Choose the palette's action `label`, in whatever language the host's

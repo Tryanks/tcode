@@ -28,7 +28,9 @@ mod empty;
 mod header;
 pub(crate) mod model;
 mod rail;
+mod side;
 pub(crate) use model::format_elapsed;
+pub(crate) use side::{CloseSide, SIDE_CONTEXT};
 mod timeline;
 pub(crate) mod tools;
 
@@ -193,6 +195,10 @@ pub struct ChatView {
     /// this frame: set as the body is laid out, before the rows and the
     /// composer that it moves are.
     body: rail::BodyLayout,
+    /// The agent shown beside the thread, opened from it.
+    side: side::Side,
+    /// Set while the view is itself an agent's shown beside its lead.
+    side_of: Option<side::SideOf>,
     /// The Agents sheet's content on phone.
     agents: Entity<crate::agents_panel::AgentsPanel>,
     terminal_was_open: bool,
@@ -371,7 +377,8 @@ impl ChatView {
                 let open = store
                     .read(cx)
                     .panel_state_for(this.session_id.as_deref())
-                    .terminal_open;
+                    .terminal_open
+                    && this.side_of.is_none();
                 if open && !this.terminal_was_open {
                     let drawer = this.terminal_drawer.clone();
                     window.defer(cx, move |window, cx| {
@@ -381,6 +388,7 @@ impl ChatView {
                     });
                 }
                 this.terminal_was_open = open;
+                this.request_side_sync(window, cx);
                 cx.notify();
             }),
         ];
@@ -401,6 +409,12 @@ impl ChatView {
                 this.dismiss_highlight(cx);
             }
         }));
+        // The compact layout shows one thread at a time; turning compact
+        // lets the agent beside this one go, and wide again brings it back.
+        subscriptions.push(cx.observe_in(&window_state, window, |this, _, window, cx| {
+            this.request_side_sync(window, cx)
+        }));
+        subscriptions.push(cx.on_release(|this, cx| this.release_side(cx)));
         let pull_requests = cx.new(|cx| {
             crate::pull_requests::PullRequestsPanel::new(
                 workspace_store.clone(),
@@ -438,6 +452,8 @@ impl ChatView {
             ),
             terminal_glide_compact: false,
             body: Default::default(),
+            side: side::Side::new(cx),
+            side_of: None,
             list_state,
             timeline_stale: false,
             history_placeholder_height: px(0.),
@@ -530,8 +546,11 @@ impl ChatView {
         self.composer.update(cx, |composer, cx| {
             composer.set_session(session_id.clone(), cx)
         });
-        self.terminal_drawer
-            .update(cx, |drawer, cx| drawer.set_session(session_id.clone(), cx));
+        // An agent beside its lead has no terminal drawer of its own.
+        if self.side_of.is_none() {
+            self.terminal_drawer
+                .update(cx, |drawer, cx| drawer.set_session(session_id.clone(), cx));
+        }
         self.session_id = session_id;
         self.timeline_stale = true;
         // Not yet shown, for a host asking before the view next renders.
@@ -556,6 +575,7 @@ impl ChatView {
         self.rows_motion.clear();
         self.hover.clear();
         self.terminal_glide.reset();
+        self.side.start_scene();
     }
 }
 
@@ -574,6 +594,7 @@ fn floating_backing(radius: gpui::Pixels, cx: &App) -> gpui::Div {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.sweep();
+        self.request_side_sync(window, cx);
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
@@ -749,7 +770,7 @@ impl Render for ChatView {
                 SURFACE_EMPTY,
                 v_flex()
                     .size_full()
-                    .when(!compact, |el| {
+                    .when(!compact && !self.is_side(), |el| {
                         el.child(self.render_header(None, false, None, None, cx))
                     })
                     .child(self.render_empty_state(window, cx))
@@ -762,7 +783,11 @@ impl Render for ChatView {
                 self.render_thread(active, show_jump_to_latest, cx),
             ));
         }
-        root.child(fade.render(layers).size_full())
+        // An agent beside its lead keeps its header, and its way back, while
+        // its thread loads.
+        let side_header = self.render_side_header(window, cx);
+        root.children(side_header)
+            .child(fade.render(layers).w_full().flex_1().min_h_0())
     }
 }
 
@@ -856,7 +881,7 @@ impl ChatView {
         });
         v_flex()
             .size_full()
-            .when(!compact, |el| el.child(header))
+            .when(!compact && !self.is_side(), |el| el.child(header))
             // The body is as tall as what holds it; under the header, that
             // is what the header leaves.
             .child(div().flex_1().min_h_0().w_full().child(body))
@@ -876,7 +901,12 @@ impl ChatView {
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
         let rail_cards = self.rail_cards(cx);
-        let layout = rail::BodyLayout::of(width, !rail_cards.is_empty(), self.side_open(), compact);
+        let layout = rail::BodyLayout::of(
+            width,
+            !rail_cards.is_empty(),
+            self.side_open(width, cx),
+            compact,
+        );
         // gpui-base has no transition that moves a laid-out column to a new
         // centre, so the view glides the column's offset itself: its shift
         // follows the rail's presence, which glides, and the width, which
@@ -911,7 +941,8 @@ impl ChatView {
             .workspace_store
             .read(cx)
             .panel_state_for(self.session_id.as_deref());
-        let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
+        let terminal_open =
+            panel.terminal_open && !self.window_state.read(cx).compact && !self.is_side();
         let terminal_height = panel.terminal_height;
 
         let item_count = self.rows.len();
@@ -1172,8 +1203,7 @@ impl ChatView {
                     )
                     .child(composer),
             );
-        // A subagent open beside the thread splits `main` with it here, or
-        // covers it where the body is too narrow to split (`side_open`).
+        let main = self.render_with_side(main.into_any_element(), width, window, cx);
 
         // Opening and closing the drawer glide; entering or leaving the
         // compact layout, which has no drawer, does not.
@@ -1226,12 +1256,6 @@ impl ChatView {
             // Not `children`: the group's replaces the panels added before.
             .when_some(drawer, |group, drawer| group.child(drawer))
             .into_any_element()
-    }
-
-    /// Whether a subagent is open beside the thread, taking the room the
-    /// side rail would have.
-    fn side_open(&self) -> bool {
-        false
     }
 }
 
