@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, CursorStyle, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Styled as _,
-    Window, canvas, div, px,
+    AnyElement, App, AppContext as _, Context, CursorStyle, IntoElement, ParentElement as _,
+    Pixels, Styled as _, Window, div, px,
 };
+#[cfg(not(target_os = "android"))]
+use gpui::{Bounds, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, canvas};
 use gpui_base::v_flex;
 use preview_mcp::{js, ports};
 use tcode_protocol::{PreviewRequest, PreviewResponse};
