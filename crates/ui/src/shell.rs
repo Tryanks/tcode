@@ -7873,10 +7873,9 @@ mod tests {
         });
     }
 
-    /// A subagent's window in its lead's timeline opens the agent's thread
-    /// beside the lead, and marks it shown; once shown, the same press moves
-    /// the keyboard to it rather than opening it twice. When the agent
-    /// finishes, the open window shows its report.
+    /// A press on a subagent's window in its lead's timeline opens the
+    /// agent's thread beside the lead; once shown, the same press moves the
+    /// keyboard to it rather than opening it twice.
     #[gpui::test]
     fn a_subagent_window_opens_its_thread_beside_the_lead(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -7971,13 +7970,6 @@ mod tests {
             .debug_bounds("activity-row-spawn-1")
             .expect("the subagent's window");
         cx.simulate_click(window.center(), gpui::Modifiers::default());
-        settle(cx);
-        assert!(cx.debug_bounds("subagent-shown").is_none());
-
-        let open = cx
-            .debug_bounds("subagent-open-spawn-1")
-            .expect("the way to the agent's thread");
-        cx.simulate_click(open.center(), gpui::Modifiers::default());
         draw(cx);
         serve_thread(&host, "mirror");
         // The host makes a native subagent's thread read-only.
@@ -8001,7 +7993,6 @@ mod tests {
             [Some("thread-1".into()), Some("mirror".into())]
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        assert!(cx.debug_bounds("subagent-shown").is_some());
         // The agent's pane keeps the keyboard on its settings row, which has
         // no field: a key types nowhere, and the pane's shortcuts still work.
         assert!(cx.debug_bounds("composer-subagent").is_some());
@@ -8018,60 +8009,16 @@ mod tests {
         cx.simulate_keystrokes("secondary-alt-left");
         draw(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        let open = cx
-            .debug_bounds("subagent-open-spawn-1")
-            .expect("the way to the agent's thread");
-        cx.simulate_click(open.center(), gpui::Modifiers::default());
+        let window = cx
+            .debug_bounds("activity-row-spawn-1")
+            .expect("the subagent's window");
+        cx.simulate_click(window.center(), gpui::Modifiers::default());
         draw(cx);
         assert_eq!(
             pane_threads(&shell, cx),
             [Some("thread-1".into()), Some("mirror".into())]
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
-
-        // The agent finishes while its window is open: the window says so
-        // and shows the report it gave back.
-        assert!(cx.debug_bounds("subagent-summary-spawn-1").is_none());
-        send_events(
-            &host,
-            vec![(
-                Topic::SessionEvents {
-                    session_id: "thread-1".into(),
-                },
-                ServerEvent::SessionEvent(
-                    agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                        id: "spawn-1".into(),
-                        parent_item_id: None,
-                        content: agent::ItemContent::Subagent {
-                            agent_type: "explore".into(),
-                            description: "Survey the panes".into(),
-                            status: agent::ItemStatus::Completed,
-                            summary: Some("The panes split the column evenly.".into()),
-                            model: None,
-                            effort: None,
-                        },
-                    })
-                    .into(),
-                ),
-            )],
-        );
-        await_restore_update(&shell, cx, |store| {
-            store
-                .with_timeline_for(Some("thread-1"), |timeline| {
-                    timeline.entries.iter().any(|entry| {
-                        matches!(
-                            &entry.content,
-                            tcode_core::session::EntryContent::Item(agent::ItemContent::Subagent {
-                                status: agent::ItemStatus::Completed,
-                                ..
-                            })
-                        )
-                    })
-                })
-                .unwrap_or(false)
-        });
-        settle(cx);
-        assert!(cx.debug_bounds("subagent-summary-spawn-1").is_some());
     }
 
     /// [`mount_panes`] with `agent-1` dispatched by `thread-1`.

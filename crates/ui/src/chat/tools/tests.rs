@@ -825,9 +825,9 @@ fn a_plan_written_as_a_call_reads_as_a_checklist(cx: &mut TestAppContext) {
 
 /// A subagent is a window in the shared grammar: the agent's type and its
 /// task, the model and effort it ran with as a chip, interrupted said in
-/// words; opened, the report it gave back.
+/// words.
 #[gpui::test]
-fn a_subagent_reads_as_its_agent_and_task_and_opens_on_its_report(cx: &mut TestAppContext) {
+fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
     let _locale = crate::settings::TestLocaleGuard::acquire();
     crate::set_locale("en");
     let (thread, cx) = StoredThread::open(cx, include_str!("fixtures/subagent.jsonl"), 1_024.);
@@ -876,14 +876,11 @@ fn a_subagent_reads_as_its_agent_and_task_and_opens_on_its_report(cx: &mut TestA
             "{settled}"
         );
     }
-    assert!(!shows(cx, &format!("subagent-summary-{claude}")));
-    click(cx, &format!("activity-row-{claude}"));
-    assert!(shows(cx, &format!("subagent-summary-{claude}")));
     thread.shutdown(cx);
 }
 
 /// A running agent says so; a failed one tells its error by the first line
-/// of what it reported, and opens on the whole of it, verbatim. The running
+/// of what it reported, under its header. The running
 /// row is the recorded Codex update; no failed agent is recorded, so that
 /// one takes the shape the adapters give a failure: the error as the
 /// summary.
@@ -924,13 +921,6 @@ fn a_subagent_window_tells_a_running_and_a_failed_agent(cx: &mut TestAppContext)
     );
     thread.open_work_log(running, cx);
     assert!(shows(cx, &format!("tool-error-{failed}")));
-    click(cx, &format!("activity-row-{failed}"));
-    assert!(
-        !shows(cx, &format!("tool-error-{failed}")),
-        "the body tells it whole"
-    );
-    assert!(shows(cx, &format!("tool-text-{failed}-summary")));
-    assert!(!shows(cx, &format!("subagent-summary-{failed}")));
     thread.shutdown(cx);
 }
 

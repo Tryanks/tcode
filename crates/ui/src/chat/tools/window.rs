@@ -15,6 +15,7 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 use crate::icon::{Icon, IconName, IconNamed};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
+use crate::widgets::TooltipTrigger as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::widgets::spinner::Spinner;
 
@@ -214,12 +215,9 @@ pub(in crate::chat) enum Detail {
     Fold(crate::motion::Shown<()>, AnyElement, u64),
     /// Open, drawn without a fold: a surface that has no window to sample.
     Open(AnyElement),
-}
-
-impl Detail {
-    pub(in crate::chat) fn expandable(&self) -> bool {
-        !matches!(self, Self::None)
-    }
+    /// Nothing to open in place: a press goes where this says, which the
+    /// pointer is told as the window's tooltip.
+    Elsewhere(SharedString),
 }
 
 /// The fold of a window's body: `Some` while it is open or still folding
@@ -285,8 +283,9 @@ pub(in crate::chat) fn elapsed(
     header.elapsed_ms.or_else(|| elapsed_of(entry))
 }
 
-/// A whole window: the header, a click on which toggles the body, then the
-/// body in a rail when open. The context menu offers the window's copies.
+/// A whole window: the header, a click on which toggles the body — or, for
+/// [`Detail::Elsewhere`], goes there — then the body in a rail when open.
+/// The context menu offers the window's copies.
 pub(in crate::chat) fn tool_window(
     spec: WindowSpec,
     detail: Detail,
@@ -306,20 +305,25 @@ pub(in crate::chat) fn tool_window(
         hover,
         motion,
     } = spec;
-    let expandable = detail.expandable();
+    let pressable = !matches!(detail, Detail::None);
+    let folds = !matches!(detail, Detail::None | Detail::Elsewhere(_));
     let open = match &detail {
         Detail::Fold(shown, ..) => !shown.leaving(),
         Detail::Open(_) => true,
-        Detail::None | Detail::Shut => false,
+        Detail::None | Detail::Shut | Detail::Elsewhere(_) => false,
+    };
+    let goes = match &detail {
+        Detail::Elsewhere(goes) => Some(goes.clone()),
+        _ => None,
     };
     let label = header.label(status);
     let radius = crate::material::radius_chip(cx);
     let fill =
-        expandable.then(|| hover.layer(format!("activity-row-{key}"), cx.theme().accent, radius));
+        pressable.then(|| hover.layer(format!("activity-row-{key}"), cx.theme().accent, radius));
     let row = header_row(
-        &motion, &key, header, status, elapsed_ms, compact, expandable, open, fill, cx,
+        &motion, &key, header, status, elapsed_ms, compact, folds, open, fill, cx,
     );
-    let row: AnyElement = if expandable {
+    let row: AnyElement = if pressable {
         crate::material::accessible_clickable(
             row,
             SharedString::from(format!("activity-row-{key}")),
@@ -331,7 +335,10 @@ pub(in crate::chat) fn tool_window(
             let key = key.clone();
             move || format!("activity-row-{key}")
         })
-        .aria_expanded(open)
+        .when(folds, |row| row.aria_expanded(open))
+        .when_some(goes, |row, goes| {
+            row.with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(goes.clone()))
+        })
         .rounded(radius)
         .cursor_pointer()
         .on_click(on_toggle)
@@ -376,7 +383,7 @@ pub(in crate::chat) fn tool_window(
                 .child(body(content))
                 .into_any_element(),
         ),
-        Detail::None | Detail::Shut => None,
+        Detail::None | Detail::Shut | Detail::Elsewhere(_) => None,
     };
     v_flex()
         .id(SharedString::from(format!("tool-window-{key}")))
@@ -432,7 +439,7 @@ fn header_row(
     status: ItemStatus,
     elapsed_ms: Option<u64>,
     compact: bool,
-    expandable: bool,
+    folds: bool,
     open: bool,
     fill: Option<crate::motion::Sampled>,
     cx: &App,
@@ -565,7 +572,7 @@ fn header_row(
                 )
             },
         )
-        .when(expandable, |row| {
+        .when(folds, |row| {
             row.child(
                 crate::widgets::Chevron::new(
                     SharedString::from(format!("tool-chevron-{key}")),
