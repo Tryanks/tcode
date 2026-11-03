@@ -83,6 +83,7 @@ chat:
   rail_screen: "Screen"
   rail_changes: "Changes"
   rail_goal: "Goal"
+  rail_commands: "Commands"
   rail_pull_requests: "Pull requests"
   copy: "Copy"
   copied: "Copied!"
@@ -126,6 +127,11 @@ chat:
   rewind_conversation_done: "Claude Code restored the conversation. The original prompt is ready to edit."
   rewind_files_done: "Claude Code restored the tracked files."
 rail:
+  commands: "%{count} commands"
+  commands_one: "1 command"
+  commands_running: "%{count} running"
+  commands_failed: "%{count} failed"
+  commands_more: "%{count} more"
   pull_requests: "%{count} pull requests"
 markdown:
   math_show_rendered: "Show rendered formula"

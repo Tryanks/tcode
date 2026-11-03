@@ -271,6 +271,8 @@ pub struct ChatView {
     expanded: HashSet<String>,
     /// The screenshots the rail's Screen card steps through.
     screen: rail::screen::Screenshots,
+    /// The commands the rail's Commands card lists.
+    commands: rail::commands::Commands,
     auto_activity_expansions: AutoActivityExpansions,
     command_panels: RefCell<CommandPanelCache>,
     inline_diffs: InlineDiffCache,
@@ -494,6 +496,7 @@ impl ChatView {
             painted_tail_start: None,
             expanded: HashSet::new(),
             screen: Default::default(),
+            commands: Default::default(),
             auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
             inline_diffs: InlineDiffCache::new(),

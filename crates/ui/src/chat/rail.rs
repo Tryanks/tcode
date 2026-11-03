@@ -3,6 +3,7 @@
 
 mod agents;
 mod changes;
+pub(super) mod commands;
 mod goal;
 mod plan;
 mod pull_requests;
@@ -216,16 +217,18 @@ pub(super) enum RailCard {
     Goal,
     Plan,
     Agents,
+    Commands,
     Screen,
     Changes,
     PullRequests,
 }
 
 impl RailCard {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Goal,
         Self::Plan,
         Self::Agents,
+        Self::Commands,
         Self::Screen,
         Self::Changes,
         Self::PullRequests,
@@ -237,6 +240,7 @@ impl RailCard {
             Self::Goal => "goal",
             Self::Plan => "plan",
             Self::Agents => "agents",
+            Self::Commands => "commands",
             Self::Screen => "screen",
             Self::Changes => "changes",
             Self::PullRequests => "pull-requests",
@@ -268,6 +272,7 @@ impl RailCard {
             Self::Goal => crate::tr!("chat.rail_goal"),
             Self::Plan => crate::tr!("chat.rail_plan"),
             Self::Agents => crate::tr!("chat.rail_agents"),
+            Self::Commands => crate::tr!("chat.rail_commands"),
             Self::Screen => crate::tr!("chat.rail_screen"),
             Self::Changes => crate::tr!("chat.rail_changes"),
             Self::PullRequests => crate::tr!("chat.rail_pull_requests"),
@@ -279,6 +284,7 @@ impl RailCard {
             Self::Goal => IconName::CircleDot,
             Self::Plan => IconName::Map,
             Self::Agents => IconName::Bot,
+            Self::Commands => IconName::SquareTerminal,
             Self::Screen => IconName::Monitor,
             Self::Changes => IconName::Files,
             Self::PullRequests => IconName::GitPullRequest,
@@ -289,7 +295,7 @@ impl RailCard {
     /// gives way to while it is open.
     fn tab(self) -> Option<RightTab> {
         match self {
-            Self::Goal | Self::Screen => None,
+            Self::Goal | Self::Commands | Self::Screen => None,
             Self::Plan => Some(RightTab::Plan),
             Self::Agents => Some(RightTab::Agents),
             Self::Changes => Some(RightTab::Diff),
@@ -302,6 +308,7 @@ impl RailCard {
             Self::Goal => goal::present(chat, cx),
             Self::Plan => plan::present(chat, cx),
             Self::Agents => agents::present(chat, cx),
+            Self::Commands => commands::present(chat, cx),
             Self::Screen => screen::present(chat, cx),
             Self::Changes => changes::present(chat, cx),
             Self::PullRequests => pull_requests::present(chat, cx),
@@ -313,6 +320,7 @@ impl RailCard {
             Self::Goal => goal::summary(chat, cx),
             Self::Plan => plan::summary(chat, cx),
             Self::Agents => agents::summary(chat, cx),
+            Self::Commands => commands::summary(chat, cx),
             Self::Screen => screen::summary(chat, cx),
             Self::Changes => changes::summary(chat, cx),
             Self::PullRequests => pull_requests::summary(chat, cx),
@@ -329,6 +337,7 @@ impl RailCard {
             Self::Goal => goal::body(chat, window, cx),
             Self::Plan => plan::body(chat, window, cx),
             Self::Agents => agents::body(chat, window, cx),
+            Self::Commands => commands::body(chat, window, cx),
             Self::Screen => screen::body(chat, window, cx),
             Self::Changes => changes::body(chat, window, cx),
             Self::PullRequests => pull_requests::body(chat, window, cx),
@@ -506,3 +515,61 @@ impl ChatView {
     }
 }
 
+/// How long something running has run, ticking each second while a frame
+/// draws it: the clock is the element's state, so a row no longer drawn
+/// drops it.
+#[derive(gpui::IntoElement)]
+pub(super) struct Elapsed {
+    id: gpui::ElementId,
+    /// When it started (unix ms).
+    since: u64,
+}
+
+impl Elapsed {
+    pub(super) fn new(id: impl Into<SharedString>, since: u64) -> Self {
+        Self {
+            id: id.into().into(),
+            since,
+        }
+    }
+}
+
+impl gpui::RenderOnce for Elapsed {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl gpui::IntoElement {
+        let since = self.since;
+        window.with_global_id(self.id, |id, window| {
+            window.with_element_state(id, |clock: Option<gpui::Entity<Clock>>, _| {
+                let clock = clock
+                    .filter(|clock| clock.read(cx).since == since)
+                    .unwrap_or_else(|| gpui::AppContext::new(cx, |cx| Clock::new(since, cx)));
+                (clock.clone(), clock)
+            })
+        })
+    }
+}
+
+struct Clock {
+    since: u64,
+    _tick: gpui::Task<()>,
+}
+
+impl Clock {
+    fn new(since: u64, cx: &mut gpui::Context<Self>) -> Self {
+        let tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { since, _tick: tick }
+    }
+}
+
+impl gpui::Render for Clock {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        let now = tcode_core::project::now_secs() * 1000;
+        div().child(super::format_elapsed(now.saturating_sub(self.since)))
+    }
+}
