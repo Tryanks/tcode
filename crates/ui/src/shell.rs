@@ -13113,8 +13113,9 @@ mod tests {
 
     /// The docked right panel glides in beside the chat as it opens and out
     /// as it closes, and the sidebar glides out as it collapses and back in,
-    /// the chat taking what they leave; each lands on the width it has at
-    /// rest.
+    /// the chat taking what they leave on every frame: partway through, its
+    /// content is partway between the widths it leaves and lands on, and no
+    /// frame jumps to either.
     #[gpui::test]
     fn workspace_panels_glide_as_they_open_and_close(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -13122,49 +13123,69 @@ mod tests {
         let store = store_of(&shell, cx);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         resize(cx, 1600.);
-        crate::test_frames::draw_settled(cx);
-        let partway = |cx: &mut VisualTestContext, selector: &'static str| {
-            draw(cx);
-            cx.executor().advance_clock(Duration::from_millis(100));
-            draw(cx);
-            cx.debug_bounds(selector).map(|bounds| bounds.left())
+        let width = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("chat-composer")
+                .expect("the composer")
+                .size
+                .width
         };
-        let at_rest = |cx: &mut VisualTestContext, selector: &'static str| {
+        let at_rest = |cx: &mut VisualTestContext| {
             draw_until(&shell, cx, &host, "chat-composer", None);
             crate::test_frames::draw_settled(cx);
-            cx.debug_bounds(selector).map(|bounds| bounds.left())
+            width(cx)
+        };
+        // A display's frames, past the glide's end.
+        let frames = |cx: &mut VisualTestContext| {
+            draw(cx);
+            (0..20)
+                .map(|_| {
+                    cx.executor().advance_clock(Duration::from_millis(16));
+                    draw(cx);
+                    width(cx)
+                })
+                .collect::<Vec<_>>()
+        };
+        let follows = |what: &str, from: Pixels, frames: &[Pixels], to: Pixels| {
+            let travel = (to - from).abs();
+            assert!(travel > px(100.), "{what}: {from:?} to {to:?}");
+            assert!(
+                frames
+                    .iter()
+                    .any(|width| (*width - from).abs() > px(1.) && (*width - to).abs() > px(1.)),
+                "{what}: never partway from {from:?} to {to:?}: {frames:?}"
+            );
+            let mut last = from;
+            for width in frames.iter().copied().chain([to]) {
+                assert!(
+                    (width - last).abs() <= travel / 2.,
+                    "{what}: jumps from {last:?} to {width:?} on its way from {from:?} to {to:?}: {frames:?}"
+                );
+                last = width;
+            }
         };
 
+        let before = at_rest(cx);
         store.update(cx, |store, cx| store.toggle_diff_panel(cx));
-        let opening = partway(cx, "right-panel").expect("the opening panel");
-        let open = at_rest(cx, "right-panel").expect("the open panel");
-        assert!(
-            open < opening && opening < px(1600.),
-            "the panel is partway in: {opening:?}, at rest {open:?}"
-        );
+        let opening = frames(cx);
+        let open = at_rest(cx);
+        follows("the right panel opening", before, &opening, open);
         store.update(cx, |store, cx| store.toggle_diff_panel(cx));
-        let closing = partway(cx, "right-panel").expect("the closing panel stays");
+        let closing = frames(cx);
+        assert_eq!(at_rest(cx), before);
+        follows("the right panel closing", open, &closing, before);
         assert!(
-            open < closing && closing < px(1600.),
-            "the panel is partway out: {closing:?}"
+            cx.debug_bounds("right-panel").is_none(),
+            "the closed panel is gone"
         );
-        assert_eq!(at_rest(cx, "right-panel"), None, "the closed panel is gone");
 
-        let expanded = at_rest(cx, "chat-composer").expect("the composer");
         window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
-        let collapsing = partway(cx, "chat-composer").expect("the composer");
-        let collapsed = at_rest(cx, "chat-composer").expect("the composer");
-        assert!(
-            collapsed < collapsing && collapsing < expanded,
-            "the chat follows the sidebar out: {collapsing:?} between {collapsed:?} and {expanded:?}"
-        );
+        let collapsing = frames(cx);
+        let collapsed = at_rest(cx);
+        follows("the sidebar collapsing", before, &collapsing, collapsed);
         window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
-        let returning = partway(cx, "chat-composer").expect("the composer");
-        assert!(
-            collapsed < returning && returning < expanded,
-            "the chat follows the sidebar back: {returning:?}"
-        );
-        assert_eq!(at_rest(cx, "chat-composer"), Some(expanded));
+        let expanding = frames(cx);
+        assert_eq!(at_rest(cx), before);
+        follows("the sidebar expanding", collapsed, &expanding, before);
     }
 
     /// Narrowed past the room for both, the docked right panel floats over the
