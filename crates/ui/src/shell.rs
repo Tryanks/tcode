@@ -8860,7 +8860,7 @@ mod tests {
         let docks = SIDEBAR_WIDTH + 2. * PANE_MIN_WIDTH + RIGHT_PANEL_MIN_WIDTH;
         for (width, docked) in [(docks + 20., true), (docks - 20., false)] {
             resize(cx, width);
-            draw(cx);
+            crate::test_frames::draw_settled(cx);
             assert_eq!(
                 cx.debug_bounds("right-panel")
                     .is_some_and(|panel| panel.size.width > px(0.)),
