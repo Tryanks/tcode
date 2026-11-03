@@ -36,7 +36,8 @@ pub(super) struct ThreadReplica {
     pub(super) folds: u64,
     /// Turns of the log before the first held one.
     pub(super) turn_offset: usize,
-    /// The window's records are still arriving.
+    /// Subscribed, and the window that brings the replica to the host's
+    /// position has not arrived: what it holds is the thread as it was left.
     pub(super) catching_up: bool,
     pub(super) history_task: Option<Task<()>>,
     /// Drops the pages fetched above the tail once the reader has stayed

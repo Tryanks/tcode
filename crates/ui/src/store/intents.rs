@@ -589,7 +589,8 @@ impl WorkspaceStore {
     }
 
     /// Show a thread: subscribe its topics and fold what the client already
-    /// holds of it, so a kept thread shows its last window at once.
+    /// holds of it, so a kept thread is ready to draw as soon as its window
+    /// brings it up to date.
     pub(crate) fn open_thread(&mut self, session_id: &str) {
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionStatus {
@@ -616,6 +617,12 @@ impl WorkspaceStore {
         }
         if !self.baseline_topics.contains(&tcode_protocol::Topic::Scope) {
             return;
+        }
+        // What the client held is the thread as it was left; it is the
+        // thread's state only once the window brings it to the host's
+        // position.
+        if let Some(thread) = self.threads.get_mut(session_id) {
+            thread.catching_up = true;
         }
         for topic in [
             tcode_protocol::Topic::SessionStatus {

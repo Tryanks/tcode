@@ -1443,6 +1443,7 @@ impl WorkspaceStore {
             (Topic::SessionEvents { session_id }, ServerEvent::SessionHistoryError(error)) => {
                 if let Some(thread) = self.open_thread_mut(session_id) {
                     thread.history_error = Some(history::history_error_message(error.clone()));
+                    thread.catching_up = false;
                 }
             }
             (
@@ -1490,13 +1491,10 @@ impl WorkspaceStore {
                     }
                     _ => *held = Some(history::HeldHistory::new(*from, *end, records)),
                 }
-                let after = *end;
-                thread.catching_up = after < *total;
-                if thread.catching_up {
-                    let _ = self.host.update_after(&envelope.topic, after);
-                    return;
-                }
-                self.host.remember_after(&envelope.topic, after);
+                // The window reaches the end of the log: the replica is at the
+                // host's position, and live records continue it.
+                thread.catching_up = false;
+                self.host.remember_after(&envelope.topic, *end);
                 let total_turns = *total_turns as usize;
                 thread.total_turns = Some(total_turns);
                 self.baseline_topics.insert(envelope.topic.clone());
