@@ -522,7 +522,11 @@ impl Popover {
                 .w(viewport.width)
                 .max_w(viewport.width)
                 .flex_none()
-                .max_h(max_height)
+                // The sheet reaches the screen's bottom edge, under the home
+                // indicator and behind the keyboard; what it holds stays
+                // above them.
+                .max_h(max_height + insets.bottom)
+                .pb(insets.bottom)
                 .text_color(cx.theme().foreground)
                 .child(material::sheet_grabber(cx))
                 .child(
@@ -590,17 +594,14 @@ impl Popover {
                             div()
                                 .absolute()
                                 .left_0()
-                                .bottom(
-                                    insets.bottom
-                                        - crate::edge_back::BackProgress::offset(
-                                            if open {
-                                                drag_progress
-                                            } else {
-                                                drag_progress.max(1. - progress)
-                                            },
-                                            sheet_height,
-                                        ),
-                                )
+                                .bottom(-crate::edge_back::BackProgress::offset(
+                                    if open {
+                                        drag_progress
+                                    } else {
+                                        drag_progress.max(1. - progress)
+                                    },
+                                    sheet_height,
+                                ))
                                 .w(viewport.width)
                                 .on_children_prepainted(move |bounds, _, cx| {
                                     if let Some(bounds) = bounds.first() {
@@ -681,15 +682,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        // The open sheet glides onto the seam the keyboard and status bar
-        // leave it.
+        // The open sheet stops short of the status bar and reaches the
+        // screen's bottom edge, with what it holds above the keyboard.
         crate::test_frames::draw_settled(cx);
         let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
         assert_eq!(sheet.top(), px(99.));
-        assert_eq!(sheet.bottom(), px(552.));
+        assert_eq!(sheet.bottom(), px(852.));
         let content = cx.debug_bounds("tall-content").unwrap();
         let viewport = cx.debug_bounds("touch-picker-content").unwrap();
-        assert!(viewport.bottom() <= sheet.bottom());
+        assert_eq!(viewport.bottom(), px(552.));
         assert!(viewport.size.height < content.size.height);
         cx.simulate_event(gpui::ScrollEvent {
             position: viewport.center(),

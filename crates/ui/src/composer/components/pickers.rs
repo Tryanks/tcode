@@ -2417,7 +2417,9 @@ mod sheet_tests {
                     let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
                     assert_eq!(sheet.left(), px(0.));
                     assert_eq!(sheet.right(), px(393.));
-                    assert_eq!(sheet.bottom(), px(852. - bottom));
+                    assert_eq!(sheet.bottom(), px(852.));
+                    let content = cx.debug_bounds("touch-picker-content").unwrap();
+                    assert!(content.bottom() <= px(852. - bottom));
                     assert!(sheet.top() >= px(99.));
                     assert_eq!(pane.left(), px(16.));
                     assert_eq!(pane.right(), px(377.));
