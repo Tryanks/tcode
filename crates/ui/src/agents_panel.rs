@@ -332,7 +332,6 @@ impl Agents {
             .map(|row| AgentHeading {
                 key: row.key.clone(),
                 title: row.title.clone(),
-                detail: row.detail.clone(),
                 execution: row.execution,
             })
     }
@@ -343,8 +342,6 @@ pub(crate) struct AgentHeading {
     /// The row's key, which its status mark's motion is kept under.
     pub(crate) key: String,
     pub(crate) title: String,
-    /// "provider · model".
-    pub(crate) detail: String,
     pub(crate) execution: Option<AgentExecution>,
 }
 
