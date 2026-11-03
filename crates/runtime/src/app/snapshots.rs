@@ -988,6 +988,7 @@ impl AppState {
         Some(SessionPlan {
             session_id: session_id.to_string(),
             steps: timeline.plan_steps.clone(),
+            explanation: timeline.plan_explanation.clone(),
         })
     }
 

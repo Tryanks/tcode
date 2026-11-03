@@ -264,6 +264,7 @@ pub use wire::{
 // calls instead of other items, and Grok's MCP calls are named server/tool.
 // In the store, an item row's envelope carries item_version 1; a row without
 // it is converted to that form when read.
+// A session plan carries the explanation the agent gave with it.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]

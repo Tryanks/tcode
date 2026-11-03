@@ -296,6 +296,7 @@ mod tests {
                             status: *status,
                         })
                         .collect(),
+                    explanation: None,
                 }),
             )
         };

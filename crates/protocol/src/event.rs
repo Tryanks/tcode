@@ -464,6 +464,9 @@ pub struct AgentStatus {
 pub struct SessionPlan {
     pub session_id: String,
     pub steps: Vec<PlanStep>,
+    /// What the agent said of the plan when it last set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
 }
 
 /// Host-owned runtime and full-history facts for one resident session.

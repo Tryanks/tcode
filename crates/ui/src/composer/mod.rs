@@ -2669,6 +2669,7 @@ mod replica_tests {
                 ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
                     session_id: session_id.clone(),
                     steps: Vec::new(),
+                    explanation: None,
                 }),
             ),
             (
