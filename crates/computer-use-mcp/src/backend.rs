@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::outline::{Frame, UiNode};
 
 #[cfg(target_os = "macos")]
+mod cursor;
+#[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
