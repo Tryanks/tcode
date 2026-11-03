@@ -1,6 +1,8 @@
 //! An agent opened from its lead, shown inside the lead's own chat: on a
 //! card in the side rail's place where the body has room for it beside the
-//! lead's column, over the lead's timeline and composer otherwise. The
+//! lead's column, on a sheet raised over the lead's timeline and composer
+//! otherwise, the one growing into the other as the body crosses between
+//! them. The
 //! lead's header stays; the agent has a header of its own. The store records
 //! which agent is beside which lead ([`WorkspaceStore::side_thread_for`]);
 //! the lead's chat hosts it, holding the agent's thread open and its
@@ -65,6 +67,26 @@ const EXPAND_CONTENT: f32 = 0.4;
 /// card shrinks back.
 const EXPAND_FADE: Duration = Duration::from_millis(120);
 
+/// The key the agent's surface records where it is drawn under, in the
+/// lead's [`ChatView::side_origins`], so that crossing to the other place
+/// starts from there.
+const SURFACE: &str = "chat-side-surface";
+
+/// How far the sheet over the lead is inset from the sides of the lead's
+/// body. At the top it is as far down as the slot, so the card and the sheet
+/// share a top edge, and it ends where the slot does.
+const SHEET_INSET: f32 = 8.;
+
+/// How dark the scrim under the sheet is, as a share of a modal's
+/// ([`crate::material::scrim`]): about 5% darker in light, 7.5% in dark. The
+/// lead stays legible under it; only that it is not what the keyboard is
+/// in is said.
+const SHEET_SCRIM: f32 = 0.15;
+
+/// The widest Back on the sheet gets with the lead's title in it, as the
+/// way back to the lead in an agent's own header is.
+const BACK_WIDEST: f32 = 160.;
+
 /// The grip of the card's edge: the sheet grabber's length, standing.
 const GRIP_LENGTH: f32 = 36.;
 const GRIP_WIDTH: f32 = 4.;
@@ -74,7 +96,8 @@ const GRIP_WIDTH: f32 = 4.;
 pub(super) enum SideMode {
     /// On a card in the side rail's place, right of the lead's column.
     Slot,
-    /// Over the lead's timeline and composer, under the lead's header.
+    /// On a sheet raised over the lead's timeline and composer, under the
+    /// lead's header.
     Overlay,
 }
 
@@ -91,12 +114,17 @@ struct SideHost {
     origin: Option<SharedString>,
 }
 
-/// The agent's card growing out of what opened it, or shrinking back.
+/// The agent's card growing out of what opened it, or shrinking back; or
+/// crossing from where it was drawn to the other place.
 struct Expand {
-    /// Its key in the lead's [`ChatView::side_origins`].
-    origin: SharedString,
+    /// Its key in the lead's [`ChatView::side_origins`]; none while it
+    /// crosses from one place to the other.
+    origin: Option<SharedString>,
     /// Where it was last on screen, and the radius of its corners.
     from: Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>,
+    /// Where its frame stays rather than in its place while it leaves:
+    /// where it was drawn, partway, as it began to.
+    held: Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>,
     phase: ExpandPhase,
 }
 
@@ -114,6 +142,17 @@ enum ExpandPhase {
         shown: f32,
         back: Option<bool>,
     },
+    /// Leaving `leaves` for the other place since `at`, what it holds
+    /// `shown` of the way in then: that fades out where it is, then it grows
+    /// from there into the other place ([`ExpandPhase::Open`]).
+    Crossing {
+        at: Instant,
+        shown: f32,
+        leaves: SideMode,
+    },
+    /// With motion reduced: the agent fading into the place it is drawn in
+    /// since `at`, an empty surface fading out of `leaves`.
+    Swapping { at: Instant, leaves: SideMode },
 }
 
 /// How far a critically damped spring with gpui-base's `Spring::new(EXPAND)`
@@ -129,16 +168,24 @@ fn expand_left(elapsed: Duration) -> f32 {
     (1. + t) * (-t).exp()
 }
 
+/// How far in what the surface holds is, `growth` of the way to its place.
+fn content_at(growth: f32) -> f32 {
+    ((growth - (1. - EXPAND_CONTENT)) / EXPAND_CONTENT).clamp(0., 1.)
+}
+
+/// How far in what it holds is, from `shown`, `since` it began fading out.
+fn fading(shown: f32, since: Duration) -> f32 {
+    shown * (1. - since.as_secs_f32() / EXPAND_FADE.as_secs_f32()).max(0.)
+}
+
 impl Expand {
     /// How far out of the origin it is at `now`, and how far in what it
     /// holds is.
     fn at(&self, now: Instant) -> (f32, f32) {
-        let content =
-            |growth: f32| ((growth - (1. - EXPAND_CONTENT)) / EXPAND_CONTENT).clamp(0., 1.);
         match self.phase {
             ExpandPhase::Open { at, from } => {
                 let growth = 1. - (1. - from) * expand_left(now.saturating_duration_since(at));
-                (growth, content(growth))
+                (growth, content_at(growth))
             }
             ExpandPhase::Closing {
                 at,
@@ -147,13 +194,16 @@ impl Expand {
                 back,
             } => {
                 let since = now.saturating_duration_since(at);
-                let shown = shown * (1. - since.as_secs_f32() / EXPAND_FADE.as_secs_f32()).max(0.);
                 let growth = match back {
                     Some(true) => grown * expand_left(since.saturating_sub(EXPAND_FADE)),
                     _ => grown,
                 };
-                (growth, shown)
+                (growth, fading(shown, since))
             }
+            ExpandPhase::Crossing { at, shown, .. } => {
+                (1., fading(shown, now.saturating_duration_since(at)))
+            }
+            ExpandPhase::Swapping { .. } => (1., 1.),
         }
     }
 }
@@ -201,37 +251,51 @@ impl Render for SideEdgeDrag {
 /// One frame of the agent beside the thread: see [`ChatView::render_side`].
 #[derive(Default)]
 pub(super) struct SideFrame {
-    /// Its card in the rail's place, while it is there or fading out of it.
+    /// Its card in the rail's place, while it is there or on its way in or
+    /// out.
     pub(super) card: Option<AnyElement>,
-    /// It over the lead, while it is there or sliding on or off.
-    overlay: Option<AnyElement>,
-    /// How far over the lead it is.
-    over: f32,
-    /// Whether what is over the lead is leaving it.
-    leaving: bool,
-    /// How far over the lead it has slid, and how far the lead has moved
-    /// left under it: a card growing out of what opened it, or going back
-    /// into it, covers the lead where it stands.
+    /// Its sheet over the lead, while it is there or on its way in or out.
+    sheet: Option<AnyElement>,
+    /// How far onto the lead the sheet has slid, and how far in it is.
     slide: f32,
-    shift: f32,
+    opacity: f32,
+    /// The scrim over the lead, while something is over it, which leaves
+    /// the lead inert.
+    scrim: Option<gpui::Hsla>,
+    /// How far above the body's bottom the lead's composer card ends, which
+    /// the sheet ends with: see [`super::rail::Slots`].
+    below_card: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
 }
 
-/// Where the card comes from and how far it has grown from there: see
-/// [`crate::motion::expand::Morph::from`].
-type Morphing = (Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>, f32);
+/// Where the surface comes from, how far it has grown from there, and
+/// where it rests instead of its place: see
+/// [`crate::motion::expand::Morph::from`] and
+/// [`crate::motion::expand::Morph::held`].
+#[derive(Clone, Copy)]
+struct Morphing {
+    from: Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>,
+    growth: f32,
+    held: Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>,
+}
 
-/// This frame of the card's way out of what opened it, or back into it.
+/// This frame of the card's way out of what opened it, or back into it,
+/// or from one place to the other.
 struct ExpandFrame {
     /// Where it comes from and how far it has grown, while it moves.
     morph: Option<Morphing>,
     /// How far in what it holds is.
     content: f32,
-    /// How far in the card is, where this rather than the body's layout
+    /// How far in the surface is, where this rather than the body's layout
     /// says.
     presence: Option<f32>,
     /// Whether it leaves as it does with no origin, `presence` of the way
     /// in.
     fading: bool,
+    /// Whether it is on its way from the other place.
+    crossing: bool,
+    /// With motion reduced, the place it is fading out of, empty, as it
+    /// fades in where it is drawn.
+    swap: Option<SideMode>,
 }
 
 impl Default for ExpandFrame {
@@ -241,6 +305,8 @@ impl Default for ExpandFrame {
             content: 1.,
             presence: None,
             fading: false,
+            crossing: false,
+            swap: None,
         }
     }
 }
@@ -278,14 +344,6 @@ impl ChatView {
     /// Whether the view is an agent's shown beside its lead.
     pub(super) fn is_side(&self) -> bool {
         self.side_of.is_some()
-    }
-
-    /// Whether the view is an agent drawn on the card beside its lead, which
-    /// paints the surface under it.
-    pub(super) fn on_side_card(&self) -> bool {
-        self.side_of
-            .as_ref()
-            .is_some_and(|of| of.mode == SideMode::Slot)
     }
 
     /// The agent shown beside the thread.
@@ -461,11 +519,12 @@ impl ChatView {
                         .side
                         .expand
                         .as_ref()
-                        .filter(|expand| expand.origin == origin)
+                        .filter(|expand| expand.origin.as_ref() == Some(&origin))
                         .map_or(0., |expand| expand.at(now).0);
                     self.side.expand = Some(Expand {
-                        origin,
+                        origin: Some(origin),
                         from: Some(from),
+                        held: None,
                         phase: ExpandPhase::Open {
                             at: now,
                             from: grown,
@@ -497,7 +556,9 @@ impl ChatView {
         self.workspace_store
             .update(cx, |store, cx| store.set_side_thread(&lead, None, cx));
         self.sync_side(window, cx);
-        // Back into what opened it, where it stays beside the lead to leave.
+        // Back into what opened it, where it stays beside the lead to leave,
+        // from where it is: partway from one place to the other, it starts
+        // from there.
         let origin = self
             .side
             .leaving
@@ -506,19 +567,28 @@ impl ChatView {
             .filter(|_| !cx.reduce_motion());
         let now = cx.background_executor().now();
         let was = self.side.expand.take();
-        self.side.expand = origin.map(|origin| {
-            let was = was.filter(|expand| expand.origin == origin);
-            let (grown, shown) = was.as_ref().map_or((1., 1.), |expand| expand.at(now));
-            Expand {
-                from: was.and_then(|expand| expand.from),
-                origin,
-                phase: ExpandPhase::Closing {
-                    at: now,
-                    grown,
-                    shown,
-                    back: None,
-                },
+        let crossing = was
+            .as_ref()
+            .is_some_and(|expand| expand.origin.is_none() && !cx.reduce_motion());
+        let drawn = self.side_origins.resolve(SURFACE);
+        let (from, grown, shown, held) = match was {
+            Some(was) if was.origin.is_some() && was.origin == origin => {
+                let (grown, shown) = was.at(now);
+                (was.from, grown, shown, None)
             }
+            Some(was) => (None, 1., was.at(now).1, drawn),
+            None => (None, 1., 1., None),
+        };
+        self.side.expand = (origin.is_some() || crossing).then_some(Expand {
+            origin,
+            from,
+            held,
+            phase: ExpandPhase::Closing {
+                at: now,
+                grown,
+                shown,
+                back: None,
+            },
         });
         if had_keyboard {
             self.focus_composer(window, cx);
@@ -527,7 +597,7 @@ impl ChatView {
 
     /// This frame's agent beside the thread, laid out by the body's layout
     /// (`self.body`): its card in the rail's place, for the timeline to
-    /// hold, and what slides over the lead, for [`Self::cover_with_side`].
+    /// hold, or its sheet over the lead, for [`Self::cover_with_side`].
     pub(super) fn render_side(&mut self, window: &mut Window, cx: &mut Context<Self>) -> SideFrame {
         if self.side_of.is_some() {
             return SideFrame::default();
@@ -539,20 +609,30 @@ impl ChatView {
             SideMode::Overlay
         };
         let open = self.side.host.is_some() && !compact;
-        if open {
-            self.side.slot = mode;
-        }
         if compact {
             self.side.expand = None;
         }
+        if open {
+            self.cross_to(mode, cx);
+        }
         let presence = self.body.side_presence();
         let expand = self.step_expand(window, cx);
+        if open {
+            self.side.slot = match self.side.expand {
+                Some(Expand {
+                    phase: ExpandPhase::Crossing { leaves, .. },
+                    ..
+                }) => leaves,
+                _ => mode,
+            };
+        }
+        let slot = self.side.slot;
         // gpui-base has no slide-over for one surface replacing another; the
-        // agent comes in over the lead as the pull request page comes in
-        // over its list (`PullRequestsPanel::render`).
+        // agent's sheet comes in over the lead as the pull request page comes
+        // in over its list (`PullRequestsPanel::render`).
         let over = self.motion.appear(
             "side-overlay",
-            open && mode == SideMode::Overlay,
+            open && slot == SideMode::Overlay,
             SLIDE,
             window,
             cx,
@@ -572,9 +652,8 @@ impl ChatView {
             cx.defer(move |cx| release_side_host(&store, left, cx));
         }
 
-        // Drawn once a frame, in the one place it was last put; the other
-        // place, still sliding or fading, holds an empty surface.
-        let slot = self.side.slot;
+        // Drawn once a frame, in the one place it is: with motion reduced,
+        // the place it fades out of holds an empty surface meanwhile.
         if let Some(host) = &self.side.host {
             host.chat.update(cx, |chat, _| {
                 if let Some(of) = &mut chat.side_of {
@@ -589,62 +668,128 @@ impl ChatView {
                 .child(self.render_side_surface(swap, cx))
                 .into_any_element(),
         );
-        let mut take_live = |here: SideMode| {
-            if slot == here { live.take() } else { None }
-                .unwrap_or_else(|| div().size_full().into_any_element())
-        };
+        let empty = || div().size_full().into_any_element();
         let morph = expand.morph;
-        // The card stays while it fades out empty, so it never goes in the
-        // frame the agent crosses over the lead; and while it shrinks back.
-        let card = (presence > 0. || (morph.is_some() && slot == SideMode::Slot)).then(|| {
-            let content = take_live(SideMode::Slot);
+        // With motion reduced, how far in the surface drawn is, and how far
+        // in the empty one it fades out of.
+        let fade = expand.swap.map(|_| expand.presence.unwrap_or(1.));
+        let ghost = |place: SideMode| expand.swap == Some(place);
+        let card = if slot == SideMode::Slot && (presence > 0. || expand.presence.is_some()) {
             let presence = expand.presence.unwrap_or(presence);
-            self.render_side_card(content, presence, morph, cx)
-        });
-        // Drawn from the frame it is asked for, at nothing, so the keyboard
-        // given to it has somewhere to be.
-        let covering = morph.is_some() && slot == SideMode::Overlay;
-        let expands = covering && !expand.fading;
-        let overlay = (over > 0. || (open && mode == SideMode::Overlay) || covering).then(|| {
-            let content = take_live(SideMode::Overlay);
-            let surface = div()
-                .debug_selector(|| "chat-side-cover".into())
-                .bg(crate::material::content_surface(cx));
-            crate::motion::expand::Morph::new(surface, px(0.), px(0.), content)
-                .from(
-                    morph.and_then(|morph| morph.0),
-                    morph.map_or(1., |morph| morph.1),
-                )
-                .into_any_element()
-        });
-        let over = match (expands, covering) {
-            (true, _) => morph.map_or(1., |morph| morph.1) * expand.content,
-            // Leaving with no origin to go back into, it slides off the
-            // lead as it would have without one.
-            (false, true) => expand.presence.unwrap_or(over),
-            (false, false) => over,
+            let content = live.take().unwrap_or_else(empty);
+            Some(self.render_side_card(content, presence, fade, morph, true, cx))
+        } else if ghost(SideMode::Slot) {
+            let gone = fade.map(|fade| 1. - fade);
+            Some(self.render_side_card(empty(), 1., gone, None, false, cx))
+        } else {
+            None
         };
+        let in_sheet = slot == SideMode::Overlay && (over > 0. || open || morph.is_some());
+        let (sheet, slide, opacity, dim) = if in_sheet {
+            let content = live.take().unwrap_or_else(empty);
+            let (slide, opacity, dim) = match (fade, morph) {
+                (Some(fade), _) => (1., fade, fade),
+                // Leaving with no origin to go back into, it slides off the
+                // lead as it would have without one.
+                (None, Some(_)) if expand.fading => {
+                    let presence = expand.presence.unwrap_or(1.);
+                    (presence, 1., presence)
+                }
+                (None, Some(morph)) => (1., 1., morph.growth),
+                (None, None) => (over, if open { over } else { 1. }, over),
+            };
+            let sheet = self.render_side_sheet(content, morph, true, cx);
+            (Some(sheet), slide, opacity, dim)
+        } else if ghost(SideMode::Overlay) {
+            let gone = fade.map_or(0., |fade| 1. - fade);
+            let sheet = self.render_side_sheet(empty(), None, false, cx);
+            (Some(sheet), 1., gone, gone)
+        } else {
+            // Into the card from the sheet, the scrim goes as it shrinks.
+            let dim = match morph {
+                Some(morph) if expand.crossing => 1. - morph.growth,
+                _ => 0.,
+            };
+            (None, 1., 1., dim)
+        };
+        let scrim =
+            (sheet.is_some() || dim > 0.).then(|| crate::material::scrim(SHEET_SCRIM * dim, cx));
         SideFrame {
             card,
-            overlay,
-            over,
-            leaving: !(open && mode == SideMode::Overlay),
-            slide: if expands { 1. } else { over },
-            shift: if covering { 0. } else { over },
+            sheet,
+            slide,
+            opacity,
+            scrim,
+            below_card: self.composer.read(cx).below_card(),
         }
     }
 
-    /// The card's way out of what opened it or back into it, this frame:
-    /// how far it has grown and from where, how far in what it holds is,
-    /// and how far in the card is while it fades away instead.
+    /// Where the body's layout now draws the agent, `mode`, is not where it
+    /// was drawn: it crosses there from where it is on screen, what it holds
+    /// fading out first. Not on screen on the last frame, as on the first
+    /// frame of a scene, it is drawn there at once.
+    fn cross_to(&mut self, mode: SideMode, cx: &App) {
+        let leaves = self.side.slot;
+        let crossing = self
+            .side
+            .expand
+            .as_ref()
+            .is_some_and(|expand| matches!(expand.phase, ExpandPhase::Crossing { .. }));
+        if leaves == mode || crossing {
+            return;
+        }
+        let Some(drawn) = self.side_origins.resolve(SURFACE) else {
+            return;
+        };
+        let now = cx.background_executor().now();
+        let was = self.side.expand.take();
+        let shown = was.as_ref().map_or(1., |was| was.at(now).1);
+        self.side.expand = Some(Expand {
+            origin: None,
+            from: None,
+            // Partway somewhere, it stays where it is while it fades.
+            held: was.is_some().then_some(drawn),
+            phase: if cx.reduce_motion() {
+                ExpandPhase::Swapping { at: now, leaves }
+            } else {
+                ExpandPhase::Crossing {
+                    at: now,
+                    shown,
+                    leaves,
+                }
+            },
+        });
+    }
+
+    /// The card's way out of what opened it or back into it, or from one
+    /// place to the other, this frame: how far it has grown and from where,
+    /// how far in what it holds is, and how far in the card is while it
+    /// fades away instead.
     fn step_expand(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ExpandFrame {
         let now = cx.background_executor().now();
         let Some(expand) = &mut self.side.expand else {
             return ExpandFrame::default();
         };
-        let on_screen = self.side_origins.resolve(&expand.origin);
+        let on_screen = expand
+            .origin
+            .as_ref()
+            .and_then(|origin| self.side_origins.resolve(origin));
         if let Some(from) = on_screen {
             expand.from = Some(from);
+        }
+        // Once what it holds has faded, it grows from where it was into the
+        // other place.
+        if let ExpandPhase::Crossing { at, .. } = expand.phase
+            && now.saturating_duration_since(at) >= EXPAND_FADE
+        {
+            expand.from = expand
+                .held
+                .take()
+                .or_else(|| self.side_origins.resolve(SURFACE));
+            expand.phase = ExpandPhase::Open {
+                at: at + EXPAND_FADE,
+                from: 0.,
+            };
         }
         // Once what the card holds has faded, it shrinks back into the
         // origin if that is on screen, and fades away otherwise.
@@ -655,15 +800,18 @@ impl ChatView {
             *back = Some(on_screen.is_some() && expand.from.is_some());
         }
         let (growth, content) = expand.at(now);
+        let crossing = expand.origin.is_none();
+        let moving = |from, growth, held| Morphing { from, growth, held };
         let (frame, done) = match expand.phase {
             ExpandPhase::Open { .. } => (
                 ExpandFrame {
-                    morph: Some((expand.from, growth)),
+                    morph: Some(moving(expand.from, growth, None)),
                     content,
                     presence: Some(1.),
-                    fading: false,
+                    crossing,
+                    ..ExpandFrame::default()
                 },
-                1. - growth < EXPAND_REST,
+                1. - growth < EXPAND_REST || (crossing && expand.from.is_none()),
             ),
             ExpandPhase::Closing {
                 at,
@@ -676,23 +824,46 @@ impl ChatView {
                 );
                 (
                     ExpandFrame {
-                        morph: Some((None, 1.)),
+                        morph: Some(moving(None, 1., expand.held)),
                         content: 0.,
                         presence: Some(1. - gone),
                         fading: true,
+                        ..ExpandFrame::default()
                     },
                     gone >= 1.,
                 )
             }
             ExpandPhase::Closing { .. } => (
                 ExpandFrame {
-                    morph: Some((expand.from, growth)),
+                    morph: Some(moving(expand.from, growth, expand.held)),
                     content,
                     presence: Some(1.),
-                    fading: false,
+                    ..ExpandFrame::default()
                 },
                 growth < EXPAND_REST,
             ),
+            ExpandPhase::Crossing { .. } => (
+                ExpandFrame {
+                    morph: Some(moving(None, 1., expand.held)),
+                    content,
+                    presence: Some(1.),
+                    crossing,
+                    ..ExpandFrame::default()
+                },
+                false,
+            ),
+            ExpandPhase::Swapping { at, leaves } => {
+                let shown =
+                    crate::motion::Curve::new(SWAP).progress(now.saturating_duration_since(at));
+                (
+                    ExpandFrame {
+                        presence: Some(shown),
+                        swap: Some(leaves),
+                        ..ExpandFrame::default()
+                    },
+                    shown >= 1.,
+                )
+            }
         };
         if done {
             let closed = matches!(expand.phase, ExpandPhase::Closing { .. });
@@ -710,21 +881,63 @@ impl ChatView {
         frame
     }
 
-    /// The agent's card in the rail's place, `presence` of the way in,
-    /// holding `content`, on its way out of an origin or back into it as
-    /// `morph` says, its leading edge dragged to widen or narrow it.
+    /// The agent's surface, the card's or the sheet's, named `selector`:
+    /// `content` on its frame, on its way as `morph` says, recording where
+    /// it is drawn while it holds the agent (`live`).
+    fn side_surface(
+        &self,
+        selector: &'static str,
+        content: AnyElement,
+        morph: Option<Morphing>,
+        live: bool,
+        cx: &App,
+    ) -> crate::motion::expand::Morph {
+        let surface = crate::material::card_raised(cx)
+            .debug_selector(move || selector.into())
+            // The agent's timeline takes the wheel over its surface, not the
+            // lead's under it. gpui-base's page viewport gives a wheel to
+            // the innermost one under the pointer, but the lead's does not
+            // hold the surface: drawn before it, it would scroll before the
+            // agent's claims the wheel, had the surface not blocked it.
+            .occlude()
+            .p_0()
+            .gap_0();
+        let surface = crate::motion::expand::Morph::new(
+            surface,
+            crate::material::radius_card(cx),
+            px(1.),
+            content,
+        )
+        .from(
+            morph.and_then(|morph| morph.from),
+            morph.map_or(1., |morph| morph.growth),
+        )
+        .held(morph.and_then(|morph| morph.held));
+        if live {
+            surface.mark(&self.side_origins, SURFACE)
+        } else {
+            surface
+        }
+    }
+
+    /// The agent's card in the rail's place, `presence` of the way in (or,
+    /// with motion reduced, `fade` of the way, where it stays), holding
+    /// `content`, on its way as `morph` says, its leading edge dragged to
+    /// widen or narrow it.
     fn render_side_card(
         &self,
         content: AnyElement,
         presence: f32,
+        fade: Option<f32>,
         morph: Option<Morphing>,
+        live: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let shown = self.body.side();
         // gpui-base's resize handle straddles the leading edge of what holds
         // it; held by nothing as wide, it straddles the middle of the gap
         // left of the card, which the drag measures the card's width from.
-        let edge = (shown && morph.is_none()).then(|| {
+        let edge = (shown && morph.is_none() && live).then(|| {
             let motion = self.motion.clone();
             let lead = cx.entity_id();
             div()
@@ -748,27 +961,9 @@ impl ChatView {
                     }),
                 )
         });
-        let surface = crate::material::card_raised(cx)
-            .debug_selector(|| "chat-side-card".into())
-            // The agent's timeline takes the wheel over the card, not the
-            // lead's under it. gpui-base's page viewport gives a wheel to
-            // the innermost one under the pointer, but the lead's does not
-            // hold the card: drawn before it, it would scroll before the
-            // agent's claims the wheel, had the card not blocked it.
-            .occlude()
-            .p_0()
-            .gap_0();
-        let card = crate::motion::expand::Morph::new(
-            surface,
-            crate::material::radius_card(cx),
-            px(1.),
-            content,
-        )
-        .from(
-            morph.and_then(|morph| morph.0),
-            morph.map_or(1., |morph| morph.1),
-        );
-        super::rail::slot(self.body.side_width(), presence, cx)
+        let card = self.side_surface("chat-side-card", content, morph, live, cx);
+        super::rail::slot(self.body.side_width(), fade.map_or(presence, |_| 1.), cx)
+            .when_some(fade, |slot, fade| slot.opacity(fade))
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<SideEdgeDrag>, _, cx| {
                     if event.drag(cx).0 != cx.entity_id() {
@@ -789,31 +984,54 @@ impl ChatView {
             .into_any_element()
     }
 
+    /// The agent's sheet over the lead, holding `content`, on its way as
+    /// `morph` says: inset from the lead's body at its sides, from the top
+    /// as far as the slot is, down to the bottom of the lead's composer
+    /// card, which [`super::rail::Slots`] lays it out to.
+    fn render_side_sheet(
+        &self,
+        content: AnyElement,
+        morph: Option<Morphing>,
+        live: bool,
+        cx: &App,
+    ) -> AnyElement {
+        div()
+            .absolute()
+            .top(super::timeline_inset(cx))
+            .left(px(SHEET_INSET))
+            .right(px(SHEET_INSET))
+            .bottom_0()
+            .child(self.side_surface("chat-side-sheet", content, morph, live, cx))
+            .into_any_element()
+    }
+
     /// `main`, the thread's timeline, deliveries and composer, under the
-    /// agent sliding over it in `side`. Always the same elements around
-    /// `main`, so it keeps its place in the tree as an agent comes and goes.
+    /// agent's sheet over it in `side`, and the scrim that dims it under
+    /// the sheet. Always the same elements around `main`, so it keeps its
+    /// place in the tree as an agent comes and goes.
     pub(super) fn cover_with_side(&self, main: AnyElement, side: SideFrame) -> AnyElement {
         if self.side_of.is_some() {
             return main;
         }
-        let (over, shift, slide) = (side.over, side.shift, side.slide);
+        let SideFrame {
+            sheet,
+            slide,
+            opacity,
+            scrim,
+            below_card,
+            ..
+        } = side;
         div()
             .relative()
             .size_full()
             .overflow_hidden()
-            .child(
-                // The lead moves a quarter left under the agent sliding over
-                // it, and is not drawn once covered.
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(relative(-0.25 * shift))
-                    .right(relative(0.25 * shift))
-                    .when(over >= 1., |lead| lead.invisible())
-                    .child(main),
-            )
-            .when_some(side.overlay, |body, overlay| {
+            .child(div().absolute().inset_0().child(main))
+            // The lead under the sheet takes no input: the scrim is not a
+            // way to close it either.
+            .when_some(scrim, |body, scrim| {
+                body.child(div().absolute().inset_0().bg(scrim).occlude())
+            })
+            .when_some(sheet, |body, sheet| {
                 body.child(
                     div()
                         .absolute()
@@ -821,17 +1039,15 @@ impl ChatView {
                         .bottom_0()
                         .left(relative(1. - slide))
                         .right(relative(slide - 1.))
-                        .opacity(if side.leaving || slide >= 1. {
-                            1.
-                        } else {
-                            over
-                        })
-                        .occlude()
-                        .child(overlay),
+                        .opacity(opacity)
+                        .child(super::rail::Slots {
+                            below_card,
+                            slots: vec![sheet],
+                        }),
                 )
             })
-            // Neither takes input while one slides over the other.
-            .when(over > 0. && over < 1., |body| {
+            // Neither takes input while the sheet slides over the lead.
+            .when(slide > 0. && slide < 1., |body| {
                 body.child(div().absolute().inset_0().occlude())
             })
             .into_any_element()
@@ -863,9 +1079,10 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// An agent's own header beside its lead: Back at its start while it
-    /// covers the lead, its state and title, and Close at its end while it
-    /// sits beside the lead.
+    /// An agent's own header beside its lead: on the sheet over the lead,
+    /// Back at its start, naming the lead it goes back to, and a badge
+    /// saying this is an agent of the lead's; its state and title; and
+    /// Close at its end while it sits beside the lead on its card.
     pub(super) fn render_side_header(
         &self,
         window: &mut Window,
@@ -901,21 +1118,27 @@ impl ChatView {
                 let _ = lead.update(cx, |lead, cx| lead.close_side(window, cx));
             }
         };
-        // Back while it covers the lead, Close while it sits beside it: one
-        // folds out as the other folds in when the body crosses between.
+        // Back and the badge on the sheet over the lead, Close on the card
+        // beside it: one folds out as the other folds in when the body
+        // crosses between.
+        let on_sheet = of.mode == SideMode::Overlay;
         let back = self
             .motion
-            .shown(
-                "side-back",
-                (of.mode == SideMode::Overlay).then_some(()),
-                SHOW,
-                window,
-                cx,
-            )
+            .shown("side-back", on_sheet.then_some(()), SHOW, window, cx)
             .map(|shown| {
-                let name: SharedString = crate::tr!("agents.back_to_parent", title = lead_title)
-                    .into_owned()
-                    .into();
+                let name: SharedString =
+                    crate::tr!("agents.back_to_parent", title = lead_title.as_str())
+                        .into_owned()
+                        .into();
+                // The lead's title fades rather than pushing the agent's out
+                // of the header.
+                let label = (!lead_title.trim().is_empty()).then(|| {
+                    div()
+                        .debug_selector(|| "side-back-title".into())
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(lead_title.clone()))
+                });
                 shown.fold_across(
                     Button::new("side-back")
                         .motion(&self.motion)
@@ -923,9 +1146,20 @@ impl ChatView {
                         .ghost()
                         .xsmall()
                         .icon(IconName::ArrowLeft)
+                        .max_w(px(BACK_WIDEST))
+                        .children(label)
                         .aria_label(name.clone())
                         .tooltip(name)
                         .on_click(close.clone()),
+                )
+            });
+        let badge = self
+            .motion
+            .shown("side-badge", on_sheet.then_some(()), SHOW, window, cx)
+            .map(|shown| {
+                shown.fold_across(
+                    crate::material::chip(crate::tr!("agents.side_badge").into_owned(), cx)
+                        .debug_selector(|| "chat-side-badge".into()),
                 )
             });
         let close = self
@@ -956,11 +1190,13 @@ impl ChatView {
                 .debug_selector(|| "chat-side-header".into())
                 .items_center()
                 .children(back)
+                .children(badge)
                 .child(div().flex_none().child(crate::agents_panel::status_mark(
                     &key, execution, window, cx,
                 )))
                 .child(
                     div()
+                        .debug_selector(|| "chat-side-title".into())
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()

@@ -81,6 +81,17 @@ impl Origins {
             .and_then(|mark| mark.shown)
     }
 
+    /// Records that `key` was drawn at `bounds`, with corners `radius` round,
+    /// as much of it as the window's content mask shows.
+    fn record(&self, key: SharedString, bounds: Bounds<Pixels>, radius: Pixels, window: &Window) {
+        let visible = bounds.intersect(&window.content_mask().bounds);
+        let shown = (visible.size.width > px(0.) && visible.size.height > px(0.))
+            .then_some((visible, radius));
+        let mut marks = self.marks();
+        let frame = marks.frame;
+        marks.marks.insert(key, Mark { shown, frame });
+    }
+
     /// `child`, the origin `key`, its corners `radius` round: where it is
     /// drawn is recorded each frame it is.
     pub(crate) fn mark(
@@ -145,14 +156,8 @@ impl Element for Origin {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let visible = bounds.intersect(&window.content_mask().bounds);
-        let shown = (visible.size.width > px(0.) && visible.size.height > px(0.))
-            .then_some((visible, self.radius));
-        {
-            let mut marks = self.origins.marks();
-            let frame = marks.frame;
-            marks.marks.insert(self.key.clone(), Mark { shown, frame });
-        }
+        self.origins
+            .record(self.key.clone(), bounds, self.radius, window);
         self.child.prepaint(window, cx);
     }
 
@@ -177,6 +182,11 @@ pub(crate) struct Morph {
     from: Option<(Bounds<Pixels>, Pixels)>,
     /// How far from the origin it is, from 0 (on it) to 1 (in its place).
     growth: f32,
+    /// Where its frame rests instead of its place, and the radius of its
+    /// corners there: what it holds is still laid out at its place.
+    held: Option<(Bounds<Pixels>, Pixels)>,
+    /// Where the frame is recorded as drawn each frame, as an origin is.
+    mark: Option<(Origins, SharedString)>,
     /// The surface's frame, drawn at the size it has now, its corners
     /// `radius` round at rest, inside a border `border` wide.
     frame: Option<Div>,
@@ -191,6 +201,8 @@ impl Morph {
         Self {
             from: None,
             growth: 1.,
+            held: None,
+            mark: None,
             frame: Some(frame),
             radius,
             border,
@@ -202,6 +214,20 @@ impl Morph {
     pub(crate) fn from(mut self, from: Option<(Bounds<Pixels>, Pixels)>, growth: f32) -> Self {
         self.from = from;
         self.growth = growth;
+        self
+    }
+
+    /// Its frame rests at `held` rather than its place, where it was drawn
+    /// as it stopped moving there.
+    pub(crate) fn held(mut self, held: Option<(Bounds<Pixels>, Pixels)>) -> Self {
+        self.held = held;
+        self
+    }
+
+    /// Where its frame is drawn each frame is recorded in `origins` as
+    /// `key`, so what it does next can start from there.
+    pub(crate) fn mark(mut self, origins: &Origins, key: impl Into<SharedString>) -> Self {
+        self.mark = Some((origins.clone(), key.into()));
         self
     }
 }
@@ -253,22 +279,26 @@ impl Element for Morph {
         cx: &mut App,
     ) -> Option<AnyElement> {
         let t = self.growth.clamp(0., 1.);
+        let (rest, rest_radius) = self.held.unwrap_or((place, self.radius));
         let (now, radius) = match self.from.filter(|_| t < 1.) {
             Some((from, from_radius)) => (
                 Bounds::from_corners(
                     gpui::point(
-                        lerp(from.left(), place.left(), t),
-                        lerp(from.top(), place.top(), t),
+                        lerp(from.left(), rest.left(), t),
+                        lerp(from.top(), rest.top(), t),
                     ),
                     gpui::point(
-                        lerp(from.right(), place.right(), t),
-                        lerp(from.bottom(), place.bottom(), t),
+                        lerp(from.right(), rest.right(), t),
+                        lerp(from.bottom(), rest.bottom(), t),
                     ),
                 ),
-                lerp(from_radius, self.radius, t),
+                lerp(from_radius, rest_radius, t),
             ),
-            None => (place, self.radius),
+            None => (rest, rest_radius),
         };
+        if let Some((origins, key)) = &self.mark {
+            origins.record(key.clone(), now, radius, window);
+        }
         let border = self.border;
         let content = self.content.take()?;
         let mut surface = self

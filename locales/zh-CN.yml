@@ -2430,6 +2430,7 @@ agents:
   empty_desc: "此对话派发的子代理会显示在这里。"
   close_side: "关闭子代理"
   back_to_parent: "返回“%{title}”"
+  side_badge: "子代理"
   open_child: "打开"
 tabs:
   with_count: "%{label}（%{count}）"

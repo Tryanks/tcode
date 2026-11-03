@@ -8005,19 +8005,26 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
         let (shell, host, cx) = mount_panes(cx);
+        send_events(&host, vec![lead_with_agent_index("thread-1")]);
+        await_restore_update(&shell, cx, |store| store.thread_meta("agent-1").is_some());
+        draw(cx);
+        (shell, host, cx)
+    }
+
+    /// The panes' index with `agent-1` dispatched by `thread-1`, which is
+    /// titled `lead_title`.
+    fn lead_with_agent_index(lead_title: &str) -> (Topic, ServerEvent) {
         let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
             unreachable!("panes_index sends a snapshot");
         };
+        index.sessions[0].title = lead_title.into();
         let mut agent = index.sessions[1].clone();
         agent.id = "agent-1".into();
         agent.title = "agent-1".into();
         agent.parent_session_id = Some("thread-1".into());
         agent.created_at = 3;
         index.sessions.push(agent);
-        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-        await_restore_update(&shell, cx, |store| store.thread_meta("agent-1").is_some());
-        draw(cx);
-        (shell, host, cx)
+        (topic, ServerEvent::IndexSnapshot(index))
     }
 
     /// Let the panes' and panels' motion land: the longest of it is an
@@ -8297,8 +8304,8 @@ mod tests {
     /// the agent's header is at its top, its composer at its bottom and its
     /// timeline takes the rest; a wheel there scrolls the agent's timeline
     /// and leaves the lead's where it was. With the lead's terminal drawer
-    /// open, the card ends above it, with the composer. Covering a narrower
-    /// lead, the agent takes the wheel too.
+    /// open, the card ends above it, with the composer. On its sheet over a
+    /// narrower lead, the agent takes the wheel too.
     #[gpui::test]
     fn an_agent_beside_its_lead_spans_the_slot_and_takes_the_wheel(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -8437,7 +8444,7 @@ mod tests {
         });
         settle_frames(cx);
 
-        // Too narrow for the card, the agent covers the lead.
+        // Too narrow for the card, the agent is on a sheet over the lead.
         resize(cx, 1000.);
         settle_frames(cx);
         assert_eq!(cx.debug_bounds("chat-side-card"), None);
@@ -8501,8 +8508,8 @@ mod tests {
     /// partway, the card lies between the row and its place, and it rests
     /// in its place; closing, it last draws where the row is, which has come
     /// back with the rail. Over a lead too narrow for the card, the agent
-    /// grows out of the row to cover the lead; closed once the row is no
-    /// longer on screen, it slides off the lead without shrinking.
+    /// grows out of the row into its sheet over the lead; closed once the
+    /// row is no longer on screen, it slides off the lead without shrinking.
     #[gpui::test]
     fn an_agent_grows_out_of_its_rail_row_and_back_into_it(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -8563,43 +8570,233 @@ mod tests {
         settle_frames(cx);
         assert!(cx.debug_bounds("chat-rail").is_some(), "the rail fits");
         let row = press_row(cx);
-        let growing = frames_of("chat-side-cover", 50, cx);
-        let cover = cx
-            .debug_bounds("chat-side-cover")
-            .expect("the agent's cover");
+        let growing = frames_of("chat-side-sheet", 50, cx);
+        let sheet = cx
+            .debug_bounds("chat-side-sheet")
+            .expect("the agent's sheet");
         assert_eq!(cx.debug_bounds("chat-side-card"), None, "no card");
         assert!(
             growing
                 .iter()
-                .any(|bounds| strictly_between(*bounds, row, cover)),
-            "the cover grows from {row:?} to {cover:?} through {growing:?}"
+                .any(|bounds| strictly_between(*bounds, row, sheet)),
+            "the sheet grows from {row:?} to {sheet:?} through {growing:?}"
         );
         settle_frames(cx);
-        assert_eq!(cx.debug_bounds("chat-side-cover"), Some(cover), "at rest");
+        assert_eq!(cx.debug_bounds("chat-side-sheet"), Some(sheet), "at rest");
 
         // Narrower still, the rail is gone, and with it the row.
         resize(cx, 1000.);
         settle_frames(cx);
         assert_eq!(cx.debug_bounds("chat-rail"), None, "no rail");
-        let cover = cx
-            .debug_bounds("chat-side-cover")
-            .expect("the agent's cover");
+        let sheet = cx
+            .debug_bounds("chat-side-sheet")
+            .expect("the agent's sheet");
         let back = cx.debug_bounds("side-back").expect("Back");
         cx.simulate_mouse_move(back.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(back.center(), gpui::Modifiers::default());
         draw(cx);
-        let leaving = frames_until_gone("chat-side-cover", cx);
+        let leaving = frames_until_gone("chat-side-sheet", cx);
         assert!(
             leaving
                 .iter()
-                .all(|bounds| bounds.size == cover.size && bounds.top() == cover.top()),
-            "the cover keeps its size as it leaves {cover:?}: {leaving:?}"
+                .all(|bounds| bounds.size == sheet.size && bounds.top() == sheet.top()),
+            "the sheet keeps its size as it leaves {sheet:?}: {leaving:?}"
         );
         assert!(
-            leaving.iter().any(|bounds| bounds.left() > cover.left()),
-            "the cover slides off the lead: {leaving:?}"
+            leaving.iter().any(|bounds| bounds.left() > sheet.left()),
+            "the sheet slides off the lead: {leaving:?}"
         );
+    }
+
+    /// Whether `inner` lies partway from `from` to `to`: each of its edges
+    /// strictly between theirs where they differ, and on theirs where they
+    /// are the same.
+    fn partway(
+        inner: gpui::Bounds<Pixels>,
+        from: gpui::Bounds<Pixels>,
+        to: gpui::Bounds<Pixels>,
+    ) -> bool {
+        let edge = |at: Pixels, a: Pixels, b: Pixels| {
+            if (a - b).abs() < px(0.5) {
+                (at - a).abs() < px(0.5)
+            } else {
+                at > a.min(b) && at < a.max(b)
+            }
+        };
+        !about(from, to, px(0.5))
+            && edge(inner.left(), from.left(), to.left())
+            && edge(inner.top(), from.top(), to.top())
+            && edge(inner.right(), from.right(), to.right())
+            && edge(inner.bottom(), from.bottom(), to.bottom())
+    }
+
+    /// The agent's card and its sheet over the next `frames` display
+    /// frames, as each frame draws them.
+    fn side_frames(
+        frames: usize,
+        cx: &mut VisualTestContext,
+    ) -> Vec<[Option<gpui::Bounds<Pixels>>; 2]> {
+        (0..frames)
+            .map(|_| {
+                let drawn = [
+                    cx.debug_bounds("chat-side-card"),
+                    cx.debug_bounds("chat-side-sheet"),
+                ];
+                display_frame(cx);
+                drawn
+            })
+            .collect()
+    }
+
+    /// An agent on its card beside its lead, the window narrowed until the
+    /// card no longer fits beside the lead's column, grows from the card
+    /// into a sheet raised over the lead: drawn in one place on every
+    /// frame, partway from the card to the sheet on its way, and at rest
+    /// inset from the lead's body at its sides, as high as the card and
+    /// ending with the lead's composer card. On the sheet the agent's
+    /// header says it is an agent and its Back names the lead, following
+    /// the lead's title; Close is gone. Widened again, the sheet shrinks
+    /// back into the card where it was, and Close is back.
+    #[gpui::test]
+    fn an_agent_beside_its_lead_grows_into_a_sheet_and_back(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        let store = store_of(&shell, cx);
+        serve_finished_turns(&host, "agent-1", 3, false);
+        serve_subagent_status(&host, "agent-1");
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                Some("thread-1"),
+                None,
+                window,
+                cx,
+            )
+        });
+        draw(cx);
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading()
+                && store.timeline_settled_for("agent-1")
+                && store.native_subagent_readonly_for(Some("agent-1"))
+        });
+        settle_frames(cx);
+        let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
+        assert_eq!(cx.debug_bounds("chat-side-sheet"), None);
+        assert!(cx.debug_bounds("side-close").is_some(), "Close on the card");
+        assert_eq!(cx.debug_bounds("chat-side-badge"), None);
+
+        resize(cx, 1000.);
+        let frames = side_frames(50, cx);
+        settle_frames(cx);
+        assert!(
+            frames
+                .iter()
+                .all(|drawn| drawn[0].is_none() || drawn[1].is_none()),
+            "drawn in one place on each frame: {frames:?}"
+        );
+        assert_eq!(cx.debug_bounds("chat-side-card"), None, "no card");
+        let sheet = cx
+            .debug_bounds("chat-side-sheet")
+            .expect("the agent's sheet");
+        let left = frames
+            .iter()
+            .rev()
+            .find_map(|drawn| drawn[0])
+            .expect("the card, before the sheet");
+        let growing: Vec<_> = frames.iter().filter_map(|drawn| drawn[1]).collect();
+        assert!(
+            growing.iter().any(|bounds| partway(*bounds, left, sheet)),
+            "the card grows from {left:?} into {sheet:?} through {growing:?}"
+        );
+        let pane = pane_bounds(&shell, cx)[0];
+        let lead_composer = cx
+            .debug_bounds("composer-card")
+            .expect("the lead's composer");
+        let inset = px(8.);
+        let resting = gpui::Bounds::from_corners(
+            gpui::point(pane.left() + inset, card.top()),
+            gpui::point(pane.right() - inset, lead_composer.bottom()),
+        );
+        assert!(
+            about(sheet, resting, px(1.)),
+            "{sheet:?} inset from {pane:?}, as high as {card:?}, down to the bottom of \
+             {lead_composer:?}"
+        );
+
+        let header = cx
+            .debug_bounds("chat-side-header")
+            .expect("the agent's header");
+        let badge = cx.debug_bounds("chat-side-badge").expect("the badge");
+        let title = cx
+            .debug_bounds("chat-side-title")
+            .expect("the agent's title");
+        let back = cx.debug_bounds("side-back").expect("Back");
+        let named = cx
+            .debug_bounds("side-back-title")
+            .expect("Back names the lead");
+        assert_eq!(cx.debug_bounds("side-close"), None, "no Close on the sheet");
+        assert!(
+            header.left() <= back.left()
+                && back.right() <= badge.left()
+                && badge.right() <= title.left()
+                && title.right() <= header.right(),
+            "Back {back:?}, then the badge {badge:?}, then the title {title:?} in {header:?}"
+        );
+        assert!(
+            named.left() >= back.left()
+                && named.right() <= back.right()
+                && named.size.width > px(0.),
+            "the lead's title {named:?} on Back {back:?}"
+        );
+        send_events(
+            &host,
+            vec![lead_with_agent_index(
+                "thread-1, a lead with a longer title",
+            )],
+        );
+        await_restore_update(&shell, cx, |store| {
+            store
+                .thread_meta("thread-1")
+                .is_some_and(|meta| meta.title.ends_with("longer title"))
+        });
+        settle_frames(cx);
+        let renamed = cx
+            .debug_bounds("side-back-title")
+            .expect("Back names the lead");
+        assert!(
+            renamed.size.width > named.size.width,
+            "Back follows the lead's title: {named:?} -> {renamed:?}"
+        );
+
+        resize(cx, 2000.);
+        let frames = side_frames(50, cx);
+        settle_frames(cx);
+        assert!(
+            frames
+                .iter()
+                .all(|drawn| drawn[0].is_none() || drawn[1].is_none()),
+            "drawn in one place on each frame: {frames:?}"
+        );
+        assert_eq!(cx.debug_bounds("chat-side-sheet"), None, "no sheet");
+        assert_eq!(
+            cx.debug_bounds("chat-side-card"),
+            Some(card),
+            "back on its card"
+        );
+        let left = frames
+            .iter()
+            .rev()
+            .find_map(|drawn| drawn[1])
+            .expect("the sheet, before the card");
+        let shrinking: Vec<_> = frames.iter().filter_map(|drawn| drawn[0]).collect();
+        assert!(
+            shrinking.iter().any(|bounds| partway(*bounds, left, card)),
+            "the sheet shrinks from {left:?} into {card:?} through {shrinking:?}"
+        );
+        assert!(cx.debug_bounds("side-close").is_some(), "Close on the card");
+        assert_eq!(cx.debug_bounds("chat-side-badge"), None);
     }
 
     /// Where `selector` is drawn over the next `frames` display frames.
