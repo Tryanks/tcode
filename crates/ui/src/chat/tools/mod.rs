@@ -239,12 +239,18 @@ impl Activity {
 
 /// The window of one Work Log activity other than a file change:
 /// dispatched on its item kind, then for a tool call on the family that
-/// claims it.
+/// claims it. One still running that its turn no longer waits on says so.
 pub(in crate::chat) fn activity(
     entry: &TimelineEntry,
     live_reasoning: bool,
     cwd: &Path,
 ) -> Activity {
+    let mut activity = kind_activity(entry, live_reasoning, cwd);
+    activity.header.background = entry.background && activity.status == ItemStatus::InProgress;
+    activity
+}
+
+fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Activity {
     let settled = |header, copy| Activity {
         header,
         status: ItemStatus::Completed,

@@ -1663,6 +1663,7 @@ pub(crate) mod tests {
             content,
             ts: None,
             finished_ts: None,
+            background: false,
             turn: 0,
         })
     }

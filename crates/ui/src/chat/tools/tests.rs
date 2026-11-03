@@ -155,8 +155,8 @@ impl Read {
         let header = &activity.header;
         Self {
             verb: header
-                .verb
-                .map(|verb| verb.text(activity.status).to_string()),
+                .verb_text(activity.status)
+                .map(|verb| verb.to_string()),
             subject: header.subject.as_ref().map(|subject| subject.to_string()),
             title: header.title.as_ref().map(|title| title.to_string()),
             argument: header
@@ -914,6 +914,59 @@ fn a_subagent_window_tells_a_running_and_a_failed_agent(cx: &mut TestAppContext)
     );
     thread.open_work_log(running, cx);
     assert!(shows(cx, &format!("tool-error-{failed}")));
+    thread.shutdown(cx);
+}
+
+/// A call the turn waits on keeps its spinner; one that returned while the
+/// work it started goes on — an agent or a command launched in the
+/// background, as Claude Code reports them — says so in the verb's place
+/// until that work ends, when it reads as done.
+#[gpui::test]
+fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut TestAppContext) {
+    let _locale = crate::settings::TestLocaleGuard::acquire();
+    crate::set_locale("en");
+    let waited = "toolu_waited";
+    let agent = "toolu_agent";
+    let command = "toolu_command";
+    let ended = "toolu_ended";
+    let subagent = |id: &str, status: &str| {
+        serde_json::json!({ "type": "item_updated", "id": id, "content": { "kind": "subagent",
+            "agent_type": "general-purpose", "description": "Say OK", "status": status,
+            "summary": null } })
+    };
+    let backgrounded = |id: &str| serde_json::json!({ "type": "item_backgrounded", "item_id": id });
+    let log = [
+        serde_json::json!({ "type": "turn_started", "turn_id": "t" }),
+        serde_json::json!({ "type": "item_completed", "id": "user",
+            "content": { "kind": "user_message", "text": "Start them." } }),
+        subagent(waited, "in_progress"),
+        subagent(agent, "in_progress"),
+        backgrounded(agent),
+        serde_json::json!({ "type": "item_updated", "id": command, "content": {
+            "kind": "command_execution", "command": "sleep 8 && echo BGDONE",
+            "output": "Command running in background with ID: bhfnwk091.",
+            "exit_code": null, "status": "in_progress" } }),
+        backgrounded(command),
+        subagent(ended, "in_progress"),
+        backgrounded(ended),
+        subagent(ended, "completed"),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, event)| serde_json::json!({ "ts": 1_000 + index, "event": event }).to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let (thread, cx) = StoredThread::open(cx, &log, 1_024.);
+    let verb = |id: &str, cx: &mut VisualTestContext| thread.header(id, cx).verb;
+    assert_eq!(verb(waited, cx).as_deref(), Some("Running agent"));
+    for id in [agent, command] {
+        assert_eq!(
+            verb(id, cx).as_deref(),
+            Some("Running in background"),
+            "{id}"
+        );
+    }
+    assert_eq!(verb(ended, cx).as_deref(), Some("Ran agent"));
     thread.shutdown(cx);
 }
 

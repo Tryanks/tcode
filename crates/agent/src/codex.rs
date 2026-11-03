@@ -674,6 +674,8 @@ struct Actor {
     async_questions: Option<(String, Vec<UserInputQuestion>)>,
     items: HashMap<String, ThreadItem>,
     subagents: HashMap<String, CodexSubagent>,
+    /// Subagents a completed turn left running, reported as backgrounded.
+    backgrounded_subagents: HashSet<String>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
     /// gives completion activities a fresh item id, so the activity id cannot
     /// be the lifecycle identity after spawn.
@@ -767,6 +769,7 @@ async fn run_actor(
         async_questions: None,
         items: HashMap::new(),
         subagents: HashMap::new(),
+        backgrounded_subagents: HashSet::new(),
         subagent_parent_by_thread: HashMap::new(),
         seen_subagent_activities: HashSet::new(),
         usage_by_turn: HashMap::new(),
@@ -2335,6 +2338,31 @@ impl Actor {
                 }
                 self.active_turn = None;
                 self.async_questions = None;
+                if status == TurnStatus::Completed {
+                    // The turn ended without waiting on a subagent still at
+                    // work: it goes on in the background.
+                    let running: Vec<String> = self
+                        .subagents
+                        .keys()
+                        .filter(|id| {
+                            !self.backgrounded_subagents.contains(*id)
+                                && self.items.get(*id).is_some_and(|item| {
+                                    item.parent_item_id.is_none()
+                                        && item_status(&item.content) == ItemStatus::InProgress
+                                })
+                        })
+                        .cloned()
+                        .collect();
+                    for item_id in running {
+                        self.backgrounded_subagents.insert(item_id.clone());
+                        self.events
+                            .emit(AgentEvent::ItemBackgrounded {
+                                item_id,
+                                parent_item_id: None,
+                            })
+                            .await;
+                    }
+                }
                 let usage = self.usage_by_turn.remove(&id);
                 self.events
                     .emit(AgentEvent::TurnCompleted {
@@ -4624,6 +4652,7 @@ mod tests {
                 async_questions: None,
                 items: HashMap::new(),
                 subagents: HashMap::new(),
+                backgrounded_subagents: HashSet::new(),
                 subagent_parent_by_thread: HashMap::new(),
                 seen_subagent_activities: HashSet::new(),
                 pending_steers: Vec::new(),
@@ -5961,6 +5990,54 @@ mod tests {
                 }
                 assert!(events.try_recv().is_err());
             }
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    /// The lead's turn ends while the child it spawned still works, as
+    /// Codex 0.166 reports a spawn the model did not wait on: the spawn goes
+    /// on in the background, said once, and a child that has finished is not.
+    #[test]
+    fn a_subagent_a_completed_turn_left_running_goes_on_in_the_background() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let activity = |id: &str, child: &str, kind: &str| {
+                json!({"item": {
+                    "type": "subAgentActivity", "id": id,
+                    "agentThreadId": child, "agentPath": "/root/reply_ok",
+                    "kind": kind
+                }})
+            };
+            for (id, child, kind) in [
+                ("running", "child-a", "started"),
+                ("done", "child-b", "started"),
+                ("done-end", "child-b", "completed"),
+            ] {
+                actor
+                    .handle_notification("item/completed", &activity(id, child, kind))
+                    .await;
+            }
+            while events.try_recv().is_ok() {}
+            let turn_completed =
+                json!({"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}});
+            for _ in 0..2 {
+                actor
+                    .handle_notification("turn/completed", &turn_completed)
+                    .await;
+            }
+            let mut backgrounded = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if let AgentEvent::ItemBackgrounded {
+                    item_id,
+                    parent_item_id,
+                } = event
+                {
+                    assert_eq!(parent_item_id, None);
+                    backgrounded.push(item_id);
+                }
+            }
+            assert_eq!(backgrounded, ["running"]);
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });

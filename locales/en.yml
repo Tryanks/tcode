@@ -2896,6 +2896,7 @@ tools:
   status:
     interrupted: "Interrupted"
     declined: "Declined"
+    background: "Running in background"
   exit_code: "exit %{code}"
   input: "Input"
   output: "Output"

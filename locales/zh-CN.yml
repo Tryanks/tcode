@@ -2889,6 +2889,7 @@ tools:
   status:
     interrupted: "已中断"
     declined: "已拒绝"
+    background: "后台运行中"
   exit_code: "退出码 %{code}"
   input: "输入"
   output: "输出"

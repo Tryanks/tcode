@@ -19,6 +19,20 @@ impl AppState {
         event: &AgentEvent,
         cx: &mut HostCx,
     ) -> bool {
+        if let AgentEvent::ItemBackgrounded {
+            item_id,
+            parent_item_id: Some(parent_item_id),
+        } = event
+        {
+            if let Some(mirror_id) = self.child_item_mirror(parent_session_id, parent_item_id, cx) {
+                let event = AgentEvent::ItemBackgrounded {
+                    item_id: item_id.clone(),
+                    parent_item_id: None,
+                };
+                self.record_event(&mirror_id, &event, cx);
+            }
+            return true;
+        }
         let Some(item) = lifecycle_item(event) else {
             return false;
         };

@@ -1922,6 +1922,16 @@ pub enum AgentEvent {
     ItemStarted(ThreadItem),
     ItemUpdated(ThreadItem),
     ItemCompleted(ThreadItem),
+    /// The call `item_id` returned to the model while the work it started
+    /// goes on — a command or an agent launched in the background — so the
+    /// turn no longer waits on it. The item stays in progress until a later
+    /// snapshot settles it, which is when that work ends. `parent_item_id`
+    /// is the item's own, as on [`ThreadItem`].
+    ItemBackgrounded {
+        item_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_item_id: Option<String>,
+    },
     /// A runtime-synthesized steering request, persisted before provider delivery.
     SteerRequested {
         request_id: String,

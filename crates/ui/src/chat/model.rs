@@ -1004,6 +1004,7 @@ pub(in crate::chat) mod tests {
             content,
             ts: None,
             finished_ts: None,
+            background: false,
             turn: 0,
         })
     }

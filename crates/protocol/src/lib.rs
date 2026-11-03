@@ -265,6 +265,8 @@ pub use wire::{
 // In the store, an item row's envelope carries item_version 1; a row without
 // it is converted to that form when read.
 // A session plan carries the explanation the agent gave with it.
+// Events add item_backgrounded: a call that returned while the work it started
+// goes on, until its item settles.
 pub const PROTOCOL_VERSION: u32 = 23;
 
 #[cfg(test)]

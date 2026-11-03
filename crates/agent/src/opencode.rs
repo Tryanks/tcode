@@ -1675,7 +1675,14 @@ impl Mapper {
                 {
                     tool.background = true;
                     let item = self.tool_item(&item_id, ItemStatus::InProgress, Some(data), None);
-                    mapped.events.extend(item.map(AgentEvent::ItemUpdated));
+                    if let Some(item) = item {
+                        let backgrounded = AgentEvent::ItemBackgrounded {
+                            item_id: item.id.clone(),
+                            parent_item_id: item.parent_item_id.clone(),
+                        };
+                        mapped.events.push(AgentEvent::ItemUpdated(item));
+                        mapped.events.push(backgrounded);
+                    }
                     return mapped;
                 }
                 if tool.name == "todowrite" {

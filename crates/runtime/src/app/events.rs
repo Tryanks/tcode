@@ -519,6 +519,7 @@ impl AppState {
             | AgentEvent::ItemStarted(_)
             | AgentEvent::ItemUpdated(_)
             | AgentEvent::ItemCompleted(_)
+            | AgentEvent::ItemBackgrounded { .. }
             | AgentEvent::SteerRequested { .. }
             | AgentEvent::Delta { .. }
             | AgentEvent::ApprovalRequested(_)
