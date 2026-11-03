@@ -144,6 +144,16 @@ pub struct ChatView {
     /// a frame without it starts at rest, and cleared as it shows another
     /// thread ([`Self::start_scene`]).
     pub(super) motion: crate::motion::owned::Owned,
+    /// Whether what the view shows has been shown since it was bound
+    /// ([`Self::start_scene`]). Until it can be drawn at rest it is laid
+    /// out unseen, so its fade in starts once there is something to fade
+    /// in rather than playing out while it loads.
+    scene_shown: bool,
+    /// When the view was bound to what it shows.
+    scene_at: Instant,
+    /// The thread's layer's opacity in the last frame.
+    #[cfg(test)]
+    pub(crate) thread_opacity: f32,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -380,6 +390,10 @@ impl ChatView {
             pane_close: None,
             header_scroll: gpui::ScrollHandle::default(),
             motion: Default::default(),
+            scene_shown: false,
+            scene_at: cx.background_executor().now(),
+            #[cfg(test)]
+            thread_opacity: 0.,
             window_state,
             composer,
             terminal_drawer,
@@ -494,7 +508,11 @@ impl ChatView {
     /// draws too, so each part of it would carry on from where the last
     /// thread left its namesake. The same thread drawn under a new parent
     /// keeps all of it.
-    pub(super) fn start_scene(&mut self) {
+    pub(super) fn start_scene(&mut self, cx: &App) {
+        self.scene_shown = false;
+        self.scene_at = cx.background_executor().now();
+        // Rows painted from here on are the new thread's.
+        self.painted_rows.set(None);
         self.motion.clear();
         self.shared.clear();
         self.rows_motion.clear();
@@ -528,6 +546,7 @@ impl Render for ChatView {
                 self.list_state.remeasure_items(row..row + 1);
             }
         }
+        let rows_drawn = self.painted_rows.get().is_some();
         self.painted_rows.set(None);
         self.shared
             .begin_frame(self.list_state.viewport_bounds(), cx);
@@ -644,25 +663,44 @@ impl Render for ChatView {
             .read(cx)
             .chat_loading_for(self.session_id.as_deref());
         let surface = match (&active, loading) {
-            (_, true) => 0,
-            (None, false) => 1,
-            (Some(_), false) => 2,
+            (_, true) => SURFACE_SKELETON,
+            (None, false) => SURFACE_EMPTY,
+            (Some(_), false) => SURFACE_THREAD,
+        };
+        // What the view was bound to shows once it can be drawn at rest;
+        // until then nothing does, and the skeleton only once that has
+        // taken longer than a glance.
+        if !self.scene_shown {
+            self.scene_shown = self.scene_ready(loading, rows_drawn, cx);
+        }
+        let surface = if self.scene_shown {
+            surface
+        } else if now.saturating_duration_since(self.scene_at) >= SCENE_PATIENCE {
+            SURFACE_SKELETON
+        } else {
+            window.request_animation_frame();
+            SURFACE_NOTHING
         };
         let fade = self
             .motion
             .cross_fade(
                 "chat-surface",
                 surface,
-                3,
+                4,
                 &crate::motion::owned::Curve::settle(),
                 window,
                 cx,
             )
-            .fill();
+            .fill()
+            .stage(SURFACE_THREAD);
+        #[cfg(test)]
+        {
+            self.thread_opacity = fade.opacity(SURFACE_THREAD);
+        }
         let mut layers = Vec::new();
-        if fade.shows(0) {
+        if fade.shows(SURFACE_SKELETON) {
             layers.push((
-                0,
+                SURFACE_SKELETON,
                 v_flex()
                     .size_full()
                     .when_some(
@@ -676,9 +714,9 @@ impl Render for ChatView {
                     .into_any_element(),
             ));
         }
-        if fade.shows(1) {
+        if fade.shows(SURFACE_EMPTY) {
             layers.push((
-                1,
+                SURFACE_EMPTY,
                 v_flex()
                     .size_full()
                     .when(!compact, |el| {
@@ -690,11 +728,46 @@ impl Render for ChatView {
         }
         if let Some(active) = active.filter(|_| !loading) {
             layers.push((
-                2,
+                SURFACE_THREAD,
                 self.render_thread(active, show_jump_to_latest, window, cx),
             ));
         }
         root.child(fade.render(layers).size_full())
+    }
+}
+
+/// The layers of a conversation's surface: its skeleton while it loads, the
+/// empty workspace with no thread, the thread, and nothing, which is what a
+/// thread just bound shows while it readies itself unseen.
+const SURFACE_SKELETON: usize = 0;
+const SURFACE_EMPTY: usize = 1;
+const SURFACE_THREAD: usize = 2;
+const SURFACE_NOTHING: usize = 3;
+
+/// How long a thread just bound may take to be ready before its skeleton
+/// shows: under it, it fades in from nothing.
+const SCENE_PATIENCE: Duration = Duration::from_millis(300);
+
+impl ChatView {
+    /// Whether what the view was bound to can be drawn at rest: no thread
+    /// once the workspace is known; a thread once its timeline is held whole
+    /// (not loading, not catching up), its rows have been drawn (measured, at
+    /// their anchor) and the Markdown of the ones on screen is built.
+    fn scene_ready(&self, loading: bool, rows_drawn: bool, cx: &App) -> bool {
+        if loading {
+            return false;
+        }
+        let Some(session_id) = self.session_id.as_deref() else {
+            return true;
+        };
+        self.workspace_store
+            .read(cx)
+            .timeline_settled_for(session_id)
+            && !self.timeline_stale
+            && (self.rows.is_empty() || rows_drawn)
+            && self.pending_md_builds.is_empty()
+            && !self.carried_anchor
+            && self.reservation_scroll_back.is_none()
     }
 }
 

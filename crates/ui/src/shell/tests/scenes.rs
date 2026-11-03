@@ -193,3 +193,168 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
         );
     }
 }
+
+/// One frame of a thread appearing: how far its fade has come, and whether
+/// its rows and its skeleton were drawn.
+#[derive(Debug, Clone, Copy)]
+struct Appearing {
+    opacity: f32,
+    rows: bool,
+    skeleton: bool,
+}
+
+fn appearing(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> Appearing {
+    let opacity = shell.read_with(cx, |shell, cx| {
+        let chat = shell.attachment.as_ref().expect("attached").chat(cx);
+        chat.read(cx).thread_opacity
+    });
+    Appearing {
+        opacity,
+        rows: cx.debug_bounds("timeline-row-0").is_some(),
+        skeleton: cx.debug_bounds("baseline-loading").is_some(),
+    }
+}
+
+/// The frame drawn now and the `frames` display frames after it.
+fn watch(shell: &Entity<AppShell>, frames: usize, cx: &mut VisualTestContext) -> Vec<Appearing> {
+    let mut seen = vec![appearing(shell, cx)];
+    for _ in 0..frames {
+        display_frame(cx);
+        seen.push(appearing(shell, cx));
+    }
+    seen
+}
+
+/// The fade a thread appears with starts once its rows are drawn, and plays
+/// through to the end: no frame shows it part way in without them.
+fn assert_appears_once_drawn(what: &str, seen: &[Appearing]) {
+    let started = seen
+        .iter()
+        .position(|frame| frame.opacity > 0.)
+        .unwrap_or_else(|| panic!("{what} never appeared: {seen:?}"));
+    assert!(
+        seen[started..].iter().all(|frame| frame.rows),
+        "{what} faded in without its rows: {seen:?}"
+    );
+    assert!(
+        seen[started..]
+            .iter()
+            .any(|frame| frame.opacity > 0.05 && frame.opacity < 0.95),
+        "{what} appeared at once: {seen:?}"
+    );
+    assert_eq!(seen.last().map(|frame| frame.opacity), Some(1.), "{what}");
+}
+
+/// A thread a pane is switched to, whose log is there by its first frame,
+/// appears promptly and still fades in, and only once its rows are drawn;
+/// and so again switching back.
+#[gpui::test]
+fn a_thread_switched_to_fades_in_once_it_is_drawn(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_panes(cx);
+    serve_finished(&host, "thread-1");
+    await_restore_update(&shell, cx, |store| {
+        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+    });
+    settle_frames(cx);
+    for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
+        serve_finished(&host, id);
+        switch(&shell, key, id, cx);
+        let seen = watch(&shell, 40, cx);
+        assert_appears_once_drawn(id, &seen);
+        let started = seen.iter().position(|frame| frame.opacity > 0.).unwrap();
+        assert!(started <= 4, "{id} kept the reader waiting: {seen:?}");
+        assert!(
+            seen.iter().all(|frame| !frame.skeleton),
+            "{id} flashed its skeleton"
+        );
+    }
+}
+
+/// A thread whose log the host is slow to send shows nothing new at first,
+/// then its skeleton, and fades in from it once its rows are drawn, rather
+/// than playing its fade out while it waited.
+#[gpui::test]
+fn a_thread_slow_to_arrive_fades_in_once_it_has(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_panes(cx);
+    serve_finished(&host, "thread-1");
+    await_restore_update(&shell, cx, |store| {
+        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+    });
+    settle_frames(cx);
+    switch(&shell, "secondary-2", "thread-2", cx);
+    let waiting = watch(&shell, 40, cx);
+    assert!(
+        waiting.iter().all(|frame| frame.opacity == 0.),
+        "the thread faded in before it arrived: {waiting:?}"
+    );
+    assert!(!waiting[0].skeleton, "the skeleton shows at once");
+    assert!(
+        waiting.last().is_some_and(|frame| frame.skeleton),
+        "the skeleton shows once the wait is long"
+    );
+
+    serve_finished(&host, "thread-2");
+    cx.run_until_parked();
+    store_of(&shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
+    draw(cx);
+    let seen = watch(&shell, 40, cx);
+    assert_appears_once_drawn("thread-2", &seen);
+    assert!(seen.last().is_some_and(|frame| !frame.skeleton));
+}
+
+/// A thread opened from the sidebar into a pane of its own fades in once its
+/// rows are drawn.
+#[gpui::test]
+fn a_thread_opened_into_a_new_pane_fades_in_once_it_is_drawn(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_panes(cx);
+    serve_finished(&host, "thread-1");
+    await_restore_update(&shell, cx, |store| {
+        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+    });
+    settle_frames(cx);
+    cx.simulate_keystrokes("secondary-d");
+    settle_frames(cx);
+    serve_finished(&host, "thread-2");
+    cx.simulate_keystrokes("secondary-2");
+    store_of(&shell, cx).update(cx, |store, cx| store.drain_host_events_for_test(cx));
+    draw(cx);
+    assert_eq!(
+        pane_threads(&shell, cx),
+        [Some("thread-1".into()), Some("thread-2".into())]
+    );
+    let seen = watch(&shell, 40, cx);
+    assert_appears_once_drawn("thread-2", &seen);
+    assert!(
+        seen.iter().all(|frame| !frame.skeleton),
+        "thread-2 flashed its skeleton: {seen:?}"
+    );
+}
+
+/// With motion reduced, a thread switched to is there at once when it is
+/// ready, and not before.
+#[gpui::test]
+fn a_thread_switched_to_with_motion_reduced_is_there_once_drawn(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_panes(cx);
+    serve_finished(&host, "thread-1");
+    await_restore_update(&shell, cx, |store| {
+        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+    });
+    settle_frames(cx);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    serve_finished(&host, "thread-2");
+    switch(&shell, "secondary-2", "thread-2", cx);
+    let seen = watch(&shell, 10, cx);
+    let started = seen
+        .iter()
+        .position(|frame| frame.opacity > 0.)
+        .expect("thread-2 appears");
+    assert!(
+        seen[started..]
+            .iter()
+            .all(|frame| frame.rows && frame.opacity == 1.)
+    );
+}
