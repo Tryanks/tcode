@@ -236,13 +236,16 @@ mod feedback_lifecycle_tests {
     fn mcp_cancellation_invalidates_pending_feedback_before_the_handler_resumes() {
         let session = feedback::FeedbackSession::new();
         let cancellation = tokio_util::sync::CancellationToken::new();
-        let mut success = session.begin(None);
+        let answered = tokio_util::sync::CancellationToken::new();
+        let mut success = session.begin(Some(answered.clone()));
         let published_success = success.ticket();
         success.complete();
         drop(success);
+        // rmcp cancels a request's token as it sends that request's response.
+        answered.cancel();
         assert!(
             published_success.is_current(),
-            "successful actions retain their bounded tail"
+            "successful actions retain their bounded tail after the response"
         );
         let cancelled = session.begin(Some(cancellation.clone()));
         let pending = cancelled.ticket();
