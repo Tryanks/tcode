@@ -46,10 +46,6 @@ const WORD_QUICK_SHARE: f32 = 0.7;
 const ONE_SHOT_CHARS: usize = 512;
 const DOCUMENT: Duration = Duration::from_millis(320);
 
-/// How long appended text can take to reach full colour.
-#[cfg(test)]
-pub(crate) const FADE: Duration = BUDGET.saturating_add(WORD_SETTLE);
-
 /// A text leaf: the render path of a paragraph, heading or table cell, or of
 /// a code block with the line in it -- the place selection runs name.
 type LeafKey = (Vec<u32>, u32);
