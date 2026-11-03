@@ -1074,19 +1074,90 @@ pub(crate) fn pane_colour(slot: usize, cx: &App) -> Hsla {
     )
 }
 
+/// The tint a narrow pane's header lays over its title area: the pane's
+/// opaque [`pane_colour`] `colour` at a soft strength, `progress` of the way
+/// in.
+///
+/// Soft because [`text_over_tint`] keeps the title's untinted contrast only
+/// by moving it toward black in light or white in dark: in dark even a white
+/// title keeps the plain one's 14.4:1 only under about 9% of a pane's
+/// colour; light paper leaves more room.
+pub(crate) fn pane_tint(colour: Hsla, progress: f32, cx: &App) -> Hsla {
+    const LIGHT: f32 = 0.14;
+    const DARK: f32 = 0.08;
+    let strength = LIGHT + (DARK - LIGHT) * cx.theme().darkness;
+    colour.alpha(strength * progress)
+}
+
+/// `text` as it is drawn over `tint` laid on [`content_surface`]: moved
+/// toward black or white, away from the surface, by as little as keeps its
+/// contrast with the tinted surface at least what it has with the plain one.
+///
+/// gpui-base's theme has no contrast measure; this is WCAG 2's, over the
+/// surface flattened as the window composites it.
+pub(crate) fn text_over_tint(text: Hsla, tint: Hsla, cx: &App) -> Hsla {
+    let surface = Hsla {
+        a: 1.,
+        ..content_surface(cx)
+    };
+    let tinted = over(surface, tint);
+    let wanted = contrast(text, surface);
+    let extreme = if luminance(text) > luminance(surface) {
+        gpui::white()
+    } else {
+        gpui::black()
+    };
+    let toward = |share: f32| over(text, extreme.alpha(share));
+    if contrast(text, tinted) >= wanted {
+        return text;
+    }
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..20 {
+        let mid = (low + high) / 2.;
+        if contrast(toward(mid), tinted) < wanted {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    toward(high)
+}
+
+/// `top` composited over the opaque `bottom`, channel by channel as the
+/// window blends them.
+fn over(bottom: Hsla, top: Hsla) -> Hsla {
+    let (bottom, top) = (bottom.to_rgb(), top.to_rgb());
+    let mix = |b: f32, t: f32| b + (t - b) * top.a;
+    Rgba {
+        r: mix(bottom.r, top.r),
+        g: mix(bottom.g, top.g),
+        b: mix(bottom.b, top.b),
+        a: 1.,
+    }
+    .into()
+}
+
+/// WCAG 2's relative luminance.
+fn luminance(colour: Hsla) -> f32 {
+    let Rgba { r, g, b, .. } = colour.to_rgb();
+    let linear = |channel: f32| {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// WCAG 2's contrast ratio of two opaque colours.
+fn contrast(a: Hsla, b: Hsla) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 fn slot_colour(slot: usize, theme: &crate::theme::Theme) -> Hsla {
     const SATURATION: f32 = 0.75;
-    fn luminance(colour: Hsla) -> f32 {
-        let Rgba { r, g, b, .. } = colour.to_rgb();
-        let linear = |channel: f32| {
-            if channel <= 0.04045 {
-                channel / 12.92
-            } else {
-                ((channel + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
-    }
     fn distance(a: f32, b: f32) -> f32 {
         let turn = (a - b).rem_euclid(1.);
         turn.min(1. - turn)
@@ -1247,6 +1318,45 @@ mod tests {
 
         crate::test_frames::draw_settled(cx);
         assert_eq!(cx.update(|_, cx| pane_colour(0, cx).to_rgb()), dark);
+    }
+
+    /// Over the tint a narrow pane's header lays on its title area, in
+    /// either mode and in every pane's colour, the title and the muted
+    /// title keep at least the contrast they have untinted, and never less
+    /// than WCAG AA's 4.5:1.
+    #[gpui::test]
+    fn a_tinted_title_keeps_its_contrast_in_every_pane_colour(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| Blank);
+        for setting in [Setting::Light, Setting::Dark] {
+            cx.update(|window, cx| apply_theme(setting, window, cx));
+            crate::test_frames::draw_settled(cx);
+            cx.update(|_, cx| {
+                let theme = cx.theme();
+                let surface = content_surface(cx).alpha(1.);
+                for slot in 0..crate::panes::MAX_PANES {
+                    let tint = pane_tint(pane_colour(slot, cx).alpha(1.), 1., cx);
+                    let tinted = over(surface, tint);
+                    for (name, text) in [
+                        ("title", theme.foreground),
+                        ("muted", theme.muted_foreground),
+                    ] {
+                        let plain = contrast(text, surface);
+                        let drawn = contrast(text_over_tint(text, tint, cx), tinted);
+                        eprintln!(
+                            "{setting:?} slot {slot} {name}: {plain:.2}:1 untinted, \
+                             {drawn:.2}:1 tinted, as drawn unchanged {:.2}:1",
+                            contrast(text, tinted)
+                        );
+                        assert!(
+                            drawn >= plain - 1e-3 && drawn >= 4.5,
+                            "{setting:?} slot {slot} {name}: {drawn}:1 over the tint, \
+                             {plain}:1 without"
+                        );
+                    }
+                }
+            });
+        }
     }
 
     /// A menu item and the rows of a virtual list, each built with `&App`
