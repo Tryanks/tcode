@@ -1,4 +1,12 @@
 //! A layout put in while the chat column is faded out.
+//!
+//! Not a [`crate::motion::Scene`], which keeps the scene left drawn beneath
+//! the one rising over it so that what they share holds still: the column is
+//! one dock holding one pane tree, and a layout replaces that tree, building
+//! every group anew around the same pane views, so no layout is left to draw
+//! beneath the new one. GPUI cannot draw the column into a texture to fade a
+//! snapshot of it either, so the one column dips through near-nothing while
+//! its layout is replaced.
 
 use gpui::{App, ElementId, Window};
 use gpui_base::motion::{Presence, PresencePhase, PresenceSample, Transition};
@@ -9,14 +17,14 @@ use super::PaneLayout;
 /// layout is put in still draws it, faintly, rather than nothing.
 const LOWEST: f32 = 0.04;
 
-/// A layout chosen for the whole column, as a change of scene: the column
+/// A layout chosen for the whole column, swapped in: the column
 /// fades out over half of `edge_back::SETTLE`, the layout is put in during
 /// the frame the column is faintest, and the column fades back in over the
 /// other half. A layout chosen meanwhile joins in: while the column fades
 /// out it keeps going and puts that one in at the bottom; while it fades in
 /// it turns back down from where it is.
 #[derive(Default)]
-pub(crate) struct Scene {
+pub(crate) struct LayoutSwap {
     current: Option<Switch>,
     generation: u64,
     opacity: Option<f32>,
@@ -28,7 +36,7 @@ struct Switch {
     chosen: Option<PaneLayout>,
 }
 
-impl Scene {
+impl LayoutSwap {
     /// Fade the column out to put `layout` in.
     pub(crate) fn choose(&mut self, layout: PaneLayout) {
         match &mut self.current {
@@ -74,7 +82,7 @@ impl Scene {
             self.opacity = None;
             return None;
         };
-        let id = ElementId::NamedInteger("pane-scene".into(), switch.generation);
+        let id = ElementId::NamedInteger("pane-layout-swap".into(), switch.generation);
         let fade = |out: bool, window: &mut Window, cx: &mut App| -> PresenceSample {
             Presence::new(id.clone(), out)
                 .transition(Transition::new(crate::edge_back::SETTLE / 2))
