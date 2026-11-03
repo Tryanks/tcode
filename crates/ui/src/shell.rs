@@ -8275,6 +8275,30 @@ mod tests {
         assert!(cx.debug_bounds("compact-thread-page").is_some());
     }
 
+    /// On a phone, the Agents pill under a lead's timeline opens a sheet
+    /// that shows the lead's agents.
+    #[gpui::test]
+    fn the_phone_agents_sheet_shows_the_leads_agents(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (_shell, _host, cx) = mount_lead_with_agent(cx);
+        as_mobile(cx);
+        resize(cx, 393.);
+        settle_panes(cx);
+        let pill = cx.debug_bounds("agents-pill").expect("the Agents pill");
+        cx.simulate_click(pill.center(), gpui::Modifiers::default());
+        settle_panes(cx);
+        let content = cx
+            .debug_bounds("touch-picker-content")
+            .expect("the Agents sheet");
+        let row = cx
+            .debug_bounds("agent-row-agent-1")
+            .expect("the agent's row");
+        assert!(
+            row.top() >= content.top() && row.bottom() <= content.bottom(),
+            "the row {row:?} is out of the sheet's content {content:?}"
+        );
+    }
+
     /// Choose the palette's action `label`, in whatever language the host's
     /// settings left the window in.
     fn choose_from_palette(shell: &Entity<AppShell>, label: &str, cx: &mut VisualTestContext) {
