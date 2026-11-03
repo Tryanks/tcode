@@ -36,7 +36,7 @@ use crate::{
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
     McpRegistration, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus, ProviderCommand,
     ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TokenUsage, ToolOutput, TurnStatus, UserInputDelivery,
+    SessionOptions, ThreadItem, TokenUsage, ToolName, ToolOutput, TurnStatus, UserInputDelivery,
     UserInputQuestion,
 };
 
@@ -2289,8 +2289,8 @@ fn tool_call_content(tool: &ToolState, status: ItemStatus, output: String) -> It
 }
 
 /// The tool's own name, where the wire has one: Grok's `_meta["x.ai/tool"]`
-/// (whose `use_tool` dispatches the MCP tool named in its input), Cursor's
-/// `rawInput._toolName`.
+/// (whose `use_tool` dispatches the MCP tool named in its input, named here
+/// `server/tool`), Cursor's `rawInput._toolName`.
 fn tool_name(meta: Option<&acp::Meta>, raw_input: Option<&Value>) -> Option<String> {
     let input = |key: &str| {
         raw_input
@@ -2303,7 +2303,12 @@ fn tool_name(meta: Option<&acp::Meta>, raw_input: Option<&Value>) -> Option<Stri
         .and_then(|tool| tool.get("name"))
         .and_then(Value::as_str)
     {
-        Some("use_tool") => input("tool_name").or(Some("use_tool")),
+        Some("use_tool") => {
+            return Some(match input("tool_name") {
+                Some(name) => ToolName::slashed(name).unwrap_or_else(|| name.to_owned()),
+                None => "use_tool".to_owned(),
+            });
+        }
         Some(name) => Some(name),
         None => input("_toolName"),
     };

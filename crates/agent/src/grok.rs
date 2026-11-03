@@ -1265,7 +1265,7 @@ mod tests {
                 if questions[0].id == "Which greeting should I use?")));
         assert!(matches!(completed(&events, "call_37_0"),
             ItemContent::ToolCall { name, output: Some(output), status: ItemStatus::Completed, .. }
-                if name == "tcode_probe__echo_upper" && output == "HELLO MCP"));
+                if name == "tcode_probe/echo_upper" && output == "HELLO MCP"));
 
         assert_eq!(
             streamed(&events, "msg-2"),

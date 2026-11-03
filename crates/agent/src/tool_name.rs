@@ -1,7 +1,8 @@
 /// A tool call's name split into the MCP server that provides the tool, when
-/// the name says, and the tool's own name. Providers spell the pair
-/// differently: Claude Code `mcp__server__tool`, Codex `server/tool`, Grok
-/// `server__tool`, others `server.tool`; a built-in tool is a plain name.
+/// the name says, and the tool's own name. Claude Code spells the pair
+/// `mcp__server__tool`; every other adapter names it `server/tool` (Codex
+/// does on the wire, the OpenCode and Grok adapters rename their own
+/// spellings to it). A built-in tool is a plain name, whatever it holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolName<'a> {
     pub server: Option<&'a str>,
@@ -10,13 +11,11 @@ pub struct ToolName<'a> {
 
 impl<'a> ToolName<'a> {
     pub fn parse(name: &'a str) -> Self {
-        let pair = name
-            .strip_prefix("mcp__")
-            .and_then(|rest| rest.split_once("__"))
-            .or_else(|| name.split_once('/'))
-            .or_else(|| name.split_once("__"))
-            .or_else(|| name.split_once('.'))
-            .filter(|(server, tool)| !server.is_empty() && !tool.is_empty());
+        let pair = match name.strip_prefix("mcp__") {
+            Some(rest) => rest.split_once("__"),
+            None => name.split_once('/'),
+        }
+        .filter(|(server, tool)| !server.is_empty() && !tool.is_empty());
         match pair {
             Some((server, tool)) => Self {
                 server: Some(server),
@@ -28,13 +27,24 @@ impl<'a> ToolName<'a> {
             },
         }
     }
+
+    /// Grok's `server__tool` spelling of an MCP tool as `server/tool`;
+    /// `None` for a name not in that spelling.
+    pub fn slashed(name: &str) -> Option<String> {
+        if name.starts_with("mcp__") || name.contains('/') {
+            return None;
+        }
+        let (server, tool) = name.split_once("__")?;
+        (!server.is_empty() && !tool.is_empty()).then(|| format!("{server}/{tool}"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every spelling recorded on the wire names the same server and tool.
+    /// Every spelling recorded on the wire names the same server and tool,
+    /// and a plain name is a built-in whatever it holds.
     #[test]
     fn provider_spellings_name_the_same_server_and_tool() {
         for (name, server, tool) in [
@@ -49,7 +59,7 @@ mod tests {
                 Some("claude_ai_Claude_Docs"),
                 "batch",
             ),
-            // Codex app-server.
+            // Codex app-server, and OpenCode and Grok as their adapters name them.
             (
                 "tcode_computer_use/observe_ui",
                 Some("tcode_computer_use"),
@@ -60,12 +70,15 @@ mod tests {
                 Some("codex_apps"),
                 "github.search_installed_repositories_v2",
             ),
-            // Grok `use_tool`.
-            ("tcode_probe__echo_upper", Some("tcode_probe"), "echo_upper"),
+            ("tcode_probe/echo_upper", Some("tcode_probe"), "echo_upper"),
             // Built-ins.
             ("Read", None, "Read"),
             ("report_result", None, "report_result"),
             ("mcp__", None, "mcp__"),
+            ("mcp__tcode_control", None, "mcp__tcode_control"),
+            ("foo__bar", None, "foo__bar"),
+            ("a.b", None, "a.b"),
+            ("Read file.txt", None, "Read file.txt"),
         ] {
             assert_eq!(ToolName::parse(name), ToolName { server, tool }, "{name}");
         }

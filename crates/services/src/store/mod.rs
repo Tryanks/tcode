@@ -1492,9 +1492,10 @@ impl ParsedRecord {
 
 /// An item row written before [`ITEM_VERSION`], as a new row holds it. A
 /// Codex sleep, image view or image generation recorded as `Other` reads
-/// back as the item the adapter maps it to now. A tool call recorded before
-/// every adapter kept results canonical holds its provider's result shape
-/// in `output`; it reads back as text and images.
+/// back as the item the adapter maps it to now. A Grok MCP call is named
+/// `server__tool`, read as `server/tool`. A tool call recorded before every
+/// adapter kept results canonical holds its provider's result shape in
+/// `output`; it reads back as text and images.
 fn legacy_item(event: &mut AgentEvent) {
     let completed = matches!(event, AgentEvent::ItemCompleted(_));
     let (AgentEvent::ItemStarted(item)
@@ -1504,11 +1505,19 @@ fn legacy_item(event: &mut AgentEvent) {
         return;
     };
     agent::codex::normalize_legacy_item(item, completed);
-    if let agent::ItemContent::ToolCall {
-        output: Some(output),
+    let agent::ItemContent::ToolCall {
+        name,
+        output,
         image_reads,
         ..
     } = &mut item.content
+    else {
+        return;
+    };
+    if let Some(slashed) = agent::ToolName::slashed(name) {
+        *name = slashed;
+    }
+    if let Some(output) = output
         && let Some(split) = agent::ToolOutput::split(output)
     {
         *output = split.text;
