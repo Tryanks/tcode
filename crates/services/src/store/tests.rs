@@ -1604,6 +1604,29 @@ fn codex_items_recorded_as_other_read_back_as_their_items() {
     );
 }
 
+/// Grok's MCP call as its adapter recorded it before naming it
+/// `server/tool` (the call in the recorded Grok fixture) reads back with the
+/// name a new row holds.
+#[test]
+fn a_grok_mcp_call_recorded_with_its_spelling_reads_back_as_server_and_tool() {
+    let dir = DataDir::new();
+    let store = dir.store();
+    let mut meta = SessionMeta::new(ProviderKind::Grok, PathBuf::from("/w"), None);
+    meta.id = "grok".into();
+    store.upsert_meta(&meta).unwrap();
+    let log = "{\"ts\":1,\"event\":{\"type\":\"item_completed\",\"id\":\"call_37_0\",\"content\":{\"kind\":\"tool_call\",\"name\":\"tcode_probe__echo_upper\",\"input\":{\"tool_name\":\"tcode_probe__echo_upper\",\"tool_input\":{\"text\":\"hello mcp\"}},\"output\":\"HELLO MCP\",\"status\":\"completed\"}}}\n";
+    store
+        .apply(&[Mutation::replace_event_log("grok", log.into())])
+        .unwrap();
+    let AgentEvent::ItemCompleted(item) = &store.read_events("grok").unwrap()[0].event else {
+        panic!("a completed item")
+    };
+    assert!(
+        matches!(&item.content, agent::ItemContent::ToolCall { name, .. } if name == "tcode_probe/echo_upper"),
+        "{item:?}"
+    );
+}
+
 /// A tool call recorded now is stamped as canonical and reads back as it
 /// was recorded, so a reopened thread shows what the live one did, even
 /// when the tool's text is itself in a provider's block shape.

@@ -3,8 +3,8 @@
 //! A window is chosen from what the item carries, never from the provider
 //! that produced it (Principle 4): first its `ItemContent` kind — a command,
 //! a file change — and then, for a `ToolCall`, by its tool name
-//! ([`agent::ToolName::parse`], so `mcp__s__t`, `s/t` and `s.t` name one
-//! tool) and the shape of its input. Each family view tries its names and
+//! ([`agent::ToolName::parse`], so `mcp__s__t` and `s/t` name one tool)
+//! and the shape of its input. Each family view tries its names and
 //! deserializes the input into its own typed fields; a call no family
 //! accepts, or whose input is not the shape a family expects, gets the
 //! generic window. A provider that names a capability differently simply
