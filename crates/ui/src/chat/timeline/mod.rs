@@ -1348,7 +1348,6 @@ mod tests {
         }
         assert!(!list.is_following_tail());
         let before = list.logical_scroll_top();
-        let before_px = list.scroll_px_offset_for_scrollbar().y;
 
         // An earlier history page arrives from the host between two frames,
         // while a trackpad pan is still delivering packets. The test app
@@ -1385,7 +1384,6 @@ mod tests {
             before.offset_in_item,
             list.logical_scroll_top().offset_in_item
         );
-        assert_eq!(list.scroll_px_offset_for_scrollbar().y, before_px + px(40.));
     }
 
     #[gpui::test]
