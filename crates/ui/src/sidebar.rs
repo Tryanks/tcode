@@ -4903,19 +4903,19 @@ impl SessionsSidebar {
             .collect();
         rows.retain(|(_, factor)| *factor >= 0.);
         let keys = rows.iter().map(|(row, _)| row.key(&groups));
+        let drawn = self.grouped_drawn.clone();
+        self.grouped_presence.update(
+            &all,
+            self.folding,
+            &self.grouped_list_state,
+            |index| (drawn.clone(), index),
+            cx,
+        );
         if !keys.clone().eq(self
             .grouped_row_keys
             .iter()
             .map(|(kind, id)| (*kind, id.as_str())))
         {
-            let drawn = self.grouped_drawn.clone();
-            self.grouped_presence.update(
-                &all,
-                self.folding,
-                &self.grouped_list_state,
-                |index| (drawn.clone(), index),
-                cx,
-            );
             replace_gliding_rows(
                 &self.grouped_list_state,
                 &self.grouped_flip,
@@ -5079,19 +5079,19 @@ impl SessionsSidebar {
         visible.retain(|_| kept.next().unwrap_or(true));
         folds.retain(|factor| *factor >= 0.);
         let keys = visible.iter().map(FlatListRow::key);
+        let drawn = self.flat_drawn.clone();
+        self.flat_presence.update(
+            &all,
+            self.folding,
+            &self.flat_list_state,
+            |index| (drawn.clone(), index),
+            cx,
+        );
         if !keys.clone().eq(self
             .flat_row_keys
             .iter()
             .map(|(kind, id)| (*kind, id.as_str())))
         {
-            let drawn = self.flat_drawn.clone();
-            self.flat_presence.update(
-                &all,
-                self.folding,
-                &self.flat_list_state,
-                |index| (drawn.clone(), index),
-                cx,
-            );
             replace_gliding_rows(
                 &self.flat_list_state,
                 &self.flat_flip,
@@ -8095,6 +8095,191 @@ mod tests {
             );
             cx.run_until_parked();
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        }
+    }
+
+    /// A Settled shelf opened at the foot of a list taller than the view
+    /// folds its rows in below its header, and scrolling down then shows
+    /// each of them at a thread row's full height: in both layouts, on the
+    /// desktop and on the phone.
+    #[gpui::test]
+    fn a_shelf_opened_at_the_foot_of_a_long_list_scrolls_to_its_rows(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let send = |topic, event| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+        let projects: Vec<Project> = (0..12)
+            .map(|index| {
+                let mut project = Project::from_root(PathBuf::from(format!("/p{index:02}")));
+                project.id = format!("p{index:02}");
+                project
+            })
+            .collect();
+        let mut sessions = Vec::new();
+        for (index, project) in projects.iter().enumerate() {
+            for row in 0..3 {
+                let mut meta = session(&format!("{}-{row}", project.id), None);
+                meta.project_id = Some(project.id.clone());
+                meta.created_at = 1000 - 10 * index as u64 - row;
+                meta.updated_at = meta.created_at;
+                sessions.push(meta);
+            }
+        }
+        // All in the last project, so its shelf is at the foot of either list.
+        sessions.extend((0..12).map(|index| {
+            let mut meta = session(&format!("settled-{index}"), None);
+            meta.project_id = Some("p11".into());
+            meta.created_at = 1;
+            meta.updated_at = 1;
+            meta.settled_at = Some(100 - index);
+            meta
+        }));
+        let settings = |layout| {
+            ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                sidebar_layout: layout,
+                ..Default::default()
+            })
+        };
+        send(Topic::Settings, settings(SidebarLayout::Flat));
+        send(
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                sessions,
+                projects,
+                summary: Default::default(),
+            }),
+        );
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (sidebar, cx) = cx
+            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_resize(size(px(393.), px(700.)));
+        // Wheels down until the list stops moving: its foot.
+        let scroll_down = |list: &ListState, cx: &mut VisualTestContext| {
+            let position = gpui::point(px(196.), px(400.));
+            cx.simulate_mouse_move(position, None, gpui::Modifiers::default());
+            for _ in 0..20 {
+                let top = list.logical_scroll_top();
+                cx.simulate_event(gpui::ScrollEvent {
+                    position,
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-2000.))),
+                    ..Default::default()
+                });
+                crate::test_frames::draw_settled(cx);
+                if list.logical_scroll_top() == top {
+                    return;
+                }
+            }
+            panic!("the list keeps scrolling");
+        };
+        for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
+            send(Topic::Settings, settings(layout));
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            let key = match layout {
+                SidebarLayout::Flat => "recent",
+                SidebarLayout::Grouped => "p11",
+            };
+            for compact in [false, true] {
+                window_state.update(cx, |state, cx| {
+                    state.compact = compact;
+                    cx.notify();
+                });
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.expanded_settled.clear();
+                    sidebar.settled_limits.clear();
+                    sidebar.compact_model_dirty = true;
+                    cx.notify();
+                });
+                crate::test_frames::draw_settled(cx);
+                let list = sidebar.read_with(cx, |sidebar, _| match (compact, layout) {
+                    (true, _) => sidebar.compact_list_state.clone(),
+                    (false, SidebarLayout::Flat) => sidebar.flat_list_state.clone(),
+                    (false, SidebarLayout::Grouped) => sidebar.grouped_list_state.clone(),
+                });
+                let row = |id: &str| -> &'static str {
+                    if compact {
+                        format!("compact-row-{id}")
+                    } else {
+                        format!("sidebar-thread-{id}")
+                    }
+                    .leak()
+                };
+                let case = format!("{layout:?} compact={compact}");
+                scroll_down(&list, cx);
+                let height = cx
+                    .debug_bounds(row("p11-2"))
+                    .unwrap_or_else(|| panic!("the last active row is in view; {case}"))
+                    .size
+                    .height;
+                let header = cx
+                    .debug_bounds(format!("settled-{key}").leak())
+                    .unwrap_or_else(|| panic!("the shelf's header is in view; {case}"));
+                cx.simulate_click(header.center(), gpui::Modifiers::default());
+                crate::test_frames::draw_settled(cx);
+                scroll_down(&list, cx);
+                let bottom = cx.update(|window, _| window.viewport_size().height);
+                // The view's foot shows the shelf's last rows, each whole.
+                let shown: Vec<usize> = (0..10)
+                    .filter(|index| {
+                        let id = format!("settled-{index}");
+                        cx.debug_bounds(row(&id)).is_some_and(|bounds| {
+                            assert!(
+                                (bounds.size.height - height).abs() < px(1.),
+                                "{id} is {:?} tall, a row {height:?}; {case}",
+                                bounds.size.height
+                            );
+                            assert!(bounds.bottom() <= bottom, "{id} is in view; {case}");
+                            true
+                        })
+                    })
+                    .collect();
+                assert!(
+                    shown.last() == Some(&9) && shown.windows(2).all(|pair| pair[1] == pair[0] + 1),
+                    "the shelf's rows up to its last are in view, not {shown:?}; {case}"
+                );
+                assert!(
+                    cx.debug_bounds(format!("settled-more-{key}").leak())
+                        .is_some_and(|more| more.bottom() <= bottom),
+                    "the shelf's Show more is in view; {case}"
+                );
+            }
         }
     }
 
