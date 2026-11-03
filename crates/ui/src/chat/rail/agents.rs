@@ -5,10 +5,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, RenderOnce, Role, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Task, Window, div, prelude::FluentBuilder as _,
-    px,
+    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::settlement::AgentExecution;
@@ -114,11 +113,8 @@ fn row(
     };
     let elapsed = match (line.running_since, &line.elapsed) {
         (Some(since), _) => Some(
-            Elapsed {
-                id: SharedString::from(format!("rail-agent-elapsed-{}", line.key)).into(),
-                since,
-            }
-            .into_any_element(),
+            super::Elapsed::new(format!("rail-agent-elapsed-{}", line.key), since)
+                .into_any_element(),
         ),
         (None, Some(elapsed)) => Some(elapsed.clone().into_any_element()),
         (None, None) => None,
@@ -262,53 +258,4 @@ fn row(
         })
     })
     .into_any_element()
-}
-
-/// How long a running agent has run, ticking while a frame draws it: the
-/// clock is the element's state, so a row no longer drawn drops it.
-#[derive(IntoElement)]
-struct Elapsed {
-    id: ElementId,
-    /// When the run started (unix ms).
-    since: u64,
-}
-
-impl RenderOnce for Elapsed {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let since = self.since;
-        window.with_global_id(self.id, |id, window| {
-            window.with_element_state(id, |clock: Option<Entity<Clock>>, _| {
-                let clock = clock
-                    .filter(|clock| clock.read(cx).since == since)
-                    .unwrap_or_else(|| cx.new(|cx| Clock::new(since, cx)));
-                (clock.clone(), clock)
-            })
-        })
-    }
-}
-
-struct Clock {
-    since: u64,
-    _tick: Task<()>,
-}
-
-impl Clock {
-    fn new(since: u64, cx: &mut Context<Self>) -> Self {
-        let tick = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        });
-        Self { since, _tick: tick }
-    }
-}
-
-impl Render for Clock {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let now = tcode_core::project::now_secs() * 1000;
-        div().child(crate::chat::format_elapsed(now.saturating_sub(self.since)))
-    }
 }
