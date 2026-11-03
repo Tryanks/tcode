@@ -192,6 +192,7 @@ impl Render for Gallery {
                     gallery_support::working_indicator(
                         "gallery-s01-working-animating",
                         self.started_at,
+                        window,
                         cx,
                     ),
                     cx,

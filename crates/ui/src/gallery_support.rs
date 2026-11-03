@@ -28,8 +28,8 @@ pub fn section_label(label: &str) -> Div {
     crate::material::tracked_uppercase(label)
 }
 
-pub fn working_indicator(id: &str, started_at: u64, cx: &App) -> AnyElement {
-    indicator::working_indicator(id.to_string().into(), Some(started_at), cx)
+pub fn working_indicator(id: &str, started_at: u64, window: &mut Window, cx: &App) -> AnyElement {
+    indicator::working_indicator(id.to_string().into(), Some(started_at), window, cx)
 }
 
 pub fn user_bubble(

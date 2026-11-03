@@ -7,8 +7,8 @@ use crate::typography::TextRole as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Div, ElementId,
-    Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce,
-    SharedString, Stateful, Styled as _, StyledText, Task, Window, div,
+    Entity, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    RenderOnce, SharedString, Stateful, Styled as _, StyledText, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::h_flex;
@@ -69,8 +69,8 @@ impl WorkingClock {
 }
 
 impl Render for WorkingClock {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        working_indicator("working".into(), self.started_at, cx)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        working_indicator("working".into(), self.started_at, window, cx)
     }
 }
 
@@ -116,7 +116,12 @@ pub(crate) fn shimmer_label(id: SharedString, label: Cow<'static, str>, cx: &App
         .into_any_element()
 }
 
-pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &App) -> AnyElement {
+pub(crate) fn working_indicator(
+    id: SharedString,
+    started_at: Option<u64>,
+    window: &mut Window,
+    cx: &App,
+) -> AnyElement {
     const DELAYS_MS: [u64; 9] = [90, 180, 270, 0, 90, 180, 90, 180, 270];
     const CYCLE_MS: u64 = 650;
 
@@ -145,6 +150,43 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
     }
 
     let elapsed_ms = started_at.map_or(0, |start| now_millis().saturating_sub(start));
+    let label = crate::tr!("chat.working");
+    let elapsed = format_elapsed(elapsed_ms);
+    // `items_baseline` cannot align these: gpui-fast's measured leaves (text)
+    // hand taffy a size and no baseline, and taffy then takes a box's bottom
+    // edge for its baseline. So the row centres the label's line and the
+    // smaller timer's, and the timer is moved onto the label's baseline,
+    // until gpui-fast reports text baselines. A line is painted with its
+    // baseline (ascent - descent) / 2 below its centre, from the metrics
+    // shaping found, which depend on the platform's monospace and the
+    // locale's fallback font, so both lines are shaped to measure it.
+    let theme = cx.theme();
+    let typography = &theme.tokens.typography;
+    let below_centre = |text: SharedString, family: SharedString, size: Pixels| {
+        let font = gpui::Font {
+            family,
+            ..Default::default()
+        };
+        let run = gpui::TextRun {
+            len: text.len(),
+            font,
+            color: Hsla::default(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let line = window.text_system().shape_line(text, size, &[run], None);
+        (line.ascent - line.descent) / 2.
+    };
+    let drop = below_centre(
+        SharedString::from(label.clone().into_owned()),
+        theme.font_family.clone(),
+        typography.sm.size,
+    ) - below_centre(
+        SharedString::from(elapsed.clone()),
+        typography.mono.clone(),
+        typography.xs.size,
+    );
     h_flex()
         .gap(px(10.))
         .items_center()
@@ -152,19 +194,15 @@ pub(crate) fn working_indicator(id: SharedString, started_at: Option<u64>, cx: &
         .child(pixels)
         .child(shimmer_label(
             SharedString::from(format!("{id}-label")),
-            crate::tr!("chat.working"),
+            label,
             cx,
         ))
         .child(
             div()
                 .text_meta_mono(false, cx)
-                // Flex has no text baselines (taffy sees opaque boxes), so the
-                // smaller digits render top-aligned beside the label; drop
-                // them onto the label's baseline. Measured against DM Sans at
-                // 2x; both fonts ship with the app.
                 .relative()
-                .top(px(2.))
-                .child(format_elapsed(elapsed_ms)),
+                .top(drop)
+                .child(elapsed),
         )
         .into_any_element()
 }
