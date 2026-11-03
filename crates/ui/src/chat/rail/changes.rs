@@ -4,11 +4,17 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{AnyElement, App, Context, SharedString, Window};
+use gpui::{
+    AnyElement, App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _,
+    Window, div,
+};
+use gpui_base::v_flex;
 
 use crate::chat::ChatView;
 use crate::chat::components::changed_files::{ChangedFilesHandlers, ClickHandler, changed_files};
 use crate::chat::model::diff_stats;
+use crate::theme::ActiveTheme as _;
+use crate::typography::TextRole as _;
 
 /// How long the files of one turn take to cross-fade into a later turn's.
 const CHANGE: Duration = Duration::from_millis(200);
@@ -80,10 +86,11 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     Some(format!("{files} · +{added} −{deleted}").into())
 }
 
-/// What the card shows open, laid out at the rail's width: the turn's
-/// changed files, as the turn's own summary in the timeline shows them, each
-/// opening its diff. A later turn's files cross-fade over an earlier one's;
-/// a card that leaves shows the turn it last showed.
+/// What the card shows open, laid out at the rail's width: which turn it
+/// is and how long ago it finished, over the turn's changed files, as the
+/// turn's own summary in the timeline shows them, each opening its diff. A
+/// later turn's files cross-fade over an earlier one's; a card that leaves
+/// shows the turn it last showed.
 pub(super) fn body(
     chat: &ChatView,
     window: &mut Window,
@@ -100,15 +107,32 @@ pub(super) fn body(
     Some(
         chat.motion
             .cross_fade("rail-changes", turn, CHANGE, window, cx, |&turn, _, cx| {
-                let (changes, completeness, cwd) = {
+                let (changes, completeness, cwd, heading) = {
                     let store = chat.workspace_store.read(cx);
-                    let (changes, completeness) =
-                        store.chat_turn_changes_for(chat.session_id.as_deref(), turn);
+                    let session = chat.session_id.as_deref();
+                    let (changes, completeness) = store.chat_turn_changes_for(session, turn);
                     let cwd = store
-                        .session_status_for(chat.session_id.as_deref())
+                        .session_status_for(session)
                         .map(|status| status.cwd.clone())
                         .unwrap_or_default();
-                    (changes, completeness, cwd)
+                    let ended = store
+                        .with_timeline_for(session, |timeline| {
+                            timeline.turns.get(turn).and_then(|turn| turn.end_ts)
+                        })
+                        .flatten();
+                    let heading = std::iter::once(
+                        crate::tr!(
+                            "diff.turn",
+                            count = store.absolute_turn_for(session, turn) + 1
+                        )
+                        .into_owned(),
+                    )
+                    .chain(ended.map(|ms| {
+                        crate::time::humanize_ago(crate::time::now_secs().saturating_sub(ms / 1000))
+                    }))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                    (changes, completeness, cwd, heading)
                 };
                 let more_key = "rail:changes-more";
                 let handlers = ChangedFilesHandlers {
@@ -131,16 +155,26 @@ pub(super) fn body(
                         })
                         .collect(),
                 };
-                changed_files(
-                    turn,
-                    &cwd,
-                    &changes,
-                    completeness,
-                    chat.expanded.contains(more_key),
-                    handlers,
-                    &motion,
-                    cx,
-                )
+                v_flex()
+                    .w_full()
+                    .child(
+                        div()
+                            .px_1()
+                            .text_caption(cx)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(heading),
+                    )
+                    .child(changed_files(
+                        turn,
+                        &cwd,
+                        &changes,
+                        completeness,
+                        chat.expanded.contains(more_key),
+                        handlers,
+                        &motion,
+                        cx,
+                    ))
+                    .into_any_element()
             }),
     )
 }

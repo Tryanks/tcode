@@ -60,6 +60,12 @@ impl Shot {
             (app, title) => app.clone().or_else(|| title.clone()),
         }
     }
+
+    /// How long ago it was taken.
+    fn ago(&self) -> Option<String> {
+        self.taken_ms
+            .map(|ms| crate::time::humanize_ago(crate::time::now_secs().saturating_sub(ms / 1000)))
+    }
 }
 
 /// The screenshots the thread's observations read back, oldest first, and
@@ -135,9 +141,12 @@ pub(super) fn present(chat: &ChatView, _cx: &App) -> bool {
     !chat.screen.shots.is_empty()
 }
 
-/// The line the card's header shows beside its title, open or shut.
+/// The line the card's header shows beside its title, open or shut: the
+/// window the latest screenshot shows, and how long ago it was taken.
 pub(super) fn summary(chat: &ChatView, _cx: &App) -> Option<SharedString> {
-    chat.screen.shots.last()?.label().map(SharedString::from)
+    let shot = chat.screen.shots.last()?;
+    let parts: Vec<String> = shot.label().into_iter().chain(shot.ago()).collect();
+    (!parts.is_empty()).then(|| parts.join(" · ").into())
 }
 
 /// What the card shows open, laid out at the rail's width.
@@ -215,9 +224,7 @@ pub(super) fn body(
         window,
         cx,
         |shot, _, cx| {
-            let ago = shot.taken_ms.map(|ms| {
-                crate::time::humanize_ago(crate::time::now_secs().saturating_sub(ms / 1000))
-            });
+            let ago = shot.ago();
             h_flex()
                 .w(px(width))
                 .gap(cx.theme().tokens.spacing.sm)
