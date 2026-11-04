@@ -594,7 +594,7 @@ fn change_watch<T: 'static>(
     window: &mut Window,
     cx: &mut Context<T>,
 ) {
-    let Some(session_id) = store.read(cx).active_session_id() else {
+    let Some(session_id) = store.read(cx).legacy_focus() else {
         return;
     };
     let number = action.key.number;
@@ -634,7 +634,7 @@ fn set_watches_paused(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(session_id) = store.read(cx).active_session_id() else {
+    let Some(session_id) = store.read(cx).legacy_focus() else {
         return;
     };
     let task = store.update(cx, |store, cx| {
@@ -665,7 +665,7 @@ fn change_link<T: 'static>(
     window: &mut Window,
     cx: &mut Context<T>,
 ) {
-    let Some(session_id) = store.read(cx).active_session_id() else {
+    let Some(session_id) = store.read(cx).legacy_focus() else {
         return;
     };
     let command = if action.linking {
@@ -791,7 +791,7 @@ fn open_pull_request(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(session) = store.read(cx).active_session_id() else {
+    let Some(session) = store.read(cx).legacy_focus() else {
         return;
     };
     store.update(cx, |store, cx| {
@@ -883,7 +883,7 @@ impl PullRequestsPanel {
             cx.observe(&store, |this: &mut Self, store, cx| {
                 let store = store.read(cx);
                 let open = store
-                    .active_session_id()
+                    .legacy_focus()
                     .and_then(|id| store.open_pull_request(&id).cloned());
                 if this.shown != open {
                     this.shown = open;
@@ -943,7 +943,7 @@ impl PullRequestsPanel {
             {
                 return None;
             }
-            let session = store.active_session_id()?;
+            let session = store.legacy_focus()?;
             let busy = detail.read(cx).lifecycle_busy(&session, &key);
             let operations = store
                 .thread_meta(&session)
@@ -965,7 +965,7 @@ impl PullRequestsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.store.read(cx).active_session_id() else {
+        let Some(session) = self.store.read(cx).legacy_focus() else {
             return;
         };
         let target = self.detail.update(cx, |detail, cx| {
@@ -1236,7 +1236,7 @@ impl PullRequestsPanel {
         if let Some(eye) = eye {
             let store = self.store.read(cx);
             let paused = store
-                .active_session_id()
+                .legacy_focus()
                 .as_deref()
                 .and_then(|id| store.thread_meta(id))
                 .is_some_and(|meta| meta.pull_request_watches_paused);
@@ -1401,7 +1401,7 @@ impl PullRequestsPanel {
         // write running over it.
         let (blocker, running) = {
             let store = self.store.read(cx);
-            let session = store.active_session_id();
+            let session = store.legacy_focus();
             let links = session
                 .as_deref()
                 .map_or(&[][..], |id| store.pull_requests(id));
@@ -1923,7 +1923,7 @@ impl Render for PullRequestsPanel {
         let open = (!self.window_state.read(cx).compact)
             .then(|| {
                 let store = self.store.read(cx);
-                let session = store.active_session_id()?;
+                let session = store.legacy_focus()?;
                 let key = store.open_pull_request(&session).cloned()?;
                 Some((session, key))
             })
@@ -1977,7 +1977,7 @@ impl Render for PullRequestsPanel {
 impl PullRequestsPanel {
     fn list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let store = self.store.read(cx);
-        let session = store.active_session_id();
+        let session = store.legacy_focus();
         let links = session
             .as_deref()
             .map(|id| store.pull_requests(id).to_vec())

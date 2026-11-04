@@ -452,7 +452,7 @@ impl Composer {
             (voice, subscriptions)
         };
 
-        let session_id = workspace_store.read(cx).active_session_id();
+        let session_id = workspace_store.read(cx).legacy_focus();
         let scene = crate::motion::Epoch::default();
         scene.show(session_id.as_deref());
         Self {

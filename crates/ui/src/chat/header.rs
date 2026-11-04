@@ -1093,7 +1093,7 @@ impl ChatView {
             return false;
         };
         self.workspace_store.update(cx, |store, cx| {
-            let behind = store.active_session_id().as_deref() != Some(session_id.as_str());
+            let behind = store.legacy_focus().as_deref() != Some(session_id.as_str());
             store.focus_thread(&session_id, cx);
             behind
         })

@@ -2241,14 +2241,14 @@ mod tests {
         let watched = |cx: &mut VisualTestContext| {
             store.read_with(cx, |store, _| {
                 store
-                    .command_output_for(store.active_session_id().as_deref(), "run")
+                    .command_output_for(store.legacy_focus().as_deref(), "run")
                     .and_then(|output| output.watched())
             })
         };
         let frame = |cx: &mut VisualTestContext| {
             store.read_with(cx, |store, _| {
                 store
-                    .command_output_for(store.active_session_id().as_deref(), "run")
+                    .command_output_for(store.legacy_focus().as_deref(), "run")
                     .and_then(|output| output.frame().cloned())
             })
         };

@@ -882,7 +882,7 @@ mod tests {
         // client never looked at it.
         type_and_open(cx, workspace.to_str().unwrap());
         wait_until(cx, &store, pump.as_mut(), "host project draft", |cx| {
-            store.read_with(cx, |store, _| store.active_session_id().is_some())
+            store.read_with(cx, |store, _| store.legacy_focus().is_some())
         });
         assert_eq!(dialog.read_with(cx, |dialog, _| dialog.error.clone()), None);
         assert_eq!(

@@ -567,7 +567,7 @@ impl DiffPanel {
             let is_active = self
                 .workspace_store
                 .read(cx)
-                .active_session_id()
+                .legacy_focus()
                 .is_some_and(|session| session == request.session);
             if is_active {
                 self.scopes
@@ -710,7 +710,7 @@ impl DiffPanel {
         let tab_store = self.workspace_store.clone();
         let agents = {
             let store = self.workspace_store.read(cx);
-            store.active_session_id().and_then(|id| {
+            store.legacy_focus().and_then(|id| {
                 let agents = Agents::of(store, &id);
                 (!agents.is_empty() || active == RightTab::Agents).then(|| agents.outstanding())
             })
@@ -718,7 +718,7 @@ impl DiffPanel {
         let count = self
             .workspace_store
             .read(cx)
-            .active_session_id()
+            .legacy_focus()
             .map_or(0, |id| {
                 self.workspace_store
                     .read(cx)

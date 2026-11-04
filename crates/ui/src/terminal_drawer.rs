@@ -504,7 +504,7 @@ impl TerminalDrawer {
         // background-thread wakeup during window teardown.
         #[cfg(test)]
         let blink_task = None;
-        let session_id = workspace_store.read(cx).active_session_id();
+        let session_id = workspace_store.read(cx).legacy_focus();
         let scene = crate::motion::Epoch::default();
         scene.show(session_id.as_deref());
         Self {
@@ -3434,10 +3434,9 @@ mod tests {
         ) -> R {
             self.store.read_with(cx, |store, _| {
                 store
-                    .with_terminal_workspace_for(
-                        store.active_session_id().as_deref(),
-                        |workspace| f(workspace.terminal(terminal_id).expect("the terminal")),
-                    )
+                    .with_terminal_workspace_for(store.legacy_focus().as_deref(), |workspace| {
+                        f(workspace.terminal(terminal_id).expect("the terminal"))
+                    })
                     .expect("the thread's terminals")
             })
         }

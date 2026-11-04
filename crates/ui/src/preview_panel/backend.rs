@@ -250,7 +250,7 @@ impl PreviewPanel {
 
     fn routed_key(&mut self, session_id: &str, cx: &mut Context<Self>) -> String {
         let active_key = self.active_key(cx);
-        let active_session_id = self.store.read(cx).active_session_id();
+        let active_session_id = self.store.read(cx).legacy_focus();
         preview_key_for_session(
             session_id,
             active_session_id.as_deref(),
@@ -1285,7 +1285,7 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) {
         let state = self.window_state.read(cx);
-        if self.store.read(cx).active_session_id().as_deref() != Some(session_id)
+        if self.store.read(cx).legacy_focus().as_deref() != Some(session_id)
             || !self.store.read(cx).preview_panel_showing()
             || state.palette_mounted()
             || state.route() != crate::window_state::Route::Chat

@@ -2343,7 +2343,7 @@ mod sheet_tests {
                             let mut composer = store.read(cx).composer_state();
                             composer.provider = Some(ProviderKind::ClaudeCode);
                             let control = PermissionControl::from_composer(&composer).unwrap();
-                            let session_id = store.read(cx).active_session_id();
+                            let session_id = store.read(cx).legacy_focus();
                             render_permission_pane(
                                 &control,
                                 compact,

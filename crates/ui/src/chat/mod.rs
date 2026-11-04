@@ -339,7 +339,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Self {
         let compact = window_state.read(cx).compact;
-        let session_id = workspace_store.read(cx).active_session_id();
+        let session_id = workspace_store.read(cx).legacy_focus();
         let scene = crate::motion::Epoch::default();
         scene.show(session_id.as_deref());
         let composer = cx.new(|cx| {
@@ -2003,7 +2003,7 @@ pub(crate) mod tests {
         driver.wait_until(cx, &workspace_store, "Git status", |cx| {
             workspace_store.read_with(cx, |store, _| {
                 store
-                    .chat_git_controls_for(store.active_session_id().as_deref())
+                    .chat_git_controls_for(store.legacy_focus().as_deref())
                     .is_some()
             })
         });
