@@ -436,16 +436,15 @@ impl OutputHandlers {
 fn output_handlers(id: &str, ctx: &mut ToolCtx<'_, '_>) -> OutputHandlers {
     let wheel = {
         let id = id.to_owned();
-        ctx.cx
-            .listener(move |this, event: &ScrollEvent, window, cx| {
-                let delta = f32::from(event.delta.pixel_delta(px(TERMINAL_CELL_HEIGHT)).y);
-                let moved = this.command_panels.borrow_mut().scroll(&id, delta);
-                if moved {
-                    // The timeline stays where it is while the output scrolls.
-                    cx.stop_propagation();
-                    window.refresh();
-                }
-            })
+        ctx.cx.listener(move |this, event: &ScrollEvent, _, cx| {
+            let delta = f32::from(event.delta.pixel_delta(px(TERMINAL_CELL_HEIGHT)).y);
+            let moved = this.command_panels.borrow_mut().scroll(&id, delta);
+            if moved {
+                // The timeline stays where it is while the output scrolls.
+                cx.stop_propagation();
+                cx.notify();
+            }
+        })
     };
     let press = {
         let id = id.to_owned();
