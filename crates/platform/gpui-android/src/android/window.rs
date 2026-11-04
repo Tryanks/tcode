@@ -440,7 +440,8 @@ impl AndroidWindow {
             | host::HostEvent::ScrollCapture(_)
             | host::HostEvent::Frame
             | host::HostEvent::RefreshRate(_)
-            | host::HostEvent::ThermalStatus(_) => {}
+            | host::HostEvent::ThermalStatus(_)
+            | host::HostEvent::PowerSaveMode(_) => {}
         }
     }
 

@@ -613,6 +613,18 @@ pub extern "C" fn gpui_ios_thermal_state_changed(state: u8) {
     super::with_platform(|platform| platform.update_thermal_state(state));
 }
 
+/// Takes `ProcessInfo.isLowPowerModeEnabled`. iOS tells Low Power Mode
+/// apart from nothing else, so any other state is unknown, as on macOS.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_low_power_mode_changed(enabled: u8) {
+    let mode = if enabled != 0 {
+        gpui::PowerMode::LowPower
+    } else {
+        gpui::PowerMode::Unknown
+    };
+    super::with_platform(|platform| platform.update_power_mode(mode));
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
     let mut result = None;
