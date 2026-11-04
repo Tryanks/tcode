@@ -334,11 +334,12 @@ impl IosWindow {
         }
         if self.pacing.borrow_mut().begin_frame(now) {
             let force_render = self.forced_frame.replace(false);
-            let require_presentation = self.pacing.borrow().active(now);
             let mut callback = self.request_frame_callback.borrow_mut().take();
             if let Some(callback) = callback.as_mut() {
+                // Grace ticks keep the display link's frame-rate vote without
+                // re-presenting an unchanged scene; GPUI itself keeps presenting
+                // after high-rate input.
                 callback(RequestFrameOptions {
-                    require_presentation,
                     force_render,
                     signal_source: FrameRequestSource::NativeCallback,
                     ..Default::default()

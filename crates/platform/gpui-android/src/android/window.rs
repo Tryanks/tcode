@@ -682,11 +682,12 @@ impl AndroidWindow {
             host::pause_frames();
             return;
         }
-        let require_presentation = force || self.0.pacing.borrow().active(now);
         let callback = self.0.callbacks.borrow_mut().request_frame.take();
         if let Some(mut callback) = callback {
+            // Grace ticks keep the Choreographer and frame-rate vote without
+            // re-presenting an unchanged scene; GPUI itself keeps presenting
+            // after high-rate input.
             callback(RequestFrameOptions {
-                require_presentation,
                 force_render: force,
                 signal_source: FrameRequestSource::NativeCallback,
                 ..Default::default()
