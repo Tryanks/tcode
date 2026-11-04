@@ -942,10 +942,14 @@ impl HostLink {
     }
 
     /// One correlated snapshot per request, including an empty continuation.
-    pub fn consume_session_snapshot(&self, envelope: &EventEnvelope) -> Option<Option<u64>> {
-        let id = envelope.request_id?;
+    pub fn consume_session_snapshot(
+        &self,
+        topic: &Topic,
+        request_id: Option<u64>,
+    ) -> Option<Option<u64>> {
+        let id = request_id?;
         let mut requests = self.inner.subscription_requests.lock().unwrap();
-        let request = requests.get_mut(&envelope.topic)?;
+        let request = requests.get_mut(topic)?;
         if request.id != id || request.consumed {
             return None;
         }

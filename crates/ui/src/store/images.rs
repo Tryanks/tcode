@@ -1476,8 +1476,8 @@ mod tests {
                             store.host.set_connection_state(state.clone());
                             store.apply_connection_state(state);
                         }
-                        store.apply_domain_event(
-                            &EventEnvelope {
+                        store.receive(
+                            EventEnvelope {
                                 request_id: store.host.subscription_request_id(&Topic::Scope),
                                 topic: Topic::Scope,
                                 event: ServerEvent::ScopeSnapshot(tcode_protocol::Scope::Full),
@@ -1492,8 +1492,8 @@ mod tests {
                         projects: vec![project.clone()],
                     })
                 };
-                store.apply_domain_event(
-                    &EventEnvelope {
+                store.receive(
+                    EventEnvelope {
                         request_id: None,
                         topic: Topic::Index,
                         event,

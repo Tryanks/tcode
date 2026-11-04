@@ -104,7 +104,7 @@ impl WorkspaceStore {
         session_id: &str,
         item_id: &str,
         cols: u16,
-        frame: &TerminalFrame,
+        frame: TerminalFrame,
     ) {
         let Some(thread) = self.open_thread_mut(session_id) else {
             return;
@@ -114,7 +114,7 @@ impl WorkspaceStore {
             .get_mut(item_id)
             .filter(|replica| replica.watched == Some(cols))
         {
-            replica.frame = Some(Rc::new(frame.clone()));
+            replica.frame = Some(Rc::new(frame));
             replica.synced = true;
         }
     }

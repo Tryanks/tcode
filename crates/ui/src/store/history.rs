@@ -68,11 +68,11 @@ struct HeldPage {
 }
 
 impl HeldHistory {
-    pub(super) fn new(from: u64, end: u64, records: &[StoredEvent]) -> Self {
+    pub(super) fn new(from: u64, end: u64, records: Vec<StoredEvent>) -> Self {
         let mut held = Self {
             from,
             end,
-            records: records.to_vec(),
+            records,
             pages: Vec::new(),
             attribution: Attribution::default(),
         };
@@ -81,11 +81,11 @@ impl HeldHistory {
     }
 
     /// Records that continue the held cursor up to `end`.
-    pub(super) fn extend(&mut self, records: &[StoredEvent], end: u64) {
-        for record in records {
+    pub(super) fn extend(&mut self, records: Vec<StoredEvent>, end: u64) {
+        for record in &records {
             self.attribution.index(record);
         }
-        self.records.extend(records.iter().cloned());
+        self.records.extend(records);
         self.end = end;
     }
 
