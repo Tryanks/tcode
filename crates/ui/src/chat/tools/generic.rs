@@ -8,6 +8,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use serde_json::Value;
+use tcode_core::session::{identifying_argument, other_argument};
 
 use super::window::{Argument, Header, Verb, section};
 use super::{Bound, Call, ToolCtx, ToolView, bounded_text, copy, output_section, thumbnails};
@@ -16,28 +17,6 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
 const ICON: &str = "icons/wrench.svg";
-
-/// The keys that name what a call is about, in the order they are looked
-/// for. A call carrying none is named by its first plain value.
-const IDENTIFYING_KEYS: &[&str] = &[
-    "title",
-    "query",
-    "url",
-    "path",
-    "file_path",
-    "filePath",
-    "command",
-    "cmd",
-    "pattern",
-    "name",
-    "subject",
-    "summary",
-    "description",
-    "text",
-    "message",
-    "prompt",
-    "thread_id",
-];
 
 pub(in crate::chat) struct Generic;
 
@@ -49,14 +28,12 @@ impl Generic {
 
 impl ToolView for Generic {
     fn header(&self, call: &Call<'_>, _cwd: &std::path::Path) -> Header {
-        let subject = match call.name.server {
-            Some(server) => format!("{server} · {}", call.name.tool),
-            None => call.name.tool.to_owned(),
-        };
         Header::with_icon(ICON, Verb("call"))
-            .subject(subject)
+            .subject(super::subject(call.name))
             .argument(Argument::plain(
-                identifying_argument(call.input).unwrap_or_default(),
+                identifying_argument(call.input)
+                    .map(|argument| one_line(&argument))
+                    .unwrap_or_default(),
             ))
     }
 
@@ -81,38 +58,6 @@ impl ToolView for Generic {
         );
         items
     }
-}
-
-/// The plain value that names what a call is about.
-pub(in crate::chat) fn identifying_argument(input: &Value) -> Option<String> {
-    match input {
-        Value::Object(map) => IDENTIFYING_KEYS
-            .iter()
-            .find_map(|key| primitive(map.get(*key)?))
-            // A question tool names its first question.
-            .or_else(|| {
-                let first = map.get("questions")?.get(0)?;
-                primitive(first.get("question").or_else(|| first.get("title"))?)
-            })
-            // A word names a call better than a number.
-            .or_else(|| {
-                map.values()
-                    .filter(|value| value.is_string())
-                    .find_map(primitive)
-            })
-            .or_else(|| map.values().find_map(primitive)),
-        Value::String(text) => Some(one_line(text)).filter(|text| !text.is_empty()),
-        _ => None,
-    }
-}
-
-fn primitive(value: &Value) -> Option<String> {
-    let text = match value {
-        Value::String(text) => one_line(text),
-        Value::Number(number) => number.to_string(),
-        Value::Bool(_) | Value::Null | Value::Array(_) | Value::Object(_) => return None,
-    };
-    (!text.is_empty()).then_some(text)
 }
 
 fn is_empty(value: &Value) -> bool {
@@ -259,16 +204,11 @@ fn value_element(
 /// An item canonicalization does not model, as a header alone: its kind and
 /// the value that names it, when its summary is a JSON object.
 pub(in crate::chat) fn other_header(provider_kind: &str, summary: &str) -> Header {
-    let argument = match serde_json::from_str::<Value>(summary) {
-        Ok(Value::Object(mut map)) => {
-            // The item's own kind and id say nothing the row does not.
-            map.remove("type");
-            map.remove("id");
-            identifying_argument(&Value::Object(map))
-        }
-        _ => Some(one_line(summary)),
-    };
     Header::bare(crate::icon::IconName::Bot)
         .subject(provider_kind.to_owned())
-        .argument(argument.and_then(Argument::plain))
+        .argument(
+            other_argument(summary)
+                .map(|argument| one_line(&argument))
+                .and_then(Argument::plain),
+        )
 }

@@ -5,6 +5,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 
 use super::*;
+use tcode_core::session::LatestActivity;
 use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
 
 #[test]
@@ -948,6 +949,96 @@ fn history_paging_literal_json_contract() {
     ));
 }
 
+/// The activity entry as this and later builds write it, for each kind of
+/// work a thread can report, read back from the literal bytes.
+#[test]
+fn session_activity_carries_the_latest_activity_literal_json() {
+    let entry = |latest: serde_json::Value| {
+        json!({
+            "working": true,
+            "turn_running": true,
+            "waiting": false,
+            "waiting_for_approval": false,
+            "waiting_for_input": false,
+            "failed": false,
+            "unread": false,
+            "fork": "available",
+            "latest_activity": latest,
+        })
+    };
+    for (literal, activity) in [
+        (json!({"type": "thinking"}), LatestActivity::Thinking),
+        (json!({"type": "writing"}), LatestActivity::Writing),
+        (
+            json!({"type": "command", "content": {"text": "cargo test"}}),
+            LatestActivity::Command {
+                text: "cargo test".into(),
+            },
+        ),
+        (
+            json!({"type": "edit", "content": {"path": "src/lib.rs"}}),
+            LatestActivity::Edit {
+                path: Some("src/lib.rs".into()),
+            },
+        ),
+        (
+            json!({"type": "read", "content": {"path": "shot.png"}}),
+            LatestActivity::Read {
+                path: "shot.png".into(),
+            },
+        ),
+        (
+            json!({"type": "web_search", "content": {"query": "gpui"}}),
+            LatestActivity::WebSearch {
+                query: "gpui".into(),
+            },
+        ),
+        (
+            json!({"type": "tool", "content": {"name": "mcp__s__t", "target": null}}),
+            LatestActivity::Tool {
+                name: "mcp__s__t".into(),
+                target: None,
+            },
+        ),
+        (
+            json!({"type": "subagent", "content": {"description": "Audit"}}),
+            LatestActivity::Subagent {
+                description: "Audit".into(),
+            },
+        ),
+        (
+            json!({"type": "other", "content": {"kind": "compaction", "summary": null}}),
+            LatestActivity::Other {
+                kind: "compaction".into(),
+                summary: None,
+            },
+        ),
+    ] {
+        let decoded: SessionActivity = serde_json::from_value(entry(literal.clone())).unwrap();
+        assert_eq!(decoded.latest_activity.as_ref(), Some(&activity));
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), entry(literal));
+    }
+}
+
+/// A peer built before the field sends entries without it, and every thread
+/// with nothing to report is written the same way.
+#[test]
+fn session_activity_without_a_latest_activity_keeps_the_older_shape() {
+    let older = json!({
+        "working": false,
+        "turn_running": false,
+        "waiting": false,
+        "waiting_for_approval": false,
+        "waiting_for_input": false,
+        "failed": false,
+        "unread": true,
+        "fork": "available",
+    });
+    let decoded: SessionActivity = serde_json::from_value(older.clone()).unwrap();
+    assert_eq!(decoded.latest_activity, None);
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), older);
+}
+
 #[test]
 fn version_six_index_visits_output_and_elision_literal_json() {
     let index = IndexSnapshot {
@@ -966,6 +1057,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                         unread: true,
                         fork: ForkAvailability::Available,
                         agent: None,
+                        latest_activity: None,
                     },
                 ),
                 (
@@ -986,6 +1078,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                             run_started_at: Some(1_000),
                             run_completed_at: Some(81_000),
                         }),
+                        latest_activity: None,
                     },
                 ),
             ]

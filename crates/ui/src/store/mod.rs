@@ -2470,6 +2470,14 @@ impl WorkspaceStore {
             .and_then(|activity| activity.agent)
     }
 
+    /// What a thread's running turn last started, as its host reports it.
+    pub fn latest_activity(&self, session_id: &str) -> Option<tcode_core::session::LatestActivity> {
+        self.index_summary
+            .activity
+            .get(session_id)
+            .and_then(|activity| activity.latest_activity.clone())
+    }
+
     pub fn waiting_for(&self, session_id: &str) -> bool {
         self.index_summary
             .activity

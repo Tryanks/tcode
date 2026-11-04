@@ -51,9 +51,10 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
 
 /// What the card shows below its header, laid out at the rail's width: a row
 /// for each agent, with its title and how long it has run, opening it on a
-/// click; under the title, its state word whenever it has a state, and what
-/// of its model, effort, branch and result is reported. Agents that leave the
-/// list fold away as they stood.
+/// click; under the title, its state word whenever it has a state, what of
+/// its model, effort and branch is reported, and what it is doing while it
+/// runs or its result once it has one. Agents that leave the list fold away
+/// as they stood.
 pub(super) fn body(
     chat: &ChatView,
     window: &mut Window,
@@ -192,6 +193,13 @@ fn row(
                 .into_any_element(),
         )
     });
+    let activity = crate::agents_panel::activity_line(
+        "rail-agent",
+        &line.key,
+        line.activity.clone(),
+        window,
+        cx,
+    );
     let failed = line.execution == Some(AgentExecution::Failed);
     let result = crate::motion::shown(
         SharedString::from(format!("rail-agent-result-{}", line.key)),
@@ -236,6 +244,7 @@ fn row(
     .child(crate::material::row_hover(radius, cx))
     .child(title_line)
     .children(about)
+    .children(activity)
     .children(result)
     .when_some(line.open.clone(), |row, id| {
         let store = store.clone();

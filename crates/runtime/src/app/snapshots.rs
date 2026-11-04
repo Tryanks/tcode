@@ -458,18 +458,19 @@ impl<'a> ActivityProjection<'a> {
         let (approvals, input) = resident.map_or((&[][..], None), |session| {
             self.state.open_requests(&meta.id, session)
         });
+        let working = resident.is_some_and(|session| {
+            session.preparing_worktree
+                || matches!(session.runtime, Runtime::Starting { .. })
+                || session.turn_in_flight
+                || session.delivery_in_flight.is_some()
+                || (meta.native_subagent.is_some() && session.timeline.turn_running)
+                || session
+                    .queue
+                    .iter()
+                    .any(|message| message.origin == MessageOrigin::Human)
+        });
         SessionActivity {
-            working: resident.is_some_and(|session| {
-                session.preparing_worktree
-                    || matches!(session.runtime, Runtime::Starting { .. })
-                    || session.turn_in_flight
-                    || session.delivery_in_flight.is_some()
-                    || (meta.native_subagent.is_some() && session.timeline.turn_running)
-                    || session
-                        .queue
-                        .iter()
-                        .any(|message| message.origin == MessageOrigin::Human)
-            }),
+            working,
             turn_running: resident.is_some_and(|session| {
                 session.turn_in_flight && session.timeline.turn_retry.is_none()
             }),
@@ -489,6 +490,11 @@ impl<'a> ActivityProjection<'a> {
             unread: self.state.session_unread(meta),
             fork: AppState::session_fork_availability(meta, resident),
             agent: self.agent_status(meta),
+            // A log left with its turn open by a host that died folds to a
+            // running timeline nothing is running.
+            latest_activity: resident
+                .filter(|_| working)
+                .and_then(|session| session.timeline.latest_activity()),
         }
     }
 }

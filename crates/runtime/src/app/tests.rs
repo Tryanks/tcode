@@ -29,6 +29,280 @@ fn permission_relaunch_marker_requires_screen_access_only_for_computer_use() {
     }
 }
 
+/// What crosses the wire for `thread`'s index entry while `events` run, one
+/// host turn each, as the provider delivers them to `via`.
+fn published_activity(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    via: &str,
+    thread: &str,
+    events: Vec<AgentEvent>,
+) -> Vec<tcode_protocol::SessionActivity> {
+    let mut published = Vec::new();
+    for event in events {
+        state.update(cx, |state, cx| {
+            state.provider_event_for_test(via, event, cx);
+        });
+        cx.run_until_parked();
+        for message in cx.drain_outgoing() {
+            if let HostMessage::Event(envelope) = message
+                && let ServerEvent::IndexActivitiesChanged { upserts, .. } = envelope.event
+                && let Some(activity) = upserts.get(thread)
+            {
+                published.push(activity.clone());
+            }
+        }
+    }
+    published
+}
+
+fn subscribed_to_index(cx: &mut TestAppContext, state: TestClientState) -> TestEntity {
+    let state = cx.new_entity(state);
+    state.deliver(
+        cx,
+        1,
+        tcode_protocol::ClientPayload::Subscribe(Subscription {
+            topic: Topic::Index,
+            after: None,
+            known_index: None,
+        }),
+    );
+    cx.run_until_parked();
+    cx.drain_outgoing();
+    state
+}
+
+/// A client learns what a thread it does not hold is doing from the index
+/// alone, and only when that changes: a stream sends nothing, the next item
+/// sends one update, an item saying the same again sends none, and the
+/// turn's end clears it.
+#[test]
+fn only_a_new_item_publishes_a_threads_latest_activity() {
+    use tcode_core::session::LatestActivity;
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-latest-activity");
+    let mut host = TestClientState::new((*test_store).clone());
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/child"), None);
+    meta.id = "child".into();
+    host.sessions.push(meta.clone());
+    host.install_selected(ActiveSession::new(meta, false, Vec::new()));
+    let state = subscribed_to_index(cx, host);
+
+    let item = |id: &str, content| {
+        AgentEvent::ItemStarted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
+        })
+    };
+    let command = |id: &str| {
+        item(
+            id,
+            ItemContent::CommandExecution {
+                command: "cargo test".into(),
+                output: String::new(),
+                exit_code: None,
+                status: ItemStatus::InProgress,
+            },
+        )
+    };
+    let delta = |item_id: &str, kind, text: &str| AgentEvent::Delta {
+        item_id: item_id.into(),
+        kind,
+        text: text.into(),
+    };
+    published_activity(
+        &state,
+        cx,
+        "child",
+        "child",
+        vec![AgentEvent::TurnStarted {
+            turn_id: "turn".into(),
+        }],
+    );
+
+    let activities = |published: Vec<tcode_protocol::SessionActivity>| {
+        published
+            .into_iter()
+            .map(|activity| activity.latest_activity)
+            .collect::<Vec<_>>()
+    };
+    let thought = item(
+        "thought",
+        ItemContent::Reasoning {
+            text: String::new(),
+        },
+    );
+    assert_eq!(
+        activities(published_activity(
+            &state,
+            cx,
+            "child",
+            "child",
+            vec![thought]
+        )),
+        [Some(LatestActivity::Thinking)]
+    );
+    let stream = (0..50)
+        .map(|_| delta("thought", agent::DeltaKind::ReasoningText, "more"))
+        .collect();
+    assert_eq!(
+        activities(published_activity(&state, cx, "child", "child", stream)),
+        []
+    );
+    let running = LatestActivity::Command {
+        text: "cargo test".into(),
+    };
+    assert_eq!(
+        activities(published_activity(
+            &state,
+            cx,
+            "child",
+            "child",
+            vec![
+                command("first"),
+                delta("first", agent::DeltaKind::CommandOutput, "ok\n"),
+                command("second"),
+            ]
+        )),
+        [Some(running)]
+    );
+    assert_eq!(
+        activities(published_activity(
+            &state,
+            cx,
+            "child",
+            "child",
+            vec![AgentEvent::TurnCompleted {
+                turn_id: "turn".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            }]
+        ))
+        .last(),
+        Some(&None)
+    );
+}
+
+/// A native subagent's work lands in its mirror, so that is the thread whose
+/// activity tells it; the lead's own entry stays with the spawn it started.
+/// When the subagent ends so does what it was doing.
+#[test]
+fn a_native_subagents_activity_is_published_on_its_mirror() {
+    use tcode_core::session::LatestActivity;
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-mirror-activity");
+    let mut host = TestClientState::new((*test_store).clone());
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp/lead"), None);
+    meta.id = "lead".into();
+    host.sessions.push(meta.clone());
+    host.install_selected(ActiveSession::new(meta, false, Vec::new()));
+    let state = subscribed_to_index(cx, host);
+
+    let spawn = |status| ThreadItem {
+        id: "spawn".into(),
+        parent_item_id: None,
+        content: ItemContent::Subagent {
+            agent_type: "explorer".into(),
+            description: "Audit".into(),
+            status,
+            summary: None,
+            model: None,
+            effort: None,
+        },
+    };
+    published_activity(
+        &state,
+        cx,
+        "lead",
+        "lead",
+        vec![
+            AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            },
+            AgentEvent::ItemStarted(spawn(ItemStatus::InProgress)),
+        ],
+    );
+    let mirror = state.read(|state| {
+        state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.is_some())
+            .expect("the spawn made a mirror")
+            .id
+            .clone()
+    });
+    let published = published_activity(
+        &state,
+        cx,
+        "lead",
+        &mirror,
+        vec![AgentEvent::ItemStarted(ThreadItem {
+            id: "child".into(),
+            parent_item_id: Some("spawn".into()),
+            content: ItemContent::CommandExecution {
+                command: "ls".into(),
+                output: String::new(),
+                exit_code: None,
+                status: ItemStatus::InProgress,
+            },
+        })],
+    );
+    assert_eq!(
+        published.last().unwrap().latest_activity,
+        Some(LatestActivity::Command { text: "ls".into() })
+    );
+    state.read(|state| {
+        assert_eq!(
+            state.resident("lead").unwrap().timeline.latest_activity(),
+            Some(LatestActivity::Subagent {
+                description: "Audit".into()
+            })
+        );
+    });
+
+    let published = published_activity(
+        &state,
+        cx,
+        "lead",
+        &mirror,
+        vec![AgentEvent::ItemCompleted(spawn(ItemStatus::Completed))],
+    );
+    assert_eq!(published.last().unwrap().latest_activity, None);
+}
+
+/// A log whose turn a dead host left open still folds to a running timeline,
+/// but nothing is running it, so the thread reports no activity.
+#[test]
+fn a_turn_left_open_in_the_log_reports_no_activity() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-stale-activity");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.update(cx, |state, _| {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/stale"), None);
+        meta.id = "stale".into();
+        let mut session = ActiveSession::new(meta.clone(), false, Vec::new());
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            },
+            AgentEvent::ItemStarted(ThreadItem {
+                id: "thought".into(),
+                parent_item_id: None,
+                content: ItemContent::Reasoning {
+                    text: String::new(),
+                },
+            }),
+        ] {
+            session.timeline.apply_at(None, &event);
+        }
+        state.sessions.push(meta);
+        state.install_selected(session);
+    });
+    let summary = state.read(|state| state.index_snapshot().summary);
+    assert_eq!(summary.activity["stale"].latest_activity, None);
+}
+
 #[test]
 fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
     let cx = &mut TestAppContext::default();

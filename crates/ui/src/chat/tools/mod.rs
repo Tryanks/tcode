@@ -116,6 +116,14 @@ impl<'a> Call<'a> {
     }
 }
 
+/// A tool as the windows name it: "server · tool", or the tool alone.
+pub(crate) fn subject(name: ToolName<'_>) -> String {
+    match name.server {
+        Some(server) => format!("{server} · {}", name.tool),
+        None => name.tool.to_owned(),
+    }
+}
+
 /// One family's window for a call it accepts.
 pub(in crate::chat) trait ToolView {
     /// `cwd` is the thread's, which paths show relative to.

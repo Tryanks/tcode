@@ -5498,6 +5498,7 @@ mod tests {
                     unread: false,
                     fork: ForkAvailability::Available,
                     agent: None,
+                    latest_activity: None,
                 },
             )]),
             ..Default::default()

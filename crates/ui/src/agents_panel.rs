@@ -14,7 +14,7 @@ use gpui::{
 use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::notice::HostNotice;
-use tcode_core::session::EntryContent;
+use tcode_core::session::{EntryContent, LatestActivity};
 use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
 
 use crate::chat::ChatView;
@@ -77,6 +77,8 @@ struct AgentRow {
     /// Whether the child's `report_result` reached its lead.
     report: AgentReport,
     archived: bool,
+    /// What it is doing, while it runs and its host reports that.
+    activity: Option<LatestActivity>,
     preview: Option<String>,
     /// The thread Open selects: the dispatched agent, or a native mirror.
     open: Option<String>,
@@ -103,6 +105,11 @@ impl AgentRow {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ")
+    }
+
+    /// Its result, once what it is doing no longer takes that line.
+    fn result(&self) -> Option<String> {
+        self.preview.clone().filter(|_| self.activity.is_none())
     }
 
     /// What it waits on the user for, or else how its run stands.
@@ -163,6 +170,9 @@ impl Agents {
                     .and_then(|parent| parent.worktree.as_ref())
                     .map(|worktree| worktree.branch.clone())
             });
+        let running_activity = |id: Option<&str>, execution: AgentExecution| {
+            store.latest_activity(id?).filter(|_| execution.running())
+        };
         let mut native = Vec::new();
         store.with_timeline_for(Some(parent_id), |timeline| {
             for entry in &timeline.entries {
@@ -203,6 +213,7 @@ impl Agents {
                     delivery: None,
                     report: AgentReport::None,
                     archived: false,
+                    activity: running_activity(mirror.map(|meta| meta.id.as_str()), execution),
                     preview: summary.as_deref().map(compact).filter(|s| !s.is_empty()),
                     open: mirror.map(|meta| meta.id.clone()),
                     agent: None,
@@ -261,6 +272,8 @@ impl Agents {
                 delivery: Some(delivery),
                 report: status.map_or_else(|| meta.report(), |status| status.report),
                 archived,
+                activity: status
+                    .and_then(|status| running_activity(Some(meta.id.as_str()), status.execution)),
                 preview: None,
                 open: Some(meta.id.clone()),
                 agent: Some(meta.id.clone()),
@@ -368,7 +381,8 @@ impl Agents {
                     model: row.model.clone(),
                     effort: row.effort.clone(),
                     branch: row.branch.clone(),
-                    preview: row.preview.clone(),
+                    activity: row.activity.clone(),
+                    preview: row.result(),
                     running_since: row.started_at.filter(|started| {
                         running && !row.ended_at.is_some_and(|ended| ended >= *started)
                     }),
@@ -450,6 +464,84 @@ pub(crate) struct AgentHeading {
     pub(crate) execution: Option<AgentExecution>,
 }
 
+/// The line that says what an agent is doing, folding in under its row (each
+/// `surface` keeps its own) and cross-fading to what it does next.
+pub(crate) fn activity_line(
+    surface: &str,
+    key: &str,
+    activity: Option<LatestActivity>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let id = format!("{surface}-activity-{key}");
+    crate::motion::shown(SharedString::from(id.clone()), activity, SHOW, window, cx).map(|shown| {
+        let text = crate::motion::cross_fade_part(
+            SharedString::from(format!("{surface}-activity-text-{key}")),
+            shown.value.clone(),
+            CHANGE,
+            window,
+            cx,
+            |activity: &LatestActivity, _, _| {
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(activity_label(activity)))
+                    .into_any_element()
+            },
+        );
+        shown.fold(
+            div()
+                .debug_selector(move || id)
+                .w_full()
+                .pt_0p5()
+                .text_secondary(false, cx)
+                .text_color(cx.theme().muted_foreground)
+                .child(text)
+                .into_any_element(),
+        )
+    })
+}
+
+fn activity_label(activity: &LatestActivity) -> String {
+    let label = match activity {
+        LatestActivity::Thinking => crate::tr!("agents.activity_thinking"),
+        LatestActivity::Writing => crate::tr!("agents.activity_writing"),
+        LatestActivity::Command { text } => {
+            crate::tr!("agents.activity_command", command = text.as_str())
+        }
+        LatestActivity::Edit { path } => crate::tr!(
+            "agents.activity_edit",
+            path = path.as_deref().unwrap_or_default()
+        ),
+        LatestActivity::Read { path } => crate::tr!("agents.activity_read", path = path.as_str()),
+        LatestActivity::WebSearch { query } => {
+            crate::tr!("agents.activity_search", query = query.as_str())
+        }
+        LatestActivity::Tool { name, target } => {
+            let tool = crate::chat::tools::subject(agent::ToolName::parse(name));
+            match target {
+                Some(target) => crate::tr!(
+                    "agents.activity_tool_target",
+                    tool = tool.as_str(),
+                    target = target.as_str()
+                ),
+                None => crate::tr!("agents.activity_tool", tool = tool.as_str()),
+            }
+        }
+        LatestActivity::Subagent { description } => crate::tr!(
+            "agents.activity_subagent",
+            description = description.as_str()
+        ),
+        LatestActivity::Other { kind, summary } => {
+            return match summary {
+                Some(summary) => format!("{kind} · {summary}"),
+                None => kind.clone(),
+            };
+        }
+    };
+    label.trim_end().to_owned()
+}
+
 /// What an agent waits on the user for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Attention {
@@ -499,6 +591,8 @@ pub(crate) struct AgentLine {
     pub(crate) effort: Option<String>,
     /// The branch it works on, when that is not its lead's.
     pub(crate) branch: Option<String>,
+    /// What it is doing, while it runs.
+    pub(crate) activity: Option<LatestActivity>,
     /// Its result, once it has one, on one line.
     pub(crate) preview: Option<String>,
     /// When the run under way started, while it runs.
@@ -1036,11 +1130,12 @@ impl AgentsPanel {
                         .child(state.label()),
                 )
             });
+        let activity = activity_line("agent", &row.key, row.activity.clone(), window, cx);
         // The result's preview folds in under the row as it arrives.
         let failed = row.execution == Some(AgentExecution::Failed);
         let preview = crate::motion::shown(
             SharedString::from(format!("agent-preview-{}", row.key)),
-            row.preview.clone(),
+            row.result(),
             SHOW,
             window,
             cx,
@@ -1063,6 +1158,7 @@ impl AgentsPanel {
             .min_w_0()
             .child(line_one)
             .child(line_two.pt_0p5())
+            .children(activity)
             .children(preview);
         let label = SharedString::from(title);
         let open = row.open.clone();
@@ -1504,6 +1600,7 @@ mod tests {
                 failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
+                latest_activity: None,
             },
         );
         let index = tcode_protocol::encode_line(&HostMessage::Event(EventEnvelope {
@@ -1537,6 +1634,253 @@ mod tests {
             );
         });
         link.close();
+    }
+
+    /// What a running agent is doing comes from the host's index, on the
+    /// dispatched agent's thread or a native subagent's mirror, and gives way
+    /// to its result as it settles, even before the host's index catches up
+    /// with a native subagent the lead's transcript has seen end.
+    #[gpui::test]
+    fn a_running_agents_activity_gives_way_to_its_result(cx: &mut TestAppContext) {
+        use agent::{AgentEvent, ItemContent, ItemStatus, ThreadItem};
+        use gpui::{px, size};
+        use tcode_core::session::LatestActivity;
+        use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
+        use tcode_protocol::{AgentStatus, SessionActivity};
+        cx.update(crate::theme::init);
+        let (to_host, _requests) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let thread = |id: &str, parent: Option<&str>| {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, "/project".into(), None);
+            meta.id = id.into();
+            meta.title = id.into();
+            meta.parent_session_id = parent.map(str::to_owned);
+            meta
+        };
+        let mut mirror = thread("mirror", Some("lead"));
+        mirror.native_subagent = Some("spawn".into());
+        let activity =
+            |agent: Option<AgentStatus>, latest_activity: Option<LatestActivity>| SessionActivity {
+                agent,
+                working: latest_activity.is_some(),
+                turn_running: latest_activity.is_some(),
+                waiting: false,
+                waiting_for_approval: false,
+                waiting_for_input: false,
+                failed: false,
+                unread: false,
+                fork: tcode_protocol::ForkAvailability::Available,
+                latest_activity,
+            };
+        let status = |execution, delivery, report| AgentStatus {
+            execution,
+            delivery,
+            report,
+            run_started_at: None,
+            run_completed_at: None,
+        };
+        let command = LatestActivity::Command {
+            text: "cargo test".into(),
+        };
+        let mut index = IndexSnapshot {
+            sessions: vec![thread("lead", None), thread("worker", Some("lead")), mirror],
+            projects: vec![],
+            summary: Default::default(),
+        };
+        index.summary.activity.insert(
+            "worker".into(),
+            activity(
+                Some(status(
+                    AgentExecution::Working,
+                    AgentDelivery::Running,
+                    AgentReport::Expected,
+                )),
+                Some(command.clone()),
+            ),
+        );
+        index.summary.activity.insert(
+            "mirror".into(),
+            activity(None, Some(LatestActivity::Thinking)),
+        );
+        let line = |topic, event| {
+            tcode_protocol::encode_line(&HostMessage::Event(EventEnvelope {
+                request_id: None,
+                topic,
+                event,
+            }))
+            .unwrap()
+        };
+        crate::store::tests::seed_full_scope(
+            &store,
+            &incoming,
+            vec![line(Topic::Index, ServerEvent::IndexSnapshot(index))],
+            cx,
+        );
+        let mut driver = crate::store::tests::LocalHostDriver::from_link(link.clone());
+        driver.wait_until(cx, &store, "child status", |cx| {
+            store.read_with(cx, |store, _| store.agent_status("worker").is_some())
+        });
+        store.update(cx, |store, cx| store.select_session("lead".into(), cx));
+
+        let events = || Topic::SessionEvents {
+            session_id: "lead".into(),
+        };
+        let spawn = |status, summary: Option<&str>| ThreadItem {
+            id: "spawn".into(),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: "explore".into(),
+                description: "Survey".into(),
+                status,
+                summary: summary.map(str::to_owned),
+                model: None,
+                effort: None,
+            },
+        };
+        let records = vec![
+            AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            }
+            .into(),
+            AgentEvent::ItemStarted(spawn(ItemStatus::InProgress, Some("Partway"))).into(),
+        ];
+        incoming
+            .try_send(line(
+                events(),
+                ServerEvent::SessionSnapshot {
+                    total: 2,
+                    total_turns: 1,
+                    truncated: false,
+                    from: 0,
+                    end: 2,
+                    records,
+                },
+            ))
+            .unwrap();
+        let lines_of = |store: &WorkspaceStore| {
+            let lines = Agents::of(store, "lead")
+                .with_results(store, "lead")
+                .lines();
+            let line = |key: &str| {
+                let line = lines.iter().find(|line| line.key == key).unwrap();
+                (line.activity.clone(), line.preview.clone())
+            };
+            [line("worker"), line("spawn")]
+        };
+        driver.wait_until(cx, &store, "the lead's transcript", |cx| {
+            store.read_with(cx, |store, _| {
+                lines_of(store)[1].0 == Some(LatestActivity::Thinking)
+            })
+        });
+        assert_eq!(
+            store.read_with(cx, |store, _| lines_of(store)),
+            [
+                (Some(command), None),
+                (Some(LatestActivity::Thinking), None)
+            ]
+        );
+
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let panel =
+                cx.new(|cx| super::AgentsPanel::new(store.clone(), Some("lead".into()), cx));
+            gpui_base::Root::new(panel, window, cx)
+        });
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("agent-activity-worker").is_some());
+        assert!(cx.debug_bounds("agent-activity-spawn").is_some());
+
+        let callback = format!(
+            "{} reported.\nThe tests pass.",
+            tcode_core::notice::callback_header("worker", "worker")
+        );
+        for message in [
+            line(
+                events(),
+                ServerEvent::SessionEvent(
+                    AgentEvent::ItemCompleted(spawn(ItemStatus::Completed, Some("Surveyed")))
+                        .into(),
+                ),
+            ),
+            line(
+                events(),
+                ServerEvent::SessionEvent(
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        id: "callback".into(),
+                        parent_item_id: None,
+                        content: ItemContent::UserMessage {
+                            text: callback,
+                            context_len: None,
+                            attachments: vec![],
+                        },
+                    })
+                    .into(),
+                ),
+            ),
+            line(
+                Topic::Index,
+                ServerEvent::IndexActivitiesChanged {
+                    upserts: [(
+                        "worker".to_owned(),
+                        activity(
+                            Some(status(
+                                AgentExecution::Finished,
+                                AgentDelivery::AwaitingSettle,
+                                AgentReport::Reported,
+                            )),
+                            None,
+                        ),
+                    )]
+                    .into(),
+                    removed: vec![],
+                },
+            ),
+        ] {
+            incoming.try_send(message).unwrap();
+        }
+        driver.wait_until(cx, &store, "the agents to settle", |cx| {
+            store.read_with(cx, |store, _| lines_of(store)[0].1.is_some())
+        });
+        assert_eq!(
+            store.read_with(cx, |store, _| lines_of(store)),
+            [
+                (None, Some("The tests pass.".to_owned())),
+                (None, Some("Surveyed".to_owned()))
+            ]
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("agent-activity-worker").is_none());
+        assert!(cx.debug_bounds("agent-activity-spawn").is_none());
+        link.close();
+    }
+
+    /// A tool reads as its window names it, with what it acts on.
+    #[test]
+    fn a_tool_call_reads_as_its_window_names_it() {
+        let label = super::activity_label(&tcode_core::session::LatestActivity::Tool {
+            name: "mcp__tcode_control__read".into(),
+            target: Some("src/lib.rs".into()),
+        });
+        assert!(label.contains("tcode_control · read"), "{label}");
+        assert!(label.contains("src/lib.rs"), "{label}");
     }
 
     #[gpui::test]
@@ -1590,6 +1934,7 @@ mod tests {
                 failed: false,
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
+                latest_activity: None,
             },
         );
         let index = tcode_protocol::encode_line(&HostMessage::Event(EventEnvelope {
