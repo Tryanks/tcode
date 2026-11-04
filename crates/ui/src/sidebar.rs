@@ -2614,6 +2614,7 @@ impl SessionsSidebar {
                 })
             })
             .touch(false)
+            .reveals(&self.hover, group_key)
             .into_any_element()
     }
 
@@ -3170,174 +3171,182 @@ impl SessionsSidebar {
         let auto_settle_enabled = state.auto_settle_enabled;
         let follow_up = meta.follow_up.is_some();
         let parked = meta.parked_at.is_some();
-        row.context_menu(move |menu, window, cx| {
-            let id = session_id.clone();
-            // Move up / Move down stay within the section the list shows.
-            let moves = sidebar
-                .upgrade()
-                .filter(|_| !settled && scope.is_full())
-                .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
-            let open_beside = crate::shell::pane_controls(None, window, cx)
-                .map(|panes| panes.split_right || crate::shell::shown_in_pane(&id, cx));
-            menu.when_some(open_beside, |menu, enabled| {
-                menu.menu_with_enable(
-                    crate::tr!("panes.open_beside").into_owned(),
-                    Box::new(crate::panes::OpenInNewPane(id.clone())),
-                    enabled,
-                )
-                .separator()
-            })
-            .menu(
-                crate::tr!("sidebar.ctx_rename").into_owned(),
-                Box::new(ThreadRename(id.clone())),
-            )
-            .menu_with_enable(
-                if title_generating {
-                    crate::tr!("sidebar.ctx_regenerating_title").into_owned()
-                } else {
-                    crate::tr!("sidebar.ctx_regenerate_title").into_owned()
-                },
-                Box::new(ThreadRegenerateTitle(id.clone())),
-                !title_generating,
-            )
-            .when(can_fork, |menu| {
-                menu.menu(
-                    crate::tr!("sidebar.ctx_fork").into_owned(),
-                    Box::new(ThreadFork(id.clone())),
-                )
-            })
-            .when(is_worktree, |menu| {
-                menu.menu(
-                    crate::tr!("sidebar.ctx_merge_worktree").into_owned(),
-                    Box::new(ThreadMergeWorktree(id.clone())),
-                )
-            })
-            .when(!is_worktree, |menu| {
-                menu.menu(
-                    crate::tr!("sidebar.ctx_move_thread").into_owned(),
-                    Box::new(ThreadMoveToProject(id.clone())),
-                )
-            })
-            .menu(
-                crate::tr!("pull_requests.link_menu").into_owned(),
-                Box::new(ThreadLinkPullRequest(id.clone())),
-            )
-            .menu(
-                crate::tr!("sidebar.ctx_mark_unread").into_owned(),
-                Box::new(ThreadMarkUnread(id.clone())),
-            )
-            .separator()
-            .menu(
-                if section == ThreadSection::Pinned {
-                    crate::tr!("sidebar.ctx_unpin").into_owned()
-                } else {
-                    crate::tr!("sidebar.ctx_pin").into_owned()
-                },
-                if section == ThreadSection::Pinned {
-                    Box::new(ThreadUnpin(id.clone())) as Box<dyn Action>
-                } else {
-                    Box::new(ThreadPin(id.clone()))
-                },
-            )
-            .menu_with_enable(
-                if settled {
-                    crate::tr!("sidebar.ctx_unsettle").into_owned()
-                } else {
-                    crate::tr!("sidebar.ctx_settle").into_owned()
-                },
-                if settled {
-                    Box::new(ThreadMakeActive(id.clone())) as Box<dyn Action>
-                } else {
-                    Box::new(ThreadSettle(id.clone()))
-                },
-                settled || (!running && !blocked),
-            )
-            .when_some(moves, |menu, (up, down)| {
-                menu.menu_with_enable(
-                    crate::tr!("sidebar.ctx_move_up").into_owned(),
-                    Box::new(ThreadMove(id.clone(), false)),
-                    up,
+        let hover = self.hover.clone();
+        let row_key = state.row_key.clone();
+        let menu = row
+            .context_menu(move |menu, window, cx| {
+                let id = session_id.clone();
+                // Move up / Move down stay within the section the list shows.
+                let moves = sidebar
+                    .upgrade()
+                    .filter(|_| !settled && scope.is_full())
+                    .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
+                let open_beside = crate::shell::pane_controls(None, window, cx)
+                    .map(|panes| panes.split_right || crate::shell::shown_in_pane(&id, cx));
+                menu.when_some(open_beside, |menu, enabled| {
+                    menu.menu_with_enable(
+                        crate::tr!("panes.open_beside").into_owned(),
+                        Box::new(crate::panes::OpenInNewPane(id.clone())),
+                        enabled,
+                    )
+                    .separator()
+                })
+                .menu(
+                    crate::tr!("sidebar.ctx_rename").into_owned(),
+                    Box::new(ThreadRename(id.clone())),
                 )
                 .menu_with_enable(
-                    crate::tr!("sidebar.ctx_move_down").into_owned(),
-                    Box::new(ThreadMove(id.clone(), true)),
-                    down,
+                    if title_generating {
+                        crate::tr!("sidebar.ctx_regenerating_title").into_owned()
+                    } else {
+                        crate::tr!("sidebar.ctx_regenerate_title").into_owned()
+                    },
+                    Box::new(ThreadRegenerateTitle(id.clone())),
+                    !title_generating,
                 )
-            })
-            .when(compact, |menu| {
-                menu.menu(
-                    crate::tr!("sidebar.ctx_arrange").into_owned(),
-                    Box::new(ThreadArrange(id.clone())),
+                .when(can_fork, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.ctx_fork").into_owned(),
+                        Box::new(ThreadFork(id.clone())),
+                    )
+                })
+                .when(is_worktree, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.ctx_merge_worktree").into_owned(),
+                        Box::new(ThreadMergeWorktree(id.clone())),
+                    )
+                })
+                .when(!is_worktree, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.ctx_move_thread").into_owned(),
+                        Box::new(ThreadMoveToProject(id.clone())),
+                    )
+                })
+                .menu(
+                    crate::tr!("pull_requests.link_menu").into_owned(),
+                    Box::new(ThreadLinkPullRequest(id.clone())),
                 )
-            })
-            .separator()
-            .menu(
-                if follow_up {
-                    crate::tr!("control.follow_up.remove")
-                } else {
-                    crate::tr!("control.follow_up.add")
-                }
-                .into_owned(),
-                Box::new(ThreadFollowUp(id.clone(), !follow_up)),
-            )
-            .menu(
-                if parked {
-                    crate::tr!("control.follow_up.unpark")
-                } else {
-                    crate::tr!("control.follow_up.park")
-                }
-                .into_owned(),
-                Box::new(ThreadPark(id.clone(), !parked)),
-            )
-            .separator()
-            .label(crate::tr!("sidebar.ctx_auto_settle"))
-            .menu_with_check(
-                crate::tr!("sidebar.ctx_auto_settle_enabled"),
-                auto_settle_enabled,
-                Box::new(ThreadAutoSettle(id.clone(), true)),
-            )
-            .menu_with_check(
-                crate::tr!("sidebar.ctx_auto_settle_disabled"),
-                !auto_settle_enabled,
-                Box::new(ThreadAutoSettle(id.clone(), false)),
-            )
-            .separator()
-            .menu(
-                crate::tr!("sidebar.ctx_copy_path").into_owned(),
-                Box::new(ThreadCopyPath(id.clone())),
-            )
-            .menu(
-                crate::tr!("sidebar.ctx_copy_id").into_owned(),
-                Box::new(ThreadCopyId(id.clone())),
-            )
-            .separator()
-            .menu(
-                crate::tr!("sidebar.ctx_export_jsonl").into_owned(),
-                Box::new(ThreadExportJsonl(id.clone())),
-            )
-            .menu(
-                crate::tr!("sidebar.ctx_export_markdown").into_owned(),
-                Box::new(ThreadExportMarkdown(id.clone())),
-            )
-            .separator()
-            .menu_with_enable(
-                crate::tr!("sidebar.archive").into_owned(),
-                Box::new(ThreadArchive(id.clone())),
-                !running,
-            )
-            .when(scope.is_full(), |menu| {
-                menu.menu_element(Box::new(ThreadDelete(id.clone())), |_, cx| {
-                    div()
-                        .text_color(cx.theme().danger)
-                        .child(crate::tr!("sidebar.ctx_delete"))
+                .menu(
+                    crate::tr!("sidebar.ctx_mark_unread").into_owned(),
+                    Box::new(ThreadMarkUnread(id.clone())),
+                )
+                .separator()
+                .menu(
+                    if section == ThreadSection::Pinned {
+                        crate::tr!("sidebar.ctx_unpin").into_owned()
+                    } else {
+                        crate::tr!("sidebar.ctx_pin").into_owned()
+                    },
+                    if section == ThreadSection::Pinned {
+                        Box::new(ThreadUnpin(id.clone())) as Box<dyn Action>
+                    } else {
+                        Box::new(ThreadPin(id.clone()))
+                    },
+                )
+                .menu_with_enable(
+                    if settled {
+                        crate::tr!("sidebar.ctx_unsettle").into_owned()
+                    } else {
+                        crate::tr!("sidebar.ctx_settle").into_owned()
+                    },
+                    if settled {
+                        Box::new(ThreadMakeActive(id.clone())) as Box<dyn Action>
+                    } else {
+                        Box::new(ThreadSettle(id.clone()))
+                    },
+                    settled || (!running && !blocked),
+                )
+                .when_some(moves, |menu, (up, down)| {
+                    menu.menu_with_enable(
+                        crate::tr!("sidebar.ctx_move_up").into_owned(),
+                        Box::new(ThreadMove(id.clone(), false)),
+                        up,
+                    )
+                    .menu_with_enable(
+                        crate::tr!("sidebar.ctx_move_down").into_owned(),
+                        Box::new(ThreadMove(id.clone(), true)),
+                        down,
+                    )
+                })
+                .when(compact, |menu| {
+                    menu.menu(
+                        crate::tr!("sidebar.ctx_arrange").into_owned(),
+                        Box::new(ThreadArrange(id.clone())),
+                    )
+                })
+                .separator()
+                .menu(
+                    if follow_up {
+                        crate::tr!("control.follow_up.remove")
+                    } else {
+                        crate::tr!("control.follow_up.add")
+                    }
+                    .into_owned(),
+                    Box::new(ThreadFollowUp(id.clone(), !follow_up)),
+                )
+                .menu(
+                    if parked {
+                        crate::tr!("control.follow_up.unpark")
+                    } else {
+                        crate::tr!("control.follow_up.park")
+                    }
+                    .into_owned(),
+                    Box::new(ThreadPark(id.clone(), !parked)),
+                )
+                .separator()
+                .label(crate::tr!("sidebar.ctx_auto_settle"))
+                .menu_with_check(
+                    crate::tr!("sidebar.ctx_auto_settle_enabled"),
+                    auto_settle_enabled,
+                    Box::new(ThreadAutoSettle(id.clone(), true)),
+                )
+                .menu_with_check(
+                    crate::tr!("sidebar.ctx_auto_settle_disabled"),
+                    !auto_settle_enabled,
+                    Box::new(ThreadAutoSettle(id.clone(), false)),
+                )
+                .separator()
+                .menu(
+                    crate::tr!("sidebar.ctx_copy_path").into_owned(),
+                    Box::new(ThreadCopyPath(id.clone())),
+                )
+                .menu(
+                    crate::tr!("sidebar.ctx_copy_id").into_owned(),
+                    Box::new(ThreadCopyId(id.clone())),
+                )
+                .separator()
+                .menu(
+                    crate::tr!("sidebar.ctx_export_jsonl").into_owned(),
+                    Box::new(ThreadExportJsonl(id.clone())),
+                )
+                .menu(
+                    crate::tr!("sidebar.ctx_export_markdown").into_owned(),
+                    Box::new(ThreadExportMarkdown(id.clone())),
+                )
+                .separator()
+                .menu_with_enable(
+                    crate::tr!("sidebar.archive").into_owned(),
+                    Box::new(ThreadArchive(id.clone())),
+                    !running,
+                )
+                .when(scope.is_full(), |menu| {
+                    menu.menu_element(Box::new(ThreadDelete(id.clone())), |_, cx| {
+                        div()
+                            .text_color(cx.theme().danger)
+                            .child(crate::tr!("sidebar.ctx_delete"))
+                    })
+                })
+                .when_some(share.as_ref(), |menu, share| {
+                    spaces::share_items(menu, share, true, cx)
                 })
             })
-            .when_some(share.as_ref(), |menu, share| {
-                spaces::share_items(menu, share, true, cx)
-            })
-        })
-        .touch(compact)
-        .into_any_element()
+            .touch(compact);
+        // A compact row reveals nothing.
+        if compact {
+            menu.into_any_element()
+        } else {
+            menu.reveals(&hover, row_key).into_any_element()
+        }
     }
 
     fn render_thread(
@@ -5921,37 +5930,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The sidebar, with the reveal of its `row` in each frame: the test
+    /// platform lays out text without painting glyphs, so what a row reveals
+    /// is read from the reveal it draws it at, on the frame's clock.
+    struct Drawn {
+        sidebar: Entity<SessionsSidebar>,
+        row: &'static str,
+        reveals: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
+    }
+    impl Render for Drawn {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let hover = self.sidebar.read(cx).hover.clone();
+            let reveal = hover.reveal(self.row, window, cx);
+            self.reveals.borrow_mut().push(reveal);
+            div().size_full().child(self.sidebar.clone())
+        }
+    }
+
     /// A row the pointer comes onto and clicks while its time is still
     /// fading out for the row's controls, the pointer still moving as it
     /// presses, selects the thread and fades the time out once: it never
     /// comes back or starts over.
     #[gpui::test]
     fn a_quick_click_fades_the_rows_time_out_once(cx: &mut TestAppContext) {
-        /// The sidebar, with the opacity its middle row's time is drawn at
-        /// in each frame: the test platform lays out text without painting
-        /// glyphs, so it is read from the reveal the row draws it at, on the
-        /// frame's clock.
-        struct Drawn {
-            sidebar: Entity<SessionsSidebar>,
-            opacity: std::rc::Rc<std::cell::RefCell<Vec<f32>>>,
-        }
-        impl Render for Drawn {
-            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let hover = self.sidebar.read(cx).hover.clone();
-                let opacity = 1. - hover.reveal("flat-thread-middle", window, cx);
-                self.opacity.borrow_mut().push(opacity);
-                div().size_full().child(self.sidebar.clone())
-            }
-        }
-
         let (sidebar, store, _, mut driver, host, root) =
             sidebar_over_host(cx, "sidebar-time-click", &["newest", "middle", "oldest"]);
         crate::store::tests::place_shown_threads(&store, cx);
-        let opacity = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let reveals = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view(|window, cx| {
             let drawn = cx.new(|_| Drawn {
                 sidebar: sidebar.clone(),
-                opacity: opacity.clone(),
+                row: "flat-thread-middle",
+                reveals: reveals.clone(),
             });
             gpui_base::Root::new(drawn, window, cx)
         });
@@ -5971,7 +5981,7 @@ mod tests {
         let row = cx.debug_bounds("sidebar-thread-middle").unwrap();
         let at = gpui::point(row.center().x, row.top() + px(8.));
         cx.simulate_mouse_move(at, None, none);
-        let since = opacity.borrow().len();
+        let since = reveals.borrow().len();
         for _ in 0..3 {
             frame(cx);
         }
@@ -5989,7 +5999,11 @@ mod tests {
             store.read_with(cx, |store, _| store.open_threads()),
             ["middle"]
         );
-        let drawn = opacity.borrow()[since..].to_vec();
+        // The time is drawn at what is left of the reveal.
+        let drawn = reveals.borrow()[since..]
+            .iter()
+            .map(|reveal| 1. - reveal)
+            .collect::<Vec<_>>();
         assert!(
             drawn[2] > 0. && drawn[2] < 1.,
             "the click lands mid-fade: {drawn:?}"
@@ -6122,8 +6136,15 @@ mod tests {
 
         let window_state = cx.new(|_| WindowState::new(false));
         let sidebar = cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
-        let (_, cx) =
-            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
+        let reveals = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let drawn = cx.new(|_| Drawn {
+                sidebar: sidebar.clone(),
+                row: "flat-thread-rename-thread",
+                reveals: reveals.clone(),
+            });
+            gpui_base::Root::new(drawn, window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(800.)));
         window_state.update(cx, |state, cx| {
@@ -6226,17 +6247,18 @@ mod tests {
                 "clicking the rename editor must not open the thread"
             );
         } else {
-            // The fill over each of the display frames that follow.
+            // How far the row's hover controls were in on the last frame.
+            let revealed = || *reveals.borrow().last().unwrap();
+            // The fill and the controls over each of the display frames that
+            // follow.
             let frames = |cx: &mut VisualTestContext| {
                 (0..24)
                     .map(|_| {
                         cx.executor()
                             .advance_clock(std::time::Duration::from_millis(16));
-                        cx.update(|window, cx| {
-                            window.simulate_next_frame(cx);
-                            let _ = window.draw(cx);
-                        });
-                        held(cx)
+                        cx.update(|window, cx| window.simulate_next_frame(cx));
+                        draw(cx);
+                        (held(cx), revealed())
                     })
                     .collect::<Vec<_>>()
             };
@@ -6252,8 +6274,8 @@ mod tests {
             cx.simulate_mouse_up(trigger, button, modifiers);
             assert_eq!(
                 frames(cx),
-                [1.; 24],
-                "the fill does not move as the menu opens under the pointer"
+                [(1., 1.); 24],
+                "nothing moves as the menu opens under the pointer"
             );
             let item = cx
                 .debug_bounds("menu-item-0")
@@ -6262,30 +6284,40 @@ mod tests {
             pointer(cx, item);
             assert_eq!(
                 frames(cx),
-                [1.; 24],
-                "the fill does not move as the pointer goes on to the menu"
+                [(1., 1.); 24],
+                "nothing moves as the pointer goes on to the menu"
             );
             pointer(cx, away);
             crate::test_frames::draw_settled(cx);
-            assert_eq!(held(cx), 1., "the row stays marked with the pointer away");
-            pointer(cx, gpui::point(row.left() + px(4.), row.center().y));
-            crate::test_frames::draw_settled(cx);
             assert_eq!(
-                held(cx),
-                1.,
-                "the row back under the pointer takes no second fill"
+                (held(cx), revealed()),
+                (1., 1.),
+                "the row stays marked with the pointer away"
+            );
+            pointer(cx, gpui::point(row.left() + px(4.), row.center().y));
+            assert_eq!(
+                frames(cx),
+                [(1., 1.); 24],
+                "the row back under the pointer takes no second fill, and its controls stay"
             );
             pointer(cx, away);
             crate::test_frames::draw_settled(cx);
             cx.simulate_click(away, gpui::Modifiers::default());
             let leaving = frames(cx);
-            assert!(
-                leaving.iter().any(|fill| *fill > 0. && *fill < 1.)
-                    && leaving.windows(2).all(|pair| pair[1] <= pair[0]),
-                "the fill fades out with the menu: {leaving:?}"
-            );
+            for part in [|frame: &(f32, f32)| frame.0, |frame: &(f32, f32)| frame.1] {
+                let part = leaving.iter().map(part).collect::<Vec<_>>();
+                assert!(
+                    part.iter().any(|value| *value > 0. && *value < 1.)
+                        && part.windows(2).all(|pair| pair[1] <= pair[0]),
+                    "the row's hover fades out with the menu: {part:?}"
+                );
+            }
             crate::test_frames::draw_settled(cx);
-            assert_eq!(held(cx), 0., "the mark leaves with the menu");
+            assert_eq!(
+                (held(cx), revealed()),
+                (0., 0.),
+                "the mark leaves with the menu"
+            );
         }
         cx.update(|window, cx| {
             sidebar.update(cx, |sidebar, cx| {

@@ -30,7 +30,7 @@ pub(crate) use hover::{blend, hold_hover_layer, hover_fill, hover_layer, hovered
 pub(crate) use image_fade::{image_arrival, image_load};
 pub(crate) use keyed::{keyed, keyed_across};
 pub(crate) use list_flip::ListFlip;
-pub(crate) use list_hover::ListHover;
+pub(crate) use list_hover::{HoverHold, ListHover};
 pub(crate) use list_scroll::{ListScroll, ScrollTarget};
 pub(crate) use size_glide::{GlideAxes, GlideState, SizeGlide, size_key};
 pub(crate) mod bounce;
