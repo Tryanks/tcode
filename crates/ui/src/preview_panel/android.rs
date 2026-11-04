@@ -136,6 +136,9 @@ impl WebView {
     pub fn show(&mut self) {
         self.visible = true;
     }
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
     pub fn hide(&mut self) {
         self.visible = false;
         let _ = self.raw.set_visible(false);
