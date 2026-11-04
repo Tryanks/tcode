@@ -254,6 +254,12 @@ impl RemoteController {
             .map_err(|error| error.message)
     }
 
+    /// How each Traverse source is doing after every change, while this
+    /// machine hosts; see [`TraverseHost::traverse_events`].
+    pub fn traverse_events(&self) -> Option<async_channel::Receiver<Vec<TraverseSourceStatus>>> {
+        self.host.as_ref().map(TraverseHost::traverse_events)
+    }
+
     /// This machine's hosting state after every change, while it hosts; see
     /// [`TraverseHost::hosting_events`].
     pub fn hosting_events(&self) -> Option<async_channel::Receiver<HostingState>> {
