@@ -555,7 +555,7 @@ fn advertise(endpoint: &Endpoint, host_name: &str) -> Option<lan::Advertisement>
         .bound_sockets()
         .iter()
         .any(|addr| addr.is_ipv6() && addr.port() == port);
-    match lan::Advertisement::start(&endpoint.id(), host_name, port, ipv6) {
+    match lan::Advertisement::start(&endpoint.id(), host_name, port, ipv6, endpoint.watch_addr()) {
         Ok(advertisement) => Some(advertisement),
         Err(error) => {
             log::warn!("not advertising this machine on the LAN: {error}");
