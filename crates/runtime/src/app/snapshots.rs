@@ -188,16 +188,26 @@ impl DomainDiff {
             });
             if stale {
                 let providers = state.providers_status_snapshot();
-                if self.providers.as_ref() != Some(&providers) {
-                    if self.providers.is_some() {
-                        emit_replacement(
-                            Topic::Providers,
-                            ServerEvent::ProvidersReplaced(providers.clone()),
-                            cx,
-                        );
-                    }
-                    self.providers = Some(providers);
+                if let Some(previous) = self.providers.as_mut()
+                    && *previous != providers
+                {
+                    previous
+                        .provider_usage
+                        .clone_from(&providers.provider_usage);
+                    previous
+                        .usage_checking
+                        .clone_from(&providers.usage_checking);
+                    let event = if *previous == providers {
+                        ServerEvent::ProviderUsageChanged {
+                            provider_usage: providers.provider_usage.clone(),
+                            usage_checking: providers.usage_checking.clone(),
+                        }
+                    } else {
+                        ServerEvent::ProvidersReplaced(providers.clone())
+                    };
+                    emit_replacement(Topic::Providers, event, cx);
                 }
+                self.providers = Some(providers);
             } else {
                 #[cfg(debug_assertions)]
                 assert_eq!(

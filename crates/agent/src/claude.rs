@@ -336,6 +336,22 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 
 const USAGE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The payload of a `get_usage` control response.
+fn usage_response(response: &Value) -> Result<Value, AgentError> {
+    if response.get("subtype").and_then(Value::as_str) == Some("error") {
+        let error = response
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| response.get("error").unwrap_or(response).to_string());
+        return Err(AgentError::Provider(error));
+    }
+    response
+        .get("response")
+        .cloned()
+        .ok_or_else(|| AgentError::Protocol("Claude usage response omitted response".into()))
+}
+
 /// Ask a short-lived Claude Code process for its subscription usage.
 pub async fn read_usage(
     binary_path: Option<PathBuf>,
@@ -398,17 +414,7 @@ pub async fn read_usage(
             if response.get("request_id").and_then(Value::as_str) != Some("usage-1") {
                 continue;
             }
-            if response.get("subtype").and_then(Value::as_str) == Some("error") {
-                let error = response
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| response.get("error").unwrap_or(response).to_string());
-                return Err(AgentError::Provider(error));
-            }
-            return response.get("response").cloned().ok_or_else(|| {
-                AgentError::Protocol("Claude usage response omitted response".into())
-            });
+            return usage_response(response);
         }
         Err(AgentError::Protocol(
             "Claude stdout closed before usage response".into(),
@@ -1105,6 +1111,22 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::RetryTurn { .. } => ControlFlow::Continue(()),
+        // The same `get_usage` control request [`read_usage`] sends, asked
+        // of the running CLI instead of a process started for it.
+        SessionCommand::ReadAccountUsage { reply } => {
+            let msg = mapper.control_request(json!({ "subtype": "get_usage" }));
+            if let Some(request_id) = msg["request_id"].as_str() {
+                mapper
+                    .pending_usage_reads
+                    .insert(request_id.to_owned(), reply);
+            }
+            if write_line(stdin, &msg).await.is_err()
+                && let Some(request_id) = msg["request_id"].as_str()
+            {
+                mapper.pending_usage_reads.remove(request_id);
+            }
+            ControlFlow::Continue(())
+        }
         SessionCommand::Shutdown => {
             // Settle pending AskUserQuestion callbacks before closing stdin.
             for (request_id, response) in mapper.cancel_pending_user_input() {
@@ -1482,6 +1504,8 @@ pub(crate) struct Mapper {
     /// Live permission-mode requests awaiting Claude's correlated response.
     /// A successful stdin write is not proof that the CLI applied the mode.
     pending_permission_modes: HashMap<String, String>,
+    /// [`SessionCommand::ReadAccountUsage`] askers by control request_id.
+    pending_usage_reads: HashMap<String, smol::channel::Sender<Result<Value, String>>>,
     outgoing: Vec<Value>,
     request_usage: Value,
     latest_usage: TokenUsage,
@@ -1549,6 +1573,7 @@ impl Mapper {
             applied_permission_mode,
             auto_unavailable: None,
             pending_permission_modes: HashMap::new(),
+            pending_usage_reads: HashMap::new(),
             outgoing: Vec::new(),
             request_usage: json!({}),
             latest_usage: TokenUsage::default(),
@@ -2898,6 +2923,10 @@ impl Mapper {
         let Some(request_id) = response.get("request_id").and_then(Value::as_str) else {
             return Vec::new();
         };
+        if let Some(reply) = self.pending_usage_reads.remove(request_id) {
+            let _ = reply.try_send(usage_response(response).map_err(|error| error.to_string()));
+            return Vec::new();
+        }
         if let Some(mode) = self.pending_permission_modes.remove(request_id) {
             if response.get("subtype").and_then(Value::as_str) == Some("success") {
                 self.applied_permission_mode = response
@@ -4105,6 +4134,63 @@ mod tests {
         std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > argv\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\nwhile IFS= read -r line; do :; done\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         binary
+    }
+
+    /// A running session answers a usage read itself: the `get_usage`
+    /// control request goes to the live CLI and its payload reaches the
+    /// asker, so no second process is started for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_usage_read_asks_the_running_cli() {
+        use std::os::unix::fs::PermissionsExt as _;
+        smol::block_on(async {
+            let directory =
+                std::env::temp_dir().join(format!("agent-claude-usage-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let binary = directory.join("claude");
+            std::fs::write(
+                &binary,
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\n\
+                 printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\n\
+                 while IFS= read -r line; do case \"$line\" in *get_usage*)\n\
+                 id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+                 printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"rate_limits_available\":true}}}\\n' \"$id\";;\n\
+                 esac; done\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: false,
+                binary_path: Some(binary),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            while !matches!(
+                handle.events.recv().await.unwrap(),
+                AgentEvent::ProviderOptions { .. }
+            ) {}
+            let (reply, answer) = smol::channel::bounded(1);
+            handle
+                .commands
+                .send(SessionCommand::ReadAccountUsage { reply })
+                .await
+                .unwrap();
+            assert_eq!(
+                answer.recv().await.unwrap().unwrap(),
+                json!({"rate_limits_available": true})
+            );
+            shut_down(handle).await;
+            let _ = std::fs::remove_dir_all(directory);
+        });
     }
 
     #[cfg(unix)]

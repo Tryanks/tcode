@@ -1394,6 +1394,54 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
     cx.run_until(|state| auth(state) == Some(AuthStatus::Unauthenticated));
 }
 
+/// A finished turn refreshes the account usage of the profile it ran on and
+/// of no other, and asks the thread's own running harness for it instead of
+/// starting another.
+#[test]
+fn a_turn_refreshes_only_its_profiles_usage_from_its_running_harness() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-turn-usage");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, received) = smol::channel::unbounded();
+    let session = live_session(ProviderKind::ClaudeCode, commands);
+    let id = session.meta.id.clone();
+    state.update(cx, |state, cx| {
+        state.sessions.push(session.meta.clone());
+        state.residents.live.insert(id.clone(), session);
+        state.provider_event_for_test(
+            &id,
+            AgentEvent::TurnCompleted {
+                turn_id: "turn".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+    });
+    assert_eq!(
+        state.read(|state| state.providers.usage_checking.clone()),
+        HashSet::from(["claude".to_string()])
+    );
+    let reply = std::iter::from_fn(|| received.try_recv().ok())
+        .find_map(|command| match command {
+            SessionCommand::ReadAccountUsage { reply } => Some(reply),
+            _ => None,
+        })
+        .expect("the running session is asked for its usage");
+    reply
+        .try_send(Ok(serde_json::json!({
+            "subscription_type": "max",
+            "rate_limits_available": true,
+            "rate_limits": {"five_hour": {"utilization": 94, "resets_at": "2026-09-04T21:20:00+00:00"}}
+        })))
+        .unwrap();
+    cx.run_until(|state| state.providers.usage_checking.is_empty());
+    let usage = state.read(|state| state.providers.provider_usage.clone());
+    assert_eq!(usage.keys().collect::<Vec<_>>(), ["claude"]);
+    assert_eq!(usage["claude"].plan.as_deref(), Some("max"));
+    assert_eq!(usage["claude"].windows.len(), 1);
+}
+
 /// Another Claude account starts from a copy of the user's own configuration,
 /// never the default account's sign-in, endpoint or history, and its sign-in
 /// runs in its own config directory. A provider without account sign-in is
@@ -4753,7 +4801,7 @@ fn steer_rejected_after_turn_end_is_resent_as_a_new_turn() {
         cx.origin = Some(MessageOrigin::Agent);
         state.steer("active", "redirect".into(), Vec::new(), cx);
         cx.origin = None;
-        let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
+        let SessionCommand::Steer { request_id, .. } = next_command(&receiver).unwrap() else {
             panic!("steer command missing")
         };
 
@@ -4766,7 +4814,7 @@ fn steer_rejected_after_turn_end_is_resent_as_a_new_turn() {
             },
             cx,
         );
-        assert!(receiver.try_recv().is_err(), "nothing queued yet");
+        assert!(next_command(&receiver).is_err(), "nothing queued yet");
 
         state.on_event(
             "active",
@@ -4775,7 +4823,7 @@ fn steer_rejected_after_turn_end_is_resent_as_a_new_turn() {
             },
             cx,
         );
-        match receiver.try_recv().unwrap() {
+        match next_command(&receiver).unwrap() {
             SessionCommand::SendTurn { text, .. } => assert_eq!(text, "redirect"),
             other => panic!("expected the rejected steer to be sent as a turn, got {other:?}"),
         }
@@ -4800,7 +4848,7 @@ fn steer_rejected_after_turn_end_is_resent_as_a_new_turn() {
             cx,
         );
         assert!(
-            receiver.try_recv().is_err(),
+            next_command(&receiver).is_err(),
             "a rejection for an already resolved steer sends nothing"
         );
     });
@@ -5052,12 +5100,15 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
             assert!(!status.activity.turn_running);
             assert_eq!(status.turn_retry, Some(retry));
             assert!(
-                receiver.try_recv().is_err(),
+                next_command(&receiver).is_err(),
                 "queued text must not race the native retry"
             );
             if automatic {
                 state.interrupt("retry", cx).unwrap();
-                assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Interrupt)));
+                assert!(matches!(
+                    next_command(&receiver),
+                    Ok(SessionCommand::Interrupt)
+                ));
                 state.on_event("retry", AgentEvent::TurnRetry { retry: None }, cx);
             } else {
                 state
@@ -5068,7 +5119,7 @@ fn native_retry_keeps_queue_waiting_and_cancellation_releases_it() {
             }
             let Ok(SessionCommand::SendTurn {
                 delivery_id, text, ..
-            }) = receiver.try_recv()
+            }) = next_command(&receiver)
             else {
                 panic!("queued message was not sent")
             };
@@ -6312,7 +6363,7 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
         );
 
         state.send_turn(&session_id, "survive the eof race".into(), Vec::new(), cx);
-        let (delivery_id, submitted_text) = match first_actor.try_recv() {
+        let (delivery_id, submitted_text) = match next_command(&first_actor) {
             Ok(SessionCommand::SendTurn {
                 delivery_id, text, ..
             }) => (delivery_id, text),
@@ -6354,7 +6405,7 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
         let (resumed_commands, resumed_actor) = smol::channel::unbounded();
         state.selected_session_mut().unwrap().runtime = Runtime::Live(resumed_commands);
         assert_eq!(state.dispatch_next_queued(&session_id, cx), Ok(true));
-        let retried_delivery = match resumed_actor.try_recv() {
+        let retried_delivery = match next_command(&resumed_actor) {
             Ok(SessionCommand::SendTurn {
                 delivery_id: retried_id,
                 text,
@@ -6588,13 +6639,13 @@ fn idle_grace_runs_from_the_last_turn_end_whether_viewed_or_parked() {
         // Fire both grace timers now; the real ones would land identically
         // but later. The first idle period ended with the second turn.
         state.reap_idle_resident("idle-resident", first_turn_end, cx);
-        assert!(actor.try_recv().is_err(), "stale timer sent Shutdown");
+        assert!(next_command(&actor).is_err(), "stale timer sent Shutdown");
         state.reap_idle_resident("idle-resident", second_turn_end, cx);
 
         let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
         assert!(matches!(active.runtime, Runtime::Idle));
-        assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
+        assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
     });
 }
 
@@ -6663,7 +6714,7 @@ fn settings_restart_waits_for_background_follow_up() {
             Vec::new(),
             cx,
         );
-        assert!(actor.try_recv().is_err());
+        assert!(next_command(&actor).is_err());
         assert_eq!(state.selected_session().unwrap().queue.len(), 1);
 
         // Even an early background-task drain cannot restart the provider
@@ -6673,7 +6724,7 @@ fn settings_restart_waits_for_background_follow_up() {
             AgentEvent::BackgroundTasksChanged { count: 0 },
             cx,
         );
-        assert!(actor.try_recv().is_err());
+        assert!(next_command(&actor).is_err());
         state.on_event(
             "background-restart",
             AgentEvent::TurnStarted {
@@ -6690,7 +6741,7 @@ fn settings_restart_waits_for_background_follow_up() {
             },
             cx,
         );
-        assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
+        assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
         assert_eq!(state.selected_session().unwrap().queue.len(), 1);
     });
 }
@@ -6728,7 +6779,7 @@ fn settings_restart_waits_for_the_running_turn() {
             Vec::new(),
             cx,
         );
-        assert!(actor.try_recv().is_err());
+        assert!(next_command(&actor).is_err());
         assert_eq!(state.selected_session().unwrap().queue.len(), 1);
 
         state.on_event(
@@ -6740,7 +6791,7 @@ fn settings_restart_waits_for_the_running_turn() {
             },
             cx,
         );
-        assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
+        assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
         assert_eq!(state.selected_session().unwrap().queue.len(), 1);
     });
 }
@@ -7261,7 +7312,7 @@ fn compaction_waits_for_the_running_turn() {
         state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id, "finish this task".into(), Vec::new(), cx);
-        let delivery_id = match commands.try_recv() {
+        let delivery_id = match next_command(&commands) {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
             other => panic!("expected SendTurn, got {other:?}"),
         };
@@ -7279,7 +7330,7 @@ fn compaction_waits_for_the_running_turn() {
                 .change_goal(&id, SessionCommand::ClearGoal, cx)
                 .is_err()
         );
-        assert!(commands.try_recv().is_err());
+        assert!(next_command(&commands).is_err());
 
         state.on_event(
             &id,
@@ -7291,11 +7342,17 @@ fn compaction_waits_for_the_running_turn() {
             cx,
         );
         state.compact_context(&id, cx).unwrap();
-        assert!(matches!(commands.try_recv(), Ok(SessionCommand::Compact)));
+        assert!(matches!(
+            next_command(&commands),
+            Ok(SessionCommand::Compact)
+        ));
         state
             .change_goal(&id, SessionCommand::ClearGoal, cx)
             .unwrap();
-        assert!(matches!(commands.try_recv(), Ok(SessionCommand::ClearGoal)));
+        assert!(matches!(
+            next_command(&commands),
+            Ok(SessionCommand::ClearGoal)
+        ));
     });
 
     let _ = std::fs::remove_dir_all(&cwd);
@@ -7952,7 +8009,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
         state.install_selected(session);
         state.send_turn(&id_a, "run the long migration".into(), Vec::new(), cx);
         state.send_turn(&id_a, "queued follow-up".into(), Vec::new(), cx);
-        let first_delivery = match commands_a.try_recv() {
+        let first_delivery = match next_command(&commands_a) {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
             other => panic!("expected migration SendTurn, got {other:?}"),
         };
@@ -7974,7 +8031,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
         // Glance at another thread: the session must survive, not die.
         state.start_draft("proj-t3".into(), cwd.clone(), cx);
         assert!(
-            commands_a.try_recv().is_err(),
+            next_command(&commands_a).is_err(),
             "switching threads must not send Shutdown to a working session"
         );
         assert!(
@@ -8008,7 +8065,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
             },
             cx,
         );
-        let follow_up_delivery = match commands_a.try_recv() {
+        let follow_up_delivery = match next_command(&commands_a) {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
             other => panic!("expected follow-up SendTurn, got {other:?}"),
         };
@@ -8080,7 +8137,7 @@ fn drained_parked_session_stays_resident() {
         state.sessions = state.store.load_index().unwrap().into();
         state.install_selected(session);
         state.send_turn(&id, "one last thing".into(), Vec::new(), cx);
-        let delivery_id = match commands.try_recv() {
+        let delivery_id = match next_command(&commands) {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
             other => panic!("expected final SendTurn, got {other:?}"),
         };
@@ -8099,7 +8156,7 @@ fn drained_parked_session_stays_resident() {
             },
             cx,
         );
-        assert!(commands.try_recv().is_err(), "drain sent Shutdown");
+        assert!(next_command(&commands).is_err(), "drain sent Shutdown");
         assert!(state.residents.parked.contains_key(&id));
         assert!(state.residents.parked[&id].idle_since.is_some());
         assert!(!state.turn_running_for(&id));

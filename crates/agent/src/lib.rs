@@ -1690,6 +1690,16 @@ pub enum SessionCommand {
     },
     /// Clear the standing goal (Codex `thread/goal/clear`, `/goal clear`).
     ClearGoal,
+    /// Read the signed-in account's usage windows from the running harness
+    /// (Claude Code's `get_usage` control request, Codex
+    /// `account/rateLimits/read`), answered on `reply` with the payload a
+    /// short-lived process would give ([`claude::read_usage`],
+    /// [`codex::read_rate_limits`]). A harness without such a read drops
+    /// `reply`.
+    #[cfg(feature = "process")]
+    ReadAccountUsage {
+        reply: smol::channel::Sender<Result<serde_json::Value, String>>,
+    },
     Shutdown,
 }
 

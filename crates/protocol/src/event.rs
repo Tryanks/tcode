@@ -108,6 +108,12 @@ pub enum ServerEvent {
     },
     SessionPlanReplaced(SessionPlan),
     ProvidersReplaced(ProvidersStatus),
+    /// Account usage and the usage reads in flight, when the rest of the
+    /// providers status is unchanged.
+    ProviderUsageChanged {
+        provider_usage: HashMap<String, tcode_core::usage::ProviderUsage>,
+        usage_checking: HashSet<String>,
+    },
     GitStatusReplaced(GitStatusStatus),
     /// An unarchived thread was added or changed. Archiving a thread removes
     /// it with [`ServerEvent::IndexRemoveSession`].
