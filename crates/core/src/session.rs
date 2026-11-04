@@ -14,6 +14,7 @@ use agent::{
 use serde::{Deserialize, Serialize};
 
 use crate::git::merge_file_changes_by_path;
+use crate::relay::{one_line, truncate_chars};
 
 mod boundaries;
 mod superseded;
@@ -560,6 +561,149 @@ pub struct PendingUserInput {
     pub delivery: UserInputDelivery,
 }
 
+/// What a thread is doing, as told by the item its running turn started last.
+/// It says what kind of work that is and what the item names, never the
+/// words the UI puts around it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum LatestActivity {
+    Thinking,
+    Writing,
+    Command {
+        text: String,
+    },
+    Edit {
+        path: Option<String>,
+    },
+    Read {
+        path: String,
+    },
+    WebSearch {
+        query: String,
+    },
+    Tool {
+        /// As the provider spells it; [`agent::ToolName::parse`] reads it.
+        name: String,
+        /// The argument that identifies the call.
+        target: Option<String>,
+    },
+    Subagent {
+        description: String,
+    },
+    /// An item canonicalization does not model: its kind, and what its
+    /// summary names.
+    Other {
+        kind: String,
+        summary: Option<String>,
+    },
+}
+
+impl LatestActivity {
+    /// The most a text field carries, in chars: this reaches every client
+    /// with every thread's index, and a row shows no more.
+    const MAX_CHARS: usize = 160;
+
+    /// What `item` says it is doing. `None` for an item that is not the
+    /// agent's work.
+    fn of(item: &ItemContent) -> Option<Self> {
+        let clip = |text: &str| truncate_chars(&one_line(text), Self::MAX_CHARS);
+        Some(match item {
+            ItemContent::UserMessage { .. } => return None,
+            ItemContent::Reasoning { .. } => Self::Thinking,
+            ItemContent::AssistantMessage { .. } | ItemContent::Plan { .. } => Self::Writing,
+            ItemContent::CommandExecution { command, .. } => Self::Command {
+                text: clip(command),
+            },
+            ItemContent::FileChange { changes, .. } => Self::Edit {
+                path: changes.first().map(|change| clip(&change.path)),
+            },
+            ItemContent::ImageRead { path, .. } => Self::Read { path: clip(path) },
+            ItemContent::WebSearch { query } => Self::WebSearch { query: clip(query) },
+            ItemContent::ToolCall { name, input, .. } => Self::Tool {
+                name: clip(name),
+                target: identifying_argument(input).map(|target| clip(&target)),
+            },
+            ItemContent::Subagent { description, .. } => Self::Subagent {
+                description: clip(description),
+            },
+            ItemContent::Other {
+                provider_kind,
+                summary,
+            } => Self::Other {
+                kind: clip(provider_kind),
+                summary: other_argument(summary).map(|summary| clip(&summary)),
+            },
+        })
+    }
+}
+
+/// What an unmodelled item's summary names: the identifying value of a JSON
+/// object, whose own kind and id say nothing, or else the summary itself.
+pub fn other_argument(summary: &str) -> Option<String> {
+    match serde_json::from_str::<serde_json::Value>(summary) {
+        Ok(serde_json::Value::Object(mut map)) => {
+            map.remove("type");
+            map.remove("id");
+            identifying_argument(&serde_json::Value::Object(map))
+        }
+        _ => Some(one_line(summary)).filter(|summary| !summary.is_empty()),
+    }
+}
+
+/// The keys that name what a tool call is about, in the order they are
+/// looked for. A call carrying none is named by its first plain value.
+const IDENTIFYING_KEYS: &[&str] = &[
+    "title",
+    "query",
+    "url",
+    "path",
+    "file_path",
+    "filePath",
+    "command",
+    "cmd",
+    "pattern",
+    "name",
+    "subject",
+    "summary",
+    "description",
+    "text",
+    "message",
+    "prompt",
+    "thread_id",
+];
+
+/// The plain value that names what a tool call is about.
+pub fn identifying_argument(input: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    fn primitive(value: &Value) -> Option<String> {
+        let text = match value {
+            Value::String(text) => one_line(text),
+            Value::Number(number) => number.to_string(),
+            Value::Bool(_) | Value::Null | Value::Array(_) | Value::Object(_) => return None,
+        };
+        (!text.is_empty()).then_some(text)
+    }
+    match input {
+        Value::Object(map) => IDENTIFYING_KEYS
+            .iter()
+            .find_map(|key| primitive(map.get(*key)?))
+            // A question tool names its first question.
+            .or_else(|| {
+                let first = map.get("questions")?.get(0)?;
+                primitive(first.get("question").or_else(|| first.get("title"))?)
+            })
+            // A word names a call better than a number.
+            .or_else(|| {
+                map.values()
+                    .filter(|value| value.is_string())
+                    .find_map(primitive)
+            })
+            .or_else(|| map.values().find_map(primitive)),
+        Value::String(text) => Some(one_line(text)).filter(|text| !text.is_empty()),
+        _ => None,
+    }
+}
+
 /// The turn a live provider is running, located in the session's whole log so
 /// a fold of any window of it can find the turn among its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +832,24 @@ impl Timeline {
             self.elided_outputs.insert(item_id.to_owned(), bytes);
         }
         self.apply_at(stored.ts, &stored.event);
+    }
+
+    /// What the running turn last started, or `None` between turns. Items
+    /// keep the place they first appeared in, so this moves when a new one
+    /// starts and not as the current one streams.
+    pub fn latest_activity(&self) -> Option<LatestActivity> {
+        if !self.turn_running {
+            return None;
+        }
+        let turn = self.boundaries.current()?;
+        self.entries
+            .iter()
+            .rev()
+            .take_while(|entry| entry.turn == turn)
+            .find_map(|entry| match &entry.content {
+                EntryContent::Item(item) => LatestActivity::of(item),
+                _ => None,
+            })
     }
 
     /// The latest `report_result` call this thread made: the tool-call item id
@@ -1710,6 +1872,182 @@ mod tests {
     use super::*;
     use agent::{ApprovalDecision, ApprovalKind, FileChangeKind, RewindMode};
     use serde_json::json;
+
+    /// A thread's latest activity is what it last started: the stream of a
+    /// running item leaves it be, an item only ever seen through its deltas
+    /// counts from the first, a child's items are its mirror's, and the end
+    /// of the turn clears it for good, whatever straggles in after.
+    #[test]
+    fn latest_activity_follows_item_starts_and_clears_when_the_turn_ends() {
+        let item = |id: &str, content| ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
+        };
+        let command = |status, output: &str| ItemContent::CommandExecution {
+            command: "cargo   test\n  --locked".into(),
+            output: output.into(),
+            exit_code: None,
+            status,
+        };
+        let delta = |kind, text: &str| AgentEvent::Delta {
+            item_id: match kind {
+                DeltaKind::AssistantText => "text".into(),
+                DeltaKind::ReasoningText => "thought".into(),
+                DeltaKind::CommandOutput => "cmd".into(),
+            },
+            kind,
+            text: text.into(),
+        };
+        let running_command = LatestActivity::Command {
+            text: "cargo test --locked".into(),
+        };
+        let tool = LatestActivity::Tool {
+            name: "mcp__tcode_control__read".into(),
+            target: Some("src/lib.rs".into()),
+        };
+        let subagent = LatestActivity::Subagent {
+            description: "Audit the fold".into(),
+        };
+        let steps = [
+            (
+                AgentEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                },
+                None,
+            ),
+            (
+                AgentEvent::ItemStarted(item(
+                    "thought",
+                    ItemContent::Reasoning {
+                        text: String::new(),
+                    },
+                )),
+                Some(LatestActivity::Thinking),
+            ),
+            (
+                delta(DeltaKind::ReasoningText, "maybe"),
+                Some(LatestActivity::Thinking),
+            ),
+            (
+                delta(DeltaKind::AssistantText, "Run"),
+                Some(LatestActivity::Writing),
+            ),
+            (
+                delta(DeltaKind::AssistantText, "ning"),
+                Some(LatestActivity::Writing),
+            ),
+            (
+                AgentEvent::ItemStarted(item("cmd", command(ItemStatus::InProgress, ""))),
+                Some(running_command.clone()),
+            ),
+            (
+                delta(DeltaKind::CommandOutput, "compiling\n"),
+                Some(running_command.clone()),
+            ),
+            (
+                AgentEvent::ItemCompleted(item("cmd", command(ItemStatus::Completed, "ok"))),
+                Some(running_command.clone()),
+            ),
+            (
+                AgentEvent::ItemStarted(item(
+                    "call",
+                    ItemContent::ToolCall {
+                        image_reads: Vec::new(),
+                        name: "mcp__tcode_control__read".into(),
+                        input: json!({ "path": "src/lib.rs", "limit": 10 }),
+                        output: None,
+                        status: ItemStatus::InProgress,
+                    },
+                )),
+                Some(tool.clone()),
+            ),
+            (
+                AgentEvent::ItemStarted(ThreadItem {
+                    id: "child".into(),
+                    parent_item_id: Some("spawn".into()),
+                    content: ItemContent::Reasoning {
+                        text: String::new(),
+                    },
+                }),
+                Some(tool),
+            ),
+            (
+                AgentEvent::ItemStarted(item(
+                    "spawn",
+                    ItemContent::Subagent {
+                        agent_type: "explorer".into(),
+                        description: "Audit the fold".into(),
+                        status: ItemStatus::InProgress,
+                        summary: None,
+                        model: None,
+                        effort: None,
+                    },
+                )),
+                Some(subagent),
+            ),
+            (
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                None,
+            ),
+            (
+                AgentEvent::ItemCompleted(item("late", command(ItemStatus::Completed, ""))),
+                None,
+            ),
+        ];
+        let mut timeline = Timeline::default();
+        for (index, (event, expected)) in steps.into_iter().enumerate() {
+            timeline.apply_at(Some(index as u64), &event);
+            assert_eq!(timeline.latest_activity(), expected, "after {event:?}");
+        }
+    }
+
+    /// An item that starts before it can say what it does names it once it
+    /// can, and whatever it names is clipped for the index.
+    #[test]
+    fn latest_activity_takes_what_an_update_names_and_clips_it() {
+        let call = |input| {
+            AgentEvent::ItemUpdated(ThreadItem {
+                id: "call".into(),
+                parent_item_id: None,
+                content: ItemContent::ToolCall {
+                    image_reads: Vec::new(),
+                    name: "bash".into(),
+                    input,
+                    output: None,
+                    status: ItemStatus::InProgress,
+                },
+            })
+        };
+        let mut timeline = Timeline::default();
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            },
+            call(serde_json::Value::Null),
+        ] {
+            timeline.apply_at(None, &event);
+        }
+        assert_eq!(
+            timeline.latest_activity(),
+            Some(LatestActivity::Tool {
+                name: "bash".into(),
+                target: None,
+            })
+        );
+        timeline.apply_at(None, &call(json!({ "command": "é".repeat(500) })));
+        assert_eq!(
+            timeline.latest_activity(),
+            Some(LatestActivity::Tool {
+                name: "bash".into(),
+                target: Some("é".repeat(160)),
+            })
+        );
+    }
 
     /// A tool window says how long its call took: the time between the
     /// item's start and its completion, and nothing for an item that only

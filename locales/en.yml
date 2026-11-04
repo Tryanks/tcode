@@ -2440,6 +2440,15 @@ agents:
   back_to_parent: "Back to %{title}"
   side_badge: "Subagent"
   open_child: "Open"
+  activity_thinking: "Thinking"
+  activity_writing: "Writing"
+  activity_command: "Running %{command}"
+  activity_edit: "Editing %{path}"
+  activity_read: "Reading %{path}"
+  activity_search: "Searching %{query}"
+  activity_tool: "Calling %{tool}"
+  activity_tool_target: "Calling %{tool} · %{target}"
+  activity_subagent: "Agent: %{description}"
 tabs:
   with_count: "%{label} (%{count})"
 choice:

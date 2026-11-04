@@ -10,7 +10,7 @@ use tcode_core::{
     git::{GitAction, GitStatus},
     project::{Project, SessionMeta, WorktreeInfo},
     provider_status::ProviderSnapshot,
-    session::{PendingUserInput, ReviewComment, RunningTurn, StoredEvent},
+    session::{LatestActivity, PendingUserInput, ReviewComment, RunningTurn, StoredEvent},
     settings::Settings,
     settlement::{AgentDelivery, AgentExecution, AgentReport},
     ui::{TerminalSplitDirection, WorkspaceMode},
@@ -443,6 +443,10 @@ pub struct SessionActivity {
     /// every other thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentStatus>,
+    /// What the thread's running turn last started; absent between turns and
+    /// for a provider that has reported no item yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_activity: Option<LatestActivity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

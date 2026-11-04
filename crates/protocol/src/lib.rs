@@ -254,7 +254,8 @@ pub use wire::{
 //
 // Unreleased: SessionMeta drops orchestrate_enabled and result_max_chars;
 // subagents start through tcode_control rather than a tcode_orchestrate
-// server.
+// server; SessionActivity carries latest_activity, what the thread's running
+// turn last started.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

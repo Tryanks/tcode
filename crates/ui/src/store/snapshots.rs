@@ -251,6 +251,7 @@ mod tests {
                 unread: false,
                 fork: tcode_protocol::ForkAvailability::Available,
                 agent: None,
+                latest_activity: None,
             },
             stopping: false,
             turn_retry: None,

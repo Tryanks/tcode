@@ -2433,6 +2433,15 @@ agents:
   back_to_parent: "返回“%{title}”"
   side_badge: "子代理"
   open_child: "打开"
+  activity_thinking: "思考中"
+  activity_writing: "输出中"
+  activity_command: "运行命令 %{command}"
+  activity_edit: "编辑 %{path}"
+  activity_read: "读取 %{path}"
+  activity_search: "搜索 %{query}"
+  activity_tool: "调用 %{tool}"
+  activity_tool_target: "调用 %{tool} · %{target}"
+  activity_subagent: "子代理:%{description}"
 tabs:
   with_count: "%{label}（%{count}）"
 choice:

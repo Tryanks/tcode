@@ -397,11 +397,11 @@ fn status_outcome(status: ItemStatus, output: &str) -> String {
     }
 }
 
-fn one_line(value: &str) -> String {
+pub(crate) fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn truncate_chars(value: &str, limit: usize) -> String {
+pub(crate) fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
