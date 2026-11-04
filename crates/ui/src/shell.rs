@@ -10666,6 +10666,9 @@ pub(crate) mod tests {
         let close = bounds("diff-close", cx);
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         settle_panes(cx);
+        // The header takes its wide tiers again as the conversation widens
+        // after the panel, over the frames a display goes on delivering.
+        crate::test_frames::draw_settled(cx);
         assert_eq!(panel_of(&store, "thread-2", cx), None);
         assert_eq!(keyboard_pane(&shell, cx), Some(0), "still where it was");
 
