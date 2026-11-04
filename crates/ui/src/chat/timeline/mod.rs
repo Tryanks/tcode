@@ -526,6 +526,62 @@ impl ChatView {
         self.markdown_visible_rows = viewport_row_window(row, self.rows.len());
         self.markdown_scroll_top = Some(row);
     }
+
+    /// The composer just put a message in the outbox. A reader scrolled
+    /// back from the end is taken there once it gets through, unless they
+    /// turned that off; a reader following the tail is already there.
+    pub(in crate::chat) fn await_sent_message(&mut self, cx: &App) {
+        let store = self.workspace_store.read(cx);
+        self.sent_message = self
+            .session_id
+            .clone()
+            .filter(|_| {
+                !self.list_state.is_following_tail() && store.settings().scroll_to_latest_on_send
+            })
+            .and_then(|session| {
+                // The newest delivery still on its way is the one just sent.
+                let key = store
+                    .delivery_messages_for(Some(&session))
+                    .into_iter()
+                    .rfind(|(_, _, failure, acknowledged)| failure.is_none() && !acknowledged)?
+                    .0;
+                Some((session, key))
+            });
+    }
+
+    /// Glide to the end once the message sent from behind it gets through:
+    /// the host has it and the thread holds it, in the timeline or in the
+    /// queue behind a running turn. A send the host refused stays where the
+    /// reader is.
+    pub(in crate::chat) fn land_sent_message(&mut self, cx: &App) {
+        let Some((session, key)) = &self.sent_message else {
+            return;
+        };
+        if self.session_id.as_ref() != Some(session) {
+            self.sent_message = None;
+            return;
+        }
+        let delivery = self
+            .workspace_store
+            .read(cx)
+            .delivery_messages_for(Some(session))
+            .into_iter()
+            .find(|(pending, ..)| pending == key);
+        match delivery {
+            Some((_, _, None, _)) => {}
+            Some((_, _, Some(_), _)) => self.sent_message = None,
+            None => {
+                self.sent_message = None;
+                if !self.list_state.is_following_tail() {
+                    self.list_scroll.scroll_to(
+                        &self.list_state,
+                        crate::motion::ScrollTarget::End,
+                        cx,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// The walk back into a page that replaced the reservation the reader had
@@ -1891,6 +1947,156 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A reader scrolled back who sends a message is taken to the end once
+    /// the host has it, and follows the reply from there; with the setting
+    /// off, or when the host refuses the send, they stay where they were.
+    #[gpui::test]
+    fn a_message_sent_from_behind_the_end_brings_the_conversation_there(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, point, px};
+        use tcode_protocol::{ClientPayload, Command};
+
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Outcome {
+            Delivered,
+            SettingOff,
+            Refused,
+        }
+        for case in [Outcome::Delivered, Outcome::SettingOff, Outcome::Refused] {
+            let (host, session_id, timeline) = seeded_chat_host_on(
+                cx,
+                synthetic_markdown_timeline(30),
+                false,
+                Some(agent::ProviderKind::ClaudeCode),
+            );
+            let scripted = tcode_runtime::app::scripted_provider(agent::ProviderKind::ClaudeCode);
+            smol::block_on(host.update_state_for_test(move |state, _| {
+                state.set_provider_launcher_for_test(scripted.launcher)
+            }))
+            .expect("script the provider");
+            // The host refuses a send for a thread it does not have.
+            let (to_proxy, proxy) = async_channel::unbounded::<String>();
+            let to_host = host.to_host.clone();
+            std::thread::spawn(move || {
+                while let Ok(line) = proxy.recv_blocking() {
+                    let mut message = tcode_protocol::decode_client_line(&line).unwrap();
+                    if case == Outcome::Refused
+                        && let ClientPayload::Command(Command::SendTurn { session_id, .. }) =
+                            &mut message.payload
+                    {
+                        *session_id = "gone".into();
+                    }
+                    let line = tcode_protocol::encode_line(&message).unwrap();
+                    if to_host.send_blocking(line).is_err() {
+                        break;
+                    }
+                }
+                // The client closing its link stops the host.
+                to_host.close();
+            });
+            let mut driver = crate::store::tests::LocalHostDriver::from_link(
+                tcode_client::HostLink::new(to_proxy, host.from_host.clone()),
+            );
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    driver.link.clone(),
+                    crate::store::WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    false,
+                    cx,
+                )
+            });
+            driver.wait_until(cx, &store, "workspace baseline", |cx| {
+                store.read_with(cx, |store, _| store.baseline_ready())
+            });
+            if case == Outcome::SettingOff {
+                store.update(cx, |store, _| store.set_scroll_to_latest_on_send(false));
+                driver.wait_until(cx, &store, "the setting off", |cx| {
+                    store.read_with(cx, |store, _| !store.settings().scroll_to_latest_on_send)
+                });
+            }
+            store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
+            driver.wait_until(cx, &store, "the conversation", |cx| {
+                store.read_with(cx, |store, _| {
+                    !store.chat_loading_for(store.sole_thread().as_deref())
+                })
+            });
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline, cx)
+            });
+            let window_state = cx.new(|_| WindowState::new(false));
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                ChatView::new(
+                    store.clone(),
+                    window_state,
+                    Some(session_id.clone()),
+                    window,
+                    cx,
+                )
+            });
+            cx.simulate_resize(gpui::size(px(800.), px(700.)));
+            draw_settled(cx);
+            let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+            let height = list.viewport_bounds().size.height;
+            let center = list.viewport_bounds().center();
+            cx.simulate_mouse_move(center, None, Modifiers::default());
+            for (phase, delta) in [
+                (gpui::TouchPhase::Started, px(0.)),
+                (gpui::TouchPhase::Moved, height * 1.5),
+            ] {
+                cx.simulate_event(gpui::ScrollEvent {
+                    position: center,
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.), delta)),
+                    touch_phase: phase,
+                    ..Default::default()
+                });
+            }
+            draw_settled(cx);
+            assert!(!list.is_following_tail());
+            let offset = || -list.scroll_px_offset_for_scrollbar().y;
+            let away = offset();
+
+            view.update_in(cx, |chat, window, cx| chat.focus_composer(window, cx));
+            cx.simulate_input("Where were we?");
+            draw(cx);
+            let send = cx.debug_bounds("send-message").expect("send button");
+            cx.simulate_click(send.center(), Modifiers::default());
+            driver.wait_until(cx, &store, "the send's outcome", |cx| {
+                store.read_with(cx, |store, _| {
+                    let deliveries = store.delivery_messages_for(Some(&session_id));
+                    match case {
+                        Outcome::Refused => {
+                            deliveries.iter().any(|(.., failure, _)| failure.is_some())
+                        }
+                        _ => deliveries.is_empty(),
+                    }
+                })
+            });
+            // A delivered message starts a turn whose working indicator
+            // never rests: the frames are delivered one by one.
+            for _ in 0..40 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                draw(cx);
+            }
+            if case == Outcome::Delivered {
+                assert!(list.is_following_tail(), "the send left the reader behind");
+                assert!(
+                    (offset() - list.max_offset_for_scrollbar().y).abs() <= px(1.),
+                    "the conversation stopped short of its end"
+                );
+            } else {
+                assert!(!list.is_following_tail(), "{case:?} moved the reader");
+                assert!(
+                    (offset() - away).abs() <= px(1.),
+                    "{case:?} moved the reader: {away:?} -> {:?}",
+                    offset()
+                );
+            }
+            driver.shutdown(cx, &store, &host);
         }
     }
 

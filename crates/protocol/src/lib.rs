@@ -267,7 +267,8 @@ pub use wire::{
 // SetTerminalHeight are sent without a delivery key and are not retained.
 // ProviderUsageChanged carries account usage and the usage reads in flight
 // when the rest of the providers status is unchanged, while subscription
-// replies remain full statuses.
+// replies remain full statuses. Settings carry scroll_to_latest_on_send
+// (absent reads as true), patched by ScrollToLatestOnSend.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

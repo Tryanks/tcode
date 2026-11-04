@@ -23,6 +23,7 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::LiveCommandPanelDisabled(_)
         | SettingsPatch::SidebarProviderMarks(_)
         | SettingsPatch::InactiveFrameThrottleDisabled(_)
+        | SettingsPatch::ScrollToLatestOnSend(_)
         | SettingsPatch::FallbackReviewAdvisor(_) => false,
         SettingsPatch::SourceControlHost { .. }
         | SettingsPatch::RemoveSourceControlHost { .. }

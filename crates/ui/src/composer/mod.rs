@@ -124,8 +124,9 @@ enum PickerRail {
 }
 
 pub enum ComposerEvent {
-    /// A turn was just submitted (chat view scrolls to the bottom).
-    Submitted,
+    /// A message just went into the outbox for the thread: a new turn, one
+    /// queued behind the running turn, or a steer.
+    Sent,
 }
 
 /// How far the draft field may grow before it scrolls. A compact window has to
@@ -852,7 +853,6 @@ impl Composer {
                     fire_at_unix_secs,
                 );
             });
-            cx.emit(ComposerEvent::Submitted);
             cx.notify();
             return;
         }
@@ -921,7 +921,6 @@ impl Composer {
             }
             input.update(cx, |state, cx| state.replace_all("", window, cx));
             self.respond(plan.id, ApprovalDecision::Feedback(text), cx);
-            cx.emit(ComposerEvent::Submitted);
             cx.notify();
             return;
         }
@@ -1029,7 +1028,7 @@ impl Composer {
                 );
             }
         });
-        cx.emit(ComposerEvent::Submitted);
+        cx.emit(ComposerEvent::Sent);
         cx.notify();
     }
 
