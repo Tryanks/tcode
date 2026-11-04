@@ -759,11 +759,13 @@ impl Render for ChatView {
         self.apply_reservation_scroll_back(window, cx);
         // Measure after this frame's list layout, including the initial tail
         // frame and frames caused by prepends. No scroll event is required.
-        // The chat is only read, and the store updated only when the report
-        // changes it: an update of either builds the chat again with the next
-        // render of the view around it.
+        // Deferred, it runs once the frame being drawn is done, with no frame
+        // of its own: a next-frame callback would wake the display for one
+        // more frame after every render. The chat is only read, and the store
+        // updated only when the report changes it: an update of either builds
+        // the chat again with the next render of the view around it.
         let chat = cx.entity().downgrade();
-        window.on_next_frame(move |_, cx| {
+        window.defer(cx, move |_, cx| {
             let Some(chat) = chat.upgrade() else {
                 return;
             };
