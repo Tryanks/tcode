@@ -6,10 +6,10 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use gpui::{
-    Action, Along as _, AnyElement, AnyView, App, Axis, Bounds, Context, Div, Empty, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Point, Render, Size, Stateful, Styled as _, Subscription, WeakEntity, Window, actions,
-    div, prelude::FluentBuilder as _, px,
+    Action, Along as _, AnyElement, AnyView, App, AppContext as _, Axis, Bounds, Context, Div,
+    Empty, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Point, Render, Size, Stateful, Styled as _, Subscription,
+    WeakEntity, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::dock::{
     DockAreaRenderer, DockLayout, NodeId, PaneNode, PaneRef, Panel, PanelEvent, PanelId, TabGroup,
@@ -218,7 +218,10 @@ type Entered = Rc<dyn Fn(Entity<ThreadPanel>, &mut Window, &mut App)>;
 /// One thread shown in one pane.
 pub(crate) struct ThreadPanel {
     chat: Entity<ChatView>,
-    drawer: Drawer,
+    drawer: Entity<Drawer>,
+    /// Where the conversation was last painted: the pane less the drawer's
+    /// room.
+    conversation: Rc<Cell<Bounds<Pixels>>>,
     /// The thread `chat` is bound to, held here too so the shell can read a
     /// pane's binding while that pane's conversation is rendering.
     session_id: Option<String>,
@@ -299,7 +302,8 @@ impl ThreadPanel {
         let mut panel = Self {
             session_id: None,
             chat,
-            drawer,
+            drawer: cx.new(|_| drawer),
+            conversation: Rc::default(),
             focus_handle,
             group: None,
             bounds: Rc::default(),
@@ -636,7 +640,6 @@ impl Render for ThreadPanel {
                 }
             });
         }
-        let pane = cx.entity();
         let conversation = content.render(layers).size_full();
         // A slot gliding below the dock's slot floor runs past its split's
         // end, where the split's frame clips it: the pane's bounds are the
@@ -690,11 +693,7 @@ impl Render for ThreadPanel {
                         None => content.h_full(),
                     })
                     .opacity(held.opacity)
-                    .child(gpui::container_query(move |size, window, cx| {
-                        pane.update(cx, |pane, cx| {
-                            pane.render_split(conversation, size.width, window, cx)
-                        })
-                    })),
+                    .child(self.split(conversation)),
             )
             .when(self.closing, |pane| pane.child(crate::motion::shield()))
             .child(self.press_catcher(cx))
