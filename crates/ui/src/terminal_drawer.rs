@@ -1,7 +1,7 @@
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     ops::Range,
     rc::Rc,
@@ -407,11 +407,15 @@ pub struct TerminalDrawer {
     hovered_link: Option<(u64, HyperlinkMatch)>,
     pressed_link: Option<(u64, String)>,
     last_link_hover: Option<Instant>,
+    /// Whether a blinking caret is in its shown half.
     cursor_phase: bool,
-    last_input: Instant,
+    /// Whether a terminal drawn this render has a caret that blinks.
+    caret_blinks: Cell<bool>,
+    /// Whether the drawer was drawn since the blink last turned.
+    blink_drawn: bool,
+    blink: Option<Task<()>>,
     terminal_focused: bool,
     current_size: Option<(f32, f32)>,
-    _blink_task: Option<Task<()>>,
     _store_subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -480,27 +484,6 @@ impl TerminalDrawer {
                 this.focus_handle.focus(window, cx);
             },
         );
-        #[cfg(not(test))]
-        let blink_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(500))
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        this.cursor_phase = !this.cursor_phase;
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }));
-        // GPUI's deterministic test scheduler rejects the async-io timer's
-        // background-thread wakeup during window teardown.
-        #[cfg(test)]
-        let blink_task = None;
         let scene = crate::motion::Epoch::default();
         scene.show(session_id.as_deref());
         Self {
@@ -531,10 +514,11 @@ impl TerminalDrawer {
             pressed_link: None,
             last_link_hover: None,
             cursor_phase: true,
-            last_input: Instant::now(),
+            caret_blinks: Cell::new(false),
+            blink_drawn: false,
+            blink: None,
             terminal_focused: false,
             current_size: None,
-            _blink_task: blink_task,
             _store_subscriptions: vec![store_observer, notice_observer],
         }
     }
@@ -864,8 +848,7 @@ impl TerminalDrawer {
     }
 
     fn note_input(&mut self, cx: &mut Context<Self>) {
-        self.last_input = Instant::now();
-        self.cursor_phase = true;
+        self.restart_blink();
         if let Some(id) = self
             .workspace_store
             .read(cx)
@@ -877,6 +860,56 @@ impl TerminalDrawer {
             self.bell_tabs.remove(&id);
         }
         cx.notify();
+    }
+
+    /// Show the caret and start its blink over, as typing does.
+    fn restart_blink(&mut self) {
+        self.cursor_phase = true;
+        self.blink = None;
+    }
+
+    /// Blink the caret only while the drawer is drawn with a caret that
+    /// blinks: a tick that finds the drawer not drawn since the last one
+    /// ends the blink, and the next render starts it again.
+    fn sync_blink(&mut self, cx: &mut Context<Self>) {
+        if !self.caret_blinks.replace(false) {
+            self.restart_blink();
+            return;
+        }
+        self.blink_drawn = true;
+        if self.blink.is_none() {
+            self.blink = Self::blink(cx);
+        }
+    }
+
+    #[cfg(not(test))]
+    fn blink(cx: &mut Context<Self>) -> Option<Task<()>> {
+        Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let blinking = this.update(cx, |this, cx| {
+                    if !std::mem::take(&mut this.blink_drawn) {
+                        this.restart_blink();
+                        return false;
+                    }
+                    this.cursor_phase = !this.cursor_phase;
+                    cx.notify();
+                    true
+                });
+                if !blinking.unwrap_or(false) {
+                    break;
+                }
+            }
+        }))
+    }
+
+    // GPUI's deterministic test scheduler rejects the async-io timer's
+    // background-thread wakeup during window teardown.
+    #[cfg(test)]
+    fn blink(_cx: &mut Context<Self>) -> Option<Task<()>> {
+        None
     }
 
     /// The whole lines `pixels` of scrolling (positive toward the history)
@@ -955,8 +988,12 @@ impl TerminalDrawer {
             .as_ref()
             .filter(|(id, _)| *id == terminal_id)
             .map(|(_, link)| link);
-        let blink_phase =
-            self.cursor_phase || self.last_input.elapsed() < Duration::from_millis(500);
+        let blink_phase = self.cursor_phase;
+        let blinks = state.cursor_blinking()
+            && marked_text.is_none()
+            && state.cursor_shape() != CursorShape::Hidden
+            && state.cursor().is_some();
+        self.caret_blinks.set(self.caret_blinks.get() || blinks);
         let paint_data = layout_grid_cached(
             &mut self.row_layout_cache.borrow_mut(),
             terminal_id,
@@ -2127,7 +2164,7 @@ impl Render for TerminalDrawer {
         .when_some(second, |group, second| group.child(second))
         .into_any_element();
 
-        v_flex()
+        let drawer = v_flex()
             .id(self.scene.id("terminal-scene"))
             .size_full()
             .min_h_0()
@@ -2245,7 +2282,9 @@ impl Render for TerminalDrawer {
                     cx,
                 )
                 .map(|shown| shown.fold(self.key_bar.clone())),
-            )
+            );
+        self.sync_blink(cx);
+        drawer
     }
 }
 
@@ -2738,8 +2777,7 @@ impl InputHandler for TerminalInputHandler {
         let text = text.to_string();
         self.drawer.update(cx, |drawer, cx| {
             drawer.marked_text = None;
-            drawer.last_input = Instant::now();
-            drawer.cursor_phase = true;
+            drawer.restart_blink();
             drawer.bell_tabs.remove(&terminal_id);
             if !text.is_empty() {
                 drawer.send_committed_text(terminal_id, &text, cx);
