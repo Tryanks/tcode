@@ -43,6 +43,10 @@ const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// How far the selected fill comes in over a pane whose row is hovered: it
+/// lies over the whole conversation, so less than on the row.
+const ROW_HOVERED_FILL: f32 = 0.6;
+
 actions!(
     tcode,
     [SplitRight, SplitDown, ClosePane, CloseOtherPanes, ZoomPane]
@@ -229,6 +233,7 @@ pub(crate) struct ThreadPanel {
     /// placeholder's bounds while the pane is drawn over the column.
     slot: Rc<Cell<Bounds<Pixels>>>,
     among_others: bool,
+    row_hovered: bool,
     zoom: PaneZoom,
     /// Leaving the column: still drawn while its slot glides shut, inert.
     closing: bool,
@@ -248,8 +253,10 @@ pub(crate) struct ThreadPanel {
     /// The chat on its way in from another pane: where it was drawn there,
     /// and when it set off.
     flight: Option<(Bounds<Pixels>, Instant)>,
-    /// The pane's fades: the waiting hint's cross-fade with its chat. Kept here because the dock draws the pane under a new
-    /// parent whenever the layout around it changes (see [`ThreadPanes`]).
+    /// The pane's fades: the waiting hint's cross-fade with its chat, and the
+    /// fill of a hovered row. Kept here because the dock draws the pane under
+    /// a new parent whenever the layout around it changes (see
+    /// [`ThreadPanes`]).
     motion: crate::motion::owned::Owned,
     /// Hears the pane being entered.
     on_entered: Entered,
@@ -298,6 +305,7 @@ impl ThreadPanel {
             bounds: Rc::default(),
             slot: Rc::default(),
             among_others: false,
+            row_hovered: false,
             zoom: PaneZoom::default(),
             closing: false,
             lease: None,
@@ -412,6 +420,15 @@ impl ThreadPanel {
     pub(crate) fn set_among_others(&mut self, among_others: bool, cx: &mut Context<Self>) {
         if self.among_others != among_others {
             self.among_others = among_others;
+            cx.notify();
+        }
+    }
+
+    /// Whether the pointer is over the threads list's row of the pane's
+    /// thread, which the pane then answers with a soft fill.
+    pub(crate) fn set_row_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.row_hovered != hovered {
+            self.row_hovered = hovered;
             cx.notify();
         }
     }
@@ -717,7 +734,8 @@ pub(crate) type DropTarget = Rc<dyn Fn(&Window, &App) -> Option<Bounds<Pixels>>>
 /// `("dock-split", node)`, a merge or a close lifts it back out, and a layout
 /// builds every group anew. Element state is keyed by the full id path from
 /// the window root, so keyed state in a pane that moves in the tree starts
-/// over. What must not — a pane's waiting hint, its header's scroll — lives with the pane's and its chat's entities instead (see
+/// over. What must not — a pane's waiting hint, its header's scroll — lives
+/// with the pane's and its chat's entities instead (see
 /// [`crate::motion::owned`]). A zoom moves no group, only the zoomed pane's
 /// own view.
 pub(crate) struct ThreadPanes {
@@ -845,21 +863,35 @@ impl TabGroupRenderer for ThreadTabs {
     }
 
     /// The pane drawn over the column leaves a placeholder of its slot's size
-    /// here (see [`Zoom`]).
+    /// here (see [`Zoom`]). Over the pane goes the soft fill that answers a
+    /// hovered row: it takes no pointer.
     fn render_active_panel(
         &self,
         panel: AnyView,
         _: &TabGroupContext,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
         let Ok(pane) = panel.clone().downcast::<ThreadPanel>() else {
             return panel.into_any_element();
         };
-        let (zoom, slot) = {
+        let (zoom, slot, motion, hovered) = {
             let pane = pane.read(cx);
-            (pane.zoom, pane.slot.clone())
+            (
+                pane.zoom,
+                pane.slot.clone(),
+                pane.motion.clone(),
+                pane.row_hovered,
+            )
         };
+        let fill = cx.theme().list_active.opacity(ROW_HOVERED_FILL);
+        let fill = motion.transition(
+            "row-hovered",
+            if hovered { fill } else { fill.opacity(0.) },
+            GLIDE,
+            window,
+            cx,
+        );
         div()
             .relative()
             .size_full()
@@ -869,6 +901,15 @@ impl TabGroupRenderer for ThreadTabs {
             .map(|this| match zoom.overlaid {
                 true => this.child(div().size_full()),
                 false => this.child(panel),
+            })
+            .when(fill.a > 0., |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "pane-row-hovered".into())
+                        .absolute()
+                        .inset_0()
+                        .bg(fill),
+                )
             })
             .into_any_element()
     }
@@ -925,6 +966,34 @@ pub(crate) fn same_layout(
                 })
         }
         _ => false,
+    }
+}
+
+/// Where each pane of `node` lies when `node` fills `area`, in the layout's
+/// order.
+pub(crate) fn pane_rects(
+    node: &PaneNode,
+    area: Bounds<Pixels>,
+    rects: &mut Vec<(PanelId, Bounds<Pixels>)>,
+) {
+    match node.kind() {
+        PaneRef::Tabs { panels, active_ix } => {
+            rects.extend(panels.get(active_ix).map(|panel| (*panel, area)));
+        }
+        PaneRef::Split {
+            axis,
+            children,
+            sizes,
+        } => {
+            let extent = area.size.along(axis);
+            let mut origin = area.origin;
+            for (child, share) in children.iter().zip(glide::tree_shares(sizes, extent)) {
+                let length = extent * share;
+                let size = area.size.apply_along(axis, |_| length);
+                pane_rects(child, Bounds::new(origin, size), rects);
+                origin = origin.apply_along(axis, |at| at + length);
+            }
+        }
     }
 }
 
