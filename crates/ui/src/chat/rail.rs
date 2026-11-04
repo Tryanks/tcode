@@ -663,7 +663,9 @@ impl Clock {
 impl gpui::Render for Clock {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         let now = tcode_core::project::now_secs() * 1000;
-        div().child(super::format_elapsed(now.saturating_sub(self.since)))
+        div().child(super::format_elapsed_seconds(
+            now.saturating_sub(self.since),
+        ))
     }
 }
 
