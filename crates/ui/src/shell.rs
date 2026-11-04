@@ -389,10 +389,10 @@ impl PaneControls {
     }
 }
 
-/// This window's [`PaneControls`] for the pane showing `session_id`, or the
-/// last input's; `None` where there are no panes.
+/// This window's [`PaneControls`] for `pane`, or the pane a command acts on;
+/// `None` where there are no panes.
 pub(crate) fn pane_controls(
-    session_id: Option<&str>,
+    pane: Option<Entity<ThreadPanel>>,
     window: &Window,
     cx: &App,
 ) -> Option<PaneControls> {
@@ -403,13 +403,8 @@ pub(crate) fn pane_controls(
     }
     let attachment = shell.attachment.as_ref()?;
     let panes = attachment.panes(cx);
-    let pane = session_id
-        .and_then(|session_id| {
-            panes
-                .iter()
-                .find(|pane| pane.read(cx).session_id() == Some(session_id))
-        })
-        .unwrap_or(&attachment.last_input);
+    let pane = pane.or_else(|| shell.acting_pane(window, cx))?;
+    let pane = &pane;
     let closable = pane
         .read(cx)
         .group()
@@ -432,10 +427,10 @@ pub(crate) fn pane_controls(
     })
 }
 
-/// Give the keyboard to the focused pane, as a click in it does: its
-/// composer takes the caret. A pane command raised from outside the panes
-/// then acts on that pane and leaves the keyboard there.
-pub(crate) fn focus_focused_pane(window: &mut Window, cx: &mut App) {
+/// Give the keyboard to the last input, as a click in it does: its composer
+/// takes the caret. A pane command raised from outside the panes then acts on
+/// that pane and leaves the keyboard there.
+pub(crate) fn select_last_input(window: &mut Window, cx: &mut App) {
     let Some(shell) = current_shell(cx) else {
         return;
     };
@@ -453,6 +448,30 @@ pub(crate) fn focus_focused_pane(window: &mut Window, cx: &mut App) {
     if !handle.contains_focused(window, cx) {
         window.focus(&handle, cx);
     }
+}
+
+/// A command a pane's own control raises, or that a window-wide one raises
+/// for the pane it acts on.
+#[derive(Clone, Copy)]
+pub(crate) enum PaneCommand {
+    Split(gpui_base::Placement),
+    Close,
+    CloseOthers,
+    Zoom,
+    Swap(Side),
+    Move(Side),
+}
+
+/// Run `command` on `pane`, once the dispatch that carried it ends.
+pub(crate) fn pane_command(pane: Entity<ThreadPanel>, command: PaneCommand, cx: &mut App) {
+    let Some((window, shell)) = current_window_shell(cx) else {
+        return;
+    };
+    cx.defer(move |cx| {
+        let _ = window.update(cx, |_, window, cx| {
+            shell.update(cx, |shell, cx| shell.run_on_pane(pane, command, window, cx));
+        });
+    });
 }
 
 /// Give the keyboard to the composer of the pane holding it, as a row of a
@@ -1743,18 +1762,16 @@ impl AppShell {
         Some((pane, beside))
     }
 
-    /// Split the acting pane: the new pane shows a fresh draft in the same
-    /// project, and the thread split from stays open.
+    /// Split `from`: the new pane shows a fresh draft in the same project,
+    /// and the thread split from stays open.
     fn split_pane(
         &mut self,
+        from: &Entity<ThreadPanel>,
         placement: gpui_base::Placement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(from) = self.acting_pane(window, cx) else {
-            return;
-        };
-        let Some((_, beside)) = self.add_pane(&from, placement, window, cx) else {
+        let Some((_, beside)) = self.add_pane(from, placement, window, cx) else {
             return;
         };
         if let Some(store) = self.store() {
@@ -1877,18 +1894,20 @@ impl AppShell {
             })
     }
 
-    /// Close the acting pane; its thread closes and stays in the threads
-    /// list. The keyboard moves to a neighbour at once, whose thread the
-    /// store then focuses, and the pane glides shut. The last pane stays.
-    fn close_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Close `pane`; its thread closes and stays in the threads list. The
+    /// keyboard moves to a neighbour at once and the pane glides shut. The
+    /// last pane stays.
+    fn close_pane(
+        &mut self,
+        pane: &Entity<ThreadPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.compact(cx) {
             return;
         }
-        let Some(pane) = self.acting_pane(window, cx) else {
-            return;
-        };
         self.close_pane_into(
-            &pane,
+            pane,
             |panes, at| {
                 // Base hands the keyboard on only when it removes the group,
                 // which the glide puts off; this is the order it would pick in:
@@ -2138,13 +2157,15 @@ impl AppShell {
     /// Zoom the acting pane over the column (see [`crate::panes::Zoom`]), or
     /// turn the zoomed one back into its slot from where it is; running
     /// glides land first.
-    fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_zoom(
+        &mut self,
+        pane: Entity<ThreadPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.compact(cx) {
             return;
         }
-        let Some(pane) = self.acting_pane(window, cx) else {
-            return;
-        };
         let Some(attachment) = self.attachment.as_ref() else {
             return;
         };
@@ -2252,15 +2273,17 @@ impl AppShell {
         crate::panes::neighbour(bounds[at], &bounds, side).map(|ix| panes[ix].clone())
     }
 
-    /// Close every pane but the acting one, as [`Self::close_pane`] closes
-    /// one: each glides shut and its thread closes once it is taken out.
-    fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Close every pane but `pane`, as [`Self::close_pane`] closes one: each
+    /// glides shut and its thread closes once it is taken out.
+    fn close_other_panes(
+        &mut self,
+        pane: Entity<ThreadPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.compact(cx) {
             return;
         }
-        let Some(pane) = self.acting_pane(window, cx) else {
-            return;
-        };
         let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
@@ -2274,16 +2297,22 @@ impl AppShell {
         self.pane_entered(pane, cx);
     }
 
-    /// The acting pane and its neighbour on `side` exchange their
-    /// conversations, each with its own composer, scroll and expanded rows,
+    /// `from` and its neighbour on `side` exchange their conversations, each with its own composer, scroll and expanded rows,
     /// so a half-written message stays with its thread; the panes, their
-    /// slots and colours stay where they are. The keyboard stays in the
-    /// acting pane, or with `follow` goes with its thread to the neighbour.
+    /// slots and colours stay where they are. The keyboard stays in `from`,
+    /// or with `follow` goes with its thread to the neighbour.
     /// Neither conversation closes. Each conversation shown travels from
     /// where it was drawn into its new pane (see
     /// [`ThreadPanel::replace_chat`]); a waiting pane's has nothing shown to
     /// carry.
-    fn swap_pane(&mut self, side: Side, follow: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn swap_pane(
+        &mut self,
+        from: Entity<ThreadPanel>,
+        side: Side,
+        follow: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.compact(cx)
             || self
                 .attachment
@@ -2292,9 +2321,6 @@ impl AppShell {
         {
             return;
         }
-        let Some(from) = self.acting_pane(window, cx) else {
-            return;
-        };
         let Some(to) = self.neighbour_of(&from, side, cx) else {
             return;
         };
@@ -2311,15 +2337,26 @@ impl AppShell {
         self.pane_entered(focused, cx);
     }
 
-    /// The acting pane's thread trades places with its neighbour's on
-    /// `side`, as [`Self::swap_pane`] exchanges them, and the keyboard goes
-    /// with it. A pane waiting for a thread has none to move.
-    fn move_thread_to_pane(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .acting_pane(window, cx)
-            .is_some_and(|pane| pane.read(cx).session_id().is_some())
-        {
-            self.swap_pane(side, true, window, cx);
+    /// What a pane command does to `pane`.
+    fn run_on_pane(
+        &mut self,
+        pane: Entity<ThreadPanel>,
+        command: PaneCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            PaneCommand::Split(placement) => self.split_pane(&pane, placement, window, cx),
+            PaneCommand::Close => self.close_pane(&pane, window, cx),
+            PaneCommand::CloseOthers => self.close_other_panes(pane, window, cx),
+            PaneCommand::Zoom => self.toggle_zoom(pane, window, cx),
+            PaneCommand::Swap(side) => self.swap_pane(pane, side, false, window, cx),
+            // `pane`'s thread trades places with its neighbour's and the
+            // keyboard goes with it. A pane waiting for a thread has none.
+            PaneCommand::Move(side) if pane.read(cx).session_id().is_some() => {
+                self.swap_pane(pane, side, true, window, cx)
+            }
+            PaneCommand::Move(_) => {}
         }
     }
 
@@ -2717,7 +2754,7 @@ impl AppShell {
         for (pane, edges) in edges {
             let close = crate::motion::shown(
                 gpui::ElementId::NamedInteger("pane-close".into(), pane.entity_id().as_u64()),
-                (among_others && !compact).then(|| pane.focus_handle(cx)),
+                (among_others && !compact).then(|| pane.downgrade()),
                 SHOW,
                 window,
                 cx,
@@ -2725,7 +2762,7 @@ impl AppShell {
             pane.update(cx, |pane, cx| pane.set_among_others(among_others, cx));
             pane.read(cx).chat().update(cx, |chat, cx| {
                 chat.set_edges(edges, cx);
-                chat.set_pane_close(close, cx);
+                chat.set_pane(pane.downgrade(), close, cx);
             });
         }
     }
@@ -3014,15 +3051,18 @@ pub(crate) fn init_pane_actions(cx: &mut App) {
             });
         });
     }
+    fn act_on_pane(cx: &mut App, command: PaneCommand) {
+        act(cx, move |shell, window, cx| {
+            if let Some(pane) = shell.acting_pane(window, cx) {
+                shell.run_on_pane(pane, command, window, cx);
+            }
+        });
+    }
     cx.on_action(|_: &SplitRight, cx| {
-        act(cx, |shell, window, cx| {
-            shell.split_pane(gpui_base::Placement::Right, window, cx)
-        })
+        act_on_pane(cx, PaneCommand::Split(gpui_base::Placement::Right))
     });
     cx.on_action(|_: &SplitDown, cx| {
-        act(cx, |shell, window, cx| {
-            shell.split_pane(gpui_base::Placement::Bottom, window, cx)
-        })
+        act_on_pane(cx, PaneCommand::Split(gpui_base::Placement::Bottom))
     });
     cx.on_action(|action: &OpenInNewPane, cx| {
         let session_id = action.0.clone();
@@ -3044,21 +3084,11 @@ pub(crate) fn init_pane_actions(cx: &mut App) {
             shell.apply_layout(layout, window, cx)
         })
     });
-    cx.on_action(|_: &ClosePane, cx| act(cx, AppShell::close_pane));
-    cx.on_action(|_: &CloseOtherPanes, cx| act(cx, AppShell::close_other_panes));
-    cx.on_action(|_: &ZoomPane, cx| act(cx, AppShell::toggle_zoom));
-    cx.on_action(|swap: &SwapPane, cx| {
-        let side = swap.0;
-        act(cx, move |shell, window, cx| {
-            shell.swap_pane(side, false, window, cx)
-        })
-    });
-    cx.on_action(|to: &MoveThreadToPane, cx| {
-        let side = to.0;
-        act(cx, move |shell, window, cx| {
-            shell.move_thread_to_pane(side, window, cx)
-        })
-    });
+    cx.on_action(|_: &ClosePane, cx| act_on_pane(cx, PaneCommand::Close));
+    cx.on_action(|_: &CloseOtherPanes, cx| act_on_pane(cx, PaneCommand::CloseOthers));
+    cx.on_action(|_: &ZoomPane, cx| act_on_pane(cx, PaneCommand::Zoom));
+    cx.on_action(|swap: &SwapPane, cx| act_on_pane(cx, PaneCommand::Swap(swap.0)));
+    cx.on_action(|to: &MoveThreadToPane, cx| act_on_pane(cx, PaneCommand::Move(to.0)));
     cx.on_action(|direction: &FocusPane, cx| {
         let direction = *direction;
         act(cx, move |shell, window, cx| {
@@ -10227,14 +10257,6 @@ pub(crate) mod tests {
         settle_panes(cx);
     }
 
-    /// Whether the pane the shell acts on is the one at `index`.
-    fn acting_on_pane(shell: &Entity<AppShell>, index: usize, cx: &VisualTestContext) -> bool {
-        shell.read_with(cx, |shell, cx| {
-            let attachment = shell.attachment.as_ref().expect("attached");
-            attachment.last_input == attachment.all_panes(cx)[index]
-        })
-    }
-
     /// The panel `session_id`'s conversation has recorded, if it is open.
     fn panel_of(
         store: &Entity<WorkspaceStore>,
@@ -10679,7 +10701,7 @@ pub(crate) mod tests {
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
         settle_panes(cx);
-        assert!(acting_on_pane(&shell, 1, cx));
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
     }
 
     /// The way back to an agent's lead in the header of the pane without the

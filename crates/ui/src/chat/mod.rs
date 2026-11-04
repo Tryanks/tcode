@@ -155,7 +155,9 @@ pub struct ChatView {
     /// The close button at the header's right end, while the conversation's
     /// pane shares the column: the pane's focus handle, faded in and out by
     /// the shell, which samples it above the dock.
-    pane_close: Option<crate::motion::Shown<gpui::FocusHandle>>,
+    pane_close: Option<crate::motion::Shown<gpui::WeakEntity<crate::panes::ThreadPanel>>>,
+    /// The pane drawing this conversation, for the header's pane commands.
+    pane: Option<gpui::WeakEntity<crate::panes::ThreadPanel>>,
     /// The header's scroll, kept by the view rather than by the header's
     /// element: the dock draws a pane's chat under a new parent whenever the
     /// panes' layout changes (see `panes::ThreadPanes`), which would scroll
@@ -472,6 +474,7 @@ impl ChatView {
             session_id,
             edges: WindowEdges::BOTH,
             pane_close: None,
+            pane: None,
             header_scroll: gpui::ScrollHandle::default(),
             motion: crate::motion::owned::Owned::in_scene(&scene),
             scene_shown: false,
@@ -580,15 +583,21 @@ impl ChatView {
         }
     }
 
-    pub(crate) fn set_pane_close(
+    pub(crate) fn set_pane(
         &mut self,
-        close: Option<crate::motion::Shown<gpui::FocusHandle>>,
+        pane: gpui::WeakEntity<crate::panes::ThreadPanel>,
+        close: Option<crate::motion::Shown<gpui::WeakEntity<crate::panes::ThreadPanel>>>,
         cx: &mut Context<Self>,
     ) {
+        self.pane = Some(pane);
         if self.pane_close != close {
             self.pane_close = close;
             cx.notify();
         }
+    }
+
+    pub(super) fn pane(&self) -> Option<Entity<crate::panes::ThreadPanel>> {
+        self.pane.as_ref()?.upgrade()
     }
 
     /// Whether the keyboard is in the composer's field, which its card shows.

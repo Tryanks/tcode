@@ -723,7 +723,7 @@ impl CommandPalette {
             }
             Action::Pane(action) => {
                 self.close(cx);
-                crate::shell::focus_focused_pane(window, cx);
+                crate::shell::select_last_input(window, cx);
                 window.dispatch_action(action.boxed_clone(), cx);
             }
             Action::OpenThread { session_id, turn } => {

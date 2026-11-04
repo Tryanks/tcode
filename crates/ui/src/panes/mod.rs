@@ -33,6 +33,7 @@ pub(crate) use zoom::{PaneZoom, Zoom};
 
 use crate::chat::{ChatView, WindowEdges};
 use crate::icon::{Icon, IconName};
+use crate::shell::PaneCommand;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::Button;
 
@@ -473,12 +474,9 @@ impl ThreadPanel {
     }
 
     /// A pane action raised inside the pane acts on it, wherever the keyboard
-    /// was: the shell acts on the pane holding the focus.
-    fn claim(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus_handle.contains_focused(window, cx) {
-            window.focus(&self.focus_handle, cx);
-        }
-        cx.propagate();
+    /// was.
+    fn act(&self, command: PaneCommand, cx: &mut Context<Self>) {
+        crate::shell::pane_command(cx.entity(), command, cx);
     }
 
     /// The chat on its way in, drawn over the column where it is now, laid
@@ -580,10 +578,7 @@ impl Render for ThreadPanel {
                             .absolute()
                             .top(spacing)
                             .right(spacing)
-                            .child(close_button(
-                                "waiting-pane-close",
-                                self.focus_handle.clone(),
-                            )),
+                            .child(close_button("waiting-pane-close", cx.weak_entity())),
                     )
                     .into_any_element(),
             ));
@@ -634,13 +629,23 @@ impl Render for ThreadPanel {
                     window.request_animation_frame();
                 }
             })
-            .on_action(cx.listener(|this, _: &SplitRight, window, cx| this.claim(window, cx)))
-            .on_action(cx.listener(|this, _: &SplitDown, window, cx| this.claim(window, cx)))
-            .on_action(cx.listener(|this, _: &ClosePane, window, cx| this.claim(window, cx)))
-            .on_action(cx.listener(|this, _: &CloseOtherPanes, window, cx| this.claim(window, cx)))
-            .on_action(cx.listener(|this, _: &ZoomPane, window, cx| this.claim(window, cx)))
-            .on_action(cx.listener(|this, _: &SwapPane, window, cx| this.claim(window, cx)))
-            .on_action(cx.listener(|this, _: &MoveThreadToPane, window, cx| this.claim(window, cx)))
+            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+                this.act(PaneCommand::Split(gpui_base::Placement::Right), cx)
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
+                this.act(PaneCommand::Split(gpui_base::Placement::Bottom), cx)
+            }))
+            .on_action(cx.listener(|this, _: &ClosePane, _, cx| this.act(PaneCommand::Close, cx)))
+            .on_action(cx.listener(|this, _: &CloseOtherPanes, _, cx| {
+                this.act(PaneCommand::CloseOthers, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ZoomPane, _, cx| this.act(PaneCommand::Zoom, cx)))
+            .on_action(
+                cx.listener(|this, swap: &SwapPane, _, cx| this.act(PaneCommand::Swap(swap.0), cx)),
+            )
+            .on_action(cx.listener(|this, to: &MoveThreadToPane, _, cx| {
+                this.act(PaneCommand::Move(to.0), cx)
+            }))
             .child(
                 content
                     .render(layers)
@@ -670,16 +675,14 @@ impl Panel for ThreadPanel {
 }
 
 /// A pane's close button, at the right end of its chat header or in the
-/// corner of a waiting pane: it gives the keyboard to the pane `pane` focuses
-/// and raises [`ClosePane`] there, as the pane menu's row does, so the pane
-/// glides out.
-pub(crate) fn close_button(id: &'static str, pane: FocusHandle) -> Button {
-    crate::widgets::button::close_button(id, crate::tr!("panes.close")).on_click(
-        move |_, window, cx| {
-            window.focus(&pane, cx);
-            window.dispatch_action(Box::new(ClosePane), cx);
-        },
-    )
+/// corner of a waiting pane: the pane glides out, as the pane menu's row
+/// closes it.
+pub(crate) fn close_button(id: &'static str, pane: WeakEntity<ThreadPanel>) -> Button {
+    crate::widgets::button::close_button(id, crate::tr!("panes.close")).on_click(move |_, _, cx| {
+        if let Some(pane) = pane.upgrade() {
+            crate::shell::pane_command(pane, PaneCommand::Close, cx);
+        }
+    })
 }
 
 /// Where a thread dragged over the column would land: the slot it would
