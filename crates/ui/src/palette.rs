@@ -423,7 +423,7 @@ impl CommandPalette {
             );
         }
         let pane = |action: Box<dyn gpui::Action>| Action::Pane(action.into());
-        if let Some(panes) = crate::shell::pane_controls(None, window, cx) {
+        if let Some(panes) = crate::shell::pane_controls(window, cx) {
             use crate::panes::{
                 CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, SplitDown, SplitRight,
                 SwapPane, ZoomPane,

@@ -870,8 +870,6 @@ impl ChatView {
                         },
                         agents_cue_dot(agents_cue.flatten(), &motion, window, cx),
                         cwd.clone(),
-                        window,
-                        cx,
                     ),
                 ));
             }
@@ -997,7 +995,7 @@ impl ChatView {
                                         })),
                                 )
                                 .children(
-                                    crate::shell::pane_controls(self.pane(), window, cx)
+                                    self.pane_controls
                                         .map(|panes| pane_menu(panes, &self.motion)),
                                 ),
                         )
@@ -1092,11 +1090,9 @@ impl ChatView {
         panels: HeaderPanels,
         agents_cue: Option<AnyElement>,
         cwd: Option<PathBuf>,
-        window: &Window,
-        cx: &App,
     ) -> AnyElement {
         use crate::widgets::menu::{CopyText, OpenPathInZed, RevealPath};
-        let panes = crate::shell::pane_controls(self.pane(), window, cx);
+        let panes = self.pane_controls;
         let cwd = cwd.map(|cwd| cwd.to_string_lossy().into_owned());
         // The panels every thread has come first, so their rows keep their
         // places.

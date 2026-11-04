@@ -3346,7 +3346,7 @@ impl SessionsSidebar {
                     .upgrade()
                     .filter(|_| !settled && scope.is_full())
                     .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
-                let open_beside = crate::shell::pane_controls(None, window, cx)
+                let open_beside = crate::shell::pane_controls(window, cx)
                     .map(|panes| panes.split_right || crate::shell::shown_in_pane(&id, cx));
                 menu.when_some(open_beside, |menu, enabled| {
                     menu.menu_with_enable(
