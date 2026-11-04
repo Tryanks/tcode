@@ -13,6 +13,9 @@ use super::nodes::{
 pub(crate) struct ParsedDocument {
     pub(crate) root: BlockNode,
     pub(crate) root_starts: Option<Vec<usize>>,
+    /// The source defines a link reference, which a link in any of its
+    /// blocks, before or after the definition, resolves against.
+    pub(crate) defines_links: bool,
 }
 
 #[cfg(test)]
@@ -46,7 +49,22 @@ pub(crate) fn parse_document(source: &str) -> ParsedDocument {
     ParsedDocument {
         root: BlockNode::Root { children },
         root_starts: positions_available.then_some(root_starts),
+        defines_links: defines_links(&arena, doc_ref),
     }
+}
+
+/// Whether a link reference definition sits in `container`, at any depth:
+/// rushdown keeps one where it was written, in a quote or a list item too.
+fn defines_links(arena: &Arena, container: NodeRef) -> bool {
+    arena[container]
+        .children(arena)
+        .any(|child| match arena[child].kind_data() {
+            KindData::LinkReferenceDefinition(_) => true,
+            KindData::Blockquote(_) | KindData::List(_) | KindData::ListItem(_) => {
+                defines_links(arena, child)
+            }
+            _ => false,
+        })
 }
 
 fn block_node(

@@ -100,7 +100,9 @@ pub struct MarkdownState {
     parsed: Rc<BlockNode>,
     items: Rc<[RootItem]>,
     root_block_starts: Option<Vec<usize>>,
-    has_potential_link_reference_definition: bool,
+    /// The text defines a link reference, so an append is parsed with the
+    /// whole text: a definition reaches links in blocks the tail does not hold.
+    defines_links: bool,
     pub(super) list_state: ListState,
     item_heights: Rc<RefCell<render::ItemHeights>>,
     image_sizes: HashMap<String, Size<Pixels>>,
@@ -175,9 +177,7 @@ impl MarkdownState {
             text: text.to_string(),
             parsed: Rc::new(parsed),
             root_block_starts: parsed_document.root_starts,
-            has_potential_link_reference_definition: contains_potential_link_reference_definition(
-                text,
-            ),
+            defines_links: parsed_document.defines_links,
             // Measure every item once so the list has a stable total height,
             // then construct/layout/paint only the visible items on warm frames.
             list_state: ListState::new(items.len(), ListAlignment::Top, px(1000.)).measure_all(),
@@ -208,9 +208,6 @@ impl MarkdownState {
         if text.is_empty() {
             return;
         }
-        self.has_potential_link_reference_definition |=
-            contains_potential_link_reference_definition(text)
-                || self.text.ends_with(']') && text.starts_with(':');
         self.text.push_str(text);
         self.reparse_append(cx);
     }
@@ -236,8 +233,6 @@ impl MarkdownState {
         self.diagrams = mermaid::Diagrams::default();
         self.text.clear();
         self.text.push_str(text);
-        self.has_potential_link_reference_definition =
-            contains_potential_link_reference_definition(text);
         self.reparse_reset(cx);
     }
 
@@ -537,8 +532,15 @@ impl MarkdownState {
 
     fn reparse_append(&mut self, cx: &mut Context<Self>) {
         self.prepare_reparse();
-        let reparse_start = self.incremental_reparse_start();
-        let parsed_document = super::parse::parse_document(&self.text[reparse_start..]);
+        let mut reparse_start = self.incremental_reparse_start();
+        let mut parsed_document = super::parse::parse_document(&self.text[reparse_start..]);
+        if reparse_start > 0 && parsed_document.defines_links {
+            reparse_start = 0;
+            parsed_document = super::parse::parse_document(&self.text);
+        }
+        if reparse_start == 0 {
+            self.defines_links = parsed_document.defines_links;
+        }
         #[cfg(test)]
         {
             self.last_reparse_bytes = self.text.len() - reparse_start;
@@ -645,7 +647,7 @@ impl MarkdownState {
     }
 
     fn incremental_reparse_start(&self) -> usize {
-        if self.has_potential_link_reference_definition {
+        if self.defines_links {
             return 0;
         }
         let block_count = match &*self.parsed {
@@ -669,6 +671,7 @@ impl MarkdownState {
         self.items = root_items(&parsed_document.root);
         self.parsed = Rc::new(parsed_document.root);
         self.root_block_starts = parsed_document.root_starts;
+        self.defines_links = parsed_document.defines_links;
         #[cfg(test)]
         {
             self.last_reparse_bytes = self.text.len();
@@ -831,10 +834,6 @@ fn root_items(root: &BlockNode) -> Rc<[RootItem]> {
     items.into()
 }
 
-fn contains_potential_link_reference_definition(source: &str) -> bool {
-    source.contains("]:")
-}
-
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let first_draw = !self.drawn;
@@ -954,6 +953,9 @@ mod tests {
             "| left | center | right |\n| :--- | :---: | ---: |\n| a | b | c |\n",
             "An earlier [reference] is resolved later.\n\n[reference]: https://example.com \"title\"\n",
             "An earlier [reference].\n\n[reference]: https://example.com\n\nTail grows",
+            "An earlier [reference] is defined in a quote.\n\n> [reference]: https://example.com\n",
+            "```python\ndef f(x) -> list[str]:\n    return x\n```\n\nA [label] after code.\n\nMore.\n",
+            "A [gone] link.\n\n[gone]: /url \"title\" stops being a definition\n",
         ];
 
         for document in documents {
@@ -996,9 +998,11 @@ mod tests {
     fn append_reparses_only_the_last_root_block(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(super::super::init);
-        let document = (0..120)
-            .map(|ix| format!("## Closed block {ix}\n\nParagraph {ix}.\n\n"))
-            .collect::<String>();
+        // Code reading `]:` defines no link.
+        let document = "```python\ndef f(x) -> list[str]:\n    pass\n```\n\n".to_string()
+            + &(0..120)
+                .map(|ix| format!("## Closed block {ix}\n\nParagraph {ix}.\n\n"))
+                .collect::<String>();
         assert!(document.len() > 2_000);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&document, cx)));
 
