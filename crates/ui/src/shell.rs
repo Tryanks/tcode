@@ -1432,23 +1432,35 @@ impl AppShell {
     /// The keyboard entered `pane`, its drawer included: the next thread
     /// lands there, and the store acts on its thread.
     fn pane_entered(&mut self, pane: Entity<ThreadPanel>, cx: &mut Context<Self>) {
-        let Some(attachment) = &mut self.attachment else {
-            return;
-        };
-        if !attachment.panes(cx).contains(&pane) {
+        if self
+            .attachment
+            .as_ref()
+            .is_none_or(|attachment| !attachment.panes(cx).contains(&pane))
+        {
             return;
         }
-        attachment.last_input = pane.clone();
-        let session_id = pane.read(cx).session_id().map(str::to_owned);
-        attachment
-            .link
-            .store
-            .update(cx, |store, cx| match session_id {
-                Some(session_id) => store.focus_thread(&session_id, cx),
-                None if store.legacy_focus().is_some() => store.release_focus(cx),
-                None => {}
-            });
+        self.set_last_input(&pane, cx);
+        if let (Some(store), Some(session_id)) =
+            (self.store(), pane.read(cx).session_id().map(str::to_owned))
+        {
+            store.update(cx, |store, cx| store.focus_thread(&session_id, cx));
+        }
         cx.notify();
+    }
+
+    /// `pane` is the last input. Coming from another pane, the user has moved
+    /// on: a draft still in flight for that one lands nowhere.
+    fn set_last_input(&mut self, pane: &Entity<ThreadPanel>, cx: &mut Context<Self>) {
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        if attachment.last_input != *pane {
+            attachment.last_input = pane.clone();
+            attachment
+                .link
+                .store
+                .update(cx, |store, _| store.selection_moved_on());
+        }
     }
 
     /// The only rebind of a pane: it shows `session_id`, open from here on,
@@ -1564,7 +1576,7 @@ impl AppShell {
             attachment.zoom.zoom_out();
         }
         let moved = attachment.last_input != *pane;
-        attachment.last_input = pane.clone();
+        self.set_last_input(pane, cx);
         self.blur_navigation(window, cx);
         self.window_state
             .update(cx, |state, cx| state.leave_route_for_chat(cx));
@@ -1700,7 +1712,7 @@ impl AppShell {
             );
         });
         self.glide_after_edit(before, cx);
-        self.attachment.as_mut()?.last_input = pane.clone();
+        self.set_last_input(&pane, cx);
         window.focus(&pane.focus_handle(cx), cx);
         cx.notify();
         Some((pane, beside))
@@ -1722,7 +1734,6 @@ impl AppShell {
         };
         if let Some(store) = self.store() {
             store.update(cx, |store, cx| {
-                store.release_focus(cx);
                 store.start_draft_beside(beside.as_deref(), cx);
             });
         }
@@ -2483,7 +2494,7 @@ impl AppShell {
     /// [`crate::panes::LayoutSwap`]): the column fades out, the layout is put
     /// in at the bottom of the fade and the column fades back in. A layout that
     /// would leave every pane where it is drawn, none zoomed, changes
-    /// nothing. The focused pane keeps the keyboard.
+    /// nothing. The last input keeps the keyboard.
     fn apply_layout(&mut self, layout: PaneLayout, window: &mut Window, cx: &mut Context<Self>) {
         let Some(plan) = self.plan_layout(layout, window, cx) else {
             return;
@@ -2554,7 +2565,7 @@ impl AppShell {
 
     /// Put `layout` in at once, as the panes are now: running glides land,
     /// the zoomed pane is back in its slot, and the panes the layout leaves
-    /// out close with their threads; the focused pane keeps the keyboard.
+    /// out close with their threads; the last input keeps the keyboard.
     fn install_layout(&mut self, layout: PaneLayout, window: &mut Window, cx: &mut Context<Self>) {
         self.land_glides(window, cx);
         let Some(plan) = self.plan_layout(layout, window, cx) else {
@@ -7588,13 +7599,25 @@ mod tests {
         })
     }
 
-    /// Answer the scratch draft the client asked for with `draft`.
+    /// Answer the scratch draft the client asked for with `draft`, and serve
+    /// it.
     fn answer_draft(
         shell: &Entity<AppShell>,
         host: &MountedShell,
         draft: &str,
         cx: &mut VisualTestContext,
     ) {
+        ack_draft(host, draft);
+        await_restore_update(shell, cx, |store| {
+            store.legacy_focus().as_deref() == Some(draft)
+        });
+        serve_thread(host, draft);
+        await_restore_update(shell, cx, |store| !store.chat_loading());
+        draw(cx);
+    }
+
+    /// The host names `draft` as the scratch draft the client asked for.
+    fn ack_draft(host: &MountedShell, draft: &str) {
         let request = std::iter::from_fn(|| host.outgoing.try_recv().ok())
             .map(|line| decode_client_line(&line).expect("client line"))
             .find(|message| {
@@ -7615,12 +7638,6 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(shell, cx, |store| {
-            store.legacy_focus().as_deref() == Some(draft)
-        });
-        serve_thread(host, draft);
-        await_restore_update(shell, cx, |store| !store.chat_loading());
-        draw(cx);
     }
 
     /// Alt-click the threads list's `row`, showing `id`, which opens it in a
@@ -9868,6 +9885,25 @@ mod tests {
             store.read_with(cx, |store, _| store.legacy_focus()),
             Some("thread-1".into())
         );
+    }
+
+    /// The keyboard leaving a new pane before its draft is answered drops the
+    /// draft: the user has moved on, and it would land in a pane left behind.
+    #[gpui::test]
+    fn leaving_a_new_pane_drops_its_draft(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        ack_draft(&host, "draft-1");
+        cx.run_until_parked();
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
     }
 
     /// Beside a draft no draft is asked for, since the host would answer with

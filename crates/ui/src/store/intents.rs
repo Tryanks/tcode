@@ -440,7 +440,7 @@ impl WorkspaceStore {
         self.dispatch(Command::RegenerateSessionTitle { session_id });
     }
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
-        self.create_and_select(Command::ForkThread { id }, true, cx);
+        self.create_and_show(Command::ForkThread { id }, true, cx);
     }
     pub fn merge_worktree(&mut self, session_id: String) {
         self.dispatch(Command::MergeWorktree { session_id });
@@ -665,6 +665,12 @@ impl WorkspaceStore {
         self.sync_terminal_topics();
         self.sync_conversation_ui(session_id);
     }
+    /// The user moved to another pane, which a reply in flight no longer
+    /// lands in.
+    pub(crate) fn selection_moved_on(&mut self) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+    }
+
     /// Show a thread where the user is: the shell places it, opens it and
     /// gives it the keyboard.
     pub fn show_thread(&mut self, session_id: String, cx: &mut Context<Self>) {
@@ -933,10 +939,10 @@ impl WorkspaceStore {
     }
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
         self.remember_project(Some(project_id.clone()));
-        self.create_and_select(Command::StartDraft { project_id, cwd }, true, cx);
+        self.create_and_show(Command::StartDraft { project_id, cwd }, true, cx);
     }
     pub fn start_scratch_draft(&mut self, cx: &mut Context<Self>) {
-        self.create_and_select(Command::StartScratchDraft, true, cx);
+        self.create_and_show(Command::StartScratchDraft, true, cx);
     }
     /// A project's draft for a workspace left with nothing to show, which
     /// takes neither the compact stack nor the keyboard.
@@ -947,7 +953,7 @@ impl WorkspaceStore {
         cx: &mut Context<Self>,
     ) {
         self.remember_project(Some(project_id.clone()));
-        self.create_and_select(Command::StartDraft { project_id, cwd }, false, cx);
+        self.create_and_show(Command::StartDraft { project_id, cwd }, false, cx);
     }
     /// Start a draft in the project `session_id` belongs to, or a scratch
     /// draft when it belongs to none. Beside a draft nothing starts: the host
@@ -977,7 +983,9 @@ impl WorkspaceStore {
             None => self.start_scratch_draft(cx),
         }
     }
-    fn create_and_select(&mut self, command: Command, asked: bool, cx: &mut Context<Self>) {
+    /// Ask the host for a thread and show what it answers, unless the user
+    /// has moved on by then.
+    fn create_and_show(&mut self, command: Command, asked: bool, cx: &mut Context<Self>) {
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         let request_generation = self.creation_request_generation;
         let selection_generation = self.selection_generation;

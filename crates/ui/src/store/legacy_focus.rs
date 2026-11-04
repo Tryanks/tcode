@@ -158,15 +158,6 @@ impl WorkspaceStore {
         cx.notify();
     }
 
-    /// Focus nothing while every thread stays open, for a surface about to
-    /// show a thread that does not exist yet.
-    pub(crate) fn release_focus(&mut self, cx: &mut Context<Self>) {
-        self.selection_generation = self.selection_generation.wrapping_add(1);
-        if self.focused_session_id.take().is_some() {
-            cx.notify();
-        }
-    }
-
     /// Act on an open thread, which another surface shows, leaving every
     /// other thread as it is. A thread that is not open is not focused.
     pub(crate) fn focus_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
