@@ -698,9 +698,21 @@ impl ChatView {
             Some((tint, _)) => crate::material::text_over_tint(text, tint, cx),
             None => text,
         };
+        // Beside the current pane the title recedes; the pane's content stays
+        // as it is.
         let (muted, foreground) = (
             on_tint(cx.theme().muted_foreground),
-            on_tint(cx.theme().foreground),
+            on_tint(motion.transition(
+                "title-colour",
+                if self.title_recedes {
+                    cx.theme().muted_foreground
+                } else {
+                    cx.theme().foreground
+                },
+                GLIDE,
+                window,
+                cx,
+            )),
         );
         let title_el = if is_draft {
             crate::material::bar_title(crate::tr!("chat.new_thread"), cx).text_color(muted)

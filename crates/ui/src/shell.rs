@@ -542,26 +542,6 @@ pub(crate) fn pane_colour(session_id: &str, cx: &App) -> Option<gpui::Hsla> {
     Some(crate::material::pane_colour(slot, cx))
 }
 
-/// The thread of the conversation holding the keyboard: in its composer, the
-/// card of an agent beside it, or its drawer. With the keyboard anywhere else
-/// (a timeline, a header, the terminal, the palette) there is none.
-///
-/// Read from the window's focus at render time: every focus change redraws
-/// the window (`Window::focus` and `Window::blur` refresh it), and the
-/// composer's own hairline reads the same focus, so the two never disagree.
-/// Like that hairline, and a gpui-base field's focus style, it stays while
-/// the window is inactive.
-pub(crate) fn selected_input(window: &Window, cx: &App) -> Option<String> {
-    let shell = current_shell(cx)?;
-    let panes = shell.read(cx).attachment.as_ref()?.panes(cx);
-    panes
-        .iter()
-        .map(|pane| pane.read(cx))
-        .find(|pane| pane.holds_input(window, cx))?
-        .session_id()
-        .map(str::to_owned)
-}
-
 /// The thread of the current pane, for what acts on the whole window.
 pub(crate) fn current_thread(cx: &App) -> Option<String> {
     current_shell(cx)?.read(cx).page_thread(cx)
@@ -2743,6 +2723,7 @@ impl AppShell {
             .collect();
         let among_others = edges.len() > 1;
         for (pane, edges) in edges {
+            let recedes = among_others && !compact && pane != attachment.current_pane;
             let close = crate::motion::shown(
                 gpui::ElementId::NamedInteger("pane-close".into(), pane.entity_id().as_u64()),
                 (among_others && !compact).then(|| pane.downgrade()),
@@ -2753,8 +2734,38 @@ impl AppShell {
             pane.update(cx, |pane, cx| pane.set_among_others(among_others, cx));
             pane.read(cx).chat().update(cx, |chat, cx| {
                 chat.set_edges(edges, cx);
+                chat.set_title_recedes(recedes, cx);
                 chat.set_pane(pane.downgrade(), close, cx);
             });
+        }
+        let shown = self.shown_threads(cx);
+        attachment
+            .sidebar
+            .update(cx, |sidebar, cx| sidebar.set_shown(shown, cx));
+    }
+
+    /// What the threads list marks: nothing on a phone, nor on a route
+    /// without the chat column, and of a zoomed column only the zoomed pane,
+    /// the others being covered.
+    fn shown_threads(&self, cx: &App) -> crate::sidebar::ShownThreads {
+        let Some(attachment) = self.attachment.as_ref() else {
+            return Default::default();
+        };
+        if self.compact(cx) || self.window_state.read(cx).route() != Route::Chat {
+            return Default::default();
+        }
+        let store = attachment.link.store.read(cx);
+        let row = |pane: &Entity<ThreadPanel>| {
+            let thread = pane.read(cx).session_id()?;
+            Some(store.roster_row(thread))
+        };
+        let panes = match attachment.zoom.pane().filter(|_| attachment.zoom.is_zoomed()) {
+            Some(zoomed) => vec![zoomed.clone()],
+            None => attachment.panes(cx),
+        };
+        crate::sidebar::ShownThreads {
+            current: row(&attachment.current_pane),
+            shown: panes.iter().filter_map(row).collect(),
         }
     }
 }
@@ -8055,7 +8066,9 @@ pub(crate) mod tests {
                     .read(cx)
                     .chat()
                     .read(cx)
-                    .composer_has_keyboard(window, cx)
+                    .composer()
+                    .read(cx)
+                    .has_keyboard(window, cx)
             })
         };
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
@@ -12048,10 +12061,51 @@ pub(crate) mod tests {
         })
     }
 
-    /// In a single pane too, a conversation lights up while the keyboard is
-    /// in its composer, an agent's beside it, or its drawer, and only then.
+    /// The composers drawn with the hairline of the one holding the keyboard.
+    fn hairlines(cx: &mut VisualTestContext) -> usize {
+        cx.update(|window, cx| {
+            let primary = cx.theme().primary;
+            let mut cards: Vec<_> = window
+                .painted_quads()
+                .iter()
+                .filter(|quad| {
+                    quad.border_widths.left.as_f32() > 0. && quad.border_color == primary
+                })
+                .map(|quad| quad.bounds)
+                .collect();
+            cards.dedup();
+            cards.len()
+        })
+    }
+
+    /// Whether the keyboard is in the composer of pane `pane`, in the
+    /// layout's order.
+    fn composer_has_keyboard(
+        shell: &Entity<AppShell>,
+        pane: usize,
+        cx: &mut VisualTestContext,
+    ) -> bool {
+        cx.update(|window, cx| {
+            shell
+                .read(cx)
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .all_panes(cx)[pane]
+                .read(cx)
+                .chat()
+                .read(cx)
+                .composer()
+                .read(cx)
+                .has_keyboard(window, cx)
+        })
+    }
+
+    /// One conversation on screen is simply current: its row stays lit
+    /// wherever the keyboard goes, an agent beside it lights the same row,
+    /// and a route without the conversation lights none.
     #[gpui::test]
-    fn a_conversation_lights_up_while_it_holds_the_keyboard(cx: &mut TestAppContext) {
+    fn a_lone_panes_row_stays_lit_wherever_the_keyboard_goes(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_lead_with_agent(cx);
         let store = store_of(&shell, cx);
@@ -12064,18 +12118,32 @@ pub(crate) mod tests {
         assert_eq!(settled(cx), lit, "the composer");
 
         cx.update(|window, cx| window.blur(cx));
-        assert_eq!(settled(cx), 0., "nothing holds the keyboard");
+        assert_eq!(settled(cx), lit, "nothing holds the keyboard");
 
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
         });
         draw(cx);
-        assert_eq!(settled(cx), 0., "a docked panel leaves the keyboard alone");
+        assert_eq!(settled(cx), lit, "a docked panel leaves the keyboard alone");
         let panel = cx.debug_bounds("right-panel").expect("the drawer");
         cx.simulate_click(panel.center(), gpui::Modifiers::default());
         assert_eq!(settled(cx), lit, "its drawer");
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
+        });
+        settle_panes(cx);
+
+        store.update(cx, |store, cx| {
+            store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
+        });
+        settle_panes(cx);
+        assert!(
+            !composer_has_keyboard(&shell, 0, cx),
+            "the terminal took the keyboard"
+        );
+        assert_eq!(settled(cx), lit, "its terminal");
+        store.update(cx, |store, cx| {
+            store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
         });
         settle_panes(cx);
 
@@ -12093,66 +12161,91 @@ pub(crate) mod tests {
         draw(cx);
         serve_thread(&host, "agent-1");
         await_restore_update(&shell, cx, |store| store.timeline_settled_for("agent-1"));
-        // Its composer takes the keyboard as it is drawn, and the fill then
-        // glides in.
-        settle_panes(cx);
         assert_eq!(settled(cx), lit, "the agent beside it lights its lead");
 
-        shell
-            .read_with(cx, |shell, _| shell.window_state())
-            .update(cx, |state, cx| state.open_palette(cx));
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.open_palette(cx));
         draw(cx);
-        assert_eq!(settled(cx), 0., "the palette belongs to no conversation");
+        assert_eq!(settled(cx), lit, "under the palette");
+        state.update(cx, |state, cx| state.close_palette(cx));
+        settle_panes(cx);
+
+        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        draw(cx);
+        assert_eq!(settled(cx), 0., "no conversation is on screen");
     }
 
-    /// Among several panes a conversation is selected only while the
-    /// keyboard is in its pane's composer: the composer's hairline and the
-    /// fill of its thread's row say so, and the fill glides to the row of
-    /// the composer the keyboard moves to. With the keyboard anywhere else (a
-    /// header button, the palette) no composer and no row is marked; the
-    /// panes and their rows keep only their colours.
+    /// The first log of `id`: a line of text, in `markdown-block-0`.
+    fn serve_answer(host: &MountedShell, id: &str) {
+        let records: Vec<agent::AgentEvent> = vec![
+            agent::AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "answer".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::AssistantMessage {
+                    text: "Selectable answer alpha beta gamma".into(),
+                    summarized: false,
+                },
+            }),
+            agent::AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+        ];
+        send_events(
+            host,
+            vec![(
+                Topic::SessionEvents {
+                    session_id: id.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
+                    from: 0,
+                    end: records.len() as u64,
+                    records: records.into_iter().map(Into::into).collect(),
+                },
+            )],
+        );
+    }
+
+    /// Among panes one is current: its row takes the selected fill and the
+    /// other shown row the weaker one. A press on the other pane's text moves
+    /// them, its composer takes no keyboard and so no hairline, and the first
+    /// composer's goes with the keyboard, into that text for a copy. The
+    /// keyboard leaving and the palette move nothing.
     #[gpui::test]
-    fn among_panes_the_composer_with_the_keyboard_marks_its_thread(cx: &mut TestAppContext) {
+    fn among_panes_the_current_ones_row_is_selected(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
-        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        let row = cx
+            .debug_bounds("sidebar-thread-thread-2")
+            .expect("the thread's row");
+        let alt = gpui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        cx.simulate_mouse_move(row.center(), None, alt);
+        draw(cx);
+        cx.simulate_click(row.center(), alt);
+        draw(cx);
+        serve_status(&host, "thread-2", false);
+        serve_answer(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| {
+            store.timeline_settled_for("thread-2")
+        });
+        settle_panes(cx);
         let active = cx.update(|_, cx| cx.theme().list_active);
+        let (full, weak) = (active.a, active.a * 0.5);
         let fills = |cx: &mut VisualTestContext| {
             [
                 row_fill("sidebar-thread-thread-1", cx),
                 row_fill("sidebar-thread-thread-2", cx),
             ]
-        };
-        // The composers drawn with the hairline of the one holding the
-        // keyboard.
-        let hairlines = |cx: &mut VisualTestContext| -> usize {
-            cx.update(|window, cx| {
-                let primary = cx.theme().primary;
-                let mut cards: Vec<_> = window
-                    .painted_quads()
-                    .iter()
-                    .filter(|quad| {
-                        quad.border_widths.left.as_f32() > 0. && quad.border_color == primary
-                    })
-                    .map(|quad| quad.bounds)
-                    .collect();
-                cards.dedup();
-                cards.len()
-            })
-        };
-        let composer_has_keyboard = |pane: usize, cx: &mut VisualTestContext| {
-            cx.update(|window, cx| {
-                shell
-                    .read(cx)
-                    .attachment
-                    .as_ref()
-                    .expect("attached")
-                    .all_panes(cx)[pane]
-                    .read(cx)
-                    .chat()
-                    .read(cx)
-                    .composer_has_keyboard(window, cx)
-            })
         };
         let wait = |by: Duration, cx: &mut VisualTestContext| {
             cx.executor().advance_clock(by);
@@ -12160,82 +12253,120 @@ pub(crate) mod tests {
         };
         let half = crate::edge_back::SETTLE / 2;
         let settle = crate::edge_back::SETTLE;
-        let between = |alpha: f32| 0. < alpha && alpha < active.a;
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        assert!(composer_has_keyboard(1, cx));
-        assert_eq!(fills(cx), [0., active.a]);
-        assert_eq!(hairlines(cx), 1);
-
-        // A header button takes the keyboard: its menu's, handed back.
-        let menu = cx.debug_bounds("pane-menu").expect("a pane menu");
-        cx.simulate_click(menu.center(), gpui::Modifiers::default());
-        draw(cx);
-        cx.simulate_keystrokes("escape");
-        draw(cx);
-        let pane = keyboard_pane(&shell, cx).expect("the menu's pane has the keyboard");
-        assert!(!composer_has_keyboard(pane, cx));
-        wait(half, cx);
-        let [first, second] = fills(cx);
-        assert!(
-            first == 0. && between(second),
-            "fading out: {first} {second}"
-        );
-        wait(settle, cx);
-        assert_eq!(fills(cx), [0., 0.]);
-        assert_eq!(hairlines(cx), 0);
-        let colours = pane_outlines(&shell, cx);
-        assert!(colours.iter().all(Option::is_some), "{colours:?}");
-        for row in ["sidebar-thread-thread-1", "sidebar-thread-thread-2"] {
-            let bounds = cx.debug_bounds(row).expect("the thread's row");
-            assert!(outline_at(bounds, cx).is_some(), "{row} keeps its colour");
-        }
-
-        // A press on the left pane's blank timeline gives its composer the
-        // keyboard, then one on the right pane's moves it there.
-        let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
-            panes.iter().map(|pane| pane.read(cx).bounds()).collect()
-        });
+        let panes = pane_bounds(&shell, cx);
+        assert_eq!(fills(cx), [weak, full]);
         cx.simulate_click(panes[0].center(), gpui::Modifiers::default());
         draw(cx);
-        assert!(composer_has_keyboard(0, cx));
-        wait(half, cx);
-        let [first, second] = fills(cx);
-        assert!(
-            between(first) && second == 0.,
-            "fading in: {first} {second}"
-        );
         wait(settle, cx);
-        assert_eq!(fills(cx), [active.a, 0.]);
+        assert_eq!(fills(cx), [full, weak]);
+        assert!(composer_has_keyboard(&shell, 0, cx));
         assert_eq!(hairlines(cx), 1);
 
-        cx.simulate_click(panes[1].center(), gpui::Modifiers::default());
+        // A press on the right timeline's text: where a selection starts.
+        let text = cx.debug_bounds("markdown-block-0").expect("the answer");
+        let answer = gpui::point(text.left() + px(30.), text.center().y);
+        assert!(panes[1].contains(&answer), "{answer:?} in {panes:?}");
+        cx.simulate_mouse_down(answer, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(answer, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
-        assert!(composer_has_keyboard(1, cx));
         wait(half, cx);
         let [first, second] = fills(cx);
         assert!(
-            between(first) && between(second),
+            weak < first && first < full && weak < second && second < full,
             "gliding: {first} {second}"
         );
         wait(settle, cx);
-        assert_eq!(fills(cx), [0., active.a]);
-        assert_eq!(hairlines(cx), 1);
-
-        shell
-            .read_with(cx, |shell, _| shell.window_state())
-            .update(cx, |state, cx| state.open_palette(cx));
-        draw(cx);
-        assert!(!composer_has_keyboard(1, cx));
-        wait(half, cx);
-        let [first, second] = fills(cx);
-        assert!(
-            first == 0. && between(second),
-            "fading out: {first} {second}"
-        );
-        wait(settle, cx);
-        assert_eq!(fills(cx), [0., 0.]);
+        assert_eq!(fills(cx), [weak, full]);
+        assert!(!composer_has_keyboard(&shell, 0, cx));
+        assert!(!composer_has_keyboard(&shell, 1, cx));
         assert_eq!(hairlines(cx), 0);
+        cx.update(|window, cx| window.blur(cx));
+        wait(settle, cx);
+        assert_eq!(fills(cx), [weak, full]);
+
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.open_palette(cx));
+        draw(cx);
+        wait(settle, cx);
+        assert_eq!(fills(cx), [weak, full], "under the palette");
+        assert_eq!(hairlines(cx), 0);
+        state.update(cx, |state, cx| state.close_palette(cx));
+        wait(settle, cx);
+
+        // A zoomed pane covers the other, which is no longer shown.
+        cx.update(|window, cx| window.dispatch_action(Box::new(crate::panes::ZoomPane), cx));
+        draw(cx);
+        wait(settle, cx);
+        assert_eq!(fills(cx), [0., full], "zoomed");
+        cx.update(|window, cx| window.dispatch_action(Box::new(crate::panes::ZoomPane), cx));
+        draw(cx);
+        wait(settle, cx);
+        assert_eq!(fills(cx), [weak, full]);
+
+        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        draw(cx);
+        wait(settle, cx);
+        assert_eq!(fills(cx), [0., 0.], "no conversation is on screen");
+    }
+
+    /// A shown thread's row makes it current with the keyboard in its
+    /// composer and the layout as it is; another thread's replaces the
+    /// current pane's, whichever pane holds the keyboard.
+    #[gpui::test]
+    fn a_rows_click_goes_to_its_shown_thread_or_replaces_the_current_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("an index")
+        };
+        let mut third = index.sessions[1].clone();
+        third.id = "thread-3".into();
+        third.title = "thread-3".into();
+        third.updated_at = 0;
+        index.sessions.push(third);
+        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+        await_restore_update(&shell, cx, |store| store.thread_meta("thread-3").is_some());
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        let click = |selector: &'static str, cx: &mut VisualTestContext| {
+            let row = cx.debug_bounds(selector).expect("the thread's row");
+            cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+            draw(cx);
+            cx.simulate_click(row.center(), gpui::Modifiers::default());
+            draw(cx);
+        };
+        let shown = pane_bounds(&shell, cx);
+
+        click("sidebar-thread-thread-1", cx);
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(pane_bounds(&shell, cx), shown);
+        assert!(composer_has_keyboard(&shell, 0, cx));
+        let active = cx.update(|_, cx| cx.theme().list_active.a);
+        assert_eq!(row_fill("sidebar-thread-thread-1", cx), active);
+
+        // The right pane pressed where the keyboard stays out of it.
+        let toggle = cx
+            .debug_bounds("toggle-sidebar")
+            .expect("the right header's");
+        press_only(toggle.center(), cx);
+        assert!(composer_has_keyboard(&shell, 0, cx));
+
+        click("sidebar-thread-thread-3", cx);
+        serve_thread(&host, "thread-3");
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-3"))
+        });
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-3".into())]
+        );
+        assert_eq!(pane_bounds(&shell, cx), shown);
     }
 
     /// Among several panes each pane's header ends with its close button,
@@ -12529,7 +12660,9 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        cx.update(|window, cx| assert!(!chat.read(cx).composer_has_keyboard(window, cx)));
+        cx.update(|window, cx| assert!(!chat.read(cx).composer()
+                    .read(cx)
+                    .has_keyboard(window, cx)));
     }
 
     /// The draft an empty workspace falls back on comes up in its pane and
