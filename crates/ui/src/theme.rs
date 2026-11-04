@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc, sync::LazyLock};
 
 use gpui::{App, Global, Hsla, Rgba, SharedString, Window, WindowAppearance, px};
 use gpui_base::{
-    ColorTokens, PlotTheme, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarMotion,
-    ScrollbarStyles, ScrollbarTheme, SemanticThemeTokens, ThemeAppearance, TypographyTokens,
+    ColorTokens, RadiusTokens, ScrollbarMode, ScrollbarMotion, ScrollbarStyles, ScrollbarTheme,
+    SemanticThemeTokens, ThemeAppearance, TypographyTokens,
 };
 use serde::Deserialize;
 
@@ -236,43 +236,43 @@ impl TryFrom<ThemeConfig> for Theme {
         let popover = color("popover.background")?;
         let danger = color("danger.background")?;
         let danger_foreground = color("danger.foreground")?;
-        let tokens = SemanticThemeTokens {
-            colors: ColorTokens {
-                selection: primary.alpha(0.3),
-                background,
-                foreground,
-                surface: popover,
-                surface_foreground: foreground,
-                primary,
-                primary_foreground,
-                secondary,
-                secondary_foreground: foreground,
-                muted,
-                muted_foreground,
-                accent,
-                accent_foreground: foreground,
-                destructive: danger,
-                destructive_foreground: danger_foreground,
-                border,
-                input,
-                ring,
-            },
-            // The scale gpui-kit derives from the same two theme-file keys.
-            radius: RadiusTokens {
-                sm: px(config.radius / 2.),
-                md: px(config.radius),
-                lg: px(config.radius_lg),
-                xl: px(config.radius * 2.),
-                ..Default::default()
-            },
-            // Sizes and line heights are gpui-base's scale on purpose.
-            typography: TypographyTokens {
-                sans: config.font_family.clone().into(),
-                mono: mono.clone(),
-                ..Default::default()
-            },
-            ..Default::default()
+        let mut colors = if mode.is_dark() {
+            ColorTokens::dark()
+        } else {
+            ColorTokens::light()
         };
+        colors.selection = primary.alpha(0.3);
+        colors.background = background;
+        colors.foreground = foreground;
+        colors.surface = popover;
+        colors.surface_foreground = foreground;
+        colors.primary = primary;
+        colors.primary_foreground = primary_foreground;
+        colors.secondary = secondary;
+        colors.secondary_foreground = foreground;
+        colors.muted = muted;
+        colors.muted_foreground = muted_foreground;
+        colors.accent = accent;
+        colors.accent_foreground = foreground;
+        colors.destructive = danger;
+        colors.destructive_foreground = danger_foreground;
+        colors.border = border;
+        colors.input = input;
+        colors.ring = ring;
+        // The scale gpui-kit derives from the same two theme-file keys.
+        let mut radius = RadiusTokens::default();
+        radius.sm = px(config.radius / 2.);
+        radius.md = px(config.radius);
+        radius.lg = px(config.radius_lg);
+        radius.xl = px(config.radius * 2.);
+        // Sizes and line heights are gpui-base's scale on purpose.
+        let mut typography = TypographyTokens::default();
+        typography.sans = config.font_family.clone().into();
+        typography.mono = mono.clone();
+        let mut tokens = SemanticThemeTokens::default();
+        tokens.colors = colors;
+        tokens.radius = radius;
+        tokens.typography = typography;
 
         Ok(Self {
             accent,
@@ -371,36 +371,33 @@ pub(crate) fn palette(mode: ThemeMode, cx: &App) -> &Theme {
 /// from it.
 fn install(theme: Theme, cx: &mut App) {
     let look = crate::widgets::scrollbar::Look::of(&theme);
-    let base_theme = gpui_base::Theme {
-        appearance: match theme.mode {
-            ThemeMode::Light => ThemeAppearance::Light,
-            ThemeMode::Dark => ThemeAppearance::Dark,
-        },
-        tokens: theme.tokens.clone(),
-        scrollbar: ScrollbarTheme::new()
-            .with_mode(if cx.should_auto_hide_scrollbars() {
-                ScrollbarMode::Scrolling
-            } else {
-                ScrollbarMode::Hover
-            })
-            .with_motion(
-                ScrollbarMotion::default()
-                    .with_enter(crate::widgets::scrollbar::MOTION)
-                    .with_exit(crate::widgets::scrollbar::MOTION)
-                    .with_expand(crate::widgets::scrollbar::MOTION),
-            )
-            .with_styles(
-                ScrollbarStyles::default()
-                    .track(|style| style.bg(look.track))
-                    .track_hover(|style| style.bg(look.track))
-                    .track_active(|style| style.bg(look.track).border_color(theme.border))
-                    .thumb(|style| style.bg(look.thumb).radius(look.radius))
-                    .thumb_hover(|style| style.bg(look.thumb_hover).radius(look.radius))
-                    .thumb_active(|style| style.bg(look.thumb_hover).radius(look.radius)),
-            ),
-        resizable: ResizableTheme::default(),
-        plot: PlotTheme::default(),
+    let mut base_theme = gpui_base::Theme::default();
+    base_theme.appearance = match theme.mode {
+        ThemeMode::Light => ThemeAppearance::Light,
+        ThemeMode::Dark => ThemeAppearance::Dark,
     };
+    base_theme.tokens = theme.tokens.clone();
+    base_theme.scrollbar = ScrollbarTheme::new()
+        .with_mode(if cx.should_auto_hide_scrollbars() {
+            ScrollbarMode::Scrolling
+        } else {
+            ScrollbarMode::Hover
+        })
+        .with_motion(
+            ScrollbarMotion::default()
+                .with_enter(crate::widgets::scrollbar::MOTION)
+                .with_exit(crate::widgets::scrollbar::MOTION)
+                .with_expand(crate::widgets::scrollbar::MOTION),
+        )
+        .with_styles(
+            ScrollbarStyles::default()
+                .track(|style| style.bg(look.track))
+                .track_hover(|style| style.bg(look.track))
+                .track_active(|style| style.bg(look.track).border_color(theme.border))
+                .thumb(|style| style.bg(look.thumb).radius(look.radius))
+                .thumb_hover(|style| style.bg(look.thumb_hover).radius(look.radius))
+                .thumb_active(|style| style.bg(look.thumb_hover).radius(look.radius)),
+        );
     cx.set_global(base_theme);
     cx.set_global(theme);
 }
