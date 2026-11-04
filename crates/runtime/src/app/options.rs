@@ -14,7 +14,8 @@ impl AppState {
         // Which provider profile the picked row belongs to (`None` = the built-in
         // profile for `provider`). Rebinding an established session's profile is
         // a backend change and goes through the relay confirmation, exactly like
-        // a provider change.
+        // a provider change, unless both profiles are accounts the native
+        // session can be carried between.
         profile_id: Option<String>,
         cx: &mut HostCx,
     ) {
@@ -27,6 +28,22 @@ impl AppState {
         let permission_default = self.initial_permission_selection(project_id.as_deref(), provider);
         let provider_commands =
             self.cached_provider_commands(provider, profile_id.as_deref(), None);
+        let accounts: Vec<String> = if provider.caps().session_transfer {
+            self.settings
+                .profiles_for_kind(provider)
+                .into_iter()
+                .filter(ResolvedProfile::supports_account_login)
+                .map(|profile| profile.id)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let profile_ref = |profile: Option<&str>| {
+            profile
+                .unwrap_or_else(|| Settings::builtin_profile_id(provider))
+                .to_owned()
+        };
+        let target_home = profile_ref(profile_id.as_deref());
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -77,19 +94,39 @@ impl AppState {
         // Established sessions can preview a different provider — or a
         // different profile of the same provider, which is a different backend
         // with its own isolated home — but the provider-native cursor is
-        // retained until the user confirms a relay.
+        // retained until the user confirms a relay. Between two accounts the
+        // native session itself moves: the next start copies it into the new
+        // account's home and resumes it there, so the model sees what it saw
+        // and nothing is relayed or confirmed.
         if active.meta.provider != provider || active.meta.profile_id != profile_id {
             let source = active.pending_relay.clone().unwrap_or(PendingRelay {
                 from_provider: active.meta.provider,
                 from_model: active.meta.model.clone(),
                 from_profile: active.meta.profile_id.clone(),
             });
+            let session_home = (source.from_provider == provider
+                && active.meta.resume_cursor.is_some()
+                && active.meta.moved_from.is_none())
+            .then(|| {
+                active
+                    .meta
+                    .session_transfer_from
+                    .clone()
+                    .unwrap_or_else(|| profile_ref(source.from_profile.as_deref()))
+            })
+            .filter(|home| accounts.contains(home) && accounts.contains(&target_home));
             let mut abandoned = false;
             if active.pending_relay.is_some()
                 && source.from_provider == provider
                 && source.from_profile == profile_id
             {
                 active.pending_relay = None;
+                if active.meta.session_transfer_from.as_ref() == Some(&target_home) {
+                    active.meta.session_transfer_from = None;
+                }
+            } else if let Some(home) = session_home {
+                active.pending_relay = None;
+                active.meta.session_transfer_from = (home != target_home).then_some(home);
             } else if has_meaningful_history(&active.timeline) {
                 active.pending_relay = Some(source);
             } else {

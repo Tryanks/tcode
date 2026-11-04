@@ -98,6 +98,9 @@ pub struct Caps {
     pub instruction_channel: InstructionChannel,
     /// The CLI signs a profile in and out of its native account itself.
     pub account_login: bool,
+    /// A session resumes under another account profile of this provider once
+    /// [`transfer_session`] has copied its native files into that profile's home.
+    pub session_transfer: bool,
 }
 
 /// What a harness restores of a turn it checkpointed.
@@ -222,6 +225,7 @@ impl ProviderKind {
                 },
                 instruction_channel: InstructionChannel::SessionAppend,
                 account_login: true,
+                session_transfer: true,
             },
             ProviderKind::Codex => Caps {
                 supports_steering: true,
@@ -253,6 +257,7 @@ impl ProviderKind {
                 },
                 instruction_channel: InstructionChannel::DeveloperContext,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::Acp => Caps {
                 supports_steering: false,
@@ -274,6 +279,7 @@ impl ProviderKind {
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::Pi => Caps {
                 supports_steering: true,
@@ -293,6 +299,7 @@ impl ProviderKind {
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::None,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::OpenCode => Caps {
                 supports_steering: true,
@@ -317,6 +324,7 @@ impl ProviderKind {
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::SessionAppend,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
@@ -336,6 +344,7 @@ impl ProviderKind {
                 plugin_management: PluginManagement::NONE,
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
+                session_transfer: false,
             },
             ProviderKind::Grok => Caps {
                 supports_steering: true,
@@ -362,6 +371,7 @@ impl ProviderKind {
                 },
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
+                session_transfer: false,
             },
         }
     }
@@ -684,6 +694,34 @@ pub async fn run_plugin_op(
         ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Acp => {
             Err(no_plugin_management(provider))
         }
+    }
+}
+
+/// Copy the native session `resume` names out of the home a profile launched
+/// with `from` keeps it in, into the one `to` launches with, so that profile
+/// resumes the same session. Only a provider with [`Caps::session_transfer`]
+/// can. Blocking.
+#[cfg(feature = "process")]
+pub fn transfer_session(
+    provider: ProviderKind,
+    from: &LaunchEnv,
+    to: &LaunchEnv,
+    resume: &ResumeCursor,
+) -> std::io::Result<()> {
+    match provider {
+        ProviderKind::ClaudeCode => claude::transfer_session(from, to, resume),
+        ProviderKind::Codex
+        | ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Acp => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "{} cannot carry a session to another profile",
+                provider.display_name()
+            ),
+        )),
     }
 }
 

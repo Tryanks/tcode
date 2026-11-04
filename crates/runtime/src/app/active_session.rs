@@ -163,6 +163,9 @@ pub struct ActiveSession {
     /// The directory the live provider process was started in; a move to another
     /// directory restarts it before the next turn.
     pub(super) live_cwd: PathBuf,
+    /// The profile the live provider process was started with; a switch to
+    /// another account restarts it before the next turn.
+    pub(super) live_profile_id: Option<String>,
     pub(super) live_option_selections: Vec<OptionSelection>,
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
     /// A transient "the next queued send carries an injected context prefix of
@@ -239,7 +242,9 @@ pub(super) struct PendingRelay {
     pub(super) from_model: Option<String>,
     /// The provider profile the history was produced against (`None` = the
     /// built-in profile). Two profiles of one [`ProviderKind`] are distinct
-    /// backends with isolated homes, so a profile switch is a relay too.
+    /// backends with isolated homes, so a profile switch is a relay too,
+    /// unless both are accounts of a provider that carries the native session
+    /// between them (`SessionMeta::session_transfer_from`).
     pub(super) from_profile: Option<String>,
 }
 
@@ -250,6 +255,7 @@ impl ActiveSession {
         provider_commands: Vec<ProviderCommand>,
     ) -> Self {
         let live_cwd = meta.cwd.clone();
+        let live_profile_id = meta.profile_id.clone();
         Self {
             meta,
             timeline: Timeline::default(),
@@ -261,6 +267,7 @@ impl ActiveSession {
             runtime: Runtime::Idle,
             live_model: None,
             live_cwd,
+            live_profile_id,
             live_option_selections: Vec::new(),
             confirmed_option_selections: Vec::new(),
             pending_context_len: None,
@@ -288,6 +295,7 @@ impl ActiveSession {
         self.shutdown_to_idle();
         self.meta.resume_cursor = None;
         self.meta.pending_fork = false;
+        self.meta.session_transfer_from = None;
         self.pending_relay = None;
     }
 
@@ -378,6 +386,30 @@ impl ActiveSession {
         self.model_changed_while_live()
             || self.options_changed_while_live()
             || self.cwd_changed_while_live()
+            || self.profile_changed_while_live()
+    }
+
+    /// Give up carrying the native session to the account the thread switched to (the copy
+    /// failed, or the provider closed before it resumed the copy): providers start fresh, and
+    /// the next message hands them the conversation from the account that holds it.
+    pub(super) fn fail_session_transfer(&mut self) {
+        self.meta.resume_cursor = None;
+        self.meta.pending_fork = false;
+    }
+
+    /// Whether the thread's native session stays behind in the profile
+    /// `session_transfer_from` names ([`Self::fail_session_transfer`]).
+    pub(super) fn session_transfer_failed(&self) -> bool {
+        self.meta.session_transfer_from.is_some() && self.meta.resume_cursor.is_none()
+    }
+
+    /// Whether the live provider runs under another profile than `meta.profile_id`
+    /// with no relay pending: the thread switched accounts and takes its native
+    /// session along. A relay keeps the old process until it is confirmed.
+    fn profile_changed_while_live(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_))
+            && self.pending_relay.is_none()
+            && self.live_profile_id != self.meta.profile_id
     }
 
     /// Whether the live provider runs in another directory than `meta.cwd`: the thread
@@ -412,10 +444,13 @@ impl ActiveSession {
     }
 
     /// The id and text of the message that opens the fresh provider session of a moved
-    /// thread, which carries the handoff; `None` until that session is live and a message
-    /// can go.
-    pub(super) fn moved_handoff_message(&self) -> Option<(u64, String)> {
-        if self.meta.moved_from.is_none() || self.cwd_changed_while_live() {
+    /// thread, or of one whose native session could not be carried to its new account,
+    /// which carries the handoff; `None` until that session is live and a message can go.
+    pub(super) fn handoff_message(&self) -> Option<(u64, String)> {
+        if (self.meta.moved_from.is_none() && !self.session_transfer_failed())
+            || self.cwd_changed_while_live()
+            || self.profile_changed_while_live()
+        {
             return None;
         }
         self.next_dispatchable()

@@ -268,7 +268,9 @@ pub use wire::{
 // ProviderUsageChanged carries account usage and the usage reads in flight
 // when the rest of the providers status is unchanged, while subscription
 // replies remain full statuses. Settings carry scroll_to_latest_on_send
-// (absent reads as true), patched by ScrollToLatestOnSend.
+// (absent reads as true), patched by ScrollToLatestOnSend. SessionMeta
+// carries session_transfer_from, the account profile whose home holds the
+// native session until the thread starts under the account it switched to.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

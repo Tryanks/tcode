@@ -154,6 +154,13 @@ pub struct SessionMeta {
     /// hands the conversation to a fresh provider session in `cwd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_from: Option<PathBuf>,
+    /// The provider profile (a built-in one by its id) whose home holds this thread's native
+    /// session, after the thread switched to another account of the same provider and until
+    /// the session starts there: the next start copies it into the current profile's home
+    /// and resumes it. With `resume_cursor` cleared, the session could not be carried, and
+    /// the next message hands the conversation over from that profile instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_transfer_from: Option<String>,
     /// Set when this thread was imported from another tool's local history
     /// ("claude:<id>" / "codex:<id>"). Used to keep re-imports idempotent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -372,6 +379,7 @@ impl SessionMeta {
             resume_cursor: None,
             pending_fork: false,
             moved_from: None,
+            session_transfer_from: None,
             imported_from: None,
             option_selections: Vec::new(),
             acp_agent_id: None,

@@ -83,7 +83,9 @@ pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
 
 // Credentials and per-account state (`.claude.json`, `projects/`) must not
 // cross accounts, and `plugins/` records absolute paths into its own config
-// directory.
+// directory. The one exception is `transfer_session`: when the user switches a
+// thread to another account, that thread's own session files are copied, and
+// nothing else of either account.
 const INHERITED_CONFIG: [&str; 4] = ["CLAUDE.md", "agents", "commands", "skills"];
 
 /// Copy the user's configuration from one config directory into another.
@@ -94,6 +96,73 @@ pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
         .iter()
         .try_for_each(|name| copy_resolved(&from.join(name), &to.join(name), &mut ancestors))?;
     inherit_settings(&from.join("settings.json"), &to.join("settings.json"))
+}
+
+/// Copy the session `resume` names from the config directory `from` launches
+/// with into the one `to` launches with: its transcript, the directory beside
+/// it (subagent transcripts, stored tool results) and its file checkpoints.
+/// What `to` already holds of the session is replaced, since `from` holds the
+/// copy the thread last ran. Blocking.
+pub fn transfer_session(
+    from: &LaunchEnv,
+    to: &LaunchEnv,
+    resume: &ResumeCursor,
+) -> std::io::Result<()> {
+    let not_found = |what: String| std::io::Error::new(std::io::ErrorKind::NotFound, what);
+    let session_id = resume
+        .str_field(&["session_id"])
+        .filter(|id| Path::new(id).file_name() == Some(std::ffi::OsStr::new(id)))
+        .ok_or_else(|| not_found("the resume cursor names no session".into()))?;
+    let (Some(from), Some(to)) = (config_dir(from), config_dir(to)) else {
+        return Err(not_found("a profile has no config directory".into()));
+    };
+    if let (Ok(source), Ok(target)) = (std::fs::canonicalize(&from), std::fs::canonicalize(&to))
+        && source == target
+    {
+        return Ok(());
+    }
+    // The project directory's name is the CLI's own encoding of the session's
+    // directory, so the one the session is found under is reused rather than
+    // derived again.
+    let projects = from.join("projects");
+    let transcript = format!("{session_id}.jsonl");
+    let project = std::fs::read_dir(&projects)
+        .map_err(|error| {
+            std::io::Error::new(error.kind(), format!("{}: {error}", projects.display()))
+        })?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|dir| dir.join(&transcript).is_file())
+        .ok_or_else(|| {
+            not_found(format!(
+                "{} holds no session {session_id}",
+                projects.display()
+            ))
+        })?;
+    let target = to
+        .join("projects")
+        .join(project.file_name().unwrap_or_default());
+    if target.join(&transcript).exists() {
+        log::info!(
+            "claude: replacing session {session_id} in {} with the copy in {}",
+            to.display(),
+            from.display()
+        );
+    }
+    let mut ancestors = HashSet::new();
+    copy_resolved(
+        &project.join(session_id),
+        &target.join(session_id),
+        &mut ancestors,
+    )?;
+    copy_resolved(
+        &from.join("file-history").join(session_id),
+        &to.join("file-history").join(session_id),
+        &mut ancestors,
+    )?;
+    std::fs::create_dir_all(&target)?;
+    std::fs::copy(project.join(&transcript), target.join(&transcript))?;
+    Ok(())
 }
 
 /// Copy what `from` names, following symbolic links: a link copied as a link
