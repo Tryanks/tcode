@@ -451,6 +451,13 @@ pub(crate) fn select_current_pane(window: &mut Window, cx: &mut App) {
     }
 }
 
+/// What held the keyboard closed: it goes back to a composer.
+pub(crate) fn return_keyboard(window: &mut Window, cx: &mut App) {
+    if let Some(shell) = current_shell(cx) {
+        shell.update(cx, |shell, cx| shell.return_keyboard(window, cx));
+    }
+}
+
 /// A command a pane's own control raises, or that a window-wide one raises
 /// for the pane it acts on.
 #[derive(Clone, Copy)]
@@ -889,6 +896,7 @@ impl AppShell {
                 // Bind once, before the baseline can trigger an empty-workspace
                 // draft fallback. Validation below never binds it again.
                 shell.bind_pane(&pane, &session_id, window, cx);
+                shell.return_keyboard(window, cx);
                 shell.pending_navigation_restore = Some(PendingNavigationRestore {
                     session_id,
                     panel: snapshot.panel,
@@ -1541,7 +1549,8 @@ impl AppShell {
 
     /// `pane` shows `session_id` and is the current pane. A thread the user
     /// `asked` for takes the compact stack and the keyboard; one the
-    /// workspace went to by itself leaves them.
+    /// workspace went to by itself leaves them, though a lone pane's composer
+    /// takes a keyboard nothing holds.
     fn show_in_pane(
         &mut self,
         pane: &Entity<ThreadPanel>,
@@ -1576,7 +1585,12 @@ impl AppShell {
         if asked && compact {
             self.go(Destination::Thread, cx);
         }
-        if asked {
+        let unheld = window.focused(cx).is_none()
+            && self
+                .attachment
+                .as_ref()
+                .is_some_and(|attachment| attachment.panes(cx).len() == 1);
+        if asked || unheld {
             chat.update(cx, |chat, cx| {
                 if beside {
                     chat.focus_side(window, cx);
@@ -1649,6 +1663,27 @@ impl AppShell {
 // ---------------------------------------------------------------------------
 
 impl AppShell {
+    /// The keyboard has nowhere left to be, or a thread was opened without
+    /// naming a pane: it goes to the current pane, into its composer as soon
+    /// as that is drawn. A route without the conversation keeps out of it.
+    fn return_keyboard(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.window_state.read(cx);
+        let page = !state.compact || state.destination() == Destination::Thread;
+        if state.route() != Route::Chat || !page || crate::window_seam::is_mobile(cx) {
+            return;
+        }
+        let Some(attachment) = &self.attachment else {
+            return;
+        };
+        let pane = attachment.current_pane.clone();
+        if pane.read(cx).session_id().is_some() {
+            let chat = pane.read(cx).chat();
+            chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+        } else {
+            window.focus(&pane.focus_handle(cx), cx);
+        }
+    }
+
     /// The pane a window-level command acts on.
     fn acting_pane(&self) -> Option<Entity<ThreadPanel>> {
         Some(self.attachment.as_ref()?.current_pane.clone())
@@ -5543,11 +5578,27 @@ impl Render for AppShell {
                 self.window_title = title;
             }
         }
-        // The palette takes focus on the frame it opens, at either width.
-        let (palette_open, focus_query) = {
+        // The palette takes focus on the frame it opens, at either width, and
+        // gives it back as it starts to leave.
+        let (palette_open, focus_query, palette_leaving) = {
             let state = self.window_state.read(cx);
-            (state.palette_mounted(), state.palette_focuses_query)
+            (
+                state.palette_mounted(),
+                state.palette_focuses_query,
+                state.palette_leaving(),
+            )
         };
+        if palette_leaving
+            && let Some(attachment) = &self.attachment
+            && attachment
+                .palette
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        {
+            cx.defer_in(window, |this, window, cx| {
+                this.return_keyboard(window, cx);
+            });
+        }
         if palette_open
             && !self.palette_was_open
             && let Some(attachment) = &self.attachment
@@ -6702,7 +6753,7 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount(cx);
+        let (shell, host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
         let store = store_of(&shell, cx);
@@ -6767,9 +6818,25 @@ pub(crate) mod tests {
         }
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         resize(cx, 1024.);
+        send_events(
+            &host,
+            vec![
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(Default::default()),
+                ),
+                panes_index(&[]),
+            ],
+        );
+        serve_thread(&host, "thread-2");
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.close_settings(cx));
         store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
-        draw(cx);
-        cx.update(|window, _| assert!(focus.is_focused(window)));
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
+        settle_panes(cx);
+        assert!(composer_has_keyboard(&shell, 0, cx));
     }
 
     #[gpui::test]
@@ -12355,6 +12422,123 @@ pub(crate) mod tests {
         assert!(0. < going && going < rest, "{going} of {rest}");
         settle_panes(cx);
         assert_eq!(hovered(cx), None);
+    }
+
+    /// A thread restored at launch takes the keyboard once it has loaded,
+    /// with no further input, though it was asked for before the window was
+    /// active and before its composer was drawn.
+    #[gpui::test]
+    fn a_restored_thread_takes_the_keyboard_once_loaded(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, _, cx) =
+            mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1024., "plan");
+        assert!(!cx.update(|window, _| window.is_window_active()));
+        assert!(cx.debug_bounds("baseline-loading").is_some());
+        assert!(!composer_has_keyboard(&shell, 0, cx));
+
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        restore_settings_and_events(&shell, &host, cx);
+        draw(cx);
+        assert!(!cx.update(|window, _| window.is_window_active()));
+        assert!(composer_has_keyboard(&shell, 0, cx));
+    }
+
+    /// Choosing a thread still loading gives its composer the keyboard the
+    /// moment it is drawn; meanwhile the keyboard is in the pane, which it
+    /// leaves to nothing else.
+    #[gpui::test]
+    fn a_chosen_threads_composer_takes_the_keyboard_as_it_is_drawn(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        cx.update(|window, cx| window.blur(cx));
+        draw(cx);
+        let row = cx
+            .debug_bounds("sidebar-thread-thread-2")
+            .expect("the thread's row");
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        assert!(!composer_has_keyboard(&shell, 0, cx), "not drawn yet");
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
+        draw(cx);
+        assert!(composer_has_keyboard(&shell, 0, cx));
+    }
+
+    /// A thread the workspace goes to by itself finds the keyboard in a lone
+    /// pane with nothing holding it, and leaves it where something does.
+    #[gpui::test]
+    fn an_unasked_thread_takes_only_a_keyboard_nothing_holds(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        serve_thread(&host, "thread-2");
+        cx.update(|window, cx| window.blur(cx));
+        store.update(cx, |store, cx| store.put_back_thread("thread-2".into(), cx));
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
+        draw(cx);
+        assert!(composer_has_keyboard(&shell, 0, cx), "nothing held it");
+
+        // The palette's input holds it.
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.open_palette(cx));
+        settle_panes(cx);
+        let query = shell.read_with(cx, |shell, cx| {
+            let palette = shell.attachment.as_ref().unwrap().palette.read(cx);
+            palette.query_focus_handle(cx)
+        });
+        cx.update(|window, _| assert!(query.is_focused(window)));
+        serve_thread(&host, "thread-1");
+        store.update(cx, |store, cx| store.put_back_thread("thread-1".into(), cx));
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-1"))
+        });
+        settle_panes(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        cx.update(|window, _| assert!(query.is_focused(window), "it keeps the keyboard"));
+        state.update(cx, |state, cx| state.close_palette(cx));
+        settle_panes(cx);
+
+        // Beside another pane it stays nowhere.
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        cx.update(|window, cx| window.blur(cx));
+        store.update(cx, |store, cx| store.put_back_thread("thread-2".into(), cx));
+        settle_panes(cx);
+        assert_eq!(keyboard_pane(&shell, cx), None);
+    }
+
+    /// What holds the keyboard over a conversation gives it to a composer as
+    /// it closes: at once, while it still leaves, not when it has gone. A
+    /// dialog with nothing to go back to does the same.
+    #[gpui::test]
+    fn closing_the_palette_or_a_dialog_returns_the_keyboard(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.open_palette(cx));
+        settle_panes(cx);
+        assert!(!composer_has_keyboard(&shell, 0, cx));
+        state.update(cx, |state, cx| state.close_palette(cx));
+        draw(cx);
+        assert!(state.read_with(cx, |state, _| state.palette_mounted()));
+        assert!(composer_has_keyboard(&shell, 0, cx), "the palette left");
+
+        cx.update(|window, cx| {
+            window.blur(cx);
+            window.open_dialog(cx, |dialog, _, _| dialog);
+        });
+        draw(cx);
+        assert!(!composer_has_keyboard(&shell, 0, cx));
+        cx.update(|window, cx| window.close_dialog(cx));
+        draw(cx);
+        assert!(composer_has_keyboard(&shell, 0, cx), "the dialog closed");
     }
 
     /// Among several panes each pane's header ends with its close button,

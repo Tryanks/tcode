@@ -324,11 +324,19 @@ pub struct ChatView {
 }
 
 impl ChatView {
-    /// The composer itself declines on a mobile build, where focus would
-    /// raise the software keyboard; a desktop window of any width types.
+    /// The composer takes the keyboard, or takes it as it is drawn: until a
+    /// thread has loaded the composer is in no pane, so the view keeps the
+    /// keyboard in the pane meanwhile. The composer itself declines on a
+    /// mobile build, where focus would raise the software keyboard, and so
+    /// does the view, whose focus it would inherit; a desktop window of any
+    /// width types.
     pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer
-            .update(cx, |composer, cx| composer.focus(window, cx));
+        if self.composer_drawn {
+            self.composer
+                .update(cx, |composer, cx| composer.focus(window, cx));
+        } else if self.session_id.is_some() && !crate::window_seam::is_mobile(cx) {
+            self.focus_handle.focus(window, cx);
+        }
     }
 
     #[cfg(test)]
@@ -673,6 +681,7 @@ impl ChatView {
         self.scene.show(session_id.as_deref());
         self.session_id = session_id;
         self.timeline_stale = true;
+        self.composer_drawn = false;
         // Not yet shown, for a host asking before the view next renders.
         self.scene_shown = false;
         self.scene_at = cx.background_executor().now();
