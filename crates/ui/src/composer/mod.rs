@@ -86,7 +86,7 @@ use crate::palette::fuzzy_score;
 use crate::provider_card::provider_glyph;
 use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
-use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{ComposerState, TopicKind, WorkspaceStore, observe_store_topics};
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::{mime_from_path, validate_attachment};
 use tcode_core::provider_models::{FastLevel, FastMode};
@@ -153,6 +153,9 @@ pub struct Composer {
     workspace_store: Entity<WorkspaceStore>,
     /// The thread this composer writes to.
     session_id: Option<String>,
+    /// The composer state of the render under way, if one is; see
+    /// [`Self::composer_state`].
+    frame_state: Option<Rc<ComposerState>>,
     input: Entity<TextareaState>,
     /// Dedicated free-form answer field shown inside an agent question card.
     /// Keeping it separate from the turn composer makes the pending question
@@ -253,8 +256,21 @@ impl Composer {
     fn subagent(&self, cx: &App) -> bool {
         self.workspace_store
             .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .conversation_read_only
+            .native_subagent_readonly_for(self.session_id.as_deref())
+    }
+
+    /// What the composer draws from the store for its thread. Within a
+    /// render, the one state built for it: everything the composer draws
+    /// reads it, many times over, and building it clones the thread's
+    /// branches, commands, options and approvals.
+    fn composer_state(&self, cx: &App) -> Rc<ComposerState> {
+        self.frame_state.clone().unwrap_or_else(|| {
+            Rc::new(
+                self.workspace_store
+                    .read(cx)
+                    .composer_state_for(self.session_id.as_deref()),
+            )
+        })
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -457,6 +473,7 @@ impl Composer {
             below_card: Rc::default(),
             session_id,
             workspace_store,
+            frame_state: None,
             input,
             user_input_custom,
             fallback_review_input,
@@ -656,17 +673,13 @@ impl Composer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let store = self.workspace_store.read(cx);
         if !self.interactive(cx)
-            || !store
-                .composer_state_for(self.session_id.as_deref())
-                .queue
-                .is_some_and(|queue| {
-                    queue
-                        .messages
-                        .iter()
-                        .any(|message| message.id == id && message.editable)
-                })
+            || !self.composer_state(cx).queue.as_ref().is_some_and(|queue| {
+                queue
+                    .messages
+                    .iter()
+                    .any(|message| message.id == id && message.editable)
+            })
         {
             return;
         }
@@ -689,10 +702,13 @@ impl Composer {
             self.queued_refill = None;
             return;
         }
-        let Some(queue) = store.composer_state_for(self.session_id.as_deref()).queue else {
+        let Some(queue) = store
+            .session_status_for(self.session_id.as_deref())
+            .map(|status| &status.queued_messages)
+        else {
             return;
         };
-        if let Some(message) = queue.messages.iter().find(|message| message.id == *id) {
+        if let Some(message) = queue.iter().find(|message| message.id == *id) {
             if !message.editable {
                 self.queued_refill = None;
             }
@@ -713,12 +729,11 @@ impl Composer {
     fn has_sendable_content(&self, cx: &App) -> bool {
         !self.input.read(cx).value().trim().is_empty()
             || !self.pending_images.is_empty()
-            || !self
+            || self
                 .workspace_store
                 .read(cx)
-                .composer_state_for(self.session_id.as_deref())
-                .terminal_contexts
-                .is_empty()
+                .session_status_for(self.session_id.as_deref())
+                .is_some_and(|status| !status.terminal_contexts.is_empty())
             || !self
                 .workspace_store
                 .read(cx)
@@ -764,14 +779,11 @@ impl Composer {
             return;
         }
         let text = input.read(cx).value().trim().to_string();
-        let composer_state = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+        let composer_state = self.composer_state(cx);
         let compact_offered = compact_offered(&composer_state);
         let goal_offered = goal_offered(&composer_state);
         let current_goal = composer_state.goal.clone();
-        let terminal_contexts = composer_state.terminal_contexts;
+        let terminal_contexts = composer_state.terminal_contexts.clone();
         if !self.has_sendable_content(cx) {
             return;
         }
@@ -861,7 +873,7 @@ impl Composer {
         }
         // While the agent waits on its plan, words sent from here answer it:
         // the agent keeps planning from them.
-        if let Some(plan) = composer_state.pending_plan
+        if let Some(plan) = composer_state.pending_plan.clone()
             && !text.is_empty()
         {
             if self
@@ -885,12 +897,7 @@ impl Composer {
             .iter()
             .map(|image| image.path.clone())
             .collect::<Vec<_>>();
-        if let Some((from, to)) = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .relay_confirmation
-        {
+        if let Some((from, to)) = self.composer_state(cx).relay_confirmation.clone() {
             let composer = cx.entity();
             let input = input.clone();
             window.open_alert_dialog(cx, move |alert, _, _| {
@@ -1001,10 +1008,7 @@ impl Composer {
     ) -> AnyElement {
         let interactive = self.interactive(cx);
         let has_text = interactive && !self.input.read(cx).value().trim().is_empty();
-        let composer_state = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+        let composer_state = self.composer_state(cx);
         let stopping = turn_running && !has_text;
         let stop_pending = composer_state.stopping;
         let steerable = turn_running && has_text && composer_state.steering_supported;
@@ -1148,14 +1152,7 @@ impl Composer {
             .with_size(size)
             .w(size)
             .aria_label(crate::tr!("composer.stop"))
-            .disabled(
-                !self.interactive(cx)
-                    || self
-                        .workspace_store
-                        .read(cx)
-                        .composer_state_for(self.session_id.as_deref())
-                        .stopping,
-            )
+            .disabled(!self.interactive(cx) || self.composer_state(cx).stopping)
             .child(div().size(px(11.)).rounded(px(2.)).bg(cx.theme().danger))
             .on_click(cx.listener(|this, _, _, cx| {
                 if !this.interactive(cx) {
@@ -1181,10 +1178,7 @@ impl Composer {
         if self.compact {
             return self.render_compact_primary_action(turn_running, window, cx);
         }
-        let composer_state = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+        let composer_state = self.composer_state(cx);
         let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
         let parts: &[DesktopAction] = if turn_running {
             // Providers with native mid-turn steering keep a send button
@@ -1334,15 +1328,14 @@ impl Composer {
     /// space under it, so a gap goes with what it separates.
     fn render_chip_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let store = self.workspace_store.read(cx);
-        let terminal = store
-            .composer_state_for(self.session_id.as_deref())
-            .terminal_contexts;
+        let composer_state = self.composer_state(cx);
+        let terminal = &composer_state.terminal_contexts;
         let review = store.review_comments_for(self.session_id.as_deref());
         let mut rows = Vec::new();
         if !terminal.is_empty() {
             rows.push((
                 gpui::SharedString::from("terminal"),
-                ChipRow::Terminal(terminal),
+                ChipRow::Terminal(terminal.clone()),
             ));
         }
         if !review.is_empty() {
@@ -1524,6 +1517,19 @@ impl Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.frame_state = Some(Rc::new(
+            self.workspace_store
+                .read(cx)
+                .composer_state_for(self.session_id.as_deref()),
+        ));
+        let composer = self.render_composer(window, cx);
+        self.frame_state = None;
+        composer
+    }
+}
+
+impl Composer {
+    fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.sync_user_input_state(window, cx);
         self.sync_images_session();
         self.sync_text_destination(window, cx);
@@ -1531,14 +1537,11 @@ impl Render for Composer {
         self.sync_native_rewind_prefill(window, cx);
         self.sync_composer_append(window, cx);
         self.sync_fallback_review_draft(window, cx);
-        let composer_state = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+        let composer_state = self.composer_state(cx);
         let subagent = composer_state.conversation_read_only;
         self.sync_keyboard(subagent, window, cx);
         let turn_running = composer_state.turn_running;
-        let approval = composer_state.pending_approval;
+        let approval = composer_state.pending_approval.clone();
         let approval_count = composer_state.pending_approval_count;
 
         let border = cx.theme().border;
@@ -2072,7 +2075,7 @@ impl Render for Composer {
         }
         if let Some(shown) = self.motion.shown(
             self.motion_key("goal"),
-            composer_state.goal,
+            composer_state.goal.clone(),
             SHOW,
             window,
             cx,
@@ -2089,6 +2092,7 @@ impl Render for Composer {
                 self.motion_key("checkout"),
                 composer_state
                     .checkout
+                    .clone()
                     .filter(|_| !self.compact && !subagent),
                 SHOW,
                 window,
@@ -2191,6 +2195,7 @@ impl Render for Composer {
                     .children(checkout),
             )
             .child(extent)
+            .into_any_element()
     }
 }
 

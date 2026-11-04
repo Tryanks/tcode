@@ -143,8 +143,8 @@ impl ChatView {
         let running = self
             .workspace_store
             .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .turn_running;
+            .session_status_for(self.session_id.as_deref())
+            .is_some_and(|status| status.activity.turn_running);
         let row_count = self.rows.len();
         let resident_ids = self.md_states.keys().cloned().collect();
         let (texts, decisions) = self

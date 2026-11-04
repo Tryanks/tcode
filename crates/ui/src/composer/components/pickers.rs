@@ -106,7 +106,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> Option<(gpui::SharedString, AnyElement)> {
         let store = self.workspace_store.read(cx);
-        let composer_state = store.composer_state_for(self.session_id.as_deref());
+        let composer_state = self.composer_state(cx);
         let active_model = composer_state.active_model.clone()?;
         let provider = active_model.provider;
         let current_model = active_model.model;
@@ -344,8 +344,7 @@ impl Composer {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<(gpui::SharedString, AnyElement)> {
-        let store = self.workspace_store.read(cx);
-        let composer = store.composer_state_for(self.session_id.as_deref());
+        let composer = self.composer_state(cx);
         let descriptors = composer
             .active_option_descriptors
             .iter()
@@ -415,7 +414,7 @@ impl Composer {
                 options: Vec::new(),
             })
         };
-        let selections = composer.active_option_selections;
+        let selections = composer.active_option_selections.clone();
         // Keep the effort value readable on phones; the sheet still exposes
         // every parameter, including context capacity and service tier.
         let mut chip_spec = spec.clone();
@@ -479,10 +478,7 @@ impl Composer {
     /// The circular context-window meter (ring showing used%, red > 90%) and
     /// its hover/click popover.
     pub(in super::super) fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+        let composer = self.composer_state(cx);
         let usage = composer.token_usage;
         let account_usage = composer.usage.clone();
         let provider = composer.provider;
@@ -547,10 +543,7 @@ impl Composer {
     }
 
     pub(in super::super) fn render_permission_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+        let composer = self.composer_state(cx);
         let Some(control) = PermissionControl::from_composer(&composer) else {
             return permission_notice(&composer, cx);
         };
@@ -667,10 +660,7 @@ impl Composer {
     }
 
     pub(in super::super) fn render_overflow_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let composer = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+        let composer = self.composer_state(cx);
         let usage = composer.token_usage;
         let permission = PermissionControl::from_composer(&composer).map(|control| {
             if control.requested.is_some() {

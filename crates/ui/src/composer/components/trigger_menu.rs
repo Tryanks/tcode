@@ -45,12 +45,7 @@ impl Composer {
     /// Load the workspace file/folder listing for the active session cwd in the
     /// background (gitignore-respected), the first time a mention menu opens.
     pub(in super::super) fn ensure_workspace(&mut self, cx: &mut Context<Self>) {
-        let Some(cwd) = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .active_cwd
-        else {
+        let Some(cwd) = self.composer_state(cx).active_cwd.clone() else {
             return;
         };
         if self.workspace_loading || self.workspace.as_ref().is_some_and(|(c, _)| *c == cwd) {
@@ -107,13 +102,10 @@ impl Composer {
             TriggerKind::Skill => {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
                 // fuzzily filtered by the `$` query with no item cap.
-                let commands = self
-                    .workspace_store
-                    .read(cx)
-                    .composer_state_for(self.session_id.as_deref())
-                    .provider_commands;
+                let composer = self.composer_state(cx);
+                let commands = &composer.provider_commands;
                 let rows =
-                    filter_provider_commands(&commands, ProviderCommandKind::Skill, &trigger.query)
+                    filter_provider_commands(commands, ProviderCommandKind::Skill, &trigger.query)
                         .into_iter()
                         .map(|c| MenuRow {
                             primary: format!("${}", c.name),
@@ -129,10 +121,7 @@ impl Composer {
                 (rows, String::new(), false)
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
-                let composer = self
-                    .workspace_store
-                    .read(cx)
-                    .composer_state_for(self.session_id.as_deref());
+                let composer = self.composer_state(cx);
                 let compact_offered = compact_offered(&composer);
                 let goal_offered = goal_offered(&composer).is_some();
                 let mut builtins: Vec<(&str, Option<&str>, &str, MenuAccept)> = vec![
@@ -192,10 +181,10 @@ impl Composer {
                 // filtered without truncation. The provider's own `compact` is
                 // what the built-in row runs, so it is not listed twice; nor is
                 // its own `goal`.
-                let commands = composer.provider_commands;
+                let commands = &composer.provider_commands;
                 rows.extend(
                     filter_provider_commands(
-                        &commands,
+                        commands,
                         ProviderCommandKind::Command,
                         &trigger.query,
                     )
