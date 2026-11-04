@@ -2736,7 +2736,7 @@ impl AppShell {
             ChatView::set_title_recedes(&chat, recedes, cx);
             ChatView::set_pane(&chat, pane.downgrade(), close, cx);
         }
-        let shown = self.shown_threads(cx);
+        let shown = self.shown_threads(tree.as_ref(), cx);
         let hovered = attachment.sidebar.read(cx).hovered_thread();
         for pane in attachment.panes(cx) {
             let hovered = shown.map.iter().any(|cell| {
@@ -2752,7 +2752,12 @@ impl AppShell {
     /// What the threads list marks: nothing on a phone, nor on a route
     /// without the chat column, and of a zoomed column only the zoomed pane,
     /// the others being covered.
-    fn shown_threads(&self, cx: &App) -> crate::sidebar::ShownThreads {
+    /// `tree` is the column's layout without the panes closing.
+    fn shown_threads(
+        &self,
+        tree: Option<&gpui_base::dock::PaneTree>,
+        cx: &App,
+    ) -> crate::sidebar::ShownThreads {
         let Some(attachment) = self.attachment.as_ref() else {
             return Default::default();
         };
@@ -2772,23 +2777,24 @@ impl AppShell {
             Some(zoomed) => vec![zoomed.clone()],
             None => attachment.panes(cx),
         };
+        let rows: Vec<_> = panes.iter().map(|pane| (pane, row(pane))).collect();
         let column = gpui::Bounds::new(gpui::Point::default(), {
             attachment.thread_panes.read(cx).bounds().size
         });
         let mut rects = Vec::new();
-        if let Some(tree) = attachment.final_layout(cx).filter(|_| panes.len() > 1) {
+        if let Some(tree) = tree.filter(|_| panes.len() > 1) {
             crate::panes::pane_rects(tree.root(), column, &mut rects);
         }
         let share = |of: Pixels, whole: Pixels| of / whole.max(px(1.));
         let map = rects
             .into_iter()
             .filter_map(|(panel, rect)| {
-                let pane = panes
+                let (pane, row) = rows
                     .iter()
-                    .find(|pane| PanelId::from(pane.entity_id()) == panel)?;
+                    .find(|(pane, _)| PanelId::from(pane.entity_id()) == panel)?;
                 Some(crate::sidebar::MapCell {
                     pane: pane.entity_id(),
-                    row: row(pane),
+                    row: row.clone(),
                     rect: gpui::bounds(
                         gpui::point(
                             share(rect.left(), column.size.width),
@@ -2802,9 +2808,16 @@ impl AppShell {
                 })
             })
             .collect();
+        let current = match rows
+            .iter()
+            .find(|(pane, _)| **pane == attachment.current_pane)
+        {
+            Some((_, row)) => row.clone(),
+            None => row(&attachment.current_pane),
+        };
         crate::sidebar::ShownThreads {
-            current: row(&attachment.current_pane),
-            shown: panes.iter().filter_map(row).collect(),
+            current,
+            shown: rows.into_iter().filter_map(|(_, row)| row).collect(),
             map,
         }
     }
