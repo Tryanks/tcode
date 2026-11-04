@@ -262,7 +262,10 @@ impl IosWindow {
         *self.raw_handles.borrow_mut() = raw_handles;
         self.surface_attached.set(true);
         self.resize_from_host(width, height, scale_factor);
-        self.schedule_forced_frame();
+        // The new drawable stays blank until a frame is drawn into it, even
+        // when no view changed.
+        self.forced_frame.set(true);
+        self.schedule_frame();
         self.report_visibility();
         log::info!("GPUI iOS Metal surface replaced at scale factor {scale_factor:.2}");
         Ok(())
@@ -319,11 +322,6 @@ impl IosWindow {
         if self.visibility_callback.borrow().is_none() {
             *self.visibility_callback.borrow_mut() = callback;
         }
-    }
-
-    pub(crate) fn schedule_forced_frame(&self) {
-        self.forced_frame.set(true);
-        self.schedule_frame();
     }
 
     pub(crate) fn display_link_tick(&self) -> bool {
@@ -440,7 +438,7 @@ impl IosWindow {
         if self.resize_callback.borrow().is_none() {
             *self.resize_callback.borrow_mut() = callback;
         }
-        self.schedule_forced_frame();
+        self.schedule_frame();
     }
 
     pub(crate) fn update_insets(&self, insets: WindowInsets) {
@@ -492,7 +490,7 @@ impl IosWindow {
         if self.appearance_callback.borrow().is_none() {
             *self.appearance_callback.borrow_mut() = callback;
         }
-        self.schedule_forced_frame();
+        self.schedule_frame();
     }
 
     pub(crate) fn with_input_handler<R>(
@@ -531,7 +529,6 @@ impl IosWindow {
         for input in self.keyboard.delete_backward() {
             self.dispatch_input(input);
         }
-        self.schedule_forced_frame();
     }
 
     pub(crate) fn key_event(
@@ -546,7 +543,6 @@ impl IosWindow {
             .keyboard
             .key_event(key, key_char, modifiers, down, repeat);
         let result = self.dispatch_input(input);
-        self.schedule_forced_frame();
         !result.propagate || result.default_prevented
     }
 }
