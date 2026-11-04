@@ -72,6 +72,9 @@ impl Composer {
             summary = crate::control::grant_summary(&request.grant)
         )
         .into_owned();
+        // The caption and the count sit on the title's first line however
+        // many lines the title wraps to.
+        let title_line = cx.theme().tokens.typography.md.line_height;
         crate::material::card_raised(cx)
             .w_full()
             .debug_selector(|| "control-request".into())
@@ -79,17 +82,19 @@ impl Composer {
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .items_center()
+                    .items_start()
                     .child(
                         div()
                             .text_caption(cx)
+                            .line_height(title_line)
                             .child(crate::tr!("control.request.caption")),
                     )
-                    .child(div().flex_1().text_title(cx).child(summary))
+                    .child(div().flex_1().min_w_0().text_title(cx).child(summary))
                     .when(count > 1, |row| {
                         row.child(
                             div()
                                 .text_secondary(self.compact, cx)
+                                .line_height(title_line)
                                 .child(format!("1/{count}")),
                         )
                     }),
