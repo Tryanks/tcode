@@ -157,8 +157,9 @@ impl Composer {
                 })
                 .collect(),
             // Each profile is its own rail and lists only its own models: the
-            // built-in profiles show the official catalog; a third-party profile
-            // (e.g. Klaude Kode → Kimi) shows only the models added to its card.
+            // built-in profiles and other accounts show the official catalog; a
+            // third-party profile (e.g. Klaude Kode → Kimi) shows only the models
+            // added to its card.
             PickerRail::Profile(id) => {
                 let kind = store.provider_profile_kind(id);
                 let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);

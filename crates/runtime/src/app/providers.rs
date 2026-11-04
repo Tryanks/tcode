@@ -993,7 +993,7 @@ impl AppState {
                     .providers
                     .provider_snapshots
                     .get(&profile_id)
-                    .is_some_and(|snapshot| !snapshot.installed)
+                    .is_some_and(|snapshot| !snapshot.installed && !snapshot.checking)
                 || self.providers.usage_checking.contains(&profile_id)
                 || stale_only
                     && self

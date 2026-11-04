@@ -1770,20 +1770,13 @@ impl WorkspaceStore {
                 .map(|choice| choice.models.clone())
                 .unwrap_or_default();
         }
-        if Settings::is_builtin_profile_id(profile_id) {
-            let kind = self
-                .settings_replica
-                .resolved_profile(profile_id)
-                .map(|profile| profile.kind)
-                .unwrap_or(agent::ProviderKind::ClaudeCode);
-            self.providers_replica
-                .model_catalogs
-                .get(&kind)
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        }
+        self.settings_replica
+            .resolved_profile(profile_id)
+            .filter(|profile| {
+                Settings::is_builtin_profile_id(profile_id) || profile.supports_account_usage()
+            })
+            .map(|profile| self.provider_model_catalog(profile.kind))
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -4088,6 +4081,83 @@ pub(crate) mod tests {
             self.link.close();
             self.worker.take().unwrap().join().unwrap();
         }
+    }
+
+    /// Another account runs the CLI the default one does, so both pickers list
+    /// that CLI's catalog; a third-party endpoint answers to its card alone.
+    #[gpui::test]
+    fn a_second_account_lists_the_cli_catalog_and_a_third_party_endpoint_only_its_card(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(scratch_root("account-models")).unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        smol::block_on(host.update_state_for_test(|state, _cx| {
+            state.providers.model_catalogs.insert(
+                agent::ProviderKind::ClaudeCode,
+                vec![agent::ModelSpec {
+                    id: "cli-model".into(),
+                    display_name: "CLI model".into(),
+                    is_default: true,
+                    options: Vec::new(),
+                }],
+            );
+            let profile = |settings| tcode_core::settings::ProviderProfile {
+                kind: agent::ProviderKind::ClaudeCode,
+                settings,
+            };
+            state.settings.profiles.extend([
+                (
+                    "second-account".to_owned(),
+                    profile(tcode_core::settings::ProviderSettings {
+                        home_path: Some("/profile-homes/second-account".into()),
+                        ..Default::default()
+                    }),
+                ),
+                (
+                    "kimi".to_owned(),
+                    profile(tcode_core::settings::ProviderSettings {
+                        env: vec![tcode_core::settings::EnvVar {
+                            name: "ANTHROPIC_BASE_URL".into(),
+                            value: "https://api.kimi.test/anthropic".into(),
+                            sensitive: false,
+                        }],
+                        custom_models: vec!["kimi-model".into()],
+                        ..Default::default()
+                    }),
+                ),
+            ]);
+        }))
+        .unwrap();
+        let mut driver = LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        let ids = |store: &WorkspaceStore, profile: &str| {
+            store
+                .picker_models_for_profile(profile)
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>()
+        };
+        store.read_with(cx, |store, _| {
+            assert_eq!(ids(store, "claude"), ["cli-model"]);
+            assert_eq!(ids(store, "second-account"), ["cli-model"]);
+            assert_eq!(ids(store, "kimi"), ["kimi-model"]);
+        });
     }
 
     #[gpui::test]
