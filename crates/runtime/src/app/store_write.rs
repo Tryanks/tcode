@@ -7,6 +7,14 @@ use tcode_services::store::{DiffPass, Mutation};
 const MAX_BATCH_WRITES: usize = 256;
 const MAX_BATCH_BYTES: usize = 4 << 20;
 
+/// How long a streamed delta may wait for the ones after it before its
+/// commit. Providers stream deltas tens of milliseconds apart, so committing
+/// each one would pay a full drive flush per delta. A power loss can take at
+/// most this much of an in-flight stream's tail, which replays exactly like
+/// a crash this much earlier: a delta only appends text, and the record that
+/// completes its item commits every delta before it.
+const DELTA_WINDOW: Duration = Duration::from_millis(200);
+
 pub(super) enum StoreWrite {
     /// One appended record, committed together with what it changes in the
     /// session's turn boundaries and the diffs of the snapshot it supersedes.
@@ -146,6 +154,15 @@ impl StoreWrite {
         }))
     }
 
+    /// Streamed text growth, which may wait for the next boundary or the
+    /// delta window to be committed.
+    fn is_streamed_delta(&self) -> bool {
+        matches!(
+            self,
+            StoreWrite::AppendEvent { event, .. } if matches!(**event, AgentEvent::Delta { .. })
+        )
+    }
+
     fn member(self) -> Member {
         let (failure, completion): (fn(String) -> RuntimeError, _) = match self {
             StoreWrite::AppendEvent { .. } => (|error| RuntimeError::PersistEvent { error }, None),
@@ -214,6 +231,19 @@ impl StoreWrite {
     }
 }
 
+/// The next write, `None` once `deadline` passes first, or an error once
+/// every sender is gone and the queue is empty.
+fn recv_until(
+    writes: &smol::channel::Receiver<StoreWrite>,
+    deadline: Instant,
+) -> Result<Option<StoreWrite>, smol::channel::RecvError> {
+    use smol::future::FutureExt as _;
+    smol::block_on(async { writes.recv().await.map(Some) }.or(async {
+        smol::Timer::at(deadline).await;
+        Ok(None)
+    }))
+}
+
 pub(super) fn atomic_write(path: PathBuf, bytes: Vec<u8>) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, bytes)?;
@@ -243,17 +273,43 @@ impl StoreWriter {
     }
 
     /// Serve `writes` until every sender is gone and the queue is drained.
+    ///
+    /// Streamed deltas wait up to [`DELTA_WINDOW`] for more; any other write
+    /// (an item or turn boundary, a meta, a flush, a log read) commits them
+    /// together with itself at once, and so does the host closing the queue.
     pub(super) fn run(mut self, writes: smol::channel::Receiver<StoreWrite>) {
-        while let Ok(first) = writes.recv_blocking() {
-            let mut queue = vec![first];
+        let mut queue = Vec::new();
+        let mut deadline = None;
+        loop {
+            let received = match deadline {
+                None => writes.recv_blocking().map(Some),
+                Some(deadline) => recv_until(&writes, deadline),
+            };
+            let Ok(received) = received else { break };
+            let Some(first) = received else {
+                self.process(std::mem::take(&mut queue));
+                deadline = None;
+                continue;
+            };
+            let mut boundary = !first.is_streamed_delta();
+            queue.push(first);
             while queue.len() < MAX_BATCH_WRITES {
                 match writes.try_recv() {
-                    Ok(write) => queue.push(write),
+                    Ok(write) => {
+                        boundary |= !write.is_streamed_delta();
+                        queue.push(write);
+                    }
                     Err(_) => break,
                 }
             }
-            self.process(queue);
+            if boundary || queue.len() >= MAX_BATCH_WRITES {
+                self.process(std::mem::take(&mut queue));
+                deadline = None;
+            } else {
+                deadline.get_or_insert_with(|| Instant::now() + DELTA_WINDOW);
+            }
         }
+        self.process(queue);
     }
 
     /// Database writes accumulate into one transaction; any other write is an
