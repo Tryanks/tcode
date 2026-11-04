@@ -994,7 +994,7 @@ mod tests {
                 let position = turn * (DELTAS + 5) + 1;
                 store.show_thread_at_position(session_id.clone(), position, cx);
             });
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             while opened(cx).as_deref() != Some(expected.as_str()) {
                 assert!(Instant::now() < deadline, "waiting for {expected}");
                 driver.step(cx, &store);
@@ -1605,7 +1605,7 @@ mod tests {
                 kind: agent::DeltaKind::AssistantText,
                 text: format!("Paragraph {delta} of the streamed answer.\n\n"),
             }]);
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             while streamed(cx) == before {
                 assert!(Instant::now() < deadline, "waiting for delta {delta}");
                 driver.step(cx, &store);
@@ -1764,7 +1764,7 @@ mod tests {
                 .clone()
         });
         cx.simulate_resize(gpui::size(px(393.), px(600.)));
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = crate::store::tests::host_deadline();
         loop {
             driver.step(cx, &store);
             draw_settled(cx);
@@ -1802,7 +1802,7 @@ mod tests {
             draw_settled(cx);
         };
         click(point(pill.center().x, pill.top() - px(40.)), cx);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = crate::store::tests::host_deadline();
         while cx.debug_bounds("image-viewer-image").is_none() {
             driver.step(cx, &store);
             draw_settled(cx);

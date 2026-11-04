@@ -3522,7 +3522,7 @@ mod tests {
         // hydrates rather than a fixed number of turns, so a slow CI runner
         // cannot race the first snapshot.
         let drain = |cx: &mut VisualTestContext| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let deadline = crate::store::tests::host_deadline();
             loop {
                 store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
                 cx.run_until_parked();
@@ -3566,7 +3566,7 @@ mod tests {
             }),
         )
         .expect("patch settings");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = crate::store::tests::host_deadline();
         loop {
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             cx.run_until_parked();

@@ -6575,7 +6575,7 @@ mod tests {
         ];
         let wait_for_rows =
             |cx: &mut VisualTestContext, driver: &mut crate::store::tests::LocalHostDriver| {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let deadline = crate::store::tests::host_deadline();
                 loop {
                     driver.step(cx, &store);
                     draw(cx);
@@ -6599,7 +6599,7 @@ mod tests {
              enabled: bool,
              driver: &mut crate::store::tests::LocalHostDriver| {
                 store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let deadline = crate::store::tests::host_deadline();
                 while store.read_with(cx, |store, _| store.settings().sidebar_provider_marks)
                     != enabled
                 {
@@ -6972,7 +6972,7 @@ mod tests {
         let toggle = cx.debug_bounds("compact-layout-toggle").unwrap();
         assert_eq!(toggle.size, size(px(44.), px(44.)));
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = crate::store::tests::host_deadline();
         loop {
             driver.step(cx, &store);
             draw(cx);
@@ -7005,7 +7005,7 @@ mod tests {
             for collapsed in [true, false] {
                 let header = cx.debug_bounds("compact-group-header").unwrap();
                 cx.simulate_click(header.center(), gpui::Modifiers::default());
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let deadline = crate::store::tests::host_deadline();
                 loop {
                     driver.step(cx, &store);
                     draw(cx);

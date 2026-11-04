@@ -13023,7 +13023,7 @@ pub(crate) mod tests {
                 let state = shell.window_state.read(cx);
                 assert!(!state.palette_open, "choosing a project closes the chooser");
             });
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             loop {
                 driver.step(cx, &store);
                 draw(cx);
