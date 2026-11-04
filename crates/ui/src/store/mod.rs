@@ -185,6 +185,9 @@ pub struct WorkspaceStore {
     import_statuses: HashMap<String, Option<ExternalImportStatus>>,
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
+    /// Each thread's place in `index_replica.0`, rebuilt by
+    /// [`Self::reindex_sessions`] whenever that list changes.
+    index_positions: HashMap<String, usize>,
     index_summary: IndexSummary,
     /// Moves on with every change to what the thread lists are derived
     /// from: the index and its summary, the settings and the scope.
@@ -385,6 +388,7 @@ impl WorkspaceStore {
                 ConnectionState::Connected { path: None }
             },
             index_replica: (Vec::new(), Vec::new()),
+            index_positions: HashMap::new(),
             index_summary: IndexSummary::default(),
             thread_list_revision: 0,
             archived_replica: None,
@@ -673,6 +677,7 @@ impl WorkspaceStore {
             self.threads.clear();
             self.conversation_ui.clear();
             self.index_replica = Default::default();
+            self.reindex_sessions();
             self.index_summary = Default::default();
             self.draft_fallback_pending = false;
         }
@@ -1238,6 +1243,7 @@ impl WorkspaceStore {
                 self.index_replica
                     .0
                     .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
+                self.reindex_sessions();
                 self.close_unshown_pull_requests();
             }
             (Topic::Index, ServerEvent::IndexUpsertProject(project)) => {
@@ -1260,6 +1266,7 @@ impl WorkspaceStore {
                     .position(|meta| meta.id == *session_id)
                 {
                     self.removed_session = Some(self.index_replica.0.remove(position));
+                    self.reindex_sessions();
                 }
                 self.native_rewind_prefills.remove(session_id);
                 self.fallback_blocks.remove(session_id);
@@ -1302,6 +1309,7 @@ impl WorkspaceStore {
                     }
                 }
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
+                self.reindex_sessions();
                 self.close_unshown_pull_requests();
                 // Client state for a conversation the index no longer lists has
                 // nothing left to return to: a deleted project takes its draft's
@@ -2099,8 +2107,17 @@ impl WorkspaceStore {
     pub fn thread_meta(&self, session_id: &str) -> Option<&SessionMeta> {
         self.index_replica
             .0
+            .get(*self.index_positions.get(session_id)?)
+    }
+
+    fn reindex_sessions(&mut self) {
+        self.index_positions = self
+            .index_replica
+            .0
             .iter()
-            .find(|meta| meta.id == session_id)
+            .enumerate()
+            .map(|(position, meta)| (meta.id.clone(), position))
+            .collect();
     }
 
     /// The thread's links as its index entry carries them.
@@ -2564,10 +2581,7 @@ impl WorkspaceStore {
         let mut id = session_id.to_owned();
         for _ in 0..self.index_replica.0.len() {
             match self
-                .index_replica
-                .0
-                .iter()
-                .find(|meta| meta.id == id)
+                .thread_meta(&id)
                 .and_then(|meta| meta.parent_session_id.clone())
             {
                 Some(parent) => id = parent,
@@ -2616,21 +2630,16 @@ impl WorkspaceStore {
 
     pub fn session_unread(&self, session_id: &str) -> bool {
         if !self.scope.is_full() {
-            return self
-                .index_replica
-                .0
-                .iter()
-                .find(|meta| meta.id == session_id)
-                .is_some_and(|meta| {
-                    !meta.is_settled()
-                        && self
-                            .settings_replica
-                            .last_visited
-                            .get(session_id)
-                            .copied()
-                            .unwrap_or(0)
-                            < meta.updated_at
-                });
+            return self.thread_meta(session_id).is_some_and(|meta| {
+                !meta.is_settled()
+                    && self
+                        .settings_replica
+                        .last_visited
+                        .get(session_id)
+                        .copied()
+                        .unwrap_or(0)
+                        < meta.updated_at
+            });
         }
         self.index_summary
             .activity
