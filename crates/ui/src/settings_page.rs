@@ -1318,12 +1318,11 @@ impl SettingsPage {
         // below), so the cluster is placed out of flow at the strip's right edge
         // and the column reserves matching trailing room for it — its actions
         // therefore end left of the buttons rather than under them.
-        let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state();
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Settings,
             self.window_state.read(cx).route(),
-            right_panel_open,
-            right_tab,
+            false,
+            Default::default(),
         );
         // Align the header title and actions with the centered content column.
         window_drag_area(

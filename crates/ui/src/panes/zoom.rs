@@ -58,6 +58,8 @@ pub(crate) struct PaneZoom {
     pub(crate) zoomed: bool,
     /// The pane is drawn over the column, its slot holding a placeholder.
     pub(crate) overlaid: bool,
+    /// Another pane is drawn over this one.
+    pub(crate) beneath: bool,
 }
 
 impl Zoom {
@@ -77,6 +79,7 @@ impl Zoom {
         PaneZoom {
             zoomed: self.is_zoomed(),
             overlaid: self.pane() == Some(pane),
+            beneath: self.pane().is_some_and(|zoomed| zoomed != pane),
         }
     }
 

@@ -21,10 +21,12 @@ use serde::Deserialize;
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
+mod drawer;
 mod glide;
 mod layout_swap;
 mod zoom;
 
+pub(crate) use drawer::{CloseRightPanel, Drawer, RIGHT_PANEL_CONTEXT};
 pub(crate) use glide::{Before, Glides, Held, window_jumped};
 pub(crate) use layout_swap::LayoutSwap;
 pub(crate) use zoom::{PaneZoom, Zoom};
@@ -212,6 +214,7 @@ type FocusIn = Rc<dyn Fn(Entity<ThreadPanel>, &mut Window, &mut App)>;
 /// One thread shown in one pane.
 pub(crate) struct ThreadPanel {
     chat: Entity<ChatView>,
+    drawer: Drawer,
     /// The thread `chat` is bound to, held here too so the shell can read a
     /// pane's binding while that pane's conversation is rendering.
     session_id: Option<String>,
@@ -263,6 +266,7 @@ impl ThreadPanel {
     /// pane is no longer being updated.
     pub(crate) fn new(
         chat: Entity<ChatView>,
+        drawer: Drawer,
         on_focus_in: impl Fn(Entity<ThreadPanel>, &mut Window, &mut App) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -288,6 +292,7 @@ impl ThreadPanel {
         let mut panel = Self {
             session_id: None,
             chat,
+            drawer,
             focus_handle,
             group: None,
             bounds: Rc::default(),
@@ -415,6 +420,7 @@ impl ThreadPanel {
     pub(crate) fn set_zoom(&mut self, zoom: PaneZoom, cx: &mut Context<Self>) {
         if self.zoom != zoom {
             self.zoom = zoom;
+            self.set_preview_covered(zoom.beneath, cx);
             cx.notify();
         }
     }
@@ -524,6 +530,7 @@ impl Render for ThreadPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         const WAITING: usize = 0;
         const CHAT: usize = 1;
+        let drawer = self.render_drawer(window, cx);
         let bounds = self.bounds.clone();
         let held = self.held;
         // A pane beside others waits for a thread rather than offering the
@@ -621,7 +628,11 @@ impl Render for ThreadPanel {
             })
             .when(waiting, |pane| pane.key_context(WAITING_CONTEXT))
             .on_prepaint(move |painted, window, _| {
-                bounds.set(painted.intersect(&window.content_mask().bounds))
+                let painted = painted.intersect(&window.content_mask().bounds);
+                // The drawer is laid out from the pane's width.
+                if bounds.replace(painted).size != painted.size {
+                    window.request_animation_frame();
+                }
             })
             .on_action(cx.listener(|this, _: &SplitRight, window, cx| this.claim(window, cx)))
             .on_action(cx.listener(|this, _: &SplitDown, window, cx| this.claim(window, cx)))
@@ -643,6 +654,7 @@ impl Render for ThreadPanel {
                     })
                     .opacity(held.opacity),
             )
+            .children(drawer)
             .when(self.closing, |pane| pane.child(crate::motion::shield()))
     }
 }

@@ -199,10 +199,6 @@ pub struct WorkspaceStore {
     /// The thread the user is acting on: the one the conversation shows,
     /// whose commands take no session id.
     focused_session_id: Option<String>,
-    /// The thread the right panel shows. Client state, one per attachment,
-    /// beside the conversation state it indexes because toggles, badges and
-    /// auto-open reach the store without a window.
-    panel_subject: Option<String>,
     /// The open threads' replicas, and those of the threads left most
     /// recently ([`KEPT_THREADS`]).
     threads: HashMap<String, ThreadReplica>,
@@ -389,7 +385,6 @@ impl WorkspaceStore {
             index_hydrated: false,
             conversation_on_screen: false,
             focused_session_id: None,
-            panel_subject: None,
             threads: HashMap::new(),
             timeline_leases: HashMap::new(),
             selection_generation: 0,
@@ -1805,10 +1800,8 @@ impl WorkspaceStore {
             .count()
     }
 
-    /// Open the diff of `session_id`'s `turn`, with that thread focused: the
-    /// right panel shows the focused thread.
+    /// Open the diff of `session_id`'s `turn`.
     pub fn open_diff_for_turn(&mut self, session_id: &str, turn: usize, cx: &mut Context<Self>) {
-        self.focus_thread(session_id, cx);
         if let Some(ui) = self.thread_conversation_ui_mut(Some(session_id)) {
             ui.pending_diff_focus = None;
             ui.right_panel_open = true;
@@ -1819,8 +1812,7 @@ impl WorkspaceStore {
         }
     }
 
-    /// Open the diff of `path` in `session_id`'s `turn`, with that thread
-    /// focused: the right panel shows the focused thread.
+    /// Open the diff of `path` in `session_id`'s `turn`.
     pub fn open_diff_for_file(
         &mut self,
         session_id: &str,
@@ -1828,7 +1820,6 @@ impl WorkspaceStore {
         path: String,
         cx: &mut Context<Self>,
     ) {
-        self.focus_thread(session_id, cx);
         if let Some(ui) = self.thread_conversation_ui_mut(Some(session_id)) {
             ui.right_panel_open = true;
             ui.right_tab = RightTab::Diff;
@@ -2349,6 +2340,19 @@ impl WorkspaceStore {
         }
     }
 
+    /// The width the user dragged a right panel to, in points.
+    pub(crate) fn right_panel_width(&self) -> Option<u32> {
+        self.client_preferences.right_panel_width
+    }
+
+    pub(crate) fn set_right_panel_width(&mut self, width: u32, cx: &mut Context<Self>) {
+        if self.client_preferences.right_panel_width != Some(width) {
+            self.client_preferences.right_panel_width = Some(width);
+            self.save_client_preferences();
+            cx.notify();
+        }
+    }
+
     pub fn reset_client_preferences(&mut self) {
         self.client_preferences = ClientPreferences::default();
         self.save_client_preferences();
@@ -2563,22 +2567,6 @@ impl WorkspaceStore {
         self.providers_replica.usage_checking.contains(profile_id)
     }
 
-    pub(crate) fn panel_subject(&self) -> Option<&str> {
-        self.panel_subject.as_deref()
-    }
-
-    pub(crate) fn set_panel_subject(&mut self, session_id: Option<String>) {
-        self.panel_subject = session_id;
-    }
-
-    /// Whether the right panel is open, and on which tab: what covers the
-    /// window's corner, whichever thread it shows.
-    pub fn window_caption_state(&self) -> (bool, tcode_core::ui::RightTab) {
-        self.thread_conversation_ui(self.panel_subject())
-            .map(|ui| (ui.right_panel_open, ui.right_tab))
-            .unwrap_or((false, RightTab::default()))
-    }
-
     pub fn shell_window_title_for(&self, session_id: Option<&str>) -> String {
         if !self.scope.is_full() {
             return self.machine_label();
@@ -2610,11 +2598,6 @@ impl WorkspaceStore {
             }
         }
         keys
-    }
-
-    pub fn preview_panel_showing_for(&self, session_id: Option<&str>) -> bool {
-        self.thread_conversation_ui(session_id)
-            .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview)
     }
 
     pub fn preview_browser_settings(&self) -> BrowserSettings {
@@ -5041,10 +5024,12 @@ pub(crate) mod tests {
             appearance: Some("light".into()),
             language: Some("system".into()),
             device_name: Some("Desk client".into()),
+            right_panel_width: Some(480),
             ..Default::default()
         });
         let reloaded = tcode_traverse::NativeClientHost::new(root.clone(), "different fallback");
         let preferences = reloaded.load_preferences();
+        assert_eq!(preferences.right_panel_width, Some(480));
         let effective = effective_client_settings(&host, &preferences);
         assert_eq!(effective.theme_mode, ThemeMode::Light);
         assert_eq!(effective.language, None);

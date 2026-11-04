@@ -134,6 +134,11 @@ pub struct ClientPreferences {
     /// [`tcode_core::attachments::DEFAULT_REMOTE_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_attachment_limit_mib: Option<u32>,
+    /// The width, in points, the user dragged a right panel to. One value:
+    /// every conversation's panel in every pane rests at it, as far as its
+    /// pane allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_panel_width: Option<u32>,
 }
 
 /// One image the platform's own picker handed back, already read into memory.

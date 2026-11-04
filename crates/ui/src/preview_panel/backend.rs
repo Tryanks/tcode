@@ -115,16 +115,7 @@ impl Backend {
         let owner = Rc::new(());
         let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&owner), proxy));
         #[cfg(not(target_os = "android"))]
-        let load_errors = {
-            let changes = super::load_error::watch();
-            cx.spawn(async move |panel, cx| {
-                while changes.recv().await.is_ok() {
-                    if panel.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            })
-        };
+        let load_errors = watch_load_errors(cx);
         Self {
             lifecycle,
             _owner: owner,
@@ -134,6 +125,33 @@ impl Backend {
             _load_errors: load_errors,
         }
     }
+}
+
+impl Backend {
+    /// A backend for another panel on `self`'s pages.
+    pub(super) fn sharing(&self, cx: &mut Context<PreviewPanel>) -> Self {
+        Self {
+            lifecycle: self.lifecycle.clone(),
+            _owner: self._owner.clone(),
+            compact_panel_selected: false,
+            seam_pressed: false,
+            #[cfg(not(target_os = "android"))]
+            _load_errors: watch_load_errors(cx),
+        }
+    }
+}
+
+/// Redraw the panel whenever a page's load error changes.
+#[cfg(not(target_os = "android"))]
+fn watch_load_errors(cx: &mut Context<PreviewPanel>) -> gpui::Task<()> {
+    let changes = super::load_error::watch();
+    cx.spawn(async move |panel, cx| {
+        while changes.recv().await.is_ok() {
+            if panel.update(cx, |_, cx| cx.notify()).is_err() {
+                break;
+            }
+        }
+    })
 }
 
 impl PreviewPanel {
@@ -188,7 +206,7 @@ impl PreviewPanel {
         }
     }
 
-    fn lifecycle_entity(&self) -> gpui::Entity<BrowserLifecycle> {
+    pub(super) fn lifecycle_entity(&self) -> gpui::Entity<BrowserLifecycle> {
         self.backend.lifecycle.clone()
     }
 
@@ -223,8 +241,9 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let lifecycle = self.lifecycle_entity();
+        let owner = cx.entity_id();
         if self.window_state.read(cx).compact {
-            let previous = lifecycle.read(cx).active_identity().cloned();
+            let previous = lifecycle.read(cx).active_identity(owner).cloned();
             if let Some((session, key)) = previous
                 && current.as_ref().map(|(id, _)| id) != Some(&session)
             {
@@ -233,7 +252,8 @@ impl PreviewPanel {
                     .update(cx, |store, cx| store.clear_preview_chrome(&key, cx));
             }
         }
-        let reconciliation = lifecycle.update(cx, |lifecycle, _| lifecycle.reconcile_key(current));
+        let reconciliation =
+            lifecycle.update(cx, |lifecycle, _| lifecycle.reconcile_key(owner, current));
         if let Some(old_key) = reconciliation.migrated_from.as_deref()
             && self.mirrored.as_deref() == Some(old_key)
         {
@@ -247,12 +267,14 @@ impl PreviewPanel {
     }
 
     fn preview_tab_showing(&self, cx: &App) -> bool {
-        let store = self.store.read(cx);
-        store.preview_panel_showing_for(store.panel_subject())
+        let panel = self
+            .store
+            .read(cx)
+            .panel_state_for(self.session_id.as_deref());
+        panel.right_panel_open && panel.right_tab == tcode_core::ui::RightTab::Preview
     }
 
     fn routed_key(&mut self, session_id: &str, cx: &mut Context<Self>) -> String {
-        self.active_key(cx);
         self.store
             .read(cx)
             .preview_key_for(session_id)
@@ -274,7 +296,8 @@ impl PreviewPanel {
     }
 
     fn update_visibility(&mut self, allow_show: bool, cx: &mut Context<Self>) {
-        let yielding = self.backend.seam_pressed || resize_drag_active(cx);
+        let dragging = resize_drag_active(cx);
+        let yielding = self.backend.seam_pressed || dragging;
         let active = self.active_key(cx);
         let window_state = self.window_state.read(cx);
         let visible = visible_preview_key(
@@ -282,6 +305,7 @@ impl PreviewPanel {
             window_state.route(),
             window_state.palette_mounted(),
             self.preview_tab_showing(cx)
+                && !self.covered
                 && self.store.read(cx).preview_browser_settings().enabled
                 // gpui-fast-macos 0.1.10 hands a drag GPUI began to the native
                 // view under the pointer (`send_window_event` hit-tests
@@ -296,13 +320,16 @@ impl PreviewPanel {
                         && window_state.destination() == crate::window_state::Destination::Panel)),
         )
         .map(str::to_string);
+        let owner = cx.entity_id();
         self.lifecycle_entity().update(cx, |lifecycle, cx| {
-            if yielding {
-                lifecycle.hide_now(cx);
+            if dragging {
+                lifecycle.hide_now(None, cx);
+            } else if yielding {
+                lifecycle.hide_now(active.as_deref(), cx);
             } else if allow_show {
-                lifecycle.set_visible(visible.as_deref(), cx);
+                lifecycle.show_for(owner, visible.as_deref(), cx);
             } else {
-                lifecycle.hide_except(visible.as_deref(), cx);
+                lifecycle.hide_except(owner, visible.as_deref(), cx);
             }
         });
     }
@@ -1285,15 +1312,7 @@ impl PreviewPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let state = self.window_state.read(cx);
-        if self.store.read(cx).panel_subject() != Some(session_id)
-            || !self.preview_tab_showing(cx)
-            || state.palette_mounted()
-            || state.route() != crate::window_state::Route::Chat
-            || (state.compact
-                && (state.destination() != crate::window_state::Destination::Panel
-                    || !self.backend.compact_panel_selected))
-        {
+        if !self.lifecycle_entity().read(cx).is_shown(key) {
             let _ = reply.try_send(Err(
                 "preview is not visible; open the Preview panel before taking a screenshot".into(),
             ));

@@ -22,12 +22,6 @@ impl WorkspaceStore {
         self.focused_session_id.as_deref()
     }
 
-    /// The right panel shows what is focused until it has rules of its own.
-    fn set_focus(&mut self, session_id: Option<String>) {
-        self.set_panel_subject(session_id.clone());
-        self.focused_session_id = session_id;
-    }
-
     pub(super) fn focused_status(&self) -> Option<&SessionStatus> {
         self.thread_status(self.focus())
     }
@@ -150,7 +144,7 @@ impl WorkspaceStore {
     /// Closing the focused thread leaves nothing focused.
     pub(super) fn unfocus(&mut self, session_id: &str) {
         if self.focus() == Some(session_id) {
-            self.set_focus(None);
+            self.focused_session_id = None;
         }
     }
 
@@ -158,8 +152,7 @@ impl WorkspaceStore {
     pub(crate) fn leave_session(&mut self, cx: &mut Context<Self>) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
-        if let Some(session_id) = self.legacy_focus() {
-            self.set_focus(None);
+        if let Some(session_id) = self.focused_session_id.take() {
             self.close_thread(&session_id, cx);
         }
         cx.notify();
@@ -169,8 +162,7 @@ impl WorkspaceStore {
     /// show a thread that does not exist yet.
     pub(crate) fn release_focus(&mut self, cx: &mut Context<Self>) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
-        if self.focus().is_some() {
-            self.set_focus(None);
+        if self.focused_session_id.take().is_some() {
             cx.notify();
         }
     }
@@ -184,7 +176,7 @@ impl WorkspaceStore {
             return;
         }
         self.selection_generation = self.selection_generation.wrapping_add(1);
-        self.set_focus(Some(session_id.to_owned()));
+        self.focused_session_id = Some(session_id.to_owned());
         cx.notify();
     }
 
@@ -198,8 +190,7 @@ impl WorkspaceStore {
     /// Select the focused thread afresh once a new baseline dropped its
     /// subscriptions.
     pub(super) fn reselect_focused(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.legacy_focus() {
-            self.set_focus(None);
+        if let Some(session_id) = self.focused_session_id.take() {
             self.select(session_id, false, cx);
         }
     }
@@ -222,7 +213,7 @@ impl WorkspaceStore {
             return;
         }
         self.leave_session(cx);
-        self.set_focus(Some(session_id.clone()));
+        self.focused_session_id = Some(session_id.clone());
         self.open_thread(&session_id);
     }
 

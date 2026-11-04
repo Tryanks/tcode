@@ -28,10 +28,10 @@ use crate::widgets::tabs::{TabBar, TabItem};
 use crate::window_state::{NavigationPanel, NavigationSnapshot};
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Div,
-    ElementId, Entity, EntityId, FocusHandle, Focusable as _, Global, HitboxBehavior,
-    InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    TouchPhase, WeakEntity, Window, actions, canvas, div, prelude::FluentBuilder as _, px,
+    ElementId, Entity, EntityId, Focusable as _, Global, HitboxBehavior, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TouchPhase, WeakEntity,
+    Window, actions, canvas, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{
     NavMotion, NavOperation, NavStack, NavStackState, ResizableState, h_flex, h_resizable,
@@ -46,7 +46,6 @@ use tcode_protocol::{
 
 use crate::attachment::{Attachment, LocalTransport, same_target};
 use crate::chat::ChatView;
-use crate::diff::DiffPanel;
 use crate::icon::{Icon, IconName};
 use crate::palette::CommandPalette;
 use crate::panes::{
@@ -79,10 +78,6 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 actions!(tcode, [Quit, TogglePalette]);
-actions!(tcode_shell, [CloseRightPanel]);
-
-/// The key context of the right panel, where Escape closes it.
-pub(crate) const RIGHT_PANEL_CONTEXT: &str = "RightPanel";
 
 /// Transient per-frame state backing [`window_drag_area`].
 struct WindowDragState {
@@ -227,7 +222,8 @@ struct ShellAttachment {
     /// The pane showing the store's focused thread, or waiting for it; the
     /// compact layout's conversation is its chat.
     focused_pane: Entity<ThreadPanel>,
-    diff: Entity<DiffPanel>,
+    /// The attachment's preview panel: it answers the preview tools and owns
+    /// the pages each pane's drawer shows.
     preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
     palette: Entity<CommandPalette>,
@@ -239,31 +235,6 @@ struct ShellAttachment {
     /// The workspace split's panels gliding as the sidebar collapses and
     /// expands.
     panel_glide: crate::motion::resize_glide::ResizeGlide,
-    /// The scene of the right panel, which shows the focused thread's tab as
-    /// that thread left it: another thread focused shows its own at once,
-    /// open or shut, never as if the reader had opened or closed it, and its
-    /// content's motion starts at rest. The drawer taking its content down
-    /// starts a new one too, so content put up again starts at rest.
-    panel_scene: crate::motion::Epoch,
-    /// The width the right panel opens at: the default until the user drags the
-    /// panel's own edge, then whatever they chose (for this run).
-    right_width: Rc<Cell<Pixels>>,
-    /// The right panel's group (room for the chat · the panel), whose handle
-    /// is the panel's left edge.
-    drawer_split: Entity<ResizableState>,
-    /// Keep giving the right panel its width until its group reports it,
-    /// then stop so the restore never fights a drag. Armed while the panel
-    /// is not drawn, while it is expanded, and on every window width change.
-    drawer_restore_pending: bool,
-    /// Where the right panel's content holds the keyboard.
-    drawer_focus: FocusHandle,
-    /// What had the keyboard when the reader opened the right panel, given
-    /// it back when they close it from inside.
-    drawer_return: Option<FocusHandle>,
-    /// Whether the right panel was open, and whether it was drawn (open or
-    /// sliding out), last frame.
-    drawer_open: bool,
-    drawer_drawn: bool,
     sidebar_width: Rc<Cell<Pixels>>,
     /// Collapsed-only overlay visibility. Purely transient and never persisted;
     /// expanded/non-workspace renders clear it synchronously.
@@ -526,6 +497,25 @@ pub(crate) fn shown_in_pane(session_id: &str, cx: &App) -> bool {
     })
 }
 
+/// The pane showing `session_id` takes the keyboard and the store's focus at
+/// once, for a control of that pane replacing its thread. The compact layout
+/// draws no panes: its pages are one stack.
+pub(crate) fn act_in_pane_of(session_id: &str, window: &mut Window, cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    shell.update(cx, |shell, cx| {
+        let Some(pane) = shell
+            .pane_showing(session_id, cx)
+            .filter(|_| !shell.compact(cx))
+        else {
+            return;
+        };
+        window.focus(&pane.focus_handle(cx), cx);
+        shell.pane_focused(pane, window, cx);
+    });
+}
+
 /// The outline colour of the pane of this window showing `session_id`,
 /// while the column shows more than one pane: none in a single or zoomed
 /// pane, nor in the compact layout.
@@ -708,9 +698,6 @@ pub struct AppShell {
     /// Tracks the palette's open state across frames so it can be focused on the
     /// open transition.
     palette_was_open: bool,
-    /// Viewport width and sidebar collapse last seen by render; a change in
-    /// either re-lays the window out, which arms the right panel's restore.
-    last_split_layout: Option<(Pixels, bool)>,
     /// The title last given to the OS window. The title is in the current
     /// language, and a language switch reaches the shell only as a redraw.
     window_title: String,
@@ -768,13 +755,6 @@ struct PageBack {
     target: Option<f32>,
 }
 
-/// The right panel's default width.
-const RIGHT_PANEL_WIDTH: f32 = 560.;
-/// The panel's narrowest: the icon tabs and the panel's own controls fit in
-/// a panel's narrowest content, beside the window's caption buttons where the
-/// panel's strip holds them.
-const RIGHT_PANEL_MIN_WIDTH: f32 =
-    crate::material::PANEL_CONTENT_MIN_WIDTH + window_caption::RIGHT_PANEL_CAPTION_WIDTH;
 /// A pane alone in the chat column is not split narrower than this, plus
 /// whatever its header holds beyond the plain one (`header_extra_width_for`),
 /// so its header keeps the tiers it has without panes.
@@ -916,7 +896,6 @@ impl AppShell {
             operation_toasts: HashMap::new(),
             next_toast_id: 1,
             palette_was_open: false,
-            last_split_layout: None,
             window_title: String::new(),
             scene_key: 0,
             attachments: Default::default(),
@@ -1176,8 +1155,9 @@ impl AppShell {
             old.link.close(cx);
             old._subscriptions.clear();
             old._tasks.clear();
-            old.preview
-                .update(cx, |preview, cx| preview.release_preview(cx));
+            for pane in old.all_panes(cx) {
+                pane.update(cx, |pane, cx| pane.release_preview(cx));
+            }
             old
         });
         if !self.compact(cx) {
@@ -1322,10 +1302,7 @@ impl AppShell {
         };
 
         let observed_session_id = store.read(cx).legacy_focus();
-        let panel_scene = crate::motion::Epoch::default();
-        panel_scene.show(observed_session_id.as_deref());
-        preview.update(cx, |preview, _| preview.share_scene(&panel_scene));
-        let thread_panel = self.new_pane(&store, observed_session_id.clone(), window, cx);
+        let thread_panel = self.new_pane(&store, &preview, observed_session_id.clone(), window, cx);
         let shell = cx.entity().downgrade();
         let drop_landing = Rc::new(Cell::new(None));
         let drop_target: crate::panes::DropTarget = Rc::new({
@@ -1371,11 +1348,6 @@ impl AppShell {
             drop_landing,
             held_split: None,
             focused_pane: thread_panel,
-            diff: cx.new(|cx| {
-                let mut diff = DiffPanel::new(store.clone(), self.window_state.clone(), cx);
-                diff.share_scene(&panel_scene, cx);
-                diff
-            }),
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
             palette: cx.new(|cx| {
@@ -1388,14 +1360,6 @@ impl AppShell {
                 "workspace-panels",
                 gpui::Axis::Horizontal,
             ),
-            panel_scene,
-            right_width: Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH))),
-            drawer_split: cx.new(|_| ResizableState::default()),
-            drawer_restore_pending: true,
-            drawer_focus: cx.focus_handle(),
-            drawer_return: None,
-            drawer_open: false,
-            drawer_drawn: false,
             sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             sidebar_overlay_visible: false,
             observed_session_id,
@@ -1425,10 +1389,18 @@ impl AppShell {
     fn new_pane(
         &self,
         store: &Entity<WorkspaceStore>,
+        preview: &Entity<PreviewPanel>,
         session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ThreadPanel> {
+        let drawer = crate::panes::Drawer::new(
+            store.clone(),
+            self.window_state.clone(),
+            preview.clone(),
+            session_id.as_deref(),
+            cx,
+        );
         let chat = cx.new(|cx| {
             ChatView::new(
                 store.clone(),
@@ -1442,6 +1414,7 @@ impl AppShell {
         cx.new(|cx| {
             ThreadPanel::new(
                 chat,
+                drawer,
                 move |pane, window, cx| {
                     _ = shell.update(cx, |shell, cx| shell.pane_focused(pane, window, cx));
                 },
@@ -1645,8 +1618,9 @@ impl AppShell {
         let node = from.read(cx).group()?.read(cx).node();
         let beside = from.read(cx).session_id().map(str::to_owned);
         let store = attachment.link.store.clone();
+        let preview = attachment.preview.clone();
         let area = attachment.thread_panes.clone();
-        let pane = self.new_pane(&store, None, window, cx);
+        let pane = self.new_pane(&store, &preview, None, window, cx);
         self.attachment.as_mut()?.zoom.zoom_out();
         let before = self.glide_before_edit(window, cx);
         area.update(cx, |area, cx| {
@@ -2556,6 +2530,7 @@ impl AppShell {
             return;
         };
         let store = attachment.link.store.clone();
+        let preview = attachment.preview.clone();
         let area = attachment.thread_panes.clone();
         let focused = attachment.focused_pane.clone();
         let before = attachment.panes(cx);
@@ -2565,7 +2540,7 @@ impl AppShell {
             let pane = match slot {
                 Slot::Pane(pane) => pane,
                 Slot::Waiting | Slot::Thread(_) => {
-                    let pane = self.new_pane(&store, None, window, cx);
+                    let pane = self.new_pane(&store, &preview, None, window, cx);
                     if let Slot::Thread(session_id) = slot {
                         threads.push((pane.clone(), session_id));
                     }
@@ -2898,8 +2873,8 @@ impl AppShell {
             && let Some(attachment) = &self.attachment
         {
             attachment
-                .preview
-                .update(cx, |preview, cx| preview.release_preview(cx));
+                .focused_pane
+                .update(cx, |pane, cx| pane.release_preview(cx));
         }
         consumed
     }
@@ -4233,11 +4208,13 @@ impl AppShell {
                 || selected_panel == Some("agents")
         });
         let show_preview = store.offers_preview();
-        attachment.preview.update(cx, |preview, cx| {
-            preview.set_compact_panel_selected(
+        let page_pane = attachment.focused_pane.clone();
+        page_pane.update(cx, |pane, cx| {
+            pane.select_compact_preview(
                 self.pending_navigation_restore.is_none()
                     && !terminal
                     && panel.right_tab == RightTab::Preview,
+                window,
                 cx,
             );
         });
@@ -4324,8 +4301,12 @@ impl AppShell {
                         .read(cx)
                         .terminal_drawer()
                         .into_any_element(),
-                    2 => attachment.preview.clone().into_any_element(),
-                    _ => attachment.diff.clone().into_any_element(),
+                    2 => page_pane
+                        .update(cx, |pane, cx| pane.drawer_preview(window, cx))
+                        .into_any_element(),
+                    _ => page_pane
+                        .update(cx, |pane, cx| pane.drawer_tabs(cx))
+                        .into_any_element(),
                 };
                 (layer, body)
             })
@@ -5081,9 +5062,9 @@ impl AppShell {
         // its layout node. Synchronize it before a route change or a
         // right-panel tab/close transition can unmount PreviewPanel.
         if self.departing.is_none() {
-            attachment
-                .preview
-                .update(cx, |preview, cx| preview.sync_visibility(cx));
+            for pane in attachment.all_panes(cx) {
+                pane.update(cx, |pane, cx| pane.sync_preview(cx));
+            }
         }
 
         let scene = attachment.routes.sample("routes", route, window, cx);
@@ -5257,212 +5238,7 @@ impl AppShell {
         let Some(attachment) = &mut self.attachment else {
             unreachable!("a workspace route has an attachment");
         };
-        let panel = attachment.link.store.read(cx).panel_state();
-        let panel_open = panel.right_panel_open;
-        let right_tab = panel.right_tab;
-        // "Expanded" (everything beside the sidebar) is a diff-only
-        // affordance; the preview tab keeps the panel's width so the webview
-        // keeps a stable size.
-        let expanded = panel.right_panel_expanded && right_tab != RightTab::Preview;
-        let scene = attachment.panel_scene.clone();
-        let new_scene = scene.show(attachment.link.store.read(cx).legacy_focus().as_deref());
-        let sidebar_layout_width = if collapsed {
-            px(0.)
-        } else {
-            attachment.sidebar_width.get()
-        };
         let split = attachment.split.clone();
-
-        let viewport_width = window.viewport_size().width;
-        let layout_changed = self.last_split_layout != Some((viewport_width, collapsed));
-        if layout_changed {
-            self.last_split_layout = Some((viewport_width, collapsed));
-        }
-        let beside_sidebar = viewport_width - sidebar_layout_width;
-        let departing = self.departing.is_some();
-        let Some(attachment) = &mut self.attachment else {
-            unreachable!("checked above");
-        };
-
-        // The right panel is a drawer over the chat, which keeps its whole
-        // column beneath: it slides in from the window's edge as it opens and
-        // back out as it closes, drawn as it was while it goes.
-        let drawer_in = gpui_base::motion::transition(
-            scene.id("right-panel-in"),
-            if panel_open { 1. } else { 0. },
-            gpui_base::motion::Transition::new(GLIDE),
-            window,
-            cx,
-        );
-        let drawn = panel_open || drawer_in > 0.;
-        let leaving = !panel_open && drawn;
-        // Expanded, it glides out to everything beside the sidebar; restored,
-        // back to the width it rests at.
-        let expand = gpui_base::motion::transition(
-            scene.id("right-panel-expand"),
-            if expanded { 1. } else { 0. },
-            gpui_base::motion::Transition::new(GLIDE),
-            window,
-            cx,
-        );
-        let rest_width = attachment
-            .right_width
-            .get()
-            .max(px(RIGHT_PANEL_MIN_WIDTH))
-            .min(beside_sidebar);
-        let drawer_width = rest_width + (beside_sidebar - rest_width) * expand;
-        if !drawn || layout_changed || expand > 0. {
-            attachment.drawer_restore_pending = true;
-        }
-        if drawn && expand == 0. && attachment.drawer_restore_pending {
-            let restored =
-                attachment
-                    .drawer_split
-                    .update(cx, |state, cx| match state.sizes().get(1) {
-                        Some(width) if (*width - rest_width).abs() > px(0.5) => {
-                            state.resize_panel(1, rest_width, window, cx);
-                            false
-                        }
-                        Some(_) => true,
-                        None => false,
-                    });
-            // A match on the frame the layout changed is the old layout, not
-            // a settled one.
-            if restored && !layout_changed {
-                attachment.drawer_restore_pending = false;
-            }
-        }
-        // Held at the width it is being given until the group has it, so no
-        // frame draws it at the group's minimum or rescaled by the window.
-        let drawer_pinned = attachment.drawer_restore_pending;
-
-        // The reader opening the panel hands it the keyboard, and closing it
-        // from inside gives the keyboard back. Another thread focused shows
-        // its own panel as that thread left it, keyboard and all.
-        let was_open = std::mem::replace(&mut attachment.drawer_open, panel_open);
-        if new_scene {
-            attachment.drawer_return = None;
-        } else if !departing && panel_open && !was_open {
-            if !attachment.drawer_focus.contains_focused(window, cx) {
-                attachment.drawer_return = window.focused(cx);
-            }
-            attachment.drawer_focus.focus(window, cx);
-        } else if !departing
-            && !panel_open
-            && was_open
-            && let Some(previous) = attachment.drawer_return.take()
-            && attachment.drawer_focus.contains_focused(window, cx)
-        {
-            previous.focus(window, cx);
-        }
-        // Once the panel has slid out, its content is taken down and what it
-        // built to draw is let go. Another thread focused keeps its own
-        // panel as it left it, page included.
-        let was_drawn = std::mem::replace(&mut attachment.drawer_drawn, drawn);
-        if was_drawn && !drawn {
-            attachment.diff.update(cx, |diff, cx| diff.release(cx));
-            if !new_scene {
-                scene.restart();
-                attachment
-                    .preview
-                    .update(cx, |preview, cx| preview.release_page(cx));
-            }
-        }
-
-        let drawer = drawn.then(|| {
-            // Which entity fills the right panel: the Preview tab shows the
-            // embedded browser; the other tabs share the DiffPanel container.
-            // Each keeps its own layer, so the one left fades out under the
-            // one chosen; a page leaving the Preview fades natively as it is
-            // let go.
-            let fade = crate::motion::CrossFade::new(
-                scene.id("right-panel-body"),
-                usize::from(right_tab == RightTab::Preview),
-                2,
-                CHANGE,
-                window,
-                cx,
-            );
-            let layers: Vec<(usize, AnyElement)> = [
-                (0, attachment.diff.clone().into_any_element()),
-                (1, attachment.preview.clone().into_any_element()),
-            ]
-            .into_iter()
-            .filter(|(layer, _)| fade.shows(*layer))
-            .collect();
-            let content = fade.fill().render(layers).size_full();
-            let remembered = attachment.right_width.clone();
-            let store = attachment.link.store.downgrade();
-            let away = drawer_width * (1. - drawer_in);
-            // The panel's edge is its group's handle; expanded, the panel
-            // spans everything beside the sidebar, and gpui-base has no API
-            // to disable one handle, so it is covered.
-            let edge_cover = (expanded || expand > 0.).then(|| {
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(beside_sidebar - drawer_width - px(5.))
-                    .w(px(10.))
-                    .h_full()
-                    .occlude()
-            });
-            div()
-                .absolute()
-                .top_0()
-                .right(px(0.) - away)
-                .h_full()
-                .w(beside_sidebar)
-                .child(
-                    h_resizable("right-panel-drawer")
-                        .with_state(&attachment.drawer_split)
-                        .on_resize(move |state, _, cx| {
-                            if !expanded && let Some(width) = state.read(cx).sizes().get(1) {
-                                remembered.set(*width);
-                            }
-                        })
-                        .child(resizable_panel().size_range(px(0.)..Pixels::MAX))
-                        .child(
-                            resizable_panel()
-                                .flex_none()
-                                .size(rest_width)
-                                .size_range(if drawer_pinned {
-                                    drawer_width..drawer_width
-                                } else {
-                                    px(RIGHT_PANEL_MIN_WIDTH).min(beside_sidebar)..beside_sidebar
-                                })
-                                .child(
-                                    // gpui-base's PopoverState and Sheet are
-                                    // modal: a popover registers a deferred
-                                    // popup, which suspends the text fields'
-                                    // context menus and the chat's scrolling
-                                    // capture window-wide, and a sheet traps
-                                    // focus. The drawer leaves the chat
-                                    // beside it working, so it takes and
-                                    // returns the keyboard itself.
-                                    crate::material::floating_panel(
-                                        div().id("right-panel"),
-                                        crate::material::Side::Right,
-                                        cx,
-                                    )
-                                    .debug_selector(|| "right-panel".into())
-                                    .size_full()
-                                    .role(Role::Complementary)
-                                    .tab_group()
-                                    .track_focus(&attachment.drawer_focus)
-                                    .key_context(RIGHT_PANEL_CONTEXT)
-                                    .on_action(move |_: &CloseRightPanel, _, cx| {
-                                        _ = store
-                                            .update(cx, |store, cx| store.close_diff_panel(cx));
-                                    })
-                                    .occlude()
-                                    .child(content)
-                                    .when(leaving, |panel| panel.child(crate::motion::shield())),
-                                ),
-                        ),
-                )
-                .children(edge_cover)
-        });
-
         // The chat and the sidebar, which glides as it collapses and expands.
         let glide = attachment.panel_glide.sample(
             &[
@@ -5553,7 +5329,6 @@ impl AppShell {
                     )
                     .child(chat_panel),
             )
-            .children(drawer)
             // Collapsed, the group runs to the window's left edge. This fixed
             // transparent strip only opens the overlay, an independent
             // absolute sibling, so neither reflows the columns. Its inevitable
@@ -8483,6 +8258,44 @@ mod tests {
         draw(cx);
     }
 
+    /// `id` finishes a turn that changed `file`.
+    fn serve_changed_turn(host: &MountedShell, id: &str, file: &str) {
+        let turn_id = format!("turn-{file}");
+        let events = [
+            agent::AgentEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+            },
+            agent::AgentEvent::TurnChangesUpdated {
+                turn_id: turn_id.clone(),
+                changes: agent::file_changes_from_unified_diff(&format!(
+                    "diff --git a/{file} b/{file}\n--- a/{file}\n+++ b/{file}\n\
+                     @@ -1 +1 @@\n-fn old() {{}}\n+fn new() {{}}\n",
+                ))
+                .expect("one file section"),
+                completeness: agent::ChangeCompleteness::Exact,
+            },
+            agent::AgentEvent::TurnCompleted {
+                turn_id,
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+        ];
+        send_events(
+            host,
+            events
+                .into_iter()
+                .map(|event| {
+                    (
+                        Topic::SessionEvents {
+                            session_id: id.into(),
+                        },
+                        ServerEvent::SessionEvent(event.into()),
+                    )
+                })
+                .collect(),
+        );
+    }
+
     /// `id`'s status as the host reports a native subagent's: read-only,
     /// its composer only its settings row.
     fn serve_subagent_status(host: &MountedShell, id: &str) {
@@ -10376,10 +10189,10 @@ mod tests {
     }
 
     /// A panel toggle in the header of the pane without the keyboard acts on
-    /// that pane's thread: the press brings it forward, and the right panel
-    /// opens on it, not on the thread that had the keyboard, whose own panel
-    /// stays as it was left. A panel its thread left open, lit on the toggle
-    /// but off screen, is shown rather than closed; only one on screen is.
+    /// that pane's thread. The press moves nothing; the release opens the
+    /// thread's drawer in its own pane, which takes the keyboard, and closed
+    /// from inside it gives the keyboard back. Each toggle closes only the
+    /// drawer of its own thread.
     #[gpui::test]
     fn a_header_toggle_acts_on_the_thread_of_its_own_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -10390,23 +10203,11 @@ mod tests {
             || serve_spawning(&host, "thread-2", &["spawn-1"]),
             cx,
         );
-        let focused = |cx: &VisualTestContext| store.read_with(cx, |store, _| store.legacy_focus());
         let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
             cx.debug_bounds(selector)
                 .unwrap_or_else(|| panic!("no {selector}"))
         };
-        let back_to_the_left = |cx: &mut VisualTestContext| {
-            let left = pane_bounds(&shell, cx)[0];
-            let at = gpui::point(left.center().x, left.top() + left.size.height / 4.);
-            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
-            draw(cx);
-            cx.simulate_click(at, gpui::Modifiers::default());
-            settle_panes(cx);
-            assert_eq!(keyboard_pane(&shell, cx), Some(0));
-            assert_eq!(focused(cx), Some("thread-1".to_owned()));
-        };
 
-        // The press alone moves the pane's focus.
         let agents = bounds("agents-panel", cx);
         assert!(pane_bounds(&shell, cx)[1].contains(&agents.center()));
         cx.simulate_mouse_move(agents.center(), None, gpui::Modifiers::default());
@@ -10417,8 +10218,11 @@ mod tests {
             gpui::Modifiers::default(),
         );
         draw(cx);
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        assert_eq!(focused(cx), Some("thread-2".to_owned()));
+        assert_eq!(
+            keyboard_pane(&shell, cx),
+            Some(0),
+            "the press moves nothing"
+        );
         assert_eq!(
             panel_of(&store, "thread-2", cx),
             None,
@@ -10432,53 +10236,200 @@ mod tests {
         settle_panes(cx);
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Agents));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
-        assert!(acting_on_pane(&shell, 1, cx));
+        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the drawer takes it");
         assert!(
             bounds("right-panel", cx).contains(&bounds("agent-row-spawn-1", cx).center()),
             "the panel lists the agents of the thread whose toggle was pressed"
         );
 
-        // Closed from inside, the keyboard goes back to the pane.
         let close = bounds("diff-close", cx);
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         settle_panes(cx);
         assert_eq!(panel_of(&store, "thread-2", cx), None);
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert_eq!(keyboard_pane(&shell, cx), Some(0), "back where it was");
 
-        back_to_the_left(cx);
         let diff = bounds("diff-panel", cx);
         press_with_a_frame_between(diff.center(), cx);
-        assert_eq!(focused(cx), Some("thread-2".to_owned()));
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
-        assert!(acting_on_pane(&shell, 1, cx));
 
-        // With the right thread's panel open, the left pane's toggle, the
-        // same distance from its pane's end, opens the left thread's, and
-        // the right thread's stays as it was left. The panel covers the
-        // right pane's end, not the left pane's.
+        // The left pane's toggle, the same distance from its pane's end,
+        // opens the left thread's drawer and leaves the right thread's.
         let panes = pane_bounds(&shell, cx);
         let at = gpui::point(
             panes[0].right() - (panes[1].right() - diff.center().x),
             diff.center().y,
         );
         press_with_a_frame_between(at, cx);
-        assert_eq!(focused(cx), Some("thread-1".to_owned()));
         assert_eq!(panel_of(&store, "thread-1", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
-        assert!(acting_on_pane(&shell, 0, cx));
+    }
 
-        // Left open and off screen, the panel comes back rather than closes,
-        // and only on screen does the toggle close it.
-        cx.simulate_keystrokes("secondary-alt-right");
+    /// Two panes each have a drawer. Diff opened from the left pane's header
+    /// lies inside that pane with the right pane uncovered; Plan opened in
+    /// the right pane too shows beside it, each with its own thread's
+    /// content. A thread moved to the other pane takes its drawer along.
+    #[gpui::test]
+    fn each_pane_has_a_drawer_of_its_own(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        serve_changed_turn(&host, "thread-1", "left.rs");
+        side_by_side(
+            &shell,
+            || {
+                serve_thread(&host, "thread-2");
+                send_events(
+                    &host,
+                    vec![(
+                        Topic::SessionPlan {
+                            session_id: "thread-2".into(),
+                        },
+                        ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
+                            session_id: "thread-2".into(),
+                            steps: vec![agent::PlanStep {
+                                step: "Right".into(),
+                                status: agent::PlanStepStatus::Pending,
+                            }],
+                            explanation: None,
+                        }),
+                    )],
+                );
+            },
+            cx,
+        );
         settle_panes(cx);
-        assert_eq!(focused(cx), Some("thread-2".to_owned()));
-        press_with_a_frame_between(at, cx);
-        assert_eq!(focused(cx), Some("thread-1".to_owned()));
+        let panes = pane_bounds(&shell, cx);
+        let inside = |pane: gpui::Bounds<Pixels>, bounds: gpui::Bounds<Pixels>| {
+            pane.left() <= bounds.left()
+                && bounds.right() <= pane.right()
+                && pane.top() <= bounds.top()
+                && bounds.bottom() <= pane.bottom()
+        };
+
+        let right_diff = cx.debug_bounds("diff-panel").expect("the Diff toggle");
+        assert!(panes[1].contains(&right_diff.center()));
+        let left_diff = gpui::point(
+            panes[0].right() - (panes[1].right() - right_diff.center().x),
+            right_diff.center().y,
+        );
+        cx.simulate_mouse_move(left_diff, None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(left_diff, gpui::Modifiers::default());
+        settle_panes(cx);
+        draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
+        let drawer = cx.debug_bounds("right-panel").expect("the left drawer");
+        assert!(inside(panes[0], drawer), "{drawer:?} in {panes:?}");
+        assert_eq!(drawer.right(), panes[0].right());
+        assert_eq!(panel_of(&store, "thread-2", cx), None);
+
+        // Uncovered, the right pane's own header still takes a click.
+        let plan = cx.debug_bounds("plan-panel").expect("the Plan toggle");
+        assert!(panes[1].contains(&plan.center()));
+        cx.simulate_mouse_move(plan.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(plan.center(), gpui::Modifiers::default());
+        settle_panes(cx);
         assert_eq!(panel_of(&store, "thread-1", cx), Some(RightTab::Diff));
-        press_with_a_frame_between(at, cx);
-        assert_eq!(panel_of(&store, "thread-1", cx), None);
-        assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
+        assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Plan));
+        let diff = cx
+            .debug_bounds("diff-line-new-left.rs-1")
+            .expect("the left thread's diff");
+        let step = cx
+            .debug_bounds("plan-step-0:Right")
+            .expect("the right thread's plan");
+        assert!(inside(panes[0], diff), "{diff:?} in {panes:?}");
+        assert!(inside(panes[1], step), "{step:?} in {panes:?}");
+
+        cx.simulate_keystrokes("secondary-alt-shift-left");
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-2".into()), Some("thread-1".into())]
+        );
+        draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
+        let diff = cx
+            .debug_bounds("diff-line-new-left.rs-1")
+            .expect("the left thread's diff");
+        let step = cx
+            .debug_bounds("plan-step-0:Right")
+            .expect("the right thread's plan");
+        assert!(inside(panes[1], diff), "{diff:?} in {panes:?}");
+        assert!(inside(panes[0], step), "{step:?} in {panes:?}");
+    }
+
+    /// The drawer's width is one preference: dragged in one thread's drawer,
+    /// it is the width another thread's drawer opens at, in another pane too.
+    #[gpui::test]
+    fn a_width_dragged_in_one_drawer_is_every_drawers(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
+        let open = |thread: &str, cx: &mut VisualTestContext| {
+            store.update(cx, |store, cx| {
+                store.toggle_tab_panel_for(thread, RightTab::Plan, cx)
+            });
+            settle_panes(cx);
+            cx.debug_bounds("right-panel").expect("the drawer")
+        };
+        let panes = pane_bounds(&shell, cx);
+        let first = open("thread-1", cx);
+        assert_eq!(first.right(), panes[0].right());
+        assert_eq!(first.size.width, px(560.));
+
+        // As a pointer does: the drag starts on the first move and moves the
+        // handle on the next, each with its frame.
+        let from = gpui::point(first.left(), px(400.));
+        cx.simulate_mouse_move(from, None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        let to = from + gpui::point(px(60.), px(0.));
+        for step in [from + gpui::point(px(5.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), gpui::Modifiers::default());
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+        settle_panes(cx);
+        let chosen = cx
+            .debug_bounds("right-panel")
+            .expect("the drawer")
+            .size
+            .width;
+        assert!(chosen < first.size.width, "the edge shrinks the panel");
+
+        store.update(cx, |store, cx| {
+            store.close_right_panel_for(Some("thread-1"), cx)
+        });
+        settle_panes(cx);
+        let other = open("thread-2", cx);
+        assert_eq!(other.right(), panes[1].right(), "the other pane's drawer");
+        assert_eq!(other.size.width, chosen);
+    }
+
+    /// A zoomed pane's drawer stays inside the zoomed pane, which covers the
+    /// column, and spans it from the pane's right edge.
+    #[gpui::test]
+    fn a_zoomed_panes_drawer_stays_inside_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", RightTab::Plan, cx)
+        });
+        settle_panes(cx);
+        let slot = pane_bounds(&shell, cx)[0];
+        cx.simulate_keystrokes("secondary-shift-enter");
+        settle_panes(cx);
+        let zoomed = pane_bounds(&shell, cx)[0];
+        assert!(
+            zoomed.size.width > slot.size.width,
+            "{zoomed:?} from {slot:?}"
+        );
+        let drawer = cx.debug_bounds("right-panel").expect("the drawer");
+        assert_eq!(drawer.right(), zoomed.right());
+        assert!(zoomed.left() <= drawer.left());
     }
 
     /// A file listed in the rail of the pane without the keyboard opens that
@@ -10570,29 +10521,6 @@ mod tests {
         assert_eq!(panel_of(&store, "thread-1", cx), None);
         settle_panes(cx);
         assert!(acting_on_pane(&shell, 1, cx));
-    }
-
-    /// The sidebar's toggle in the header of the pane without the keyboard
-    /// brings that pane forward as it folds the sidebar.
-    #[gpui::test]
-    fn the_sidebar_toggle_takes_the_focus_of_its_pane(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        let store = store_of(&shell, cx);
-        side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
-        let toggle = cx
-            .debug_bounds("toggle-sidebar")
-            .expect("the sidebar toggle");
-        assert!(pane_bounds(&shell, cx)[1].contains(&toggle.center()));
-        press_with_a_frame_between(toggle.center(), cx);
-        assert!(shell.read_with(cx, |shell, cx| {
-            shell.window_state().read(cx).sidebar_collapsed
-        }));
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
-        assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
-            Some("thread-2".into())
-        );
     }
 
     /// The way back to an agent's lead in the header of the pane without the
@@ -13668,6 +13596,9 @@ mod tests {
                 shell.window_state(),
             )
         });
+        let page_pane = shell.read_with(cx, |shell, _| {
+            shell.attachment.as_ref().unwrap().focused_pane.clone()
+        });
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
         let key = store.read_with(cx, |store, _| store.preview_active_identity().unwrap().1);
         store.update(cx, |store, cx| {
@@ -13692,6 +13623,7 @@ mod tests {
         draw(cx);
         // Dispatch the same action as the compact overflow menu.
         cx.update(|window, cx| {
+            let preview = page_pane.update(cx, |pane, cx| pane.drawer_preview(window, cx));
             preview.update(cx, |preview, cx| {
                 preview.on_preview_action(&crate::preview_panel::PreviewAction::Close, window, cx)
             });
@@ -14040,7 +13972,7 @@ mod tests {
                 .attachment
                 .as_ref()
                 .expect("attached")
-                .diff
+                .focused_pane
                 .downgrade()
         });
         shell.update(cx, |shell, cx| shell.detach(cx));
@@ -15243,7 +15175,8 @@ mod tests {
     /// through, on a thread whose header and tab strip are as full as they
     /// get, with the sidebar open and collapsed: it rests against the
     /// window's right edge at the width the user chose, or everything beside
-    /// the sidebar where that is less, and comes back to that width after the
+    /// the sidebar where that would leave no usable strip of chat, and comes
+    /// back to that width after the
     /// window narrows and widens again, after a drag of its edge chose
     /// another, after a sidebar drag, and after it was expanded to everything
     /// beside the sidebar and dragged there. At every width no tab label is
@@ -15260,7 +15193,7 @@ mod tests {
         resize(cx, 1600.);
         store.update(cx, |store, cx| store.toggle_diff_panel(cx));
         draw_until(&shell, cx, &host, "diff-body", None);
-        let chosen = Rc::new(Cell::new(px(RIGHT_PANEL_WIDTH)));
+        let chosen = Rc::new(Cell::new(px(560.)));
 
         let walk = |cx: &mut VisualTestContext, widths: &[f32]| {
             for &width in widths {
@@ -15276,10 +15209,18 @@ mod tests {
                     }
                 });
                 let beside = px(width) - sidebar;
+                // All of the pane where a strip of chat too narrow to use
+                // would be left beside it.
+                let fits = chosen.get().min(beside);
+                let expected = if beside - fits < px(240.) {
+                    beside
+                } else {
+                    fits
+                };
                 let panel = cx.debug_bounds("right-panel").expect("the right panel");
                 assert_eq!(
                     (panel.size.width, panel.right()),
-                    (chosen.get().min(beside), px(width)),
+                    (expected, px(width)),
                     "{width}pt, sidebar {sidebar:?}"
                 );
                 let tabs = cx.debug_bounds("right-panel-tabs").expect("the tab list");

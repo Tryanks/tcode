@@ -205,9 +205,6 @@ pub struct ChatView {
     side: side::Side,
     /// Set while the view is itself an agent's shown beside its lead.
     side_of: Option<side::SideOf>,
-    /// The press on a panel toggle being released brought this pane's thread
-    /// forward, so what the toggle shows was not on screen to close.
-    toggle_brought_forward: bool,
     /// The Agents sheet's content on phone.
     agents: Entity<crate::agents_panel::AgentsPanel>,
     terminal_was_open: bool,
@@ -492,7 +489,6 @@ impl ChatView {
             body: Default::default(),
             side: side::Side::new(),
             side_of: None,
-            toggle_brought_forward: false,
             list_state,
             timeline_stale: false,
             history_placeholder_height: px(0.),
@@ -543,6 +539,16 @@ impl ChatView {
 
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// The thread the drawer of the view's pane shows.
+    pub(crate) fn drawer_subject(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    /// Whether the view's pane is at the window's top right corner.
+    pub(crate) fn at_window_corner(&self) -> bool {
+        self.edges.right
     }
 
     pub(crate) fn workspace_store(&self) -> &Entity<WorkspaceStore> {
