@@ -26,7 +26,7 @@ use crate::plugins_settings::PluginsSettingsPanel;
 use crate::provider_card::{ManagePlugins, ProviderCard};
 use crate::provider_model_picker::ProviderModelPicker;
 use crate::settings::{ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode};
-use crate::store::WorkspaceStore;
+use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
 use crate::time::{humanize_ago, now_secs};
 use crate::typography::TextRole as _;
@@ -615,8 +615,12 @@ impl SettingsPage {
             )
         });
         let subscriptions = vec![
-            cx.observe(&store, |this, _, cx| {
-                let selection = this.store.read(cx).settings().title_generation;
+            cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
+                if change.topic != TopicKind::Settings {
+                    return;
+                }
+                let settings = this.store.read(cx).settings();
+                let selection = settings.title_generation;
                 this.title_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
@@ -625,10 +629,7 @@ impl SettingsPage {
                         cx,
                     );
                 });
-                cx.notify();
-            }),
-            cx.observe(&store, |this, _, cx| {
-                let selection = this.store.read(cx).settings().fallback_review;
+                let selection = settings.fallback_review;
                 this.fallback_review_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
