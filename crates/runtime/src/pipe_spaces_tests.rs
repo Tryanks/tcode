@@ -795,7 +795,7 @@ fn space_turns_keep_the_sending_author_through_provider_delivery_and_queueing() 
         );
         if text == "first" {
             let SessionCommand::SendTurn { delivery_id, .. } =
-                host.provider.commands.recv_blocking().unwrap()
+                crate::app::next_command_blocking(&host.provider.commands).unwrap()
             else {
                 panic!("send command")
             };
@@ -822,7 +822,7 @@ fn space_turns_keep_the_sending_author_through_provider_delivery_and_queueing() 
         })
         .unwrap();
     let SessionCommand::SendTurn { delivery_id, .. } =
-        host.provider.commands.recv_blocking().unwrap()
+        crate::app::next_command_blocking(&host.provider.commands).unwrap()
     else {
         panic!("queued send command")
     };

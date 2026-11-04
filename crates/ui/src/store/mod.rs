@@ -1407,6 +1407,20 @@ impl WorkspaceStore {
                 self.baseline_topics.insert(Topic::Providers);
             }
             (Topic::Hosting, ServerEvent::HostingReplaced(state)) => cx.emit((**state).clone()),
+            (
+                Topic::Providers,
+                ServerEvent::ProviderUsageChanged {
+                    provider_usage,
+                    usage_checking,
+                },
+            ) if self.baseline_topics.contains(&envelope.topic) => {
+                self.providers_replica
+                    .provider_usage
+                    .clone_from(provider_usage);
+                self.providers_replica
+                    .usage_checking
+                    .clone_from(usage_checking);
+            }
             (Topic::GitStatus { session_id }, ServerEvent::GitStatusReplaced(status)) => {
                 if let Some(thread) = self.threads.get_mut(session_id) {
                     thread.git = Some(status.clone());
@@ -8650,6 +8664,31 @@ pub(crate) mod tests {
         assert_eq!(
             replica_git.status.expect("git replica").changed_files[0].path,
             "src/replica.rs"
+        );
+
+        // A usage read that lands moves nothing else in the providers status.
+        update_host!(&host, |state, _cx| {
+            state.providers.provider_usage.insert(
+                "codex".into(),
+                tcode_core::usage::ProviderUsage {
+                    fetched_at: 7,
+                    plan: Some("pro".into()),
+                    ..Default::default()
+                },
+            );
+            state.providers.usage_checking.insert("claude".into());
+        });
+        driver.wait_until(cx, &workspace, "usage replica", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.providers_replica.usage_checking.contains("claude")
+            })
+        });
+        let live_providers = update_host!(&host, |state, _| state.providers_status_snapshot());
+        let replica_providers = workspace.read_with(cx, |store, _| store.providers_replica.clone());
+        assert_eq!(replica_providers, live_providers);
+        assert_eq!(
+            replica_providers.provider_usage["codex"].plan.as_deref(),
+            Some("pro")
         );
 
         driver.shutdown(cx, &workspace, &host);

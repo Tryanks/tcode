@@ -608,6 +608,8 @@ enum PendingRequest {
     /// `thread/goal/get` at startup: the snapshot a resumed thread pushes may
     /// arrive while startup still waits for its own responses.
     GoalSnapshot,
+    /// [`SessionCommand::ReadAccountUsage`]: the result goes to its asker.
+    AccountUsage(Sender<Result<Value, String>>),
 }
 
 struct PendingApproval {
@@ -1127,6 +1129,11 @@ impl SessionActor for Actor {
                 "thread/goal/clear",
                 json!({ "threadId": self.thread_id, "origin": "user" }),
                 PendingRequest::GoalChange,
+            ),
+            SessionCommand::ReadAccountUsage { reply } => self.request(
+                "account/rateLimits/read",
+                json!({}),
+                PendingRequest::AccountUsage(reply),
             ),
             SessionCommand::Shutdown => Ok(()),
         }
@@ -1843,6 +1850,17 @@ impl Actor {
                 .await;
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let pending = self.pending_requests.remove(&id);
+            if let Some(PendingRequest::AccountUsage(reply)) = &pending {
+                let result = match value.get("error") {
+                    Some(error) => Err(describe_rpc_error(error)),
+                    None => value
+                        .get("result")
+                        .cloned()
+                        .ok_or_else(|| format!("response {id} omitted result")),
+                };
+                let _ = reply.try_send(result);
+                return;
+            }
             if let Some(PendingRequest::GoalSnapshot) = &pending {
                 // A build without goals, or with the feature off, rejects the
                 // request; that is simply a thread without a goal.
@@ -3182,6 +3200,7 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
         Some(PendingRequest::Compact) => "thread/compact/start",
         Some(PendingRequest::GoalChange) => "thread/goal",
         Some(PendingRequest::GoalSnapshot) => "thread/goal/get",
+        Some(PendingRequest::AccountUsage(_)) => "account/rateLimits/read",
         None => "unknown",
     }
 }
@@ -5600,6 +5619,31 @@ mod tests {
         assert!(message.contains("Cannot find module"), "{message}");
         assert!(message.contains("exit status: 1"), "{message}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A running app-server answers a usage read itself:
+    /// `account/rateLimits/read` goes out on the live connection and its
+    /// result reaches the asker, so no second server is started for it.
+    #[test]
+    fn a_usage_read_asks_the_running_app_server() {
+        smol::block_on(async {
+            let (mut actor, _events) = test_actor();
+            let (reply, answer) = smol::channel::bounded(1);
+            actor
+                .handle_command(SessionCommand::ReadAccountUsage { reply })
+                .await
+                .unwrap();
+            let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                panic!("missing usage request")
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["method"], "account/rateLimits/read");
+            let result = json!({"rateLimits": {"planType": "pro"}});
+            actor
+                .handle_line(&json!({"id": request["id"], "result": result}).to_string())
+                .await;
+            assert_eq!(answer.recv().await.unwrap().unwrap(), result);
+        });
     }
 
     #[test]

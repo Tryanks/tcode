@@ -1242,7 +1242,8 @@ async fn handle_command<D: Dialect>(
         }
         SessionCommand::RetryTurn { .. }
         | SessionCommand::SetGoal { .. }
-        | SessionCommand::ClearGoal => {}
+        | SessionCommand::ClearGoal
+        | SessionCommand::ReadAccountUsage { .. } => {}
         SessionCommand::Shutdown => unreachable!("handled by the caller"),
     }
 }

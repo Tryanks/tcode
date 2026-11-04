@@ -323,14 +323,23 @@ impl Harness {
         std::mem::take(&mut self.host().requests)
     }
 
+    /// The next command the scripted provider receives, waiting for one.
+    fn received(&mut self) -> SessionCommand {
+        let commands = self.commands.clone();
+        let mut received = None;
+        self.cx.run_until(|_| {
+            received = received.take().or_else(|| next_command(&commands).ok());
+            received.is_some()
+        });
+        received.unwrap()
+    }
+
     /// The text of the next turn the scripted provider receives.
     fn delivered(&mut self) -> (u64, String) {
-        let commands = self.commands.clone();
-        self.cx.run_until(|_| !commands.is_empty());
-        match commands.try_recv() {
-            Ok(SessionCommand::SendTurn {
+        match self.received() {
+            SessionCommand::SendTurn {
                 delivery_id, text, ..
-            }) => (delivery_id, text),
+            } => (delivery_id, text),
             other => panic!("expected a delivered turn, got {other:?}"),
         }
     }
@@ -361,10 +370,8 @@ impl Harness {
 
     /// The text of the next wake steered into the running turn.
     fn steered(&mut self) -> String {
-        let commands = self.commands.clone();
-        self.cx.run_until(|_| !commands.is_empty());
-        match commands.try_recv() {
-            Ok(SessionCommand::Steer { text, .. }) => text,
+        match self.received() {
+            SessionCommand::Steer { text, .. } => text,
             other => panic!("expected a steered wake, got {other:?}"),
         }
     }
@@ -566,7 +573,7 @@ fn rate_limited_passes_wake_nobody_and_end_nothing() {
             .read(|state| state.pull_request_watches.failures.is_empty()),
         "a rate limit never counts toward giving up"
     );
-    assert!(harness.commands.is_empty());
+    assert!(next_command(&harness.commands).is_err());
     assert!(harness.notices().is_empty());
 }
 
@@ -622,7 +629,10 @@ fn a_watch_whose_first_pass_finds_its_pull_request_closed_or_merged_wakes_once()
         harness.accept(delivery);
         assert_eq!(harness.watch("thread"), None);
         harness.pass();
-        assert!(harness.commands.is_empty(), "{state} wakes the thread once");
+        assert!(
+            next_command(&harness.commands).is_err(),
+            "{state} wakes the thread once"
+        );
     }
 }
 
@@ -631,7 +641,7 @@ fn a_merge_the_sync_records_wakes_the_watching_thread_once_and_ends_the_watch() 
     let mut harness = Harness::new("tcode-watch-merged");
     harness.watch_thread("thread", START);
     harness.pass();
-    assert!(harness.commands.is_empty());
+    assert!(next_command(&harness.commands).is_err());
     harness.host().state = "MERGED";
     harness.state.update(&mut harness.cx, |state, cx| {
         let mut meta = state.find_meta("thread").unwrap();
@@ -650,7 +660,7 @@ fn a_merge_the_sync_records_wakes_the_watching_thread_once_and_ends_the_watch() 
     assert_eq!(harness.watch("thread"), None);
     harness.pass();
     assert!(
-        harness.commands.is_empty(),
+        next_command(&harness.commands).is_err(),
         "the merge wakes the thread once"
     );
 }
@@ -670,14 +680,14 @@ fn checks_pass_only_once_every_check_main_requires_has_reported() {
     harness.watch_thread("thread", START);
     harness.pass();
     assert!(
-        harness.commands.is_empty(),
+        next_command(&harness.commands).is_err(),
         "Linux x64, which the branch protection requires, has not reported"
     );
     harness.host().checks[1] = check("Linux x64 / tests", "SUCCESS");
     harness.host().checks.push(required("Linux x64", "SUCCESS"));
     harness.pass();
     assert!(
-        harness.commands.is_empty(),
+        next_command(&harness.commands).is_err(),
         "macOS arm64, which the ruleset requires, has not reported"
     );
 
@@ -694,7 +704,10 @@ fn checks_pass_only_once_every_check_main_requires_has_reported() {
     );
     harness.accept(delivery);
     harness.pass();
-    assert!(harness.commands.is_empty(), "the pass is told once");
+    assert!(
+        next_command(&harness.commands).is_err(),
+        "the pass is told once"
+    );
 }
 
 #[test]
@@ -932,7 +945,7 @@ fn a_wake_reaches_a_non_resident_thread_and_a_restart_before_acceptance_redelive
     );
     harness.pass();
     assert!(
-        harness.commands.is_empty(),
+        next_command(&harness.commands).is_err(),
         "a delivered wake is not repeated"
     );
 }
@@ -966,12 +979,10 @@ fn a_wake_steers_into_a_running_turn_and_is_not_repeated() {
     });
 
     harness.pass();
-    let commands = harness.commands.clone();
-    harness.cx.run_until(|_| !commands.is_empty());
-    let (request_id, text) = match commands.try_recv() {
-        Ok(SessionCommand::Steer {
+    let (request_id, text) = match harness.received() {
+        SessionCommand::Steer {
             request_id, text, ..
-        }) => (request_id, text),
+        } => (request_id, text),
         other => panic!("a wake during a turn steers into it, got {other:?}"),
     };
     assert!(text.starts_with(
@@ -1006,7 +1017,7 @@ fn a_wake_steers_into_a_running_turn_and_is_not_repeated() {
     harness.requests();
     harness.pass();
     assert!(
-        harness.commands.is_empty(),
+        next_command(&harness.commands).is_err(),
         "a delivered wake is not repeated"
     );
 }
@@ -1061,7 +1072,7 @@ fn pausing_an_idle_watch_and_resume_catches_up_once_after_restart() {
             "paused watches make no reads"
         );
         assert!(
-            harness.commands.is_empty(),
+            next_command(&harness.commands).is_err(),
             "a restart cannot wake a paused thread"
         );
         assert_eq!(harness.watch("thread"), Some(baseline));
@@ -1069,7 +1080,10 @@ fn pausing_an_idle_watch_and_resume_catches_up_once_after_restart() {
 
         harness.resume();
         if change == "unchanged" {
-            assert!(harness.commands.is_empty(), "resume without news is silent");
+            assert!(
+                next_command(&harness.commands).is_err(),
+                "resume without news is silent"
+            );
             assert!(harness.notices().is_empty());
         } else {
             let text = harness.steered();
@@ -1088,7 +1102,7 @@ fn pausing_an_idle_watch_and_resume_catches_up_once_after_restart() {
         harness.finish_turn();
         harness.pass();
         assert!(
-            harness.commands.is_empty(),
+            next_command(&harness.commands).is_err(),
             "unchanged news is never repeated"
         );
         assert!(harness.notices().is_empty());
@@ -1108,7 +1122,7 @@ fn pausing_blocks_an_in_flight_read_and_accepts_agent_watches_while_paused() {
         .cx
         .run_until(|state| !state.pull_request_watches.passing);
     assert_eq!(harness.watch("thread"), Some(baseline));
-    assert!(harness.commands.is_empty());
+    assert!(next_command(&harness.commands).is_err());
     assert!(harness.notices().is_empty());
 
     harness.state.dispatch_command(
@@ -1156,7 +1170,7 @@ fn pausing_blocks_an_in_flight_read_and_accepts_agent_watches_while_paused() {
     let registered = harness.watch("thread").unwrap();
     harness.pass();
     assert!(
-        harness.commands.is_empty(),
+        next_command(&harness.commands).is_err(),
         "new registrations inherit the pause"
     );
     harness.resume();
@@ -1168,7 +1182,7 @@ fn pausing_blocks_an_in_flight_read_and_accepts_agent_watches_while_paused() {
     );
     harness.finish_turn();
     harness.pass();
-    assert!(harness.commands.is_empty());
+    assert!(next_command(&harness.commands).is_err());
 }
 
 #[test]
@@ -1190,7 +1204,7 @@ fn a_late_turn_acceptance_cannot_resume_watches_after_interrupt() {
     let (delivery, _) = harness.delivered();
     assert_eq!(harness.stop(2), Ok(()));
     assert!(matches!(
-        harness.commands.try_recv(),
+        next_command(&harness.commands),
         Ok(SessionCommand::Interrupt)
     ));
     harness.host().checks = vec![check("build", "FAILURE")];
@@ -1198,7 +1212,7 @@ fn a_late_turn_acceptance_cannot_resume_watches_after_interrupt() {
     harness.pass();
     assert!(!harness.activity().waiting);
     assert!(
-        harness.commands.is_empty(),
+        next_command(&harness.commands).is_err(),
         "accepting a pre-Stop turn cannot resume monitoring"
     );
     harness.resume();
@@ -1231,7 +1245,7 @@ fn resume_combines_pending_news_with_changes_from_the_pause() {
     harness.finish_turn();
     harness.pass();
     assert!(
-        harness.commands.is_empty(),
+        next_command(&harness.commands).is_err(),
         "combined news is delivered once"
     );
 }
@@ -1246,7 +1260,7 @@ fn late_acceptance_of_old_news_delivers_only_the_remaining_catchup() {
     assert!(old_text.contains("Checks failed"));
     assert_eq!(harness.stop(1), Ok(()));
     assert!(matches!(
-        harness.commands.try_recv(),
+        next_command(&harness.commands),
         Ok(SessionCommand::Interrupt)
     ));
     harness.host().checks = vec![check("build", "SUCCESS")];
@@ -1270,7 +1284,7 @@ fn late_acceptance_of_old_news_delivers_only_the_remaining_catchup() {
             .is_some_and(|wake| wake.text.contains("passed"))
     });
     harness.accept(old_delivery);
-    let text = match harness.commands.try_recv() {
+    let text = match next_command(&harness.commands) {
         Ok(SessionCommand::Steer { text, .. }) => text,
         other => panic!("catch-up steers into the accepted turn: {other:?}"),
     };
@@ -1283,7 +1297,7 @@ fn late_acceptance_of_old_news_delivers_only_the_remaining_catchup() {
     assert_eq!(text, "Continue.");
     harness.accept(human_delivery);
     harness.pass();
-    assert!(harness.commands.is_empty());
+    assert!(next_command(&harness.commands).is_err());
 }
 
 #[test]
@@ -1327,7 +1341,7 @@ fn ending_paused_watches_prevents_a_later_turn_from_restoring_them() {
         harness.resume();
         harness.pass();
         assert!(harness.watch("thread").is_none());
-        assert!(harness.commands.is_empty());
+        assert!(next_command(&harness.commands).is_err());
     }
 }
 

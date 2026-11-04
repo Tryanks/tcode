@@ -38,6 +38,10 @@ struct RunningLogin {
 
 type SecretWrites = HashMap<String, HashMap<String, Arc<smol::lock::Mutex<SecretWrite>>>>;
 
+/// How long a running session has to answer a usage read before a process
+/// is started for it instead; the same bound a started one gets.
+const LIVE_USAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
 pub struct ProviderCatalog {
     pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
     model_refreshes: HashMap<ProviderKind, ModelRefresh>,
@@ -970,76 +974,124 @@ impl AppState {
     fn provider_account_changed(&mut self, profile_id: &str, cx: &mut HostCx) {
         self.providers.invalidate_profile_reads(profile_id);
         if let Some(profile) = self.settings.resolved_profile(profile_id) {
-            self.refresh_profile_status(profile, cx);
-            self.refresh_provider_usage_if_stale(cx);
+            self.refresh_profile_status(profile.clone(), cx);
+            self.refresh_profile_usage(profile, true, None, cx);
         }
     }
 
     /// Fetch account usage / rate-limit windows for every usage-capable profile.
     pub fn refresh_provider_usage(&mut self, cx: &mut HostCx) {
-        self.refresh_provider_usage_inner(cx, false);
-    }
-
-    /// Refresh usage unless the profile already has a result from the last two
-    /// minutes. Called after turns to avoid repeatedly polling provider CLIs.
-    pub fn refresh_provider_usage_if_stale(&mut self, cx: &mut HostCx) {
-        self.refresh_provider_usage_inner(cx, true);
-    }
-
-    fn refresh_provider_usage_inner(&mut self, cx: &mut HostCx, stale_only: bool) {
-        let now = now_secs();
         for profile in self.all_profiles() {
-            let supported = profile.supports_account_usage();
-            let profile_id = profile.id.clone();
-            let provider = profile.kind;
-            if !supported
-                || self
-                    .providers
-                    .provider_snapshots
-                    .get(&profile_id)
-                    .is_some_and(|snapshot| !snapshot.installed && !snapshot.checking)
-                || self.providers.usage_checking.contains(&profile_id)
-                || stale_only
-                    && self
-                        .providers
-                        .provider_usage
-                        .get(&profile_id)
-                        .is_some_and(|usage| now.saturating_sub(usage.fetched_at) < 120)
-            {
-                continue;
-            }
-            self.providers.usage_checking.insert(profile_id.clone());
-            let revision = self
-                .providers
-                .profile_revisions
-                .get(&profile_id)
-                .copied()
-                .unwrap_or(0);
-            let binary = self.resolve_profile_binary(&profile_id);
-            let launch_env = self.prepare_profile_env(&profile_id, cx);
-            let host_cx = cx.clone();
-            HostCx::spawn_detached(cx, async move {
-                let launch_env = match launch_env.await {
-                    Ok(env) => env,
-                    Err(error) => {
-                        host_cx.enqueue(move |state, cx| {
-                            state.providers.complete_usage(profile_id, revision, None);
-                            state.report_error(RuntimeError::PersistSettings { error }, cx);
-                        });
-                        return;
-                    }
-                };
-                let usage = tcode_services::provider_usage::fetch_provider_usage(
-                    provider, binary, launch_env,
-                )
-                .await;
-                host_cx.enqueue(move |state, _cx| {
-                    if state.settings.resolved_profile(&profile_id).as_ref() == Some(&profile) {
-                        state.providers.complete_usage(profile_id, revision, usage);
-                    }
-                });
-            });
+            self.refresh_profile_usage(profile, false, None, cx);
         }
+    }
+
+    /// After a thread's turn: the usage of the profile it ran on, unless that
+    /// already has a result from the last two minutes. A turn moves no other
+    /// profile's usage, and the thread's own harness answers when it can.
+    pub(super) fn refresh_session_usage_if_stale(&mut self, session_id: &str, cx: &mut HostCx) {
+        let Some(session) = self.resident(session_id) else {
+            return;
+        };
+        let Some(profile) = self.settings.resolved_profile(
+            session
+                .meta
+                .profile_id
+                .as_deref()
+                .unwrap_or_else(|| Settings::builtin_profile_id(session.meta.provider)),
+        ) else {
+            return;
+        };
+        let live = match &session.runtime {
+            Runtime::Live(commands) if session.meta.provider == profile.kind => {
+                Some(commands.clone())
+            }
+            _ => None,
+        };
+        self.refresh_profile_usage(profile, true, live, cx);
+    }
+
+    /// `live` is a running session of the profile to ask first; a session
+    /// that cannot answer leaves the read to a process started for it.
+    fn refresh_profile_usage(
+        &mut self,
+        profile: ResolvedProfile,
+        stale_only: bool,
+        live: Option<smol::channel::Sender<SessionCommand>>,
+        cx: &mut HostCx,
+    ) {
+        let profile_id = profile.id.clone();
+        let provider = profile.kind;
+        if !profile.supports_account_usage()
+            || self
+                .providers
+                .provider_snapshots
+                .get(&profile_id)
+                .is_some_and(|snapshot| !snapshot.installed && !snapshot.checking)
+            || self.providers.usage_checking.contains(&profile_id)
+            || stale_only
+                && self
+                    .providers
+                    .provider_usage
+                    .get(&profile_id)
+                    .is_some_and(|usage| now_secs().saturating_sub(usage.fetched_at) < 120)
+        {
+            return;
+        }
+        self.providers.usage_checking.insert(profile_id.clone());
+        let revision = self
+            .providers
+            .profile_revisions
+            .get(&profile_id)
+            .copied()
+            .unwrap_or(0);
+        let answer = live.and_then(|commands| {
+            let (reply, answer) = smol::channel::bounded(1);
+            commands
+                .try_send(SessionCommand::ReadAccountUsage { reply })
+                .is_ok()
+                .then_some(answer)
+        });
+        let binary = self.resolve_profile_binary(&profile_id);
+        let launch_env = self.prepare_profile_env(&profile_id, cx);
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let answered = match answer {
+                Some(answer) => smol::future::or(async { answer.recv().await.ok() }, async {
+                    smol::Timer::after(LIVE_USAGE_TIMEOUT).await;
+                    None
+                })
+                .await
+                .and_then(|payload| {
+                    tcode_services::provider_usage::usage_from_payload(provider, payload)
+                }),
+                None => None,
+            };
+            let usage = match answered {
+                Some(usage) => Some(usage),
+                None => {
+                    let launch_env = match launch_env.await {
+                        Ok(env) => env,
+                        Err(error) => {
+                            host_cx.enqueue(move |state, cx| {
+                                state.providers.complete_usage(profile_id, revision, None);
+                                state.report_error(RuntimeError::PersistSettings { error }, cx);
+                            });
+                            return;
+                        }
+                    };
+                    tcode_services::provider_usage::fetch_provider_usage(
+                        provider, binary, launch_env,
+                    )
+                    .await
+                }
+            };
+            host_cx.enqueue(move |state, _cx| {
+                if state.settings.resolved_profile(&profile_id).as_ref() == Some(&profile) {
+                    state.providers.complete_usage(profile_id, revision, usage);
+                }
+            });
+        });
     }
 
     /// Check every provider and the running tcode build in the background,

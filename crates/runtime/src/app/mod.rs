@@ -273,6 +273,8 @@ mod terminals;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
+pub(crate) use test_support::{next_command, next_command_blocking};
+#[cfg(test)]
 mod tests;
 
 pub use active_session::{ActiveSession, QueuedMessage};

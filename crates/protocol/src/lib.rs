@@ -263,9 +263,11 @@ pub use wire::{
 // screen or change last sent on it, after the screen a subscriber holds. The
 // Hosting topic answers a full device's subscription with HostingReplaced and
 // pushes it again whenever the machine's hosting state changes, which
-// replaces polling Query::Hosting for it.
-// TerminalInput and SetTerminalHeight are sent without a delivery key and
-// are not retained.
+// replaces polling Query::Hosting for it. TerminalInput and
+// SetTerminalHeight are sent without a delivery key and are not retained.
+// ProviderUsageChanged carries account usage and the usage reads in flight
+// when the rest of the providers status is unchanged, while subscription
+// replies remain full statuses.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

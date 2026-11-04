@@ -462,6 +462,7 @@ impl SessionActor for PiActor {
             | SessionCommand::SetOption { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
+            | SessionCommand::ReadAccountUsage { .. }
             | SessionCommand::Shutdown => Ok(()),
         }
     }

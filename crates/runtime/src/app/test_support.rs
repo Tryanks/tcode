@@ -390,3 +390,33 @@ pub(super) fn rpc(
         session,
     )
 }
+
+/// The next command a scripted provider receives that a test scripts: the
+/// usage reads a finished turn asks of a running harness are answered on the
+/// way, as a harness answers them without the conversation moving.
+pub(crate) fn next_command(
+    commands: &smol::channel::Receiver<SessionCommand>,
+) -> Result<SessionCommand, smol::channel::TryRecvError> {
+    loop {
+        match commands.try_recv() {
+            Ok(SessionCommand::ReadAccountUsage { reply }) => answer_usage_read(reply),
+            other => return other,
+        }
+    }
+}
+
+/// [`next_command`], waiting for it.
+pub(crate) fn next_command_blocking(
+    commands: &smol::channel::Receiver<SessionCommand>,
+) -> Result<SessionCommand, smol::channel::RecvError> {
+    loop {
+        match commands.recv_blocking() {
+            Ok(SessionCommand::ReadAccountUsage { reply }) => answer_usage_read(reply),
+            other => return other,
+        }
+    }
+}
+
+fn answer_usage_read(reply: smol::channel::Sender<Result<serde_json::Value, String>>) {
+    let _ = reply.try_send(Err("the scripted provider has no account".into()));
+}

@@ -1170,6 +1170,23 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         json!({"type": "last_visited_changed", "content": {"s": 5}})
     );
     assert_eq!(
+        serde_json::to_value(ServerEvent::ProviderUsageChanged {
+            provider_usage: [(
+                "codex".to_string(),
+                tcode_core::usage::ProviderUsage {
+                    fetched_at: 9,
+                    ..Default::default()
+                }
+            )]
+            .into(),
+            usage_checking: ["claude".to_string()].into(),
+        })
+        .unwrap(),
+        json!({"type": "provider_usage_changed", "content": {
+            "provider_usage": {"codex": {"fetched_at": 9, "plan": null, "windows": [], "error": null}},
+            "usage_checking": ["claude"]}})
+    );
+    assert_eq!(
         serde_json::from_str::<Query>(
             r#"{"type":"read_item_output","content":{"session_id":"s","item_id":"i"}}"#
         )

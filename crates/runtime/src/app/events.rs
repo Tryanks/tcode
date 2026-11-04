@@ -575,7 +575,7 @@ impl AppState {
             if let Some(resident) = self.resident_mut(session_id) {
                 resident.interrupt_requested = false;
             }
-            self.refresh_provider_usage_if_stale(cx);
+            self.refresh_session_usage_if_stale(session_id, cx);
             // The turn is over: the next queued message (if any) now goes out as
             // an ordinary turn, FIFO, one at a time.
             let mut restart = false;
