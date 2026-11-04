@@ -4679,7 +4679,8 @@ impl AppShell {
                                         || !shell.compact(cx)
                                         || shell.nav.read(cx).depth() <= 1))
                                     || !bounds.contains(&event.position)
-                                    || event.position.x - bounds.left() > px(20.)
+                                    || event.position.x - bounds.left()
+                                        > crate::edge_back::EDGE_WIDTH
                                 {
                                     return;
                                 }
