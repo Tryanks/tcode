@@ -224,8 +224,8 @@ impl AppState {
 
     /// Point `project_id` at `root`; see [`Command::SetProjectRoot`]. Every
     /// resident thread of the project is stopped first so no process keeps
-    /// working in the old directory; each resumes from its cursor when next
-    /// opened.
+    /// working in the old directory, and continues there when next opened; a
+    /// thread whose queue outlived its provider starts at once and delivers it.
     pub fn set_project_root(
         &mut self,
         project_id: &str,
@@ -313,16 +313,20 @@ impl AppState {
             .filter(|active| in_project(&active.meta))
             .map(|active| active.meta.id.clone())
             .collect();
-        if resident_ids
-            .iter()
-            .any(|id| self.resident(id).is_some_and(ActiveSession::has_work))
-        {
+        if resident_ids.iter().any(|id| {
+            self.resident(id)
+                .is_some_and(|active| active.has_work() && !active.queue_stranded())
+        }) {
             return Err(ProtocolError {
                 code: "project_busy".into(),
                 message: "A thread of this project is still running; wait for it to finish.".into(),
             });
         }
         for id in &resident_ids {
+            // No process to stop, and the queue exists nowhere else.
+            if self.resident(id).is_some_and(ActiveSession::queue_stranded) {
+                continue;
+            }
             if self.residents.live.contains_key(id) {
                 self.shutdown_active(id, cx);
             } else if let Some(parked) = self.residents.evict(id)
@@ -373,9 +377,23 @@ impl AppState {
             })
             .cloned()
             .collect();
+        let mut stranded = Vec::new();
         for mut meta in metas {
             if let Some(cwd) = rebase_path(&meta.cwd, &old_root, &root) {
-                meta.cwd = cwd;
+                let old_cwd = std::mem::replace(&mut meta.cwd, cwd);
+                if meta.cwd != old_cwd {
+                    // Keep the native session out of the new directory, as
+                    // `move_session_by` does: Claude Code cannot resume it there.
+                    meta.moved_from.get_or_insert(old_cwd);
+                    meta.resume_cursor = None;
+                    meta.pending_fork = false;
+                }
+                if self
+                    .resident(&meta.id)
+                    .is_some_and(ActiveSession::queue_stranded)
+                {
+                    stranded.push(meta.clone());
+                }
             }
             if let Some(worktree) = &mut meta.worktree
                 && let Some(path) = rebase_path(&worktree.root_project_path, &old_root, &root)
@@ -391,6 +409,9 @@ impl AppState {
                 resident.meta.cwd = meta.cwd.clone();
                 resident.meta.worktree = meta.worktree.clone();
                 resident.meta.project_id = meta.project_id.clone();
+                resident.meta.moved_from = meta.moved_from.clone();
+                resident.meta.resume_cursor = meta.resume_cursor.clone();
+                resident.meta.pending_fork = meta.pending_fork;
             }
             self.persist_meta(&meta, cx);
         }
@@ -438,6 +459,11 @@ impl AppState {
                 let project = project.clone();
                 self.enqueue_store_write(StoreWrite::UpsertProject(project), cx);
             }
+        }
+        for meta in stranded {
+            self.ensure_session_started(&meta.id, cx);
+            self.refresh_git_status(&meta.id, cx);
+            self.refresh_session_git_branch(meta.id, meta.cwd, cx);
         }
         Ok(())
     }
