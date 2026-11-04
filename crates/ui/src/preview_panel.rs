@@ -291,26 +291,32 @@ impl PreviewPanel {
     }
 
     /// Show `session_id`'s page, or none.
-    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
-        if self.session_id != session_id {
-            self.session_id = session_id;
-            cx.notify();
+    pub(crate) fn set_session(this: &Entity<Self>, session_id: Option<String>, cx: &mut App) {
+        if this.read(cx).session_id != session_id {
+            this.update(cx, |panel, cx| {
+                panel.session_id = session_id;
+                cx.notify();
+            });
         }
     }
 
-    pub(crate) fn set_at_window_corner(&mut self, at_corner: bool, cx: &mut Context<Self>) {
-        if self.at_window_corner != at_corner {
-            self.at_window_corner = at_corner;
-            cx.notify();
+    pub(crate) fn set_at_window_corner(this: &Entity<Self>, at_corner: bool, cx: &mut App) {
+        if this.read(cx).at_window_corner != at_corner {
+            this.update(cx, |panel, cx| {
+                panel.at_window_corner = at_corner;
+                cx.notify();
+            });
         }
     }
 
     /// Another pane is drawn over this panel's, or no longer.
-    pub(crate) fn set_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
-        if self.covered != covered {
-            self.covered = covered;
-            self.sync_visibility(cx);
-            cx.notify();
+    pub(crate) fn set_covered(this: &Entity<Self>, covered: bool, cx: &mut App) {
+        if this.read(cx).covered != covered {
+            this.update(cx, |panel, cx| {
+                panel.covered = covered;
+                panel.sync_visibility(cx);
+                cx.notify();
+            });
         }
     }
 

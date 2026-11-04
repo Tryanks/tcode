@@ -296,34 +296,42 @@ impl DiffPanel {
     }
 
     /// Show the tabs of `session_id`'s thread, or none.
-    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
-        if self.session_id == session_id {
+    pub(crate) fn set_session(this: &Entity<Self>, session_id: Option<String>, cx: &mut App) {
+        if this.read(cx).session_id == session_id {
             return;
         }
-        self.session_id = session_id.clone();
-        self.sync_review_comments(cx);
-        self.plan
-            .update(cx, |plan, cx| plan.set_session(session_id.clone(), cx));
-        self.pull_requests.update(cx, |pull_requests, cx| {
-            pull_requests.set_session(session_id.clone(), cx)
+        this.update(cx, |panel, cx| {
+            panel.session_id = session_id.clone();
+            panel.sync_review_comments(cx);
+            panel
+                .plan
+                .update(cx, |plan, cx| plan.set_session(session_id.clone(), cx));
+            panel.pull_requests.update(cx, |pull_requests, cx| {
+                pull_requests.set_session(session_id.clone(), cx)
+            });
+            panel
+                .agents
+                .update(cx, |agents, cx| agents.set_session(session_id, cx));
+            panel.sync_agents_shown(cx);
+            cx.notify();
         });
-        self.agents
-            .update(cx, |agents, cx| agents.set_session(session_id, cx));
-        self.sync_agents_shown(cx);
-        cx.notify();
     }
 
-    pub(crate) fn set_lead(&mut self, lead: Option<String>, cx: &mut Context<Self>) {
-        if self.lead != lead {
-            self.lead = lead;
-            cx.notify();
+    pub(crate) fn set_lead(this: &Entity<Self>, lead: Option<String>, cx: &mut App) {
+        if this.read(cx).lead != lead {
+            this.update(cx, |panel, cx| {
+                panel.lead = lead;
+                cx.notify();
+            });
         }
     }
 
-    pub(crate) fn set_at_window_corner(&mut self, at_corner: bool, cx: &mut Context<Self>) {
-        if self.at_window_corner != at_corner {
-            self.at_window_corner = at_corner;
-            cx.notify();
+    pub(crate) fn set_at_window_corner(this: &Entity<Self>, at_corner: bool, cx: &mut App) {
+        if this.read(cx).at_window_corner != at_corner {
+            this.update(cx, |panel, cx| {
+                panel.at_window_corner = at_corner;
+                cx.notify();
+            });
         }
     }
 

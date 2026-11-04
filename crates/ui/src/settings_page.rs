@@ -1071,8 +1071,10 @@ impl SettingsPage {
     }
 
     /// Draw the rail at `opacity` from this frame on.
-    pub(crate) fn fade_rail(&mut self, opacity: f32) {
-        self.rail_opacity = opacity;
+    pub(crate) fn fade_rail(this: &Entity<Self>, opacity: f32, cx: &mut App) {
+        if this.read(cx).rail_opacity != opacity {
+            this.update(cx, |page, _| page.rail_opacity = opacity);
+        }
     }
 
     fn advanced_expanded(&self) -> bool {

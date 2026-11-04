@@ -412,33 +412,39 @@ impl ThreadPanel {
     fn await_chat(&mut self, awaiting: bool, cx: &mut Context<Self>) {
         if self.awaiting != awaiting {
             self.awaiting = awaiting;
-            self.chat.update(cx, |chat, cx| chat.set_held(awaiting, cx));
+            ChatView::set_held(&self.chat, awaiting, cx);
         }
     }
 
     /// Whether other panes share the column.
-    pub(crate) fn set_among_others(&mut self, among_others: bool, cx: &mut Context<Self>) {
-        if self.among_others != among_others {
-            self.among_others = among_others;
-            cx.notify();
+    pub(crate) fn set_among_others(this: &Entity<Self>, among_others: bool, cx: &mut App) {
+        if this.read(cx).among_others != among_others {
+            this.update(cx, |pane, cx| {
+                pane.among_others = among_others;
+                cx.notify();
+            });
         }
     }
 
     /// Whether the pointer is over the threads list's row of the pane's
     /// thread, which the pane then answers with a soft fill.
-    pub(crate) fn set_row_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
-        if self.row_hovered != hovered {
-            self.row_hovered = hovered;
-            cx.notify();
+    pub(crate) fn set_row_hovered(this: &Entity<Self>, hovered: bool, cx: &mut App) {
+        if this.read(cx).row_hovered != hovered {
+            this.update(cx, |pane, cx| {
+                pane.row_hovered = hovered;
+                cx.notify();
+            });
         }
     }
 
     /// How a zoom of the column leaves the pane.
-    pub(crate) fn set_zoom(&mut self, zoom: PaneZoom, cx: &mut Context<Self>) {
-        if self.zoom != zoom {
-            self.zoom = zoom;
-            self.set_preview_covered(zoom.beneath, cx);
-            cx.notify();
+    pub(crate) fn set_zoom(this: &Entity<Self>, zoom: PaneZoom, cx: &mut App) {
+        if this.read(cx).zoom != zoom {
+            this.update(cx, |pane, cx| {
+                pane.zoom = zoom;
+                pane.set_preview_covered(zoom.beneath, cx);
+                cx.notify();
+            });
         }
     }
 
@@ -462,10 +468,12 @@ impl ThreadPanel {
     /// Lay the content out at `held`'s size along the axes it names, clipped
     /// to the pane, rather than at the pane's size, and draw it at its
     /// opacity.
-    pub(crate) fn set_held(&mut self, held: Held, cx: &mut Context<Self>) {
-        if self.held != held {
-            self.held = held;
-            cx.notify();
+    pub(crate) fn set_held(this: &Entity<Self>, held: Held, cx: &mut App) {
+        if this.read(cx).held != held {
+            this.update(cx, |pane, cx| {
+                pane.held = held;
+                cx.notify();
+            });
         }
     }
 

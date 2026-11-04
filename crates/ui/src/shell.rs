@@ -2104,7 +2104,7 @@ impl AppShell {
                 .get(&PanelId::from(pane.entity_id()))
                 .copied()
                 .unwrap_or_default();
-            pane.update(cx, |pane, cx| pane.set_held(held, cx));
+            ThreadPanel::set_held(pane, held, cx);
         }
         if closing {
             self.remove_closed(window, cx);
@@ -2136,7 +2136,7 @@ impl AppShell {
             }
         });
         for pane in panes {
-            pane.update(cx, |pane, cx| pane.set_held(Default::default(), cx));
+            ThreadPanel::set_held(&pane, Default::default(), cx);
         }
         self.remove_closed(window, cx);
     }
@@ -2686,6 +2686,11 @@ impl AppShell {
     /// than in the header: a split re-parents the pane's group in its frame,
     /// which would restart any keyed state in the header (see
     /// `panes::ThreadPanes`), so the button would snap in.
+    ///
+    /// Each view is updated only when what it is handed differs from what it
+    /// holds: in gpui-fast an update while the window draws counts as a change
+    /// to every view that read the entity, so handing a view what it already
+    /// holds would draw all of them again next frame.
     fn sync_panes(&self, window: &mut Window, cx: &mut App) {
         let Some(attachment) = self.attachment.as_ref() else {
             return;
@@ -2693,7 +2698,7 @@ impl AppShell {
         let compact = self.compact(cx);
         for pane in attachment.all_panes(cx) {
             let zoom = attachment.zoom.of(&pane);
-            pane.update(cx, |pane, cx| pane.set_zoom(zoom, cx));
+            ThreadPanel::set_zoom(&pane, zoom, cx);
         }
         let tree = attachment.final_layout(cx);
         let edges: Vec<_> = attachment
@@ -2725,12 +2730,11 @@ impl AppShell {
                 window,
                 cx,
             );
-            pane.update(cx, |pane, cx| pane.set_among_others(among_others, cx));
-            pane.read(cx).chat().update(cx, |chat, cx| {
-                chat.set_edges(edges, cx);
-                chat.set_title_recedes(recedes, cx);
-                chat.set_pane(pane.downgrade(), close, cx);
-            });
+            ThreadPanel::set_among_others(&pane, among_others, cx);
+            let chat = pane.read(cx).chat();
+            ChatView::set_edges(&chat, edges, cx);
+            ChatView::set_title_recedes(&chat, recedes, cx);
+            ChatView::set_pane(&chat, pane.downgrade(), close, cx);
         }
         let shown = self.shown_threads(cx);
         let hovered = attachment.sidebar.read(cx).hovered_thread();
@@ -2740,11 +2744,9 @@ impl AppShell {
                     && hovered.is_some()
                     && cell.row.as_deref() == hovered.as_deref()
             });
-            pane.update(cx, |pane, cx| pane.set_row_hovered(hovered, cx));
+            ThreadPanel::set_row_hovered(&pane, hovered, cx);
         }
-        attachment
-            .sidebar
-            .update(cx, |sidebar, cx| sidebar.set_shown(shown, cx));
+        SessionsSidebar::set_shown(&attachment.sidebar, shown, cx);
     }
 
     /// What the threads list marks: nothing on a phone, nor on a route
@@ -2828,9 +2830,13 @@ impl AppShell {
     /// Back gesture and must not animate like one.
     fn sync_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = crate::window_seam::window_is_compact(window, cx);
-        let flipped = self
-            .window_state
-            .update(cx, |state, cx| state.set_compact(compact, cx));
+        // Read first: an update while the window draws counts as a change to
+        // every view that read the state, so they would all be drawn again
+        // next frame though nothing changed.
+        let flipped = self.compact(cx) != compact
+            && self
+                .window_state
+                .update(cx, |state, cx| state.set_compact(compact, cx));
         if flipped {
             self.layout_flipped = true;
             self.move_edge_back(TouchPhase::Cancelled, window, cx);
@@ -3908,7 +3914,7 @@ impl AppShell {
             .filter(|_| !chat.read(cx).appears(cx));
         let current = holding.unwrap_or(wanted);
         attachment.thread_body_shown = Some(current);
-        chat.update(cx, |chat, cx| chat.set_held(holding.is_some(), cx));
+        ChatView::set_held(&chat, holding.is_some(), cx);
         if holding.is_some() {
             window.request_animation_frame();
         }
@@ -5174,7 +5180,7 @@ impl AppShell {
         // right-panel tab/close transition can unmount PreviewPanel.
         if self.departing.is_none() {
             for pane in attachment.all_panes(cx) {
-                pane.update(cx, |pane, cx| pane.sync_preview(cx));
+                ThreadPanel::sync_preview(&pane, cx);
             }
         }
 
@@ -5222,9 +5228,7 @@ impl AppShell {
             .attachment
             .as_ref()
             .expect("a workspace route has an attachment");
-        attachment
-            .settings_page
-            .update(cx, |page, _| page.fade_rail(rail));
+        SettingsPage::fade_rail(&attachment.settings_page, rail, cx);
         // Settings is a window of its own: opening it switches the whole
         // window, so the settings rail — not the workspace sidebar — is the
         // left column. Root owns the translucent canvas across both routes;

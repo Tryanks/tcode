@@ -1677,8 +1677,8 @@ mod tests {
             cx.update(|_, cx| cx.set_reduce_motion(reduce));
             for left in [false, true] {
                 let edges = |cx: &mut VisualTestContext| {
-                    view.update(cx, |chat, cx| {
-                        chat.set_edges(WindowEdges { left, right: true }, cx)
+                    cx.update(|_, cx| {
+                        ChatView::set_edges(&view, WindowEdges { left, right: true }, cx)
                     })
                 };
                 let seen = follow(&root, edges, !reduce, toggle, cx);

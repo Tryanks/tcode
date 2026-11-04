@@ -35,6 +35,7 @@ use gpui_base::{ElementExt as _, ResizableState, h_resizable, resizable_panel};
 use tcode_core::ui::RightTab;
 
 use super::ThreadPanel;
+use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::motion::resize_glide::{Panel, ResizeGlide};
 use crate::preview_panel::PreviewPanel;
@@ -211,11 +212,9 @@ impl ThreadPanel {
             })
         });
         let tabs = tabs.clone();
-        tabs.update(cx, |tabs, cx| {
-            tabs.set_session(subject, cx);
-            tabs.set_lead(lead, cx);
-            tabs.set_at_window_corner(at_corner, cx);
-        });
+        DiffPanel::set_session(&tabs, subject, cx);
+        DiffPanel::set_lead(&tabs, lead, cx);
+        DiffPanel::set_at_window_corner(&tabs, at_corner, cx);
         tabs
     }
 
@@ -239,11 +238,9 @@ impl ThreadPanel {
                 preview
             }
         };
-        preview.update(cx, |preview, cx| {
-            preview.set_session(subject, cx);
-            preview.set_at_window_corner(at_corner, cx);
-            preview.set_covered(covered, cx);
-        });
+        PreviewPanel::set_session(&preview, subject, cx);
+        PreviewPanel::set_at_window_corner(&preview, at_corner, cx);
+        PreviewPanel::set_covered(&preview, covered, cx);
         preview
     }
 
@@ -271,8 +268,8 @@ impl ThreadPanel {
 
     /// Hide the pane's page before the layout it sits in goes: a native view
     /// outlives its element.
-    pub(crate) fn sync_preview(&mut self, cx: &mut Context<Self>) {
-        if let Some(preview) = &self.drawer.preview {
+    pub(crate) fn sync_preview(this: &Entity<Self>, cx: &mut App) {
+        if let Some(preview) = this.read(cx).drawer.preview.clone() {
             preview.update(cx, |preview, cx| preview.sync_visibility(cx));
         }
     }
@@ -280,7 +277,7 @@ impl ThreadPanel {
     /// Another pane is drawn over this one, or no longer.
     pub(super) fn set_preview_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
         if let Some(preview) = &self.drawer.preview {
-            preview.update(cx, |preview, cx| preview.set_covered(covered, cx));
+            PreviewPanel::set_covered(preview, covered, cx);
         }
     }
 
@@ -312,14 +309,12 @@ impl ThreadPanel {
             self.drawer.scene.restart();
         }
         if let Some(tabs) = &self.drawer.tabs {
-            let subject = subject.clone();
-            tabs.update(cx, |tabs, cx| tabs.set_session(subject, cx));
+            DiffPanel::set_session(tabs, subject.clone(), cx);
         }
         if self.drawer.preview.is_some() {
             self.drawer_preview(window, cx);
         }
-        self.chat
-            .update(cx, |chat, cx| chat.set_pane_width(pane_width, cx));
+        ChatView::set_pane_width(&self.chat, pane_width, cx);
         let store = self.drawer.store.clone();
         let panel = store.read(cx).panel_state_for(subject.as_deref());
         let panel_open = panel.right_panel_open;

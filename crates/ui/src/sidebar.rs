@@ -2878,10 +2878,12 @@ impl SessionsSidebar {
     }
 
     /// What the chat column shows now, drawn from the next frame.
-    pub(crate) fn set_shown(&mut self, shown: ShownThreads, cx: &mut Context<Self>) {
-        if self.shown != shown {
-            self.shown = shown;
-            cx.notify();
+    pub(crate) fn set_shown(this: &Entity<Self>, shown: ShownThreads, cx: &mut App) {
+        if this.read(cx).shown != shown {
+            this.update(cx, |sidebar, cx| {
+                sidebar.shown = shown;
+                cx.notify();
+            });
         }
     }
 
