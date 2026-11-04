@@ -219,6 +219,10 @@ type Entered = Rc<dyn Fn(Entity<ThreadPanel>, &mut Window, &mut App)>;
 pub(crate) struct ThreadPanel {
     chat: Entity<ChatView>,
     drawer: Entity<Drawer>,
+    /// The drawer's Preview tab once made: the window syncs its page on
+    /// every frame, and a read of the drawer, which writes itself as it lays
+    /// the pane out, would build the window again after each.
+    preview: Rc<std::cell::RefCell<Option<Entity<crate::preview_panel::PreviewPanel>>>>,
     /// Where the conversation was last painted: the pane less the drawer's
     /// room.
     conversation: Rc<Cell<Bounds<Pixels>>>,
@@ -302,6 +306,7 @@ impl ThreadPanel {
         let mut panel = Self {
             session_id: None,
             chat,
+            preview: drawer.preview(),
             drawer: cx.new(|_| drawer),
             conversation: Rc::default(),
             focus_handle,

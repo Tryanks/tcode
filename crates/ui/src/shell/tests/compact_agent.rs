@@ -444,6 +444,10 @@ fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
     assert!(page.left() > px(0.), "it slides in: {page:?}");
     await_restore_update(&shell, cx, |store, _| store.timeline_settled_for("agent-1"));
     settle_panes(cx);
+    // The frame the window asked for as the page came to rest, which a
+    // display delivers: the lead is put beneath the agent there.
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    draw(cx);
     serve_long_lead(&host, "thread-1");
     await_restore_update(&shell, cx, |store, _| {
         store.timeline_settled_for("thread-1")

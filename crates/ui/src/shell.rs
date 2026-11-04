@@ -225,6 +225,10 @@ struct ShellAttachment {
     /// it, it is where the next thread lands and the compact layout's page,
     /// and the host never learns of it.
     current_pane: Entity<ThreadPanel>,
+    /// What each pane's chat was last handed, by chat: compared here, not
+    /// read back from the chat, whose every render would otherwise draw
+    /// the shell again.
+    handed: HashMap<gpui::EntityId, HandedToChat>,
     /// The attachment's preview panel: it answers the preview tools and owns
     /// the pages each pane's drawer shows.
     preview: Entity<PreviewPanel>,
@@ -249,6 +253,15 @@ struct ShellAttachment {
     stamped: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What the shell last handed a pane's chat.
+#[derive(Clone, PartialEq)]
+struct HandedToChat {
+    edges: crate::chat::WindowEdges,
+    recedes: bool,
+    close: Option<crate::motion::Shown<gpui::WeakEntity<ThreadPanel>>>,
+    controls: Option<PaneControls>,
 }
 
 /// An attachment's link and the store it fills. The link closes when the
@@ -1276,6 +1289,7 @@ impl AppShell {
             drop_landing,
             held_split: None,
             current_pane: thread_panel,
+            handed: HashMap::new(),
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
             palette: cx.new(|cx| {
@@ -2713,7 +2727,7 @@ impl AppShell {
     /// holds: in gpui-fast an update while the window draws counts as a change
     /// to every view that read the entity, so handing a view what it already
     /// holds would draw all of them again next frame.
-    fn sync_panes(&self, window: &mut Window, cx: &mut App) {
+    fn sync_panes(&mut self, window: &mut Window, cx: &mut App) {
         let Some(attachment) = self.attachment.as_ref() else {
             return;
         };
@@ -2743,6 +2757,7 @@ impl AppShell {
             })
             .collect();
         let among_others = edges.len() > 1;
+        let mut handed = Vec::with_capacity(edges.len());
         for (pane, edges) in edges {
             let recedes = among_others && !compact && pane != attachment.current_pane;
             let close = crate::motion::shown(
@@ -2753,12 +2768,40 @@ impl AppShell {
                 cx,
             );
             ThreadPanel::set_among_others(&pane, among_others, cx);
-            let chat = pane.read(cx).chat();
-            ChatView::set_edges(&chat, edges, cx);
-            ChatView::set_title_recedes(&chat, recedes, cx);
             let controls = self.pane_controls(&pane, window, cx);
-            ChatView::set_pane(&chat, close, controls, cx);
+            let chat = pane.read(cx).chat();
+            handed.push((
+                chat,
+                HandedToChat {
+                    edges,
+                    recedes,
+                    close,
+                    controls,
+                },
+            ));
         }
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        attachment
+            .handed
+            .retain(|chat, _| handed.iter().any(|(handed, _)| handed.entity_id() == *chat));
+        for (chat, now) in handed {
+            let last = attachment.handed.get(&chat.entity_id());
+            if last.is_none_or(|last| last.edges != now.edges) {
+                ChatView::set_edges(&chat, now.edges, cx);
+            }
+            if last.is_none_or(|last| last.recedes != now.recedes) {
+                ChatView::set_title_recedes(&chat, now.recedes, cx);
+            }
+            if last.is_none_or(|last| last.close != now.close || last.controls != now.controls) {
+                ChatView::set_pane(&chat, now.close.clone(), now.controls, cx);
+            }
+            attachment.handed.insert(chat.entity_id(), now);
+        }
+        let Some(attachment) = self.attachment.as_ref() else {
+            return;
+        };
         let shown = self.shown_threads(tree.as_ref(), cx);
         let hovered = attachment.sidebar.read(cx).hovered_thread();
         for pane in attachment.panes(cx) {
@@ -5678,7 +5721,7 @@ impl Render for AppShell {
             .children(
                 self.attachment
                     .as_ref()
-                    .and_then(|attachment| attachment.preview.read(cx).native_fade()),
+                    .and_then(|attachment| attachment.preview.read(cx).native_fade(cx)),
             )
     }
 }
