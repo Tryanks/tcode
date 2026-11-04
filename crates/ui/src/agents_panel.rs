@@ -415,6 +415,16 @@ impl Agents {
         (!parts.is_empty()).then(|| parts.join(" · "))
     }
 
+    /// What the agent whose thread is `open` goes by: its row's title, or
+    /// its thread's.
+    pub(crate) fn title(&self, store: &WorkspaceStore, open: &str) -> String {
+        self.heading(open)
+            .map(|heading| heading.title)
+            .or_else(|| store.thread_meta(open).map(|meta| meta.title.clone()))
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| crate::tr!("agents.untitled").into_owned())
+    }
+
     /// The row of the agent whose thread is `open`, as its lead's Agents
     /// view shows it.
     pub(crate) fn heading(&self, open: &str) -> Option<AgentHeading> {

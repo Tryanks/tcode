@@ -59,6 +59,9 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// The widest the chip naming an agent whose panel is shown grows.
+const SUBJECT_WIDEST: f32 = 180.;
+
 /// A diff view toggle. The compact toolbar reaches these through its overflow
 /// menu, which addresses items by action rather than by callback.
 #[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -201,6 +204,8 @@ pub struct DiffPanel {
     window_state: Entity<WindowState>,
     /// The thread the drawer shows, which the pane tells it.
     session_id: Option<String>,
+    /// The thread the pane shows, where the panel shows an agent beside it.
+    lead: Option<String>,
     /// Whether the panel's pane reaches the window's top right corner.
     at_window_corner: bool,
     /// The Plan/Tasks tab content (the other tab in this right panel).
@@ -258,6 +263,7 @@ impl DiffPanel {
             workspace_store,
             window_state,
             session_id,
+            lead: None,
             at_window_corner: false,
             plan,
             pull_requests,
@@ -295,6 +301,13 @@ impl DiffPanel {
             .update(cx, |agents, cx| agents.set_session(session_id, cx));
         self.sync_agents_shown(cx);
         cx.notify();
+    }
+
+    pub(crate) fn set_lead(&mut self, lead: Option<String>, cx: &mut Context<Self>) {
+        if self.lead != lead {
+            self.lead = lead;
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_at_window_corner(&mut self, at_corner: bool, cx: &mut Context<Self>) {
@@ -399,14 +412,13 @@ impl DiffPanel {
             return;
         };
         let list = &cache.list;
-        if let Some(index) =
-            file_header_index(&list.files, &list.unified_items, &request.path, &cwd)
-        {
-            list.glide_to(false, index, cx);
-        }
-        if let Some(index) = file_header_index(&list.files, &list.split_items, &request.path, &cwd)
-        {
-            list.glide_to(true, index, cx);
+        if let Some(path) = &request.path {
+            if let Some(index) = file_header_index(&list.files, &list.unified_items, path, &cwd) {
+                list.glide_to(false, index, cx);
+            }
+            if let Some(index) = file_header_index(&list.files, &list.split_items, path, &cwd) {
+                list.glide_to(true, index, cx);
+            }
         }
         self.workspace_store.update(cx, |store, _cx| {
             store.take_diff_focus_for(self.session_id.as_deref(), session, turn);
@@ -856,6 +868,34 @@ impl DiffPanel {
         });
         let tab_icons = self.tab_icons.clone();
         let panel = cx.entity_id();
+        // Whose panel it is, where it shows an agent's.
+        let subject = {
+            let store = self.workspace_store.read(cx);
+            self.lead
+                .as_deref()
+                .zip(self.session_id.as_deref())
+                .map(|(lead, agent)| {
+                    let title = Agents::of(store, lead).title(store, agent);
+                    crate::tr!("diff.agent_subject", title = title.as_str()).into_owned()
+                })
+        };
+        let subject = self
+            .motion
+            .shown("diff-subject", subject, SHOW, window, cx)
+            .map(|shown| {
+                let label = shown.value.clone();
+                shown.fold_across(
+                    material::chip_surface(cx.theme().secondary, cx.theme().foreground, cx)
+                        .debug_selector(|| "diff-subject".into())
+                        .max_w(px(SUBJECT_WIDEST))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(label)),
+                        ),
+                )
+            });
         let tabs = canvas(
             move |bounds, window, cx| {
                 let labelled = build_tabs(false).into_any_element().layout_as_root(
@@ -925,6 +965,7 @@ impl DiffPanel {
         material::bar_divider_below(material::bar("right-panel-header", kind, false, cx), cx)
             .when(hosts_caption, |strip| strip.pr_0())
             .child(tabs)
+            .children(subject)
             // The gap between the tabs and the icon cluster holds nothing, so
             // it doubles as the window's drag handle: `window_drag_area` for the
             // app-owned move (macOS), `drag_region` for native HTCAPTION

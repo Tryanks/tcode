@@ -419,13 +419,32 @@ impl ChatView {
         self.side_of.is_some()
     }
 
-    /// The thread the panes and the right panel know this view by: its own,
-    /// or for an agent beside its lead, the lead's, which stays the focused
-    /// thread while the agent shows.
-    pub(super) fn pane_session(&self) -> Option<String> {
-        match &self.side_of {
-            Some(of) => Some(of.lead_session.clone()),
-            None => self.session_id.clone(),
+    /// The drawer of this view's pane shows `agent`, beside this thread, in
+    /// place of what it showed. The drawer holds one thread: closing the
+    /// agent's must not reveal the lead's.
+    pub(super) fn show_agent_in_drawer(&mut self, agent: String, cx: &mut Context<Self>) {
+        let shown = self.drawer_subject().map(str::to_owned);
+        self.workspace_store.update(cx, |store, cx| {
+            if shown.as_ref() != Some(&agent) {
+                store.close_right_panel_for(shown.as_deref(), cx);
+            }
+        });
+        self.drawer_agent = Some(agent);
+        cx.notify();
+    }
+
+    /// The lead of the agent this view shows beside it.
+    pub(super) fn side_lead(&self) -> Option<Entity<ChatView>> {
+        self.side_of.as_ref()?.lead.upgrade()
+    }
+
+    /// The drawer goes back to this thread, closing on the agent it showed.
+    pub(super) fn close_drawer_agent(&mut self, cx: &mut Context<Self>) {
+        if let Some(agent) = self.drawer_agent.take() {
+            self.workspace_store.update(cx, |store, cx| {
+                store.close_right_panel_for(Some(&agent), cx)
+            });
+            cx.notify();
         }
     }
 
@@ -513,6 +532,17 @@ impl ChatView {
         let wanted = self.wanted_side(cx);
         let store = self.workspace_store.clone();
         if let Some(host) = self.side.host.take() {
+            // Its diff slides out with it, and the lead's panel takes no
+            // place. The compact layout draws no drawer to slide.
+            if self.drawer_agent.as_ref() == Some(&host.session_id) {
+                if self.window_state.read(cx).compact {
+                    self.close_drawer_agent(cx);
+                } else {
+                    store.update(cx, |store, cx| {
+                        store.close_right_panel_for(Some(&host.session_id), cx)
+                    });
+                }
+            }
             close_side_thread(&store, &host, cx);
             // Out of the compact layout, and beside the same thread, it
             // leaves where it was drawn; otherwise there is nothing for it
@@ -1229,25 +1259,18 @@ impl ChatView {
     ) -> Option<AnyElement> {
         let of = self.side_of.as_ref()?;
         let session = self.session_id.clone()?;
-        let (heading, meta_title, lead_title) = {
+        let (heading, title, lead_title) = {
             let store = self.workspace_store.read(cx);
-            let heading =
-                crate::agents_panel::Agents::of(store, &of.lead_session).heading(&session);
+            let agents = crate::agents_panel::Agents::of(store, &of.lead_session);
             (
-                heading,
-                store.thread_meta(&session).map(|meta| meta.title.clone()),
+                agents.heading(&session),
+                agents.title(store, &session),
                 store
                     .thread_meta(&of.lead_session)
                     .map(|meta| meta.title.clone())
                     .unwrap_or_default(),
             )
         };
-        let title = heading
-            .as_ref()
-            .map(|heading| heading.title.clone())
-            .or(meta_title)
-            .filter(|title| !title.trim().is_empty())
-            .unwrap_or_else(|| crate::tr!("agents.untitled").into_owned());
         let execution = heading.as_ref().and_then(|heading| heading.execution);
         let key = heading.map_or_else(|| session.clone(), |heading| heading.key);
 

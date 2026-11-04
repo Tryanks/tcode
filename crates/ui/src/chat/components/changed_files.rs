@@ -90,6 +90,7 @@ pub(crate) fn changed_files(
                 cx,
             )
             .motion(motion)
+            .debug_selector(move || format!("view-diff-{index}"))
             .tooltip(crate::tr!("chat.view_diff_tooltip").into_owned()),
         );
 
@@ -391,6 +392,10 @@ fn chip_element(
             "changed-file-chip-{index}-{key}"
         )))
         .motion(motion)
+        .debug_selector({
+            let key = key.clone();
+            move || format!("changed-file-chip-{key}")
+        })
         .ghost()
         .outline()
         .chip()

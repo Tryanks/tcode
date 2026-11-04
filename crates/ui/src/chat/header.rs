@@ -1110,6 +1110,9 @@ impl ChatView {
             TogglePanel::Diff => Some(RightTab::Diff),
             TogglePanel::PullRequests => Some(RightTab::PullRequests),
         };
+        if tab.is_some() {
+            self.close_drawer_agent(cx);
+        }
         self.workspace_store.update(cx, |store, cx| match tab {
             None => store.toggle_terminal_panel_for(session_id, cx),
             Some(tab) => store.toggle_tab_panel_for(&session_id, tab, cx),

@@ -1085,6 +1085,7 @@ diff:
   empty_file: "Empty file."
   no_text: "File contents are not available."
   title: "Diff"
+  agent_subject: "Subagent · %{title}"
   panel_tabs: "Right panel tabs"
   scope_menu: "Diff scope"
   base_branches: "Base branches"

@@ -6,7 +6,7 @@ use tcode_core::ui::RightTab;
 pub(crate) struct DiffFocus {
     pub session: String,
     pub turn: usize,
-    pub path: String,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,7 +76,7 @@ mod tests {
         ui.pending_diff_focus = Some(DiffFocus {
             session: "session-a".into(),
             turn: 3,
-            path: "src/second.rs".into(),
+            path: Some("src/second.rs".into()),
         });
         assert_eq!(ui.take_diff_focus("session-a", 2), None);
         assert!(ui.pending_diff_focus.is_some());
@@ -85,14 +85,14 @@ mod tests {
             Some(DiffFocus {
                 session: "session-a".into(),
                 turn: 3,
-                path: "src/second.rs".into(),
+                path: Some("src/second.rs".into()),
             })
         );
         assert_eq!(ui.take_diff_focus("session-a", 3), None);
         ui.pending_diff_focus = Some(DiffFocus {
             session: "session-a".into(),
             turn: 3,
-            path: "src/second.rs".into(),
+            path: Some("src/second.rs".into()),
         });
         ui.discard_diff_focus();
         assert!(ui.pending_diff_focus.is_none());
