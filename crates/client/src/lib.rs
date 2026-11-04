@@ -97,12 +97,50 @@ struct Write {
     entry: outbox::Entry,
     sent: Option<web_time::Instant>,
     adopted: bool,
+    /// Saved where a relaunch finds it, or never saved at all (a secret, or a
+    /// link without storage). Only a durable write goes on the wire, so a
+    /// write the host may have seen is always one a relaunch would redeliver.
+    durable: bool,
+    /// What this write adds to the saved snapshot and to the wire, measured
+    /// once at admission so the outbox bound costs nothing per enqueue.
+    stored_bytes: usize,
+    wire_bytes: usize,
+}
+
+impl Write {
+    fn new(id: u64, entry: outbox::Entry, durable: bool) -> Result<Self, ProtocolError> {
+        let wire_bytes = encode_line(&ClientMessage {
+            principal: None,
+            id,
+            key: Some(entry.key.clone()),
+            payload: ClientPayload::Command(entry.command.clone()),
+        })?
+        .len();
+        let stored_bytes = if entry.command.contains_secret() {
+            0
+        } else {
+            serde_json::to_vec(&entry)
+                .map_err(outbox::storage_error)?
+                .len()
+        };
+        Ok(Self {
+            id,
+            entry,
+            sent: None,
+            adopted: false,
+            durable,
+            stored_bytes,
+            wire_bytes,
+        })
+    }
 }
 
 #[derive(Default)]
 struct Delivery {
     writes: VecDeque<Write>,
     storage: Option<Arc<dyn outbox::Storage>>,
+    /// The saved snapshot no longer matches `writes`.
+    dirty: bool,
     failed: VecDeque<(outbox::Entry, ProtocolError)>,
     acknowledged: VecDeque<outbox::Entry>,
 }
@@ -121,6 +159,8 @@ struct HostLinkInner {
     events_tx: async_channel::Sender<EventEnvelope>,
     events_rx: async_channel::Receiver<EventEnvelope>,
     delivery_changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
+    /// Work for the pump that arrives from another thread: a write to save.
+    pump_work: (async_channel::Sender<()>, async_channel::Receiver<()>),
     next_id: AtomicU64,
     // Keep intent changes and recovery replay atomic: a cloned recovery intent
     // must not be sent after a newer unsubscribe or cursor change.
@@ -170,6 +210,7 @@ impl HostLink {
                 events_tx,
                 events_rx,
                 delivery_changes: async_channel::bounded(1),
+                pump_work: async_channel::bounded(1),
                 next_id: AtomicU64::new(1),
                 subscription_transition: Mutex::new(()),
                 subscribed_topics: Mutex::new(HashMap::new()),
@@ -229,10 +270,20 @@ impl HostLink {
         T: Future,
     {
         loop {
-            let line = futures_lite::future::race(self.inner.from_host.recv(), async {
-                timer().await;
-                Ok(String::new())
-            })
+            self.save_outbox();
+            let line = futures_lite::future::race(
+                self.inner.from_host.recv(),
+                futures_lite::future::race(
+                    async {
+                        timer().await;
+                        Ok(String::new())
+                    },
+                    async {
+                        let _ = self.inner.pump_work.1.recv().await;
+                        Ok(String::new())
+                    },
+                ),
+            )
             .await;
             let Ok(line) = line else { break };
             self.check_deadlines(web_time::Instant::now());
@@ -289,13 +340,8 @@ impl HostLink {
                                     delivery.acknowledged.pop_front();
                                 }
                             }
+                            delivery.dirty |= delivery.storage.is_some() && write.stored_bytes > 0;
                             let _ = self.inner.delivery_changes.0.try_send(());
-                            if let Err(error) = persist(&delivery) {
-                                log::error!(
-                                    "could not prune acknowledged outbox entry: {}",
-                                    error.message
-                                );
-                            }
                         }
                     }
                     if let Some(waiter) = self.inner.pending.lock().unwrap().remove(&id) {
@@ -306,8 +352,73 @@ impl HostLink {
                 Err(error) => log::error!("failed to decode host message: {}", error.message),
             }
         }
+        self.save_outbox();
         self.inner.pending.lock().unwrap().clear();
         self.inner.events_tx.close();
+    }
+
+    /// Save the outbox when it changed, without holding it locked while the
+    /// storage writes, so admitting a write never waits on the disk. Unsaved
+    /// writes are saved at once, since they are held off the wire until then;
+    /// a pruned Ack waits until no host line is ready, so a burst of Acks
+    /// costs one write.
+    fn save_outbox(&self) {
+        let (storage, entries, saving) = {
+            let mut delivery = self.inner.delivery.lock().unwrap();
+            let saving: Vec<u64> = delivery
+                .writes
+                .iter()
+                .filter(|write| !write.durable)
+                .map(|write| write.id)
+                .collect();
+            let Some(storage) = delivery.storage.clone() else {
+                return;
+            };
+            if saving.is_empty() && !(delivery.dirty && self.inner.from_host.is_empty()) {
+                return;
+            }
+            delivery.dirty = false;
+            (storage, snapshot(&delivery), saving)
+        };
+        let result = storage.save(&entries);
+        let mut delivery = self.inner.delivery.lock().unwrap();
+        let mut failed = Vec::new();
+        match result {
+            Ok(()) => {
+                for write in &mut delivery.writes {
+                    write.durable |= saving.contains(&write.id);
+                }
+            }
+            // A write that could not be saved was never sent: it fails like
+            // a rejected one, and Retry admits it again under a new key.
+            Err(error) => {
+                log::error!("could not save the outbox: {}", error.message);
+                let mut index = 0;
+                while index < delivery.writes.len() {
+                    if saving.contains(&delivery.writes[index].id) {
+                        let write = delivery.writes.remove(index).unwrap();
+                        delivery.failed.push_back((write.entry, error.clone()));
+                        failed.push((write.id, error.clone()));
+                    } else {
+                        index += 1;
+                    }
+                }
+                while delivery.failed.len() > outbox::MAX_ITEMS {
+                    delivery.failed.pop_front();
+                }
+            }
+        }
+        drop(delivery);
+        for (id, error) in failed {
+            if let Some(waiter) = self.inner.pending.lock().unwrap().remove(&id) {
+                let _ = waiter.sender.try_send(HostMessage::Ack {
+                    id,
+                    result: Err(error),
+                });
+            }
+        }
+        let _ = self.inner.delivery_changes.0.try_send(());
+        self.flush_outbox();
     }
 
     /// Restore before starting the pump or admitting new work.
@@ -324,12 +435,8 @@ impl HostLink {
         let mut delivery = self.inner.delivery.lock().unwrap();
         delivery.storage = Some(storage);
         for entry in entries {
-            delivery.writes.push_back(Write {
-                id: self.next_id(),
-                entry,
-                sent: None,
-                adopted: false,
-            });
+            let write = Write::new(self.next_id(), entry, true)?;
+            delivery.writes.push_back(write);
         }
         Ok(())
     }
@@ -429,42 +536,22 @@ impl HostLink {
             key: uuid::Uuid::new_v4().to_string(),
             command,
         };
-        // Reject unencodable platform paths before they can block the FIFO.
-        encode_line(&ClientMessage {
-            principal: None,
-            id,
-            key: Some(entry.key.clone()),
-            payload: ClientPayload::Command(entry.command.clone()),
-        })?;
+        // Measuring the write also rejects an unencodable platform path
+        // before it can block the FIFO.
+        let mut write = Write::new(id, entry, true)?;
         let mut delivery = self.inner.delivery.lock().unwrap();
-        delivery.writes.push_back(Write {
-            id,
-            entry,
-            sent: None,
-            adopted: false,
-        });
+        let saved = delivery.storage.is_some() && write.stored_bytes > 0;
+        write.durable = !saved;
+        delivery.writes.push_back(write);
         let mut evicted = Vec::new();
         while delivery.writes.len() > outbox::MAX_ITEMS
-            || snapshot_bytes(&delivery)? > outbox::MAX_BYTES
+            || outbox_bytes(&delivery) > outbox::MAX_BYTES
         {
             evicted.push(delivery.writes.pop_front().unwrap());
         }
-        if let Err(error) = persist(&delivery) {
-            if let Some(write) = delivery
-                .writes
-                .iter()
-                .chain(evicted.iter())
-                .find(|write| write.id == id)
-            {
-                let entry = write.entry.clone();
-                delivery.failed.push_back((entry, error.clone()));
-                let _ = self.inner.delivery_changes.0.try_send(());
-            }
-            delivery.writes.retain(|write| write.id != id);
-            for write in evicted.into_iter().rev().filter(|write| write.id != id) {
-                delivery.writes.push_front(write);
-            }
-            return Err(error);
+        if saved || evicted.iter().any(|write| write.stored_bytes > 0) {
+            delivery.dirty |= delivery.storage.is_some();
+            let _ = self.inner.pump_work.0.try_send(());
         }
         for write in &evicted {
             delivery.failed.push_back((
@@ -505,8 +592,8 @@ impl HostLink {
     /// Send every unsent retained write in queue order without waiting for
     /// Acks: the transport stream and the host both preserve line order, so
     /// a write costs a one-way trip instead of a round trip. Sent writes form
-    /// a prefix of the queue; a full outgoing channel ends the pass and the
-    /// rest go out on a later flush. A reconnect clears `sent` on every entry
+    /// a prefix of the queue; a full outgoing channel or a write not saved yet
+    /// ends the pass and the rest go out on a later flush. A reconnect clears `sent` on every entry
     /// and the whole queue is redelivered under its original keys.
     fn flush_outbox(&self) {
         if !matches!(
@@ -521,6 +608,7 @@ impl HostLink {
             .writes
             .iter_mut()
             .skip_while(|write| write.sent.is_some())
+            .take_while(|write| write.durable)
         {
             let message = ClientMessage {
                 principal: None,
@@ -1019,27 +1107,22 @@ fn snapshot(delivery: &Delivery) -> Vec<outbox::Entry> {
         .collect()
 }
 
-fn snapshot_bytes(delivery: &Delivery) -> Result<usize, ProtocolError> {
-    let stored = serde_json::to_vec(&snapshot(delivery))
-        .map_err(outbox::storage_error)?
-        .len();
-    let wire = delivery.writes.iter().try_fold(0_usize, |bytes, write| {
-        encode_line(&ClientMessage {
-            principal: None,
-            id: write.id,
-            key: Some(write.entry.key.clone()),
-            payload: ClientPayload::Command(write.entry.command.clone()),
-        })
-        .map(|line| bytes.saturating_add(line.len()))
-    })?;
-    Ok(stored.max(wire))
-}
-
-fn persist(delivery: &Delivery) -> Result<(), ProtocolError> {
-    if let Some(storage) = &delivery.storage {
-        storage.save(&snapshot(delivery))?;
-    }
-    Ok(())
+/// The larger of the saved snapshot's size and the queue's size on the
+/// wire, as `serde_json` writes the snapshot: `[`, the entries joined by `,`, `]`.
+fn outbox_bytes(delivery: &Delivery) -> usize {
+    let (stored, entries, wire) = delivery.writes.iter().fold(
+        (0_usize, 0_usize, 0_usize),
+        |(stored, entries, wire), write| {
+            (
+                stored.saturating_add(write.stored_bytes),
+                entries + usize::from(write.stored_bytes > 0),
+                wire.saturating_add(write.wire_bytes),
+            )
+        },
+    );
+    stored
+        .saturating_add(entries.saturating_sub(1) + 2)
+        .max(wire)
 }
 
 async fn delay() {
@@ -1120,16 +1203,61 @@ mod tests {
         assert_eq!(link.pending_commands().len(), 1);
     }
 
+    /// Platform storage; the flag makes every save fail, as a full disk does.
     #[derive(Default)]
-    struct MemoryStorage(Mutex<Vec<outbox::Entry>>);
+    struct MemoryStorage(Mutex<Vec<outbox::Entry>>, std::sync::atomic::AtomicBool);
     impl outbox::Storage for MemoryStorage {
         fn load(&self) -> Result<Vec<outbox::Entry>, ProtocolError> {
             Ok(self.0.lock().unwrap().clone())
         }
         fn save(&self, entries: &[outbox::Entry]) -> Result<(), ProtocolError> {
+            if self.1.load(Ordering::Relaxed) {
+                return Err(outbox::storage_error("disk full"));
+            }
             *self.0.lock().unwrap() = entries.to_vec();
             Ok(())
         }
+    }
+
+    /// Whatever the host may have received, a relaunch redelivers: a write
+    /// goes on the wire only once it is saved, and one the storage cannot
+    /// keep fails without ever being sent.
+    #[test]
+    fn a_write_is_sent_only_once_saved_and_one_that_cannot_be_saved_fails_unsent() {
+        let storage = Arc::new(MemoryStorage::default());
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        link.restore_outbox(storage.clone()).unwrap();
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut pump = std::pin::pin!(link.pump_with_timer(std::future::pending::<()>));
+        assert!(pump.as_mut().poll(&mut cx).is_pending());
+        link.dispatch(rename(0)).unwrap();
+        assert!(outgoing.try_recv().is_err(), "sent before it was saved");
+        assert!(pump.as_mut().poll(&mut cx).is_pending());
+        let saved = storage.0.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            request(&outgoing).key.as_deref(),
+            Some(saved[0].key.as_str())
+        );
+
+        storage.1.store(true, Ordering::Relaxed);
+        let mut second = std::pin::pin!(link.command(rename(1)));
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        assert!(pump.as_mut().poll(&mut cx).is_pending());
+        assert!(matches!(
+            second.as_mut().poll(&mut cx),
+            std::task::Poll::Ready(Err(error)) if error.code == "outbox_storage"
+        ));
+        assert!(outgoing.try_recv().is_err(), "an unsaved write was sent");
+        assert_eq!(pending_titles(&link), ["0"]);
+        assert!(matches!(
+            &link.failed_commands()[..],
+            [(outbox::Entry { command: Command::RenameSession { title, .. }, .. }, _)] if title == "1"
+        ));
+        link.close();
+        assert!(pump.as_mut().poll(&mut cx).is_ready());
     }
 
     #[test]
@@ -1235,9 +1363,13 @@ mod tests {
         assert!(
             matches!(first.as_mut().poll(&mut cx), std::task::Poll::Ready(Err(error)) if error.code == "outbox_full")
         );
+        // The link's pump saves what was admitted, as it runs in the app.
+        let mut saving = std::pin::pin!(link.pump_with_timer(std::future::pending::<()>));
+        assert!(saving.as_mut().poll(&mut cx).is_pending());
         let entries = storage.0.lock().unwrap().clone();
         assert_eq!(entries.len(), 256);
         link.close();
+        assert!(saving.as_mut().poll(&mut cx).is_ready());
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let recreated = HostLink::new(to_host, from_host);
