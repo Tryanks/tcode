@@ -643,13 +643,16 @@ impl ChatView {
         path: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(session_id) = self.pane_session() else {
+        let Some(session_id) = self.session_id.clone() else {
             return;
         };
-        self.workspace_store.update(cx, |store, cx| match path {
-            Some(path) => store.open_diff_for_file(&session_id, turn, path, cx),
-            None => store.open_diff_for_turn(&session_id, turn, cx),
-        });
+        if let Some(lead) = self.side_lead() {
+            lead.update(cx, |lead, cx| {
+                lead.show_agent_in_drawer(session_id.clone(), cx)
+            });
+        }
+        self.workspace_store
+            .update(cx, |store, cx| store.open_diff(&session_id, turn, path, cx));
         if self.window_state.read(cx).compact {
             self.window_state
                 .update(cx, |_, cx| cx.emit(OpenPanel(NavigationPanel::Diff)));

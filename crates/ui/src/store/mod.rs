@@ -1800,24 +1800,12 @@ impl WorkspaceStore {
             .count()
     }
 
-    /// Open the diff of `session_id`'s `turn`.
-    pub fn open_diff_for_turn(&mut self, session_id: &str, turn: usize, cx: &mut Context<Self>) {
-        if let Some(ui) = self.thread_conversation_ui_mut(Some(session_id)) {
-            ui.pending_diff_focus = None;
-            ui.right_panel_open = true;
-            ui.right_tab = RightTab::Diff;
-            ui.diff_selected_turn = Some(turn);
-            ui.refresh_diff();
-            cx.notify();
-        }
-    }
-
-    /// Open the diff of `path` in `session_id`'s `turn`.
-    pub fn open_diff_for_file(
+    /// Open the diff of `session_id`'s `turn`, at `path` if one is given.
+    pub fn open_diff(
         &mut self,
         session_id: &str,
         turn: usize,
-        path: String,
+        path: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if let Some(ui) = self.thread_conversation_ui_mut(Some(session_id)) {

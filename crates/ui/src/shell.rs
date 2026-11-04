@@ -10265,6 +10265,106 @@ mod tests {
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
     }
 
+    /// A file in the card of an agent beside its lead opens the agent's diff
+    /// in the drawer of the lead's pane, which says whose it is, and the
+    /// agent stays beside its lead. The drawer closed, the lead's header's
+    /// Diff toggle shows the lead's diff. The agent's card closing takes its
+    /// diff with it, and the lead's panel does not take its place.
+    #[gpui::test]
+    fn a_changed_file_in_an_agents_card_opens_the_agents_diff(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        let store = store_of(&shell, cx);
+        serve_changed_turn(&host, "thread-1", "lead.rs");
+        await_restore_update(&shell, cx, |store| {
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+        });
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", RightTab::Agents, cx)
+        });
+        settle_panes(cx);
+        open_agent_from_panel(&shell, &host, cx);
+        serve_changed_turn(&host, "agent-1", "agent.rs");
+        serve_changed_turn(&host, "agent-1", "later.rs");
+        await_restore_update(&shell, cx, |store| {
+            store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len()) == Some(2)
+        });
+        settle_panes(cx);
+
+        let shows_agents_file = |cx: &mut VisualTestContext| {
+            press_control("changed-file-chip-file-agent.rs", cx);
+            draw_until(&shell, cx, &host, "diff-line-new-agent.rs-1", None);
+            assert_eq!(cx.debug_bounds("diff-line-new-lead.rs-1"), None);
+            assert!(cx.debug_bounds("diff-subject").is_some());
+            assert_eq!(panel_of(&store, "agent-1", cx), Some(RightTab::Diff));
+            store.read_with(cx, |store, _| {
+                assert_eq!(
+                    store.side_thread_for("thread-1").as_deref(),
+                    Some("agent-1")
+                );
+            });
+            let drawer = cx.debug_bounds("right-panel").expect("the drawer");
+            assert_eq!(drawer.right(), pane_bounds(&shell, cx)[0].right());
+        };
+        let shows_leads_diff = |cx: &mut VisualTestContext| {
+            draw_until(&shell, cx, &host, "diff-line-new-lead.rs-1", None);
+            assert_eq!(cx.debug_bounds("diff-line-new-agent.rs-1"), None);
+            assert_eq!(cx.debug_bounds("diff-subject"), None);
+        };
+
+        shows_agents_file(cx);
+        press_control("diff-close", cx);
+        assert_eq!(panel_of(&store, "agent-1", cx), None);
+        assert_eq!(cx.debug_bounds("right-panel"), None);
+        assert!(cx.debug_bounds("chat-side-header").is_some(), "it stays");
+        press_control("view-diff-1", cx);
+        draw_until(&shell, cx, &host, "diff-line-new-later.rs-1", None);
+        press_control("diff-close", cx);
+        press_control("diff-panel", cx);
+        shows_leads_diff(cx);
+        press_control("diff-close", cx);
+
+        shows_agents_file(cx);
+        // The panel lies over the card's Close here; it reaches the same place.
+        store.update(cx, |store, cx| store.set_side_thread("thread-1", None, cx));
+        settle_panes(cx);
+        assert_eq!(cx.debug_bounds("chat-side-header"), None);
+        assert_eq!(cx.debug_bounds("right-panel"), None, "nothing in its place");
+        assert_eq!(panel_of(&store, "thread-1", cx), None);
+        press_control("diff-panel", cx);
+        shows_leads_diff(cx);
+    }
+
+    /// On a compact agent's page a changed file opens the agent's diff on the
+    /// panel page over it: there is no pane beside a lead to show it in, and
+    /// the page's chat is the agent's.
+    #[gpui::test]
+    fn a_changed_file_on_a_compact_agents_page_opens_the_agents_diff(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        as_mobile(cx);
+        let store = store_of(&shell, cx);
+        serve_changed_turn(&host, "thread-1", "lead.rs");
+        resize(cx, 600.);
+        settle_panes(cx);
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(&store, "agent-1".into(), None, None, window, cx)
+        });
+        draw(cx);
+        serve_thread(&host, "agent-1");
+        serve_changed_turn(&host, "agent-1", "agent.rs");
+        await_restore_update(&shell, cx, |store| {
+            store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len()) == Some(1)
+        });
+        settle_panes(cx);
+
+        press_control("changed-file-chip-file-agent.rs", cx);
+        draw_until(&shell, cx, &host, "diff-line-new-agent.rs-1", None);
+        assert_eq!(cx.debug_bounds("diff-line-new-lead.rs-1"), None);
+        assert_eq!(panel_of(&store, "agent-1", cx), Some(RightTab::Diff));
+        assert_eq!(panel_of(&store, "thread-1", cx), None);
+    }
+
     /// Two panes each have a drawer. Diff opened from the left pane's header
     /// lies inside that pane with the right pane uncovered; Plan opened in
     /// the right pane too shows beside it, each with its own thread's

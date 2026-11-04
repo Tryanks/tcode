@@ -89,6 +89,8 @@ pub(crate) struct Drawer {
     /// so the restore never fights a drag. Armed while the panel is not
     /// drawn, while it is expanded, and whenever its width should change.
     restore_pending: bool,
+    /// The thread the drawer showed last frame.
+    subject: Option<String>,
     /// The pane's width and the panel's rest width last frame.
     laid_out: (Pixels, Pixels),
     /// Where the panel's content holds the keyboard.
@@ -122,6 +124,7 @@ impl Drawer {
             scene,
             split: cx.new(|_| ResizableState::default()),
             restore_pending: true,
+            subject: None,
             laid_out: Default::default(),
             focus: cx.focus_handle(),
             return_to: None,
@@ -143,6 +146,10 @@ impl ThreadPanel {
     /// the same entity, as a page.
     pub(crate) fn drawer_tabs(&mut self, cx: &mut Context<Self>) -> Entity<DiffPanel> {
         let subject = self.drawer_subject(cx);
+        let lead = self
+            .session_id
+            .clone()
+            .filter(|_| self.session_id != subject);
         let at_corner = self.chat.read(cx).at_window_corner();
         let tabs = self.drawer.tabs.get_or_insert_with(|| {
             let (store, window_state) =
@@ -157,6 +164,7 @@ impl ThreadPanel {
         let tabs = tabs.clone();
         tabs.update(cx, |tabs, cx| {
             tabs.set_session(subject, cx);
+            tabs.set_lead(lead, cx);
             tabs.set_at_window_corner(at_corner, cx);
         });
         tabs
@@ -235,6 +243,14 @@ impl ThreadPanel {
     ) -> Option<AnyElement> {
         let new_scene = self.drawer.scene.show(self.session_id.as_deref());
         let subject = self.drawer_subject(cx);
+        // An open drawer changing thread within the pane's own shows the new
+        // one at once, content at rest; a shut one slides in on it.
+        if std::mem::replace(&mut self.drawer.subject, subject.clone()) != subject
+            && self.drawer.open
+            && !new_scene
+        {
+            self.drawer.scene.restart();
+        }
         if let Some(tabs) = &self.drawer.tabs {
             let subject = subject.clone();
             tabs.update(cx, |tabs, cx| tabs.set_session(subject, cx));
@@ -329,6 +345,9 @@ impl ThreadPanel {
         // built to draw is let go. Another thread in the pane keeps its own
         // panel as it left it, page included.
         let was_drawn = std::mem::replace(&mut self.drawer.drawn, drawn);
+        if !drawn && self.session_id != subject {
+            self.chat.update(cx, |chat, _| chat.release_drawer_agent());
+        }
         if was_drawn && !drawn {
             if let Some(tabs) = &self.drawer.tabs {
                 tabs.update(cx, |tabs, cx| tabs.release(cx));

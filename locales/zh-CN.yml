@@ -1078,6 +1078,7 @@ diff:
   empty_file: "空文件。"
   no_text: "无法获取文件内容。"
   title: "Diff"
+  agent_subject: "子代理 · %{title}"
   panel_tabs: "右侧面板标签页"
   scope_menu: "Diff 范围"
   base_branches: "基础分支"

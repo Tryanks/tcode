@@ -205,6 +205,10 @@ pub struct ChatView {
     side: side::Side,
     /// Set while the view is itself an agent's shown beside its lead.
     side_of: Option<side::SideOf>,
+    /// The agent beside this thread whose diff the pane's drawer shows, in
+    /// place of this thread's panel. Here because it stays with the thread
+    /// when the thread changes panes.
+    drawer_agent: Option<String>,
     /// The Agents sheet's content on phone.
     agents: Entity<crate::agents_panel::AgentsPanel>,
     terminal_was_open: bool,
@@ -489,6 +493,7 @@ impl ChatView {
             body: Default::default(),
             side: side::Side::new(),
             side_of: None,
+            drawer_agent: None,
             list_state,
             timeline_stale: false,
             history_placeholder_height: px(0.),
@@ -543,7 +548,13 @@ impl ChatView {
 
     /// The thread the drawer of the view's pane shows.
     pub(crate) fn drawer_subject(&self) -> Option<&str> {
-        self.session_id.as_deref()
+        self.drawer_agent.as_deref().or(self.session_id.as_deref())
+    }
+
+    /// The drawer of the view's pane has slid shut: whichever agent it
+    /// showed, it shows this thread again.
+    pub(crate) fn release_drawer_agent(&mut self) {
+        self.drawer_agent = None;
     }
 
     /// Whether the view's pane is at the window's top right corner.
@@ -591,6 +602,7 @@ impl ChatView {
         if self.session_id == session_id {
             return;
         }
+        self.close_drawer_agent(cx);
         self.composer.update(cx, |composer, cx| {
             composer.set_session(session_id.clone(), cx)
         });
