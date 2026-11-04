@@ -206,7 +206,7 @@ impl PluginsSettingsPanel {
     /// outside any project when no thread is open.
     fn refresh(&self, profile_id: &str, cx: &mut App) {
         let profile_id = profile_id.to_string();
-        let thread = crate::shell::last_input_thread(cx);
+        let thread = crate::shell::current_thread(cx);
         self.store.update(cx, |store, _| {
             let cwd = store.session_cwd_for(thread.as_deref());
             store.refresh_provider_plugins(profile_id, cwd);
@@ -437,7 +437,7 @@ impl PluginsSettingsPanel {
         let store = self.store.read(cx);
         let name = store.provider_profile_display_name(&profile.id);
         let catalog = store.provider_plugin_catalog(&profile.id).cloned();
-        let requested_cwd = store.session_cwd_for(crate::shell::last_input_thread(cx).as_deref());
+        let requested_cwd = store.session_cwd_for(crate::shell::current_thread(cx).as_deref());
         let switches = store.plugin_management();
         let (master, switch_on) = (switches.enabled, switches.provider_switch(profile.kind));
         let muted = cx.theme().muted_foreground;
