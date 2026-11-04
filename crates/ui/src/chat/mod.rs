@@ -975,7 +975,9 @@ impl ChatView {
     /// Whether what the view was bound to can be drawn at rest: no thread
     /// once the workspace is known; a thread once its timeline is held whole
     /// (not loading, not catching up), its rows have been drawn (measured, at
-    /// their anchor) and the Markdown of the ones on screen is built.
+    /// their anchor) and the Markdown of the ones on screen is built, its
+    /// diagrams drawn. Reading the Markdown here draws the view again when a
+    /// diagram is.
     fn scene_ready(&self, loading: bool, rows_drawn: bool, cx: &App) -> bool {
         if loading {
             return false;
@@ -989,6 +991,10 @@ impl ChatView {
             && !self.timeline_stale
             && (self.rows.is_empty() || rows_drawn)
             && self.pending_md_builds.is_empty()
+            && !self
+                .md_states
+                .values()
+                .any(|md| md.state.read(cx).drawing_first_diagrams())
             && !self.carried_anchor
             && self.reservation_scroll_back.is_none()
     }

@@ -2,8 +2,10 @@
 //!
 //! A pure-Rust engine lays a fence's source out to SVG, and the picture is
 //! rasterized, both on the background executor: a diagram is never laid out
-//! on the main thread while its source streams in, and never shown before its
-//! pixels and its size exist.
+//! on the main thread, and never shown before its pixels and its size exist.
+//! A document opened with a whole fence shows its code until the picture is
+//! drawn, at the diagram's height when that is known, then the picture at
+//! once; the chat holds a thread unseen until its first pictures are drawn.
 //!
 //! A streaming fence's source flips between parsing and not on almost every
 //! token, so each fence has a [`Slot`] that keeps what is shown moving one way.
@@ -54,6 +56,7 @@ use super::{
 use crate::{
     icon::IconName,
     motion::{CrossFade, GlideState, SizeGlide},
+    recent_cache::RecentCache,
     theme::ActiveTheme as _,
     typography::TextRole as _,
     widgets::copy::{action_button, copy_button},
@@ -201,15 +204,27 @@ impl Outcome {
 }
 
 /// The most recent whole fences drawn, for a document rebuilt or opened
-/// again and for a theme switched back.
-#[derive(Default)]
+/// again and for a theme switched back; and the sizes of many more, which a
+/// fence drawn again holds while its picture is on its way.
 struct Finals {
     entries: VecDeque<((SharedString, bool), Outcome)>,
     bytes: usize,
+    sizes: RecentCache<(SharedString, bool), gpui::Size<Pixels>>,
+}
+
+impl Default for Finals {
+    fn default() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            bytes: 0,
+            sizes: RecentCache::new(FINAL_SIZES_CAPACITY),
+        }
+    }
 }
 
 const FINALS_CAPACITY: usize = 32;
 const FINALS_BYTES: usize = 64 * 1024 * 1024;
+const FINAL_SIZES_CAPACITY: usize = 512;
 
 impl Finals {
     fn get(&mut self, key: &(SharedString, bool)) -> Option<Outcome> {
@@ -221,6 +236,10 @@ impl Finals {
     }
 
     fn insert(&mut self, key: (SharedString, bool), outcome: Outcome) {
+        if let Outcome::Drawn(picture) = &outcome {
+            self.sizes
+                .get_or_insert_with(key.clone(), || picture.size());
+        }
         if let Some(ix) = self.entries.iter().position(|(entry, _)| *entry == key)
             && let Some((_, old)) = self.entries.remove(ix)
         {
@@ -304,6 +323,11 @@ pub(super) struct Slot {
     timer: Option<(Instant, Task<()>)>,
     /// The fence has been laid out before.
     built: bool,
+    /// The first render of the whole fence, which appears at once, is on
+    /// its way.
+    opening: bool,
+    /// The size of the diagram on its way, when it was drawn before.
+    reserve: Option<gpui::Size<Pixels>>,
     glide: GlideState,
 }
 
@@ -398,32 +422,10 @@ impl Slot {
                 whole,
             };
             if self.tried.as_ref() != Some(&attempt) {
-                // A whole fence drawn before is shown at once, and so is one
-                // on its first frame, as a document opened from history shows
-                // its diagrams on its first frame rather than its code.
+                let key = (attempt.source.clone(), attempt.dark);
+                // A whole fence drawn before is shown at once.
                 let at_once = whole
-                    .then(|| {
-                        let key = (attempt.source.clone(), attempt.dark);
-                        FINALS
-                            .with(|finals| finals.borrow_mut().get(&key))
-                            .or_else(|| {
-                                (!self.built).then(|| {
-                                    let outcome = Outcome::new(
-                                        draw(
-                                            &attempt.source,
-                                            attempt.dark,
-                                            true,
-                                            &cx.svg_renderer(),
-                                        ),
-                                        cx,
-                                    );
-                                    FINALS.with(|finals| {
-                                        finals.borrow_mut().insert(key, outcome.clone())
-                                    });
-                                    outcome
-                                })
-                            })
-                    })
+                    .then(|| FINALS.with(|finals| finals.borrow_mut().get(&key)))
                     .flatten();
                 match at_once {
                     Some(outcome) => {
@@ -432,8 +434,17 @@ impl Slot {
                         self.accept(attempt, outcome, env.burst);
                     }
                     None if self.in_flight.is_none() => {
+                        // A fence whole when the document opens, as from
+                        // history, was not watched arriving: its picture
+                        // appears without motion once it is drawn.
+                        let opening = whole && !self.built;
+                        if opening {
+                            self.opening = true;
+                            self.reserve =
+                                FINALS.with(|finals| finals.borrow().sizes.get(&key).copied());
+                        }
                         self.tried = Some(attempt.clone());
-                        self.in_flight = Some(spawn(path, attempt, env.burst, cx));
+                        self.in_flight = Some(spawn(path, attempt, env.burst || opening, cx));
                     }
                     // The render in flight hands over to the newest source
                     // when it is done.
@@ -466,6 +477,8 @@ impl Slot {
         let Some(ready) = self.ready.take() else {
             return;
         };
+        self.opening = false;
+        self.reserve = None;
         if self.swap.is_some() {
             self.finish_swap();
         }
@@ -633,6 +646,13 @@ impl Diagrams {
         cx.notify();
     }
 
+    /// Whether a fence's first picture is still being drawn.
+    pub(super) fn opening(&self) -> bool {
+        self.slots
+            .values()
+            .any(|slot| slot.opening && slot.in_flight.is_some())
+    }
+
     /// The reader switches fence `path` between its diagram and its source,
     /// which cross-fade unless `still`.
     pub(super) fn toggle(&mut self, path: &str, showing_source: bool, now: Instant, still: bool) {
@@ -678,6 +698,9 @@ pub(super) fn block(
     let swap = slot.and_then(|slot| slot.swap);
     let generation = slot.map_or(0, |slot| slot.generation);
     let glide = slot.map(|slot| slot.glide.clone()).unwrap_or_default();
+    let reserve = slot
+        .and_then(|slot| slot.reserve)
+        .filter(|_| layer == Layer::Source && shown.is_none() && failed.is_none());
     let now = cx.background_executor().now();
     let progress = swap.map_or(1., |swap| {
         crate::motion::Curve::new(SWAP).progress(now.saturating_duration_since(swap.at))
@@ -704,16 +727,29 @@ pub(super) fn block(
             };
             line
         });
-        layers.push((
-            0,
-            div()
+        let code = div()
+            .w_full()
+            .px_3()
+            .py_3()
+            .child(lines(cx))
+            .children(failure);
+        // Until its picture is drawn, the code holds the height the diagram
+        // will have, so nothing below moves when it appears.
+        let code = match reserve {
+            Some(size) => div()
+                .relative()
                 .w_full()
-                .px_3()
-                .py_3()
-                .child(lines(cx))
-                .children(failure)
+                .overflow_hidden()
+                .child(div().w_full().p_3().child(Fitted::<gpui::Img> {
+                    intrinsic: size,
+                    blend: None,
+                    image: None,
+                }))
+                .child(code.absolute().top_0().left_0())
                 .into_any_element(),
-        ));
+            None => code.into_any_element(),
+        };
+        layers.push((0, code));
     }
     if shows(Layer::Diagram)
         && let Some(current) = shown.clone()
@@ -1450,12 +1486,15 @@ mod tests {
         assert_eq!(block_height(cx), snapped, "the swap took one frame");
     }
 
+    /// A document opened with a whole fence draws it off the main thread,
+    /// and the picture then appears whole at once: it never fades in from
+    /// the code, and nothing moves after.
     #[gpui::test]
-    fn a_diagram_from_history_is_whole_on_its_first_frame(cx: &mut TestAppContext) {
+    fn a_diagram_from_history_appears_whole_once_drawn(cx: &mut TestAppContext) {
         let (_, cx) = open(&format!("```mermaid\n{FLOWCHART}```\n"), false, cx);
         assert!(
             diagram_shown(cx) && !code_shown(cx),
-            "drawn on the first frame"
+            "the picture, not a cross-fade from the code"
         );
         let first = block_height(cx);
         draw_settled(cx);
@@ -1464,6 +1503,44 @@ mod tests {
             first,
             "nothing moves after the first frame"
         );
+    }
+
+    /// A fence drawn before, whose picture is no longer among the recent
+    /// ones, is drawn again off the main thread; meanwhile its code holds
+    /// the diagram's height, so nothing below moves when the picture comes.
+    #[gpui::test]
+    fn a_diagram_drawn_again_holds_its_height_while_it_draws(cx: &mut TestAppContext) {
+        let text = format!("```mermaid\n{FLOWCHART}```\n");
+        let (_, cx) = open(&text, false, cx);
+        draw_settled(cx);
+        let drawn = block_height(cx);
+        // Many diagrams later: the picture has left, its size is kept.
+        FINALS.with(|finals| finals.borrow_mut().entries.clear());
+        let root = cx
+            .update(|window, _| window.root::<Root>())
+            .flatten()
+            .expect("the root view");
+        root.update(cx, |root, cx| {
+            root.markdown = cx.new(|cx| MarkdownState::new(&text, cx));
+            cx.notify();
+        });
+        // A frame drawn before the picture is.
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+        assert!(
+            code_shown(cx) && !diagram_shown(cx),
+            "the code, until drawn"
+        );
+        assert_eq!(
+            block_height(cx),
+            drawn,
+            "the code holds the diagram's height"
+        );
+        draw(cx);
+        assert!(diagram_shown(cx) && !code_shown(cx), "the picture, at once");
+        assert_eq!(block_height(cx), drawn);
     }
 
     /// A theme switch glides a diagram with the palette around it: the
