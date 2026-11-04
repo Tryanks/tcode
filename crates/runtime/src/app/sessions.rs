@@ -2050,19 +2050,24 @@ impl AppState {
         }
     }
 
-    /// The reasoning effort last used with exactly this (provider, model),
-    /// from the most recently updated session that ran it (archived included:
+    /// The reasoning effort last used with exactly this (provider, profile,
+    /// model), from the most recently updated session that ran it (archived included:
     /// memory outlives the thread). Model switches restore this instead of
     /// resetting to the model's default. Keyed per model, so the remembered
     /// value is always one the model accepts.
     pub(super) fn remembered_effort(
         &self,
         provider: ProviderKind,
+        profile_id: Option<&str>,
         model: Option<&str>,
     ) -> Option<OptionSelection> {
         self.sessions
             .iter()
-            .filter(|meta| meta.provider == provider && meta.model.as_deref() == model)
+            .filter(|meta| {
+                meta.provider == provider
+                    && meta.profile_id.as_deref() == profile_id
+                    && meta.model.as_deref() == model
+            })
             .max_by_key(|meta| meta.updated_at)
             .and_then(|meta| {
                 meta.option_selections

@@ -2657,6 +2657,146 @@ mod replica_tests {
         assert_eq!(left, right, "{current:?} in {column:?}");
     }
 
+    /// Two accounts of one CLI list the same ids. A model picked under the
+    /// second reads as selected there alone, and the thread runs on it.
+    #[gpui::test]
+    fn a_model_is_selected_under_the_account_it_was_picked_on(cx: &mut TestAppContext) {
+        use crate::test_frames::draw_settled;
+        use agent::ProviderKind;
+
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let root = crate::store::tests::scratch_root("account-selection");
+        let project = tcode_core::project::Project::from_root(root.clone());
+        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project).unwrap();
+        let host =
+            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
+                .unwrap();
+        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::ClaudeCode);
+        let (launcher, launches, project_id, cwd) = (
+            scripted.launcher.clone(),
+            scripted.launches.clone(),
+            project.id.clone(),
+            root.clone(),
+        );
+        let session_id = smol::block_on(host.update_state_for_test(move |state, cx| {
+            let spec = |id: &str| agent::ModelSpec {
+                id: id.into(),
+                display_name: id.into(),
+                is_default: false,
+                options: Vec::new(),
+            };
+            state.providers.model_catalogs.insert(
+                ProviderKind::ClaudeCode,
+                vec![spec("first-model"), spec("shared-model")],
+            );
+            state.settings.profiles.insert(
+                "second-account".to_owned(),
+                tcode_core::settings::ProviderProfile {
+                    kind: ProviderKind::ClaudeCode,
+                    settings: tcode_core::settings::ProviderSettings {
+                        home_path: Some("/profile-homes/second-account".into()),
+                        ..Default::default()
+                    },
+                },
+            );
+            state.set_provider_launcher_for_test(launcher);
+            state.start_draft(project_id, cwd, cx)
+        }))
+        .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
+        driver.wait_until(cx, &store, "the draft's status", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .composer_state_for(Some(&session_id))
+                    .active_model
+                    .is_some()
+            })
+        });
+        let session = Some(session_id.clone());
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), session, window, cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        draw_settled(cx);
+
+        let show_rail = |cx: &mut gpui::VisualTestContext, profile: &str| {
+            composer.update(cx, |composer, cx| {
+                composer.picker_rail = Some(PickerRail::Profile(profile.to_owned()));
+                cx.notify();
+            });
+            draw_settled(cx);
+        };
+        let open_picker = |cx: &mut gpui::VisualTestContext| {
+            let picker = cx.debug_bounds("model-picker").expect("model picker");
+            cx.simulate_click(picker.center(), Modifiers::default());
+            draw_settled(cx);
+        };
+
+        open_picker(cx);
+        show_rail(cx, "second-account");
+        cx.simulate_keystrokes("secondary-2");
+        draw_settled(cx);
+        driver.wait_until(cx, &store, "the pick to reach the thread", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .composer_state_for(Some(&session_id))
+                    .active_model
+                    .is_some_and(|active| {
+                        active.model.as_deref() == Some("shared-model")
+                            && active.profile_id.as_deref() == Some("second-account")
+                    })
+            })
+        });
+        draw_settled(cx);
+
+        open_picker(cx);
+        assert!(
+            cx.debug_bounds("model-row-current").is_some(),
+            "the account the model was picked on shows it selected"
+        );
+        show_rail(cx, "claude");
+        assert!(
+            cx.debug_bounds("model-row-current").is_none(),
+            "the other account lists the same id, unselected"
+        );
+        cx.simulate_keystrokes("escape");
+        draw_settled(cx);
+
+        store.update(cx, |store, _| {
+            store.send_turn_for(session_id.clone(), "hello".into(), Vec::new())
+        });
+        driver.wait_until(cx, &store, "the provider launch", |_| !launches.is_empty());
+        let launch = launches.try_recv().unwrap();
+        assert_eq!(launch.model.as_deref(), Some("shared-model"));
+        assert!(
+            launch
+                .launch_env
+                .pairs(ProviderKind::ClaudeCode)
+                .contains(&(
+                    "CLAUDE_CONFIG_DIR".to_owned(),
+                    "/profile-homes/second-account".to_owned()
+                )),
+            "the thread launches on the second account"
+        );
+        driver.shutdown(cx, &store, &host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[gpui::test]
     fn switching_language_relocalizes_the_model_search_placeholder(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();

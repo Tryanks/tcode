@@ -146,11 +146,15 @@ impl Composer {
                             .label(crate::tr!("fallback.retry_on", model = model.clone()))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.workspace_store.update(cx, |store, _cx| {
+                                    let profile_id = store
+                                        .composer_state_for(this.session_id.as_deref())
+                                        .active_model
+                                        .and_then(|active| active.profile_id);
                                     store.set_active_model_for(
                                         this.session_id.clone().unwrap_or_default(),
                                         ProviderKind::ClaudeCode,
                                         Some(model.clone()),
-                                        None,
+                                        profile_id,
                                     );
                                     store.dismiss_fallback_block_for(this.session_id.as_deref());
                                 });

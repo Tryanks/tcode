@@ -19,7 +19,8 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         let profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
-        let remembered_effort = self.remembered_effort(provider, model.as_deref());
+        let remembered_effort =
+            self.remembered_effort(provider, profile_id.as_deref(), model.as_deref());
         let project_id = self
             .resident(target_id)
             .and_then(|active| active.meta.project_id.clone());

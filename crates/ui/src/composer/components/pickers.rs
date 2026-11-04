@@ -35,6 +35,25 @@ struct ModelRow {
     favorite: bool,
 }
 
+/// The row a thread runs on, in a row's own terms. Its id alone names no row:
+/// two accounts of one CLI list the same ids, and Favorites spans providers.
+#[derive(Clone)]
+struct SelectedModel {
+    id: String,
+    provider: ProviderKind,
+    profile_id: Option<String>,
+}
+
+impl ModelRow {
+    fn is_selected(&self, selected: &Option<SelectedModel>) -> bool {
+        selected.as_ref().is_some_and(|selected| {
+            selected.id == self.id
+                && selected.provider == self.provider
+                && selected.profile_id == self.profile_id
+        })
+    }
+}
+
 /// The provider glyph tinted with the accent configured on its Settings →
 /// Providers card, falling back to the provider's own brand tint.
 fn tinted_provider_glyph(provider: ProviderKind, store: &WorkspaceStore) -> Icon {
@@ -213,7 +232,14 @@ impl Composer {
         let selected = match provider {
             ProviderKind::Acp => acp_agent_id.clone(),
             _ => current_model.clone(),
-        };
+        }
+        .map(|id| SelectedModel {
+            id,
+            provider,
+            profile_id: active_profile
+                .clone()
+                .filter(|id| !tcode_core::settings::Settings::is_builtin_profile_id(id)),
+        });
         let acp_rail_agents: Vec<(String, String)> = store
             .settings_installed_acp_agents()
             .into_iter()
@@ -684,7 +710,7 @@ fn render_model_pane(
     // The rail's rows before the search filtered them, which a row the
     // search takes away is drawn from as it folds.
     all_rows: Rc<[ModelRow]>,
-    selected: &Option<String>,
+    selected: &Option<SelectedModel>,
     rail: PickerRail,
     // (id, name) of every installed+enabled ACP agent — one rail entry each.
     acp_agents: &[(String, String)],
@@ -781,10 +807,7 @@ fn render_model_pane(
         .read(cx)
         .value()
         .is_empty()
-        .then(|| {
-            rows.iter()
-                .position(|row| selected.as_deref() == Some(row.id.as_str()))
-        })
+        .then(|| rows.iter().position(|row| row.is_selected(selected)))
         .flatten();
     let build_list = {
         let selected = selected.clone();
@@ -1116,7 +1139,7 @@ fn render_compact_model_footer(
 fn render_model_row(
     row: &ModelRow,
     index: usize,
-    selected: &Option<String>,
+    selected: &Option<SelectedModel>,
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
     session_id: Option<String>,
@@ -1124,7 +1147,7 @@ fn render_model_row(
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let is_current = selected.as_deref() == Some(row.id.as_str());
+    let is_current = row.is_selected(selected);
     let is_acp = row.acp;
     let is_fav = !is_acp && row.favorite;
     let name = row.name.clone();
