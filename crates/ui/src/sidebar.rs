@@ -85,8 +85,39 @@ fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static,
     })
 }
 
+/// What a wide chat column shows, by the rows of its threads: an agent's is
+/// its lead's. Empty wherever no conversation is on screen.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct ShownThreads {
+    pub(crate) current: Option<String>,
+    pub(crate) shown: Vec<String>,
+}
+
+impl ShownThreads {
+    fn light(&self, row: &str) -> RowLight {
+        if self.current.as_deref() == Some(row) {
+            RowLight::Current
+        } else if self.shown.iter().any(|shown| shown == row) {
+            RowLight::Shown
+        } else {
+            RowLight::None
+        }
+    }
+}
+
+/// How a thread's row says what the chat column does with its thread.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowLight {
+    None,
+    Shown,
+    Current,
+}
+
 /// The gap between the parts of a desktop row (`selectable_row`'s).
 const ROW_GAP: gpui::Pixels = px(6.);
+/// How far the selected fill comes in on a row shown but not current, as
+/// macOS unemphasizes a selection the keyboard is away from.
+const SHOWN_FILL: f32 = 0.5;
 
 /// Each flat slot: the desktop two-line row and the 2pt gap reserved below it.
 const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(false) + 2.;
@@ -542,7 +573,6 @@ struct FlatFrame {
     settled_count: usize,
     project_names: HashMap<String, String>,
     flags: HashMap<String, ThreadFlags>,
-    active_id: Option<String>,
 }
 
 /// A row of the desktop grouped list. Project-scoped rows index into the
@@ -625,6 +655,8 @@ pub struct SessionsSidebar {
     arrange_row_keys: Vec<String>,
     arrange_flip: crate::motion::ListFlip,
     last_selected: Option<String>,
+    /// What the chat column shows, as its shell last told the list.
+    shown: ShownThreads,
     /// Optional project id filter for the session-local flat list.
     project_filter: Option<String>,
     settled_scope: Option<(SidebarLayout, Option<String>)>,
@@ -1080,6 +1112,7 @@ impl SessionsSidebar {
             arrange_row_keys: Vec::new(),
             arrange_flip: Default::default(),
             last_selected: None,
+            shown: ShownThreads::default(),
             project_filter: None,
             settled_scope: None,
             renaming: None,
@@ -2637,14 +2670,8 @@ impl SessionsSidebar {
                 .into_any_element(),
             GroupedListRow::Thread(meta) => item
                 .child({
-                    let active = self.selected_row(window, cx);
-                    let thread = self.render_thread(
-                        meta,
-                        flags,
-                        active.as_deref() == Some(meta.id.as_str()),
-                        window,
-                        cx,
-                    );
+                    let light = self.shown.light(&meta.id);
+                    let thread = self.render_thread(meta, flags, light, window, cx);
                     drag_ghost::slot(arrange::thread_slot(&meta.id), thread, window, cx)
                 })
                 .into_any_element(),
@@ -2764,26 +2791,28 @@ impl SessionsSidebar {
         )
     }
 
-    /// The thread whose row is drawn selected: the selected input's, or its
-    /// lead's.
-    fn selected_row(&self, window: &Window, cx: &App) -> Option<String> {
-        let selected = crate::shell::selected_input(window, cx)?;
-        Some(self.store.read(cx).roster_row(&selected))
+    /// What the chat column shows now, drawn from the next frame.
+    pub(crate) fn set_shown(&mut self, shown: ShownThreads, cx: &mut Context<Self>) {
+        if self.shown != shown {
+            self.shown = shown;
+            cx.notify();
+        }
     }
 
-    /// The row of the thread in the pane last in use.
+    /// The row of the current pane's thread.
     fn current_row(&self, cx: &App) -> Option<String> {
         let thread = crate::shell::current_thread(cx)?;
         Some(self.store.read(cx).roster_row(&thread))
     }
 
-    /// `base` carries the row's selectable surface, selected when `is_active`.
+    /// `base` carries the row's selectable surface, selected when `light` is
+    /// [`RowLight::Current`].
     fn thread_clickable_row(
         &self,
         base: gpui::Div,
         meta: &SessionMeta,
         state: &ThreadRowState,
-        is_active: bool,
+        light: RowLight,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> crate::material::Clickable<gpui::Div> {
@@ -2793,11 +2822,11 @@ impl SessionsSidebar {
         let active = cx.theme().list_active;
         let fill = transition(
             (row_id.clone(), "selected-fill"),
-            if is_active {
-                active
-            } else {
-                active.opacity(0.)
-            },
+            active.opacity(match light {
+                RowLight::Current => 1.,
+                RowLight::Shown => SHOWN_FILL,
+                RowLight::None => 0.,
+            }),
             gpui_base::motion::Transition::new(GLIDE),
             window,
             cx,
@@ -2838,7 +2867,7 @@ impl SessionsSidebar {
             cx,
         )
         .text_body(false, cx)
-        .aria_selected(is_active)
+        .aria_selected(light == RowLight::Current)
         .debug_selector({
             let id = meta.id.clone();
             move || format!("sidebar-thread-{id}")
@@ -3353,7 +3382,7 @@ impl SessionsSidebar {
         &self,
         meta: &SessionMeta,
         flags: &HashMap<String, ThreadFlags>,
-        is_active: bool,
+        light: RowLight,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -3366,10 +3395,10 @@ impl SessionsSidebar {
 
         let row = self
             .thread_clickable_row(
-                selectable_row(h_flex(), is_active, false, cx),
+                selectable_row(h_flex(), light == RowLight::Current, false, cx),
                 meta,
                 &state,
-                is_active,
+                light,
                 window,
                 cx,
             )
@@ -3539,7 +3568,7 @@ impl SessionsSidebar {
         meta: &SessionMeta,
         flags: &HashMap<String, ThreadFlags>,
         project_name: Option<String>,
-        is_active: bool,
+        light: RowLight,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -3554,10 +3583,15 @@ impl SessionsSidebar {
 
         let row = self
             .thread_clickable_row(
-                crate::material::selectable_row_two_line(v_flex(), is_active, false, cx),
+                crate::material::selectable_row_two_line(
+                    v_flex(),
+                    light == RowLight::Current,
+                    false,
+                    cx,
+                ),
                 meta,
                 &state,
-                is_active,
+                light,
                 window,
                 cx,
             )
@@ -5004,7 +5038,6 @@ impl SessionsSidebar {
         groups: &[ProjectGroup],
         flat_sessions: &[SessionMeta],
         flags: HashMap<String, ThreadFlags>,
-        active_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (gpui::AnyElement, gpui::AnyElement) {
@@ -5127,7 +5160,6 @@ impl SessionsSidebar {
             settled_count,
             project_names,
             flags,
-            active_id,
         });
         self.flat_drawn = frame.clone();
         let flip = self.flat_flip.clone();
@@ -5245,9 +5277,9 @@ impl SessionsSidebar {
             .as_ref()
             .and_then(|project_id| frame.project_names.get(project_id))
             .cloned();
-        let is_active = frame.active_id.as_deref() == Some(meta.id.as_str());
+        let light = self.shown.light(&meta.id);
         let thread =
-            self.render_flat_thread(meta, &frame.flags, project_name, is_active, window, cx);
+            self.render_flat_thread(meta, &frame.flags, project_name, light, window, cx);
         let row = div().w_full().px_2().pb(px(2.)).child(drag_ghost::slot(
             arrange::thread_slot(&meta.id),
             thread,
@@ -5283,13 +5315,12 @@ impl Render for SessionsSidebar {
             return self.render_compact(window, cx);
         }
 
-        let (layout, active_id, groups, flat_sessions, flags) = {
+        let (layout, groups, flat_sessions, flags) = {
             let store = self.store.read(cx);
             let sessions = store.sidebar_sessions();
             let flags = session_flags(&sessions, store);
             (
                 store.sidebar_layout(),
-                self.selected_row(window, cx),
                 store.grouped_sessions(),
                 store.flat_sessions(),
                 flags,
@@ -5318,7 +5349,7 @@ impl Render for SessionsSidebar {
         }
         if fade.shows(1) {
             let (header, list) =
-                self.render_flat_layout(&groups, &flat_sessions, flags, active_id, window, cx);
+                self.render_flat_layout(&groups, &flat_sessions, flags, window, cx);
             headers.push((1, header));
             lists.push((1, v_flex().size_full().child(list).into_any_element()));
         }

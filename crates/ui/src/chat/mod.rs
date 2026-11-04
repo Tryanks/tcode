@@ -189,6 +189,7 @@ pub struct ChatView {
     held: bool,
     /// Whether the last frame drew the thread, and with it the composer.
     composer_drawn: bool,
+    title_recedes: bool,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -486,6 +487,7 @@ impl ChatView {
             scene_shown: false,
             held: false,
             composer_drawn: false,
+            title_recedes: false,
             scene_at: cx.background_executor().now(),
             window_state,
             composer,
@@ -623,6 +625,15 @@ impl ChatView {
         }
     }
 
+    /// Whether the header's title recedes, its pane not being the current one
+    /// among several.
+    pub(crate) fn set_title_recedes(&mut self, recedes: bool, cx: &mut Context<Self>) {
+        if self.title_recedes != recedes {
+            self.title_recedes = recedes;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn set_pane(
         &mut self,
         pane: gpui::WeakEntity<crate::panes::ThreadPanel>,
@@ -638,11 +649,6 @@ impl ChatView {
 
     pub(super) fn pane(&self) -> Option<Entity<crate::panes::ThreadPanel>> {
         self.pane.as_ref()?.upgrade()
-    }
-
-    /// Whether the keyboard is in the composer's field, which its card shows.
-    pub(crate) fn composer_has_keyboard(&self, window: &Window, cx: &App) -> bool {
-        self.composer.read(cx).has_keyboard(window, cx)
     }
 
     /// Show `session_id`'s thread, or none; the next sync finds the thread
