@@ -26,7 +26,7 @@ pub(crate) fn draw(cx: &mut VisualTestContext) {
 /// once its motion has come to rest.
 ///
 /// Frames advance the test clock, which drives Tcode's motion. gpui-base
-/// 0.8.1 samples some of its own motion with `Instant::now()` instead: its
+/// samples some of its own motion with `Instant::now()` instead: its
 /// `Scrollbar`'s visibility and width transitions (`scrollbar.rs`,
 /// prepaint), which its inputs, text views and `.scrollbar()` still draw,
 /// and the touch spring of `ScrollBounce` (`scroll_bounce.rs`). So the

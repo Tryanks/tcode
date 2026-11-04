@@ -3,7 +3,7 @@
 //!
 //! Gap: gpui-base's presence fades GPUI content, and GPUI cannot fade over a
 //! native view, which composites above GPUI's base content; gpui-webview
-//! 0.8.1 offers `set_visible` and bounds, no opacity. So the view's own alpha
+//! offers `set_visible` and bounds, no opacity. So the view's own alpha
 //! (`NSView.alphaValue`, `UIView.alpha`) follows a gpui-base [`Presence`],
 //! and the view is hidden only once its exit has played. An AppKit view is
 //! hit-tested at any alpha, so a leaving view is covered by a hitbox on
