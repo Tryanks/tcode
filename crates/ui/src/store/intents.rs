@@ -190,6 +190,9 @@ impl WorkspaceStore {
                 SettingsPatch::InactiveFrameThrottleDisabled(value) => {
                     self.settings_replica.inactive_frame_throttle_disabled = value
                 }
+                SettingsPatch::ScrollToLatestOnSend(value) => {
+                    self.settings_replica.scroll_to_latest_on_send = value
+                }
                 _ => return,
             }
             self.thread_list_revision += 1;
@@ -243,6 +246,9 @@ impl WorkspaceStore {
     }
     pub fn set_inactive_frame_throttle_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::InactiveFrameThrottleDisabled(value));
+    }
+    pub fn set_scroll_to_latest_on_send(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::ScrollToLatestOnSend(value));
     }
     pub fn set_abort_on_model_fallback(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::AbortOnModelFallback(value));

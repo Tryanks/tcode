@@ -437,6 +437,9 @@ settings:
   delete_confirmation:
     title: "删除确认"
     description: "归档对话及其保存内容前询问。"
+  scroll_to_latest_on_send:
+    title: "发送消息时滚动到最新"
+    description: "对话未停在最新处时，你发送的消息送达后自动滚动到最新内容。"
   auto_open_task_panel:
     title: "自动打开任务面板"
     description: "当出现步骤时自动打开右侧的任务面板。"

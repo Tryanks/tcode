@@ -92,6 +92,13 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_skip_delete_confirmation(false), cx)
             }),
         );
+        let scroll_on_send_reset = crate::settings_rows::reset_action(
+            "reset-scroll-to-latest-on-send",
+            !settings.scroll_to_latest_on_send,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_scroll_to_latest_on_send(true), cx)
+            }),
+        );
         let threads = vec![
             self.title_generation_row(cx),
             self.toggle_row(
@@ -102,6 +109,15 @@ impl SettingsPage {
                 delete_confirm_reset,
                 cx,
                 |store, checked| store.set_skip_delete_confirmation(!checked),
+            ),
+            self.toggle_row(
+                "scroll-to-latest-on-send",
+                crate::tr!("settings.scroll_to_latest_on_send.title"),
+                crate::tr!("settings.scroll_to_latest_on_send.description"),
+                settings.scroll_to_latest_on_send,
+                scroll_on_send_reset,
+                cx,
+                WorkspaceStore::set_scroll_to_latest_on_send,
             ),
         ];
         let settling = self.settling_rows(&settings, window, cx);

@@ -311,6 +311,9 @@ pub struct ChatView {
     /// The timeline's glide to a turn or to its end; the reader's own
     /// scroll stops it.
     pub(super) list_scroll: crate::motion::ListScroll,
+    /// The thread and delivery key of a message sent while the reader was
+    /// scrolled back, until it gets through or is refused.
+    sent_message: Option<(String, String)>,
     session_key: Option<String>,
     /// The turn the reader jumped to (a palette hit, a thread anchor), by
     /// its turn number in the whole thread: a history page moves the held
@@ -448,6 +451,9 @@ impl ChatView {
             drawer
         });
         composer.update(cx, |composer, _| composer.share_scene(&scene));
+        subscriptions.push(cx.subscribe(&composer, |this, _, event, cx| match event {
+            crate::composer::ComposerEvent::Sent => this.await_sent_message(cx),
+        }));
         // The drawer is inside the view: the keyboard entering it does not
         // leave the view, but it does leave the transcript.
         subscriptions.push(cx.on_focus_in(
@@ -558,6 +564,7 @@ impl ChatView {
             copy_when_loaded: None,
             hover: crate::motion::ListHover::new(crate::material::HOVER).in_scene(&scene),
             list_scroll,
+            sent_message: None,
             session_key: None,
             highlighted_turn: None,
             copied: CopiedMark::default(),
@@ -737,6 +744,7 @@ impl Render for ChatView {
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
+        self.land_sent_message(cx);
         self.inline_diffs.sweep();
         self.tool_texts.sweep(&cx.theme().highlight_theme);
         let now = cx.background_executor().now();

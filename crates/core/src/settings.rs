@@ -893,6 +893,7 @@ pub enum SettingsPatch {
     SidebarProviderMarks(bool),
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
+    ScrollToLatestOnSend(bool),
     AbortOnModelFallback(bool),
     ResumeOnLimitReset(bool),
     FallbackReviewAdvisor(bool),
@@ -1144,6 +1145,10 @@ pub struct Settings {
     /// the throttle defaults to on even for legacy settings files that lack the field.
     #[serde(default)]
     pub inactive_frame_throttle_disabled: bool,
+    /// Whether a conversation scrolled back from its end goes to it once a
+    /// message sent from it reaches the host.
+    #[serde(default = "default_true")]
+    pub scroll_to_latest_on_send: bool,
     #[serde(default = "default_true")]
     pub abort_on_model_fallback: bool,
     #[serde(default = "default_true")]
@@ -1295,6 +1300,7 @@ impl Default for Settings {
             sidebar_provider_marks: false,
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
+            scroll_to_latest_on_send: true,
             abort_on_model_fallback: true,
             resume_on_limit_reset: true,
             fallback_review_advisor: false,
@@ -1375,6 +1381,9 @@ impl Settings {
             }
             SettingsPatch::InactiveFrameThrottleDisabled(value) => {
                 self.inactive_frame_throttle_disabled = value;
+            }
+            SettingsPatch::ScrollToLatestOnSend(value) => {
+                self.scroll_to_latest_on_send = value;
             }
             SettingsPatch::AbortOnModelFallback(value) => {
                 self.abort_on_model_fallback = value;
@@ -1766,6 +1775,7 @@ mod tests {
         assert_eq!(legacy.auto_settle_after_days, Some(3.0));
         assert!(!legacy.auto_settle_on_merge);
         assert!(!legacy.sidebar_provider_marks);
+        assert!(legacy.scroll_to_latest_on_send);
         assert!(!legacy.sidebar_collapsed);
         assert!(!legacy.remote_hosting_enabled);
         assert_eq!(legacy.remote_host_name, None);
