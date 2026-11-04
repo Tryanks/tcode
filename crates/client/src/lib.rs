@@ -1336,6 +1336,47 @@ mod tests {
         assert!(pump.as_mut().poll(&mut cx).is_ready());
     }
 
+    /// Typing into a terminal while the link is down neither evicts a
+    /// message waiting to be sent nor leaves keys for a relaunch to replay.
+    #[test]
+    fn terminal_input_while_offline_keeps_pending_messages_and_saves_nothing() {
+        let storage = Arc::new(MemoryStorage::default());
+        let (to_host, _transport) = outgoing::channel();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        link.restore_outbox(storage.clone()).unwrap();
+        link.set_connection_state(ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: None,
+        });
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut pump = std::pin::pin!(link.pump_with_timer(std::future::pending::<()>));
+        link.dispatch(rename(0)).unwrap();
+        for _ in 0..outbox::MAX_ITEMS {
+            let _ = link.dispatch(Command::TerminalInput {
+                terminal_id: 1,
+                bytes: b"x".to_vec(),
+            });
+            let _ = link.dispatch(Command::SetTerminalHeight {
+                session_id: "one".into(),
+                height: 240.,
+            });
+        }
+        assert!(pump.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(pending_titles(&link), ["0"]);
+        assert!(link.failed_commands().is_empty());
+        let saved = storage.0.lock().unwrap().clone();
+        assert!(matches!(
+            &saved[..],
+            [outbox::Entry {
+                command: Command::RenameSession { .. },
+                ..
+            }]
+        ));
+        link.close();
+        assert!(pump.as_mut().poll(&mut cx).is_ready());
+    }
+
     #[test]
     fn durable_writes_recreate_in_order_and_oldest_surplus_fails() {
         let storage = Arc::new(MemoryStorage::default());
