@@ -34,11 +34,15 @@ pub(crate) const CHAT_RAIL_NARROWEST: f32 = 220.;
 /// The chat's side rail at its widest: a wider gutter only widens the room
 /// between the column and the rail, since card rows gain nothing past it.
 pub(crate) const CHAT_RAIL_WIDEST: f32 = 300.;
-/// Between the chat's content column and its side rail.
+/// Between the chat's content column and its side rail: the timeline
+/// scrollbar's track is this wide, and sits here.
 pub(crate) const CHAT_RAIL_GAP: f32 = 16.;
-/// Between the side rail and the chat's right edge: the timeline
-/// scrollbar's track is this wide, so the rail stays clear of it.
+/// Between the side rail and the chat's right edge.
 pub(crate) const CHAT_RAIL_EDGE: f32 = 16.;
+/// What an agent's card in the rail's place keeps left of it beyond
+/// [`CHAT_RAIL_GAP`]: its edge's resize band, 9 wide, which the timeline
+/// scrollbar's track stays clear of.
+pub(crate) const CHAT_SIDE_GRIP: f32 = 12.;
 /// The compact layout's page inset: content is held this far clear of both
 /// window edges. Cards inside that content inset a further [`CARD_INSET`].
 pub(crate) const COMPACT_PAGE_INSET: f32 = 16.;

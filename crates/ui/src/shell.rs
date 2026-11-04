@@ -5767,6 +5767,7 @@ mod tests {
     use super::*;
 
     mod compact_agent;
+    mod lead_scrollbar;
     mod scenes;
 
     /// One shell over a transport the test holds both ends of, so what the
