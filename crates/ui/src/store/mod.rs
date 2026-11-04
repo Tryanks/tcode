@@ -1894,27 +1894,14 @@ impl WorkspaceStore {
     }
 
     pub fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
-        let closing = self
-            .active_conversation_ui()
-            .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Diff);
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            if closing {
-                ui.right_panel_open = false;
-                ui.pending_diff_focus = None;
-            } else {
-                ui.right_panel_open = true;
-                ui.right_tab = RightTab::Diff;
-                ui.refresh_diff();
-            }
-        }
-        if closing {
-            self.suppress_task_auto_open_if_running();
-        }
-        cx.notify();
+        self.toggle_tab_panel(RightTab::Diff, cx);
     }
 
-    pub fn open_diff_for_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    /// Open the diff of `session_id`'s `turn`, with that thread focused: the
+    /// right panel shows the focused thread.
+    pub fn open_diff_for_turn(&mut self, session_id: &str, turn: usize, cx: &mut Context<Self>) {
+        self.focus_thread(session_id, cx);
+        if let Some(ui) = self.thread_conversation_ui_mut(Some(session_id)) {
             ui.pending_diff_focus = None;
             ui.right_panel_open = true;
             ui.right_tab = RightTab::Diff;
@@ -1924,16 +1911,22 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn open_diff_for_file(&mut self, turn: usize, path: String, cx: &mut Context<Self>) {
-        let session = self
-            .focused_status()
-            .map(|status| status.session_id.clone());
-        if let (Some(session), Some(ui)) = (session, self.active_conversation_ui_mut()) {
+    /// Open the diff of `path` in `session_id`'s `turn`, with that thread
+    /// focused: the right panel shows the focused thread.
+    pub fn open_diff_for_file(
+        &mut self,
+        session_id: &str,
+        turn: usize,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_thread(session_id, cx);
+        if let Some(ui) = self.thread_conversation_ui_mut(Some(session_id)) {
             ui.right_panel_open = true;
             ui.right_tab = RightTab::Diff;
             ui.diff_selected_turn = Some(turn);
             ui.pending_diff_focus = Some(DiffFocus {
-                session,
+                session: session_id.to_owned(),
                 turn,
                 path,
             });
@@ -1999,17 +1992,30 @@ impl WorkspaceStore {
     }
 
     fn toggle_tab_panel(&mut self, tab: RightTab, cx: &mut Context<Self>) {
-        let closing = self
-            .active_conversation_ui()
+        if let Some(session_id) = self.focused_session_id.clone() {
+            self.toggle_tab_panel_for(&session_id, tab, cx);
+        }
+    }
+
+    /// Show `tab` of `session_id`'s right panel, or close the panel while it
+    /// shows that tab.
+    pub fn toggle_tab_panel_for(
+        &mut self,
+        session_id: &str,
+        tab: RightTab,
+        cx: &mut Context<Self>,
+    ) {
+        if tab == RightTab::Preview && !self.offers_preview() {
+            return;
+        }
+        let showing = self
+            .thread_conversation_ui(Some(session_id))
             .is_some_and(|ui| ui.right_panel_open && ui.right_tab == tab);
-        if let Some(ui) = self.active_conversation_ui_mut() {
-            ui.right_panel_open = !closing;
-            ui.right_tab = tab;
+        if showing {
+            self.close_right_panel_for(Some(session_id), cx);
+        } else {
+            self.open_tab_for(session_id, tab, cx);
         }
-        if closing {
-            self.suppress_task_auto_open_if_running();
-        }
-        cx.notify();
     }
 
     pub fn toggle_pull_requests_panel(&mut self, cx: &mut Context<Self>) {
@@ -2024,9 +2030,6 @@ impl WorkspaceStore {
     }
 
     pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
-        if !self.offers_preview() {
-            return;
-        }
         self.toggle_tab_panel(RightTab::Preview, cx);
     }
 
@@ -2071,6 +2074,9 @@ impl WorkspaceStore {
         });
         ui.right_panel_open = true;
         ui.right_tab = tab;
+        if tab == RightTab::Diff {
+            ui.refresh_diff();
+        }
         cx.notify();
     }
 

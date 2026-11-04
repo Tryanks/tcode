@@ -10081,6 +10081,328 @@ mod tests {
         assert_eq!(drafts, ["", "typed as it loaded"]);
     }
 
+    /// [`mount_panes`]' `thread-1` on the left and `thread-2`, answered by
+    /// `serve`, on the right, the keyboard on the left.
+    fn side_by_side(shell: &Entity<AppShell>, serve: impl FnOnce(), cx: &mut VisualTestContext) {
+        let row = cx
+            .debug_bounds("sidebar-thread-thread-2")
+            .expect("the thread's row");
+        let alt = gpui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        cx.simulate_mouse_move(row.center(), None, alt);
+        draw(cx);
+        cx.simulate_click(row.center(), alt);
+        settle_panes(cx);
+        serve();
+        await_restore_update(shell, cx, |store| !store.chat_loading_for(Some("thread-2")));
+        settle_panes(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(keyboard_pane(shell, cx), Some(0));
+    }
+
+    /// Press and release at `at`, a frame between the two as on screen.
+    fn press_with_a_frame_between(at: gpui::Point<Pixels>, cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_down(at, MouseButton::Left, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_up(at, MouseButton::Left, gpui::Modifiers::default());
+        settle_panes(cx);
+    }
+
+    /// Whether the pane the shell acts on is the one at `index`.
+    fn acting_on_pane(shell: &Entity<AppShell>, index: usize, cx: &VisualTestContext) -> bool {
+        shell.read_with(cx, |shell, cx| {
+            let attachment = shell.attachment.as_ref().expect("attached");
+            attachment.focused_pane == attachment.all_panes(cx)[index]
+        })
+    }
+
+    /// The panel `session_id`'s conversation has recorded, if it is open.
+    fn panel_of(
+        store: &Entity<WorkspaceStore>,
+        session_id: &str,
+        cx: &VisualTestContext,
+    ) -> Option<RightTab> {
+        store.read_with(cx, |store, _| {
+            let panel = store.panel_state_for(Some(session_id));
+            panel.right_panel_open.then_some(panel.right_tab)
+        })
+    }
+
+    /// A panel toggle in the header of the pane without the keyboard acts on
+    /// that pane's thread: the press brings it forward, and the right panel
+    /// opens on it, not on the thread that had the keyboard, whose own panel
+    /// stays as it was left. A panel its thread left open, lit on the toggle
+    /// but off screen, is shown rather than closed; only one on screen is.
+    #[gpui::test]
+    fn a_header_toggle_acts_on_the_thread_of_its_own_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        side_by_side(
+            &shell,
+            || serve_spawning(&host, "thread-2", &["spawn-1"]),
+            cx,
+        );
+        let focused =
+            |cx: &VisualTestContext| store.read_with(cx, |store, _| store.active_session_id());
+        let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("no {selector}"))
+        };
+        let back_to_the_left = |cx: &mut VisualTestContext| {
+            let left = pane_bounds(&shell, cx)[0];
+            let at = gpui::point(left.center().x, left.top() + left.size.height / 4.);
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+            draw(cx);
+            cx.simulate_click(at, gpui::Modifiers::default());
+            settle_panes(cx);
+            assert_eq!(keyboard_pane(&shell, cx), Some(0));
+            assert_eq!(focused(cx), Some("thread-1".to_owned()));
+        };
+
+        // The press alone moves the pane's focus.
+        let agents = bounds("agents-panel", cx);
+        assert!(pane_bounds(&shell, cx)[1].contains(&agents.center()));
+        cx.simulate_mouse_move(agents.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_down(
+            agents.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        draw(cx);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert_eq!(focused(cx), Some("thread-2".to_owned()));
+        assert_eq!(
+            panel_of(&store, "thread-2", cx),
+            None,
+            "it opens on release"
+        );
+        cx.simulate_mouse_up(
+            agents.center(),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        settle_panes(cx);
+        assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Agents));
+        assert_eq!(panel_of(&store, "thread-1", cx), None);
+        assert!(acting_on_pane(&shell, 1, cx));
+        assert!(
+            bounds("right-panel", cx).contains(&bounds("agent-row-spawn-1", cx).center()),
+            "the panel lists the agents of the thread whose toggle was pressed"
+        );
+
+        // Closed from inside, the keyboard goes back to the pane.
+        let close = bounds("diff-close", cx);
+        cx.simulate_click(close.center(), gpui::Modifiers::default());
+        settle_panes(cx);
+        assert_eq!(panel_of(&store, "thread-2", cx), None);
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        back_to_the_left(cx);
+        let diff = bounds("diff-panel", cx);
+        press_with_a_frame_between(diff.center(), cx);
+        assert_eq!(focused(cx), Some("thread-2".to_owned()));
+        assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
+        assert_eq!(panel_of(&store, "thread-1", cx), None);
+        assert!(acting_on_pane(&shell, 1, cx));
+
+        // With the right thread's panel open, the left pane's toggle, the
+        // same distance from its pane's end, opens the left thread's, and
+        // the right thread's stays as it was left. The panel covers the
+        // right pane's end, not the left pane's.
+        let panes = pane_bounds(&shell, cx);
+        let at = gpui::point(
+            panes[0].right() - (panes[1].right() - diff.center().x),
+            diff.center().y,
+        );
+        press_with_a_frame_between(at, cx);
+        assert_eq!(focused(cx), Some("thread-1".to_owned()));
+        assert_eq!(panel_of(&store, "thread-1", cx), Some(RightTab::Diff));
+        assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
+        assert!(acting_on_pane(&shell, 0, cx));
+
+        // Left open and off screen, the panel comes back rather than closes,
+        // and only on screen does the toggle close it.
+        cx.simulate_keystrokes("secondary-alt-right");
+        settle_panes(cx);
+        assert_eq!(focused(cx), Some("thread-2".to_owned()));
+        press_with_a_frame_between(at, cx);
+        assert_eq!(focused(cx), Some("thread-1".to_owned()));
+        assert_eq!(panel_of(&store, "thread-1", cx), Some(RightTab::Diff));
+        press_with_a_frame_between(at, cx);
+        assert_eq!(panel_of(&store, "thread-1", cx), None);
+        assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
+    }
+
+    /// A file listed in the rail of the pane without the keyboard opens that
+    /// thread's diff, also on a tap released before the next frame: the pane
+    /// hears the keyboard enter it only once a frame is drawn, so the store
+    /// has not moved yet.
+    #[gpui::test]
+    fn a_changed_file_opens_the_diff_of_the_thread_of_its_own_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        resize(cx, 3200.);
+        side_by_side(
+            &shell,
+            || {
+                let records: Vec<tcode_core::session::StoredEvent> = [
+                    agent::AgentEvent::TurnStarted {
+                        turn_id: "turn-1".into(),
+                    },
+                    agent::AgentEvent::TurnChangesUpdated {
+                        turn_id: "turn-1".into(),
+                        changes: agent::file_changes_from_unified_diff(
+                            "diff --git a/src/lib.rs b/src/lib.rs\n\
+                             --- a/src/lib.rs\n+++ b/src/lib.rs\n\
+                             @@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n",
+                        )
+                        .expect("one file section"),
+                        completeness: agent::ChangeCompleteness::Exact,
+                    },
+                    agent::AgentEvent::TurnCompleted {
+                        turn_id: "turn-1".into(),
+                        status: agent::TurnStatus::Completed,
+                        usage: None,
+                    },
+                ]
+                .into_iter()
+                .map(Into::into)
+                .collect();
+                serve_status(&host, "thread-2", false);
+                send_events(
+                    &host,
+                    vec![(
+                        Topic::SessionEvents {
+                            session_id: "thread-2".into(),
+                        },
+                        ServerEvent::SessionSnapshot {
+                            total: records.len() as u64,
+                            total_turns: 1,
+                            truncated: false,
+                            from: 0,
+                            end: records.len() as u64,
+                            records,
+                        },
+                    )],
+                );
+            },
+            cx,
+        );
+        settle_frames(cx);
+        let row = cx
+            .debug_bounds("changed-file-row-file-src/lib.rs")
+            .expect("the file's row in the rail");
+        assert!(pane_bounds(&shell, cx)[1].contains(&row.center()));
+
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        let press = gpui::MouseDownEvent {
+            button: MouseButton::Left,
+            position: row.center(),
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        };
+        let release = gpui::MouseUpEvent {
+            button: MouseButton::Left,
+            position: row.center(),
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+        };
+        cx.update(|window, cx| {
+            window.dispatch_event(gpui::PlatformInput::MouseDown(press), cx);
+            window.dispatch_event(gpui::PlatformInput::MouseUp(release), cx);
+        });
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.diff_selected_turn(), Some(0));
+        });
+        assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
+        assert_eq!(panel_of(&store, "thread-1", cx), None);
+        settle_panes(cx);
+        assert!(acting_on_pane(&shell, 1, cx));
+    }
+
+    /// The sidebar's toggle in the header of the pane without the keyboard
+    /// brings that pane forward as it folds the sidebar.
+    #[gpui::test]
+    fn the_sidebar_toggle_takes_the_focus_of_its_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
+        let toggle = cx
+            .debug_bounds("toggle-sidebar")
+            .expect("the sidebar toggle");
+        assert!(pane_bounds(&shell, cx)[1].contains(&toggle.center()));
+        press_with_a_frame_between(toggle.center(), cx);
+        assert!(shell.read_with(cx, |shell, cx| {
+            shell.window_state().read(cx).sidebar_collapsed
+        }));
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            Some("thread-2".into())
+        );
+    }
+
+    /// The way back to an agent's lead in the header of the pane without the
+    /// keyboard shows the lead in that pane, not in the one with the keyboard.
+    #[gpui::test]
+    fn the_way_back_to_a_lead_stays_in_its_own_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("panes_index sends a snapshot");
+        };
+        let mut agent = index.sessions[1].clone();
+        agent.id = "agent-1".into();
+        agent.title = "agent-1".into();
+        agent.parent_session_id = Some("thread-2".into());
+        index.sessions.push(agent);
+        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
+        await_restore_update(&shell, cx, |store| store.thread_meta("agent-1").is_some());
+        side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
+
+        cx.simulate_keystrokes("secondary-alt-right");
+        settle_panes(cx);
+        store.update(cx, |store, cx| store.select_session("agent-1".into(), cx));
+        settle_panes(cx);
+        serve_thread(&host, "agent-1");
+        await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some("agent-1")));
+        settle_panes(cx);
+        cx.simulate_keystrokes("secondary-alt-left");
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("agent-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        let link = cx
+            .debug_bounds("agent-parent-link")
+            .expect("the way back to the lead");
+        press_with_a_frame_between(link.center(), cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+    }
+
     /// ⇧⌥⌘← exchanges the right pane's thread with the left one's, a
     /// half-written message going along with it, and the keyboard stays in
     /// the right pane, now on the left one's thread; each pane keeps its
