@@ -19,14 +19,14 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 
-use crate::{diff::model::sub_runs, highlight};
+use crate::highlight;
 
 use super::{
     fitted_image::FittedImage,
     inline::{Inline, InlineState},
     inline_flow::{InlineCodeStyle, InlineFlow, InlineFlowItem},
     mermaid,
-    nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
+    nodes::{BlockNode, CodeBlock, ColumnumnAlign, HeldHighlights, Paragraph, Table, TextMark},
     selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
     utils::list_item_prefix,
@@ -1309,31 +1309,40 @@ fn render_list_item(
 
 fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighlightRuns {
     let prepared = code.prepared();
-    let compute = || {
-        highlight::highlighted(
-            prepared.text.clone(),
-            code.lang.clone().unwrap_or_else(|| "text".into()),
-            theme,
-            || {
-                prepared
-                    .previous_highlights
-                    .get()
-                    .and_then(std::sync::Weak::upgrade)
-            },
-        )
-    };
+    let language = code.lang.clone().unwrap_or_else(|| "text".into());
     let Ok(mut cache) = prepared.highlights.lock() else {
-        return compute();
+        return highlight::highlighted(prepared.text.clone(), language, theme);
     };
-    if let Some((cached_theme, runs)) = cache.as_ref()
+    if let Some((cached_theme, held)) = cache.as_ref()
         && cached_theme == theme
-        && let Some(runs) = runs.upgrade()
+        && let Some(runs) = held.get()
     {
         return runs;
     }
-    let runs = compute();
-    // The global cache bounds retention; the block's shortcut must not keep evicted runs alive.
-    *cache = Some((theme.clone(), Arc::downgrade(&runs)));
+    let previous = prepared
+        .previous_highlights
+        .lock()
+        .ok()
+        .and_then(|mut previous| previous.take());
+    let (runs, held) = match previous {
+        Some(previous) => {
+            let runs = Arc::new(highlight::HighlightedSource::new(
+                prepared.text.clone(),
+                language,
+                theme,
+                Some(&previous),
+            ));
+            (runs.clone(), HeldHighlights::Own(runs))
+        }
+        None => {
+            let runs = highlight::highlighted(prepared.text.clone(), language, theme);
+            // The shared cache bounds retention; the block's shortcut must
+            // not keep evicted runs alive.
+            let held = HeldHighlights::Shared(Arc::downgrade(&runs));
+            (runs, held)
+        }
+    };
+    *cache = Some((theme.clone(), held));
     runs
 }
 
@@ -1347,22 +1356,12 @@ fn render_code_lines(
     let path = super::selection::render_path(path);
     let prepared = code.prepared();
     let highlighted = cached_highlights(code, &cx.theme().highlight_theme);
-    let all_runs = &highlighted.runs;
-    let states = code.states_for_lines(prepared, span.clone());
-    let mut offset = prepared.lines.get(span.start).map_or(0, |line| line.start);
-    let span_end = span
-        .end
-        .checked_sub(1)
-        .and_then(|ix| prepared.lines.get(ix))
-        .map_or(offset, |line| line.end + 1);
-    // Highlight runs are ordered and disjoint; only those in the span matter.
-    let span_runs = &all_runs[all_runs.partition_point(|(range, _)| range.end <= offset)
-        ..all_runs.partition_point(|(range, _)| range.start < span_end)];
     let mut rendered_lines = Vec::with_capacity(span.len());
     let mono_font_family = cx.theme().mono_font_family.clone();
-    for (line_state, ix) in states.into_iter().zip(span.clone()) {
-        let end = prepared.lines[ix].end;
-        let runs = sub_runs(span_runs, offset, end);
+    for ix in span {
+        let line = prepared.lines[ix].clone();
+        let runs = highlighted.runs_between(line.start, line.end);
+        let line_state = InlineState::shared(prepared.text[line].to_string().into());
         let line = div()
             .id(("code-line", ix))
             .min_h(px(18.))
@@ -1376,7 +1375,6 @@ fn render_code_lines(
         #[cfg(test)]
         let line = line.debug_selector(move || format!("markdown-code-line-{ix}"));
         rendered_lines.push(line);
-        offset = end.saturating_add(1);
     }
     v_flex()
         .w_full()
@@ -1433,11 +1431,8 @@ impl Element for CodeSliceMeasure {
         {
             let start = prepared.lines[self.span.start].start;
             let end = prepared.lines[self.span.end - 1].end;
-            let highlighted = cached_highlights(&self.code, &cx.theme().highlight_theme);
-            let all_runs = &highlighted.runs;
-            let runs = &all_runs[all_runs.partition_point(|(range, _)| range.end <= start)
-                ..all_runs.partition_point(|(range, _)| range.start < end)];
-            let runs = sub_runs(runs, start, end);
+            let runs =
+                cached_highlights(&self.code, &cx.theme().highlight_theme).runs_between(start, end);
             let text = StyledText::new(prepared.text[start..end].to_string()).with_highlights(runs);
             text_layout = Some((text.layout().clone(), end - start));
             text.into_any_element()

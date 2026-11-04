@@ -237,7 +237,6 @@ impl ShownLines {
                 source.into(),
                 crate::highlight::language_name_for_path(path).into(),
                 theme,
-                || None,
             ),
             numbers: numbers.into(),
             folds,
@@ -299,7 +298,7 @@ fn code(call: &Call<'_>, read: &Read<'_>, output: &str, ctx: &mut ToolCtx<'_, '_
                 .text_color(theme.foreground)
                 .child(
                     StyledText::new(highlighted.source().clone())
-                        .with_highlights(highlighted.runs.iter().cloned()),
+                        .with_highlights(highlighted.runs().cloned()),
                 ),
         );
     let beyond = beyond.map(|count| {
