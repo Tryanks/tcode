@@ -186,6 +186,9 @@ pub struct WorkspaceStore {
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     index_summary: IndexSummary,
+    /// Moves on with every change to what the thread lists are derived
+    /// from: the index and its summary, the settings and the scope.
+    thread_list_revision: u64,
     /// Archived threads, which the index leaves out; loaded while a view
     /// holds them.
     archived_replica: Option<ArchivedSessions>,
@@ -383,6 +386,7 @@ impl WorkspaceStore {
             },
             index_replica: (Vec::new(), Vec::new()),
             index_summary: IndexSummary::default(),
+            thread_list_revision: 0,
             archived_replica: None,
             archived_holds: 0,
             archived_task: None,
@@ -1127,6 +1131,12 @@ impl WorkspaceStore {
     fn apply_domain_event(&mut self, envelope: &EventEnvelope, cx: &mut Context<Self>) {
         if !self.host.subscription_reply_is_current(envelope) {
             return;
+        }
+        if matches!(
+            TopicKind::from(&envelope.topic),
+            TopicKind::Index | TopicKind::Settings
+        ) {
+            self.thread_list_revision += 1;
         }
         if envelope.topic == Topic::Scope {
             if let ServerEvent::ScopeSnapshot(scope) = &envelope.event
@@ -2245,6 +2255,10 @@ impl WorkspaceStore {
 
     pub fn settings(&self) -> Settings {
         effective_client_settings(&self.settings_replica, &self.client_preferences)
+    }
+
+    pub(crate) fn thread_list_revision(&self) -> u64 {
+        self.thread_list_revision
     }
 
     pub fn title_generating(&self, session_id: &str) -> bool {
