@@ -855,6 +855,7 @@ async fn connection_loop(
             })
             .await;
         let mut stable_ms = 0;
+        let mut park = false;
         let established = {
             let establishing = std::pin::pin!(establish(&device, &host));
             let mut establishing = Some(establishing);
@@ -868,6 +869,10 @@ async fn connection_loop(
                         // A probe cannot hurry a dial; a reconnect restarts it.
                         Ok(Wake::Probe) => continue,
                         Ok(Wake::Reconnect) => break None,
+                        Ok(Wake::Park) => {
+                            park = true;
+                            break None;
+                        }
                         Err(_) => { establishing = None; }
                     },
                 }
@@ -876,6 +881,9 @@ async fn connection_loop(
         let Some(established) = established else {
             if outgoing.is_closed() {
                 break;
+            }
+            if park {
+                parked(&outgoing, &mut buffered).await;
             }
             continue;
         };
@@ -904,8 +912,19 @@ async fn connection_loop(
                 if lost.healthy {
                     stable_ms = started.elapsed().as_millis() as u64;
                 }
-                if lost.wake == Some(Wake::Reconnect) {
-                    continue;
+                match lost.wake {
+                    Some(Wake::Reconnect) => continue,
+                    Some(Wake::Park) => {
+                        let _ = state
+                            .send(ConnectionState::Reconnecting {
+                                attempt: backoff.attempt(),
+                                reason: None,
+                            })
+                            .await;
+                        parked(&outgoing, &mut buffered).await;
+                        continue;
+                    }
+                    _ => {}
                 }
                 lost.failure
             }
@@ -931,7 +950,9 @@ async fn connection_loop(
             })
             .await;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(delay);
-        buffer_during_backoff(&outgoing, &mut buffered, deadline).await;
+        if buffer_during_backoff(&outgoing, &mut buffered, deadline).await == Some(Wake::Park) {
+            parked(&outgoing, &mut buffered).await;
+        }
     }
     let _ = state
         .send(ConnectionState::Offline {
@@ -1240,8 +1261,8 @@ async fn relay_connected(
             }
             _ = tokio::time::sleep(Duration::from_millis(wait)) => {}
             wake = outgoing.wake.recv() => match wake {
-                Ok(Wake::Reconnect) => {
-                    break Lost { failure: ConnectionFailure::Unreachable(None), healthy, wake: Some(Wake::Reconnect) };
+                Ok(wake @ (Wake::Reconnect | Wake::Park)) => {
+                    break Lost { failure: ConnectionFailure::Unreachable(None), healthy, wake: Some(wake) };
                 }
                 // Probe now: rewind the idle window so the next tick pings.
                 Ok(Wake::Probe) => {
@@ -1264,12 +1285,13 @@ async fn relay_connected(
     lost
 }
 
-/// Queue writes while waiting for `deadline`. Ends early on a wake.
+/// Queue writes while waiting for `deadline`. Ends early on a wake, which
+/// it returns.
 async fn buffer_during_backoff(
     outgoing: &OutgoingReceiver,
     buffered: &mut VecDeque<String>,
     deadline: tokio::time::Instant,
-) {
+) -> Option<Wake> {
     let done = tokio::time::sleep_until(deadline);
     tokio::pin!(done);
     loop {
@@ -1280,10 +1302,32 @@ async fn buffer_during_backoff(
                         buffered.push_back(line);
                     }
                 }
+                Err(_) => return None,
+            },
+            _ = &mut done => return None,
+            wake = outgoing.wake.recv() => return wake.ok(),
+        }
+    }
+}
+
+/// Hold the link down, queueing writes, until the app comes back: no dial,
+/// no heartbeat, no backoff timer. A network change's probe does not end
+/// it, since the app is still away; only the return's reconnect does.
+async fn parked(outgoing: &OutgoingReceiver, buffered: &mut VecDeque<String>) {
+    loop {
+        tokio::select! {
+            line = outgoing.recv() => match line {
+                Ok(line) => {
+                    if subscription_key(&line).is_none() {
+                        buffered.push_back(line);
+                    }
+                }
                 Err(_) => return,
             },
-            _ = &mut done => return,
-            _ = outgoing.wake.recv() => return,
+            wake = outgoing.wake.recv() => match wake {
+                Ok(Wake::Probe | Wake::Park) => {}
+                Ok(Wake::Reconnect) | Err(_) => return,
+            },
         }
     }
 }
@@ -1318,6 +1362,22 @@ mod tests {
             lan: true,
             probing_direct: false,
         }
+    }
+
+    /// A network change while the app is away probes every transport; a
+    /// parked one stays down until the app's return.
+    #[tokio::test]
+    async fn a_parked_link_ignores_probes_and_ends_on_the_return() {
+        let (to_host, outgoing) = tcode_client::outgoing::channel();
+        let mut buffered = VecDeque::new();
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut parked = std::pin::pin!(parked(&outgoing, &mut buffered));
+        to_host.wake(Wake::Probe);
+        to_host.wake(Wake::Park);
+        assert!(parked.as_mut().poll(&mut cx).is_pending());
+        assert!(parked.as_mut().poll(&mut cx).is_pending());
+        to_host.wake(Wake::Reconnect);
+        assert!(parked.as_mut().poll(&mut cx).is_ready());
     }
 
     /// The phone's direct path dying is a state change, not a side channel:

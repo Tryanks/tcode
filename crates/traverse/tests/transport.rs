@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tcode_client::heartbeat::NATIVE_IDLE_MS;
 use tcode_client::host::Transport;
 use tcode_client::pairing::{PairInvite, PairedHost};
+use tcode_client::recovery::Wake;
 use tcode_client::{ConnectionFailure, ConnectionState};
 use tcode_traverse::manifest::ManifestSource;
 use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, PairError, TraverseHost};
@@ -600,6 +601,36 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     client.to_host.send_blocking(ping.to_string()).unwrap();
     recv_type(&client, "query_result", Some(2));
     assert_eq!(client.state.try_recv().ok(), None);
+    host.shutdown();
+}
+
+/// A phone away long enough to reconnect on return parks its link: the
+/// connection closes, and the return dials again and delivers what was
+/// written while it was down.
+#[test]
+fn a_parked_link_closes_and_the_return_delivers_what_was_written_meanwhile() {
+    let host_dir = TestDir::new("park-host");
+    let (mux, _, _) = fake_host();
+    let host = start_host(mux, &host_dir, None);
+    let dir = TestDir::new("park-device");
+    let phone = device(&dir, "phone");
+    let minted = host.new_invitation();
+    let paired = pair(&minted.invite, &phone).unwrap();
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, syncing_directly);
+    client.to_host.send_blocking(subscribe(1)).unwrap();
+    recv_type(&client, "ack", Some(1));
+    wait_state(&client, connected_directly);
+
+    client.to_host.wake(Wake::Park);
+    wait_state(&client, |state| {
+        matches!(state, ConnectionState::Reconnecting { .. })
+    });
+    let open = json!({"id": 2, "payload": {"type": "command", "content": {"type": "open_latest_session"}}});
+    client.to_host.send_blocking(open.to_string()).unwrap();
+    client.to_host.wake(Wake::Reconnect);
+    wait_state(&client, syncing_directly);
+    recv_type(&client, "ack", Some(2));
     host.shutdown();
 }
 

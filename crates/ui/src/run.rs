@@ -233,13 +233,44 @@ pub fn run_shell(
         .take()
         .expect("the shell is built while the window opens");
     crate::shell::set_back_target(window, &shell, cx);
-    if let Some(wakes) = options.lifecycle.as_deref().map(lifecycle_wakes) {
+    if let Some(phases) = options.lifecycle.as_deref().map(lifecycle_phases) {
         let shell = shell.downgrade();
         cx.spawn(async move |cx| {
-            while let Ok(wake) = wakes.recv().await {
-                if shell
-                    .update(cx, |shell, _| shell.wake_connection(wake))
-                    .is_err()
+            enum Event {
+                Phase(gpui::AppLifecyclePhase),
+                ParkDue,
+                Closed,
+            }
+            let mut lifecycle = tcode_client::recovery::Lifecycle::default();
+            loop {
+                let phase = async { phases.recv().await.map_or(Event::Closed, Event::Phase) };
+                let event = match lifecycle.park_in(wall_ms()) {
+                    Some(ms) => {
+                        let due = cx
+                            .background_executor()
+                            .timer(std::time::Duration::from_millis(ms));
+                        futures_lite::future::race(phase, async {
+                            due.await;
+                            Event::ParkDue
+                        })
+                        .await
+                    }
+                    None => phase.await,
+                };
+                let wake = match event {
+                    Event::Phase(phase) => lifecycle_wake(&mut lifecycle, phase, wall_ms()),
+                    // The timer runs on the monotonic clock, which stops while
+                    // the device sleeps; the absence is measured on the wall clock.
+                    Event::ParkDue => lifecycle
+                        .park_in(wall_ms())
+                        .is_some_and(|ms| ms == 0)
+                        .then(|| lifecycle.park()),
+                    Event::Closed => break,
+                };
+                if let Some(wake) = wake
+                    && shell
+                        .update(cx, |shell, _| shell.wake_connection(wake))
+                        .is_err()
                 {
                     break;
                 }
@@ -257,24 +288,28 @@ pub fn run_shell(
 
 /// Application recovery policy for a client the OS can suspend: every
 /// foreground transition probes or reconnects the attachment once, depending
-/// on how long the client was away.
-fn lifecycle_wakes(
+/// on how long the client was away, and an absence long enough to reconnect
+/// on return parks the link meanwhile. Android does not suspend a stopped
+/// app, which would otherwise keep its radio and CPU busy with a link it
+/// drops on return; iOS suspends first, so its park, if any, lands just
+/// before the return's reconnect.
+fn lifecycle_phases(
     platform: &dyn gpui::Platform,
-) -> async_channel::Receiver<tcode_client::recovery::Wake> {
+) -> async_channel::Receiver<gpui::AppLifecyclePhase> {
     let (sender, receiver) = async_channel::unbounded();
-    let mut lifecycle = tcode_client::recovery::Lifecycle::default();
     platform.on_app_lifecycle(Box::new(move |phase| {
-        // Wall time includes device sleep. A backward clock correction
-        // saturates to a short absence and still gets a bounded probe.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if let Some(wake) = lifecycle_wake(&mut lifecycle, phase, now) {
-            let _ = sender.try_send(wake);
-        }
+        let _ = sender.try_send(phase);
     }));
     receiver
+}
+
+/// Wall time includes device sleep. A backward clock correction saturates
+/// to a short absence and still gets a bounded probe.
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn lifecycle_wake(
