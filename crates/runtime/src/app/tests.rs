@@ -5906,6 +5906,12 @@ fn switching_accounts_carries_the_native_session() {
     );
     switch.select(cx, 13, Some("work")).unwrap();
     switch.run_turn(cx, &events, delivery_id, "Notes drafted.");
+    // The usage read after that turn is the new account's, which the process still
+    // running the old one cannot answer.
+    assert!(matches!(
+        switch.launches.lock().unwrap()[0].1.try_recv(),
+        Err(smol::channel::TryRecvError::Empty)
+    ));
     switch.send(cx, 14, "ship it").unwrap();
     let (delivery_id, text, events) = next_turn(cx, &switch.launches, 1);
     assert_eq!(text, "ship it");

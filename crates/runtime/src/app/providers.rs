@@ -1002,8 +1002,13 @@ impl AppState {
         ) else {
             return;
         };
+        // A process still running under the account the thread switched away from
+        // answers for that account, not this one.
         let live = match &session.runtime {
-            Runtime::Live(commands) if session.meta.provider == profile.kind => {
+            Runtime::Live(commands)
+                if session.meta.provider == profile.kind
+                    && session.live_profile_id == session.meta.profile_id =>
+            {
                 Some(commands.clone())
             }
             _ => None,
