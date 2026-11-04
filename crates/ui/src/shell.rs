@@ -8713,13 +8713,93 @@ mod tests {
         panic!("{selector} is still drawn after {} frames", drawn.len());
     }
 
+    /// One frame of the agent's surface, as the renderer draws it.
+    #[derive(Clone, Copy, Debug)]
+    struct SurfaceFrame {
+        bounds: gpui::Bounds<Pixels>,
+        /// The alpha of the surface's own fill.
+        fill: f32,
+        /// The strongest fill of what the agent's timeline holds.
+        content: f32,
+        /// Whether the agent's row in the lead's rail is drawn.
+        row: bool,
+    }
+
+    /// The surface named `selector`, as this frame draws it.
+    fn surface_frame(selector: &'static str, cx: &mut VisualTestContext) -> Option<SurfaceFrame> {
+        let bounds = cx.debug_bounds(selector)?;
+        let timeline = cx.debug_bounds("chat-side-timeline");
+        let row = cx.debug_bounds("rail-agent-agent-1").is_some();
+        let (fill, content) = cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let quads = crate::test_frames::painted_quads(window);
+            let alpha = |quad: &gpui::Quad| quad.background.as_solid().map(|fill| fill.a);
+            let fill = quads
+                .iter()
+                .filter(|quad| quad.bounds == bounds.scale(scale))
+                .filter_map(alpha)
+                .fold(0., f32::max);
+            let content = timeline.map_or(0., |timeline| {
+                let timeline = timeline.scale(scale);
+                quads
+                    .iter()
+                    .filter(|quad| {
+                        timeline.contains(&quad.bounds.origin)
+                            && timeline.contains(&quad.bounds.bottom_right())
+                    })
+                    .filter_map(alpha)
+                    .fold(0., f32::max)
+            });
+            (fill, content)
+        });
+        Some(SurfaceFrame {
+            bounds,
+            fill,
+            content,
+            row,
+        })
+    }
+
+    /// Display frames until `selector` is no longer drawn, the surface on
+    /// each frame that drew it.
+    fn surface_until_gone(selector: &'static str, cx: &mut VisualTestContext) -> Vec<SurfaceFrame> {
+        let mut drawn = Vec::new();
+        for _ in 0..80 {
+            match surface_frame(selector, cx) {
+                Some(frame) => drawn.push(frame),
+                None => return drawn,
+            }
+            display_frame(cx);
+        }
+        panic!("{selector} is still drawn after {} frames", drawn.len());
+    }
+
+    /// The surface named `selector` over the next `frames` display frames.
+    fn surface_frames(
+        selector: &'static str,
+        frames: usize,
+        cx: &mut VisualTestContext,
+    ) -> Vec<SurfaceFrame> {
+        (0..frames)
+            .filter_map(|_| {
+                let frame = surface_frame(selector, cx);
+                display_frame(cx);
+                frame
+            })
+            .collect()
+    }
+
     /// An agent opened from its row in the lead's rail grows out of the row
     /// into its card, and shrinks back into the row when it is closed:
     /// partway, the card lies between the row and its place, and it rests
     /// in its place; closing, it last draws where the row is, which has come
-    /// back with the rail. Over a lead too narrow for the card, the agent
-    /// grows out of the row into its sheet over the lead; closed once the
-    /// row is no longer on screen, it slides off the lead without shrinking.
+    /// back with the rail. The surface comes in over the row from nothing;
+    /// closing, it moves on the next frame, with the row already under it,
+    /// and has faded to nothing by the time it goes, so what it covered is
+    /// seen rather than a block that vanishes. Over a lead too narrow for
+    /// the card, the agent grows out of the row into its sheet over the
+    /// lead; closed once the row is no longer on screen, it slides off the
+    /// lead without shrinking.
     #[gpui::test]
     fn an_agent_grows_out_of_its_rail_row_and_back_into_it(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -8737,42 +8817,73 @@ mod tests {
             row
         };
         let row = press_row(cx);
-        let growing = frames_of("chat-side-card", 50, cx);
+        let growing = surface_frames("chat-side-card", 50, cx);
         let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
         assert!(
             growing
                 .iter()
-                .any(|bounds| strictly_between(*bounds, row, card)),
+                .any(|frame| strictly_between(frame.bounds, row, card)),
             "the card grows from {row:?} to {card:?} through {growing:?}"
         );
         assert!(
-            about(growing[0], row, px(40.)),
+            about(growing[0].bounds, row, px(40.)),
             "it starts at {row:?}: {:?}",
             growing[0]
         );
         settle_frames(cx);
         assert_eq!(cx.debug_bounds("chat-side-card"), Some(card), "at rest");
         assert!(cx.debug_bounds("chat-side-header").is_some());
+        let rest = surface_frame("chat-side-card", cx).expect("the agent's card");
+        assert!(
+            growing[0].fill < rest.fill * 0.1,
+            "the row is not covered at once: {:?} of {rest:?}",
+            growing[0]
+        );
 
         let close = cx.debug_bounds("side-close").expect("Close");
         cx.simulate_mouse_move(close.center(), None, gpui::Modifiers::default());
         draw(cx);
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         draw(cx);
-        let shrinking = frames_until_gone("chat-side-card", cx);
+        let shrinking = surface_until_gone("chat-side-card", cx);
         let row = cx
             .debug_bounds("rail-agent-agent-1")
             .expect("the row is back in the rail");
         let last = *shrinking.last().expect("the card shrinks");
         assert!(
-            about(last, row, px(2.)),
+            about(last.bounds, row, px(2.)),
             "the card goes into {row:?}, last drawn at {last:?}"
         );
         assert!(
             shrinking
                 .iter()
-                .any(|bounds| strictly_between(*bounds, row, card)),
+                .any(|frame| strictly_between(frame.bounds, row, card)),
             "the card shrinks from {card:?} to {row:?} through {shrinking:?}"
+        );
+        assert!(
+            about(shrinking[0].bounds, card, px(1.)),
+            "it closes from {card:?}, not from a place of its own: {shrinking:?}"
+        );
+        assert!(
+            shrinking[1].bounds.size.width < card.size.width,
+            "it moves on the frame after the one it closed on: {shrinking:?}"
+        );
+        assert!(
+            shrinking
+                .iter()
+                .any(|frame| frame.fill > rest.fill * 0.1 && frame.fill < rest.fill * 0.9),
+            "the surface turns translucent on its way: {shrinking:?}"
+        );
+        assert!(
+            last.fill < rest.fill * 0.05,
+            "nothing pops as it goes: {last:?} of {rest:?}"
+        );
+        assert!(
+            shrinking
+                .iter()
+                .filter(|frame| frame.fill < rest.fill)
+                .all(|frame| frame.row),
+            "the row is under the surface before it thins: {shrinking:?}"
         );
 
         // A lead too narrow for the card beside it, with its rail.
@@ -8819,6 +8930,91 @@ mod tests {
         );
     }
 
+    /// Opened again as it shrinks back into its row, or closed as it grows
+    /// out of it, the agent's surface goes on from where it is and as it is:
+    /// neither its frame nor its fill jumps.
+    #[gpui::test]
+    fn an_agent_turned_back_midway_goes_on_from_where_it_is(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        let store = store_of(&shell, cx);
+        serve_finished_turns(&host, "agent-1", 3, false);
+        settle_frames(cx);
+        let row = cx
+            .debug_bounds("rail-agent-agent-1")
+            .expect("the agent's row in the rail");
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        draw(cx);
+        settle_frames(cx);
+        let rest = surface_frame("chat-side-card", cx).expect("the agent's card");
+
+        let goes_on = |before: SurfaceFrame, after: SurfaceFrame| {
+            assert!(
+                about(after.bounds, before.bounds, px(1.)),
+                "the frame stays: {before:?} -> {after:?}"
+            );
+            assert!(
+                (after.fill - before.fill).abs() < rest.fill * 0.02,
+                "the fill stays: {before:?} -> {after:?} of {rest:?}"
+            );
+        };
+
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        for _ in 0..6 {
+            display_frame(cx);
+        }
+        let shrinking = surface_frame("chat-side-card", cx).expect("the card, shrinking");
+        assert!(
+            shrinking.bounds.size.width < rest.bounds.size.width
+                && shrinking.fill < rest.fill
+                && shrinking.fill > 0.,
+            "partway, and thinning: {shrinking:?}"
+        );
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                crate::shell::side_host_for("thread-1", cx),
+                Some("rail-agent-agent-1".into()),
+                window,
+                cx,
+            )
+        });
+        draw(cx);
+        goes_on(
+            shrinking,
+            surface_frame("chat-side-card", cx).expect("the card, reopened"),
+        );
+
+        for _ in 0..4 {
+            display_frame(cx);
+        }
+        let growing = surface_frame("chat-side-card", cx).expect("the card, growing");
+        assert!(
+            growing.bounds.size.width < rest.bounds.size.width,
+            "partway: {growing:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        goes_on(
+            growing,
+            surface_frame("chat-side-card", cx).expect("the card, closed again"),
+        );
+        let last = *surface_until_gone("chat-side-card", cx)
+            .last()
+            .expect("the card shrinks");
+        let row = cx
+            .debug_bounds("rail-agent-agent-1")
+            .expect("the row is back in the rail");
+        assert!(
+            about(last.bounds, row, px(2.)) && last.fill < rest.fill * 0.05,
+            "it goes into {row:?} unseen: {last:?}"
+        );
+    }
+
     /// Whether `inner` lies partway from `from` to `to`: each of its edges
     /// strictly between theirs where they differ, and on theirs where they
     /// are the same.
@@ -8841,22 +9037,28 @@ mod tests {
             && edge(inner.bottom(), from.bottom(), to.bottom())
     }
 
+    /// Where a frame draws the agent's card and its sheet.
+    type SidePlaces = [Option<gpui::Bounds<Pixels>>; 2];
+
     /// The agent's card and its sheet over the next `frames` display
-    /// frames, as each frame draws them.
+    /// frames, as each frame draws them, and the surface drawn.
     fn side_frames(
         frames: usize,
         cx: &mut VisualTestContext,
-    ) -> Vec<[Option<gpui::Bounds<Pixels>>; 2]> {
+    ) -> (Vec<SidePlaces>, Vec<SurfaceFrame>) {
         (0..frames)
             .map(|_| {
                 let drawn = [
                     cx.debug_bounds("chat-side-card"),
                     cx.debug_bounds("chat-side-sheet"),
                 ];
+                let surface = surface_frame("chat-side-card", cx)
+                    .or_else(|| surface_frame("chat-side-sheet", cx))
+                    .expect("the agent's surface");
                 display_frame(cx);
-                drawn
+                (drawn, surface)
             })
-            .collect()
+            .unzip()
     }
 
     /// An agent on its card beside its lead, the window narrowed until the
@@ -8864,10 +9066,11 @@ mod tests {
     /// into a sheet raised over the lead: drawn in one place on every
     /// frame, partway from the card to the sheet on its way, and at rest
     /// inset from the lead's body at its sides, as high as the card and
-    /// ending with the lead's composer card. On the sheet the agent's
-    /// header says it is an agent and its Back names the lead, following
-    /// the lead's title; Close is gone. Widened again, the sheet shrinks
-    /// back into the card where it was, and Close is back.
+    /// ending with the lead's composer card. On the way the surface stays
+    /// opaque and what it holds stays on it, never leaving it blank. On the
+    /// sheet the agent's header says it is an agent and its Back names the
+    /// lead, following the lead's title; Close is gone. Widened again, the
+    /// sheet shrinks back into the card where it was, and Close is back.
     #[gpui::test]
     fn an_agent_beside_its_lead_grows_into_a_sheet_and_back(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -8896,10 +9099,24 @@ mod tests {
         assert_eq!(cx.debug_bounds("chat-side-sheet"), None);
         assert!(cx.debug_bounds("side-close").is_some(), "Close on the card");
         assert_eq!(cx.debug_bounds("chat-side-badge"), None);
+        let rest = surface_frame("chat-side-card", cx).expect("the agent's card");
+        let never_blank = |surfaces: &[SurfaceFrame]| {
+            assert!(
+                surfaces.iter().all(|frame| frame.fill >= rest.fill * 0.99),
+                "the surface stays opaque: {surfaces:?} against {rest:?}"
+            );
+            assert!(
+                surfaces
+                    .iter()
+                    .all(|frame| frame.content > rest.content * 0.1),
+                "what it holds stays on it: {surfaces:?} against {rest:?}"
+            );
+        };
 
         resize(cx, 1000.);
-        let frames = side_frames(50, cx);
+        let (frames, surfaces) = side_frames(50, cx);
         settle_frames(cx);
+        never_blank(&surfaces);
         assert!(
             frames
                 .iter()
@@ -8981,8 +9198,9 @@ mod tests {
         );
 
         resize(cx, 2000.);
-        let frames = side_frames(50, cx);
+        let (frames, surfaces) = side_frames(50, cx);
         settle_frames(cx);
+        never_blank(&surfaces);
         assert!(
             frames
                 .iter()

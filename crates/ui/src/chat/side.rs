@@ -52,25 +52,44 @@ const SWAP: Duration = Duration::from_millis(200);
 const SHOW: Duration = Duration::from_millis(200);
 
 /// The response of the spring the agent's card grows out of what opened it
-/// along, and shrinks back into it, as gpui-base's `Spring::new` takes one:
-/// critically damped, so it never passes its place.
+/// along, or crosses to the other place along, as gpui-base's `Spring::new`
+/// takes one: critically damped, so it never passes its place.
 const EXPAND: Duration = Duration::from_millis(400);
 
-/// How near its end the card's growth comes before it is there.
+/// The response of the same spring as the card shrinks back.
+const EXPAND_BACK: Duration = Duration::from_millis(300);
+
+/// How much of the spring's way is left when the card is there.
 const EXPAND_REST: f32 = 0.001;
 
-/// The share of the card's growth over which what it holds fades in, at the
-/// end of it.
-const EXPAND_CONTENT: f32 = 0.4;
+/// The share of its way by which the surface is opaque, growing.
+const OPEN_SURFACE: f32 = 0.4;
 
-/// How long what the card holds takes to fade out as it closes, before the
-/// card shrinks back.
-const EXPAND_FADE: Duration = Duration::from_millis(120);
+/// The share of its way over which what it holds fades in, growing.
+const OPEN_CONTENT: (f32, f32) = (0.3, 0.8);
+
+/// The share of its way by which what it holds has gone, shrinking, and
+/// from which the surface fades: the one starts before the other ends, so
+/// the surface is never opaque and empty.
+const BACK_CONTENT: f32 = 0.55;
+const BACK_SURFACE: f32 = 0.45;
+
+/// How long what it holds takes to fade out as it leaves with no origin on
+/// screen.
+const LEAVE_FADE: Duration = Duration::from_millis(120);
+
+/// The share of a crossing's way at which what the surface holds takes the
+/// size of the new place, and how far in it is then.
+const CROSS_SWAP: f32 = 0.5;
+const CROSS_LOW: f32 = 0.25;
 
 /// The key the agent's surface records where it is drawn under, in the
 /// lead's [`ChatView::side_origins`], so that crossing to the other place
 /// starts from there.
 const SURFACE: &str = "chat-side-surface";
+
+/// The key what the surface holds records where it is laid out under.
+const HELD: &str = "chat-side-held";
 
 /// How far the sheet over the lead is inset from the sides of the lead's
 /// body. At the top it is as far down as the slot, so the card and the sheet
@@ -122,32 +141,58 @@ struct Expand {
     origin: Option<SharedString>,
     /// Where it was last on screen, and the radius of its corners.
     from: Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>,
-    /// Where its frame stays rather than in its place while it leaves:
-    /// where it was drawn, partway, as it began to.
+    /// Where its frame ends rather than in its place: where it was drawn,
+    /// partway, as it began to leave.
     held: Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>,
+    /// Where what it holds stays laid out rather than at its place: the
+    /// place it is crossing from, until [`CROSS_SWAP`].
+    laid: Option<gpui::Bounds<gpui::Pixels>>,
     phase: ExpandPhase,
+}
+
+/// How far in the surface and what it holds are.
+#[derive(Clone, Copy)]
+struct Shown {
+    surface: f32,
+    content: f32,
+}
+
+impl Shown {
+    const FULLY: Self = Self {
+        surface: 1.,
+        content: 1.,
+    };
+    const NOT: Self = Self {
+        surface: 0.,
+        content: 0.,
+    };
 }
 
 #[derive(Clone, Copy)]
 enum ExpandPhase {
-    /// Growing out of the origin since `at`, from `from` of the way.
-    Open { at: Instant, from: f32 },
-    /// Closed at `at`, `grown` of the way out with what it holds `shown` of
-    /// the way in: that fades out, then the card shrinks back into the
-    /// origin (`Some(true)`), or fades and slides away as it does with no
-    /// origin where that is nowhere on screen then (`Some(false)`).
+    /// Growing since `at` from `grown` of the way out of the origin, or from
+    /// where it was into the other place, as `shown` was then.
+    Open {
+        at: Instant,
+        grown: f32,
+        shown: Shown,
+    },
+    /// Shrinking since `at` from `grown` of the way out of the origin, as
+    /// `shown` was then.
     Closing {
         at: Instant,
         grown: f32,
-        shown: f32,
-        back: Option<bool>,
+        shown: Shown,
     },
-    /// Leaving `leaves` for the other place since `at`, what it holds
-    /// `shown` of the way in then: that fades out where it is, then it grows
-    /// from there into the other place ([`ExpandPhase::Open`]).
+    /// With its origin nowhere on screen as it closed at `at`: fading and
+    /// sliding away as it does with no origin.
+    Leaving { at: Instant, shown: Shown },
+    /// Leaving `leaves` for the other place at `at`, as `shown` was then:
+    /// drawn there this once, so where it starts from is where the body's
+    /// layout has it now.
     Crossing {
         at: Instant,
-        shown: f32,
+        shown: Shown,
         leaves: SideMode,
     },
     /// With motion reduced: the agent fading into the place it is drawn in
@@ -155,55 +200,79 @@ enum ExpandPhase {
     Swapping { at: Instant, leaves: SideMode },
 }
 
-/// How far a critically damped spring with gpui-base's `Spring::new(EXPAND)`
-/// response has still to go, `elapsed` after it left from rest.
+/// How much of its way a critically damped spring with gpui-base's
+/// `Spring::new(response)` has still to go, `elapsed` after it left from
+/// rest.
 ///
 /// gpui-base's spring is stepped frame by frame toward the target it is
-/// given on a frame, so a phase can only start on a frame. The card's phases
-/// are timed from when they start (its shrink, from the end of the fade
-/// before it), so this is the same spring's step response, in closed form.
-fn expand_left(elapsed: Duration) -> f32 {
-    let omega = std::f32::consts::TAU / EXPAND.as_secs_f32();
+/// given on a frame. The card's phases carry on from where another left
+/// them and their fades read how far along the spring is, so this is the
+/// same spring's step response, in closed form.
+fn spring_left(elapsed: Duration, response: Duration) -> f32 {
+    let omega = std::f32::consts::TAU / response.as_secs_f32();
     let t = omega * elapsed.as_secs_f32();
     (1. + t) * (-t).exp()
 }
 
-/// How far in what the surface holds is, `growth` of the way to its place.
-fn content_at(growth: f32) -> f32 {
-    ((growth - (1. - EXPAND_CONTENT)) / EXPAND_CONTENT).clamp(0., 1.)
+/// How far `way` is from `from` to `to`, from 0 to 1.
+fn ramp(way: f32, from: f32, to: f32) -> f32 {
+    ((way - from) / (to - from)).clamp(0., 1.)
 }
 
-/// How far in what it holds is, from `shown`, `since` it began fading out.
-fn fading(shown: f32, since: Duration) -> f32 {
-    shown * (1. - since.as_secs_f32() / EXPAND_FADE.as_secs_f32()).max(0.)
+fn mix(from: f32, to: f32, t: f32) -> f32 {
+    from + (to - from) * t
 }
 
 impl Expand {
-    /// How far out of the origin it is at `now`, and how far in what it
-    /// holds is.
-    fn at(&self, now: Instant) -> (f32, f32) {
+    /// How much of its spring's way it has still to go at `now`.
+    fn left(&self, now: Instant) -> f32 {
         match self.phase {
-            ExpandPhase::Open { at, from } => {
-                let growth = 1. - (1. - from) * expand_left(now.saturating_duration_since(at));
-                (growth, content_at(growth))
+            ExpandPhase::Open { at, .. } => spring_left(now.saturating_duration_since(at), EXPAND),
+            ExpandPhase::Closing { at, .. } => {
+                spring_left(now.saturating_duration_since(at), EXPAND_BACK)
             }
-            ExpandPhase::Closing {
-                at,
-                grown,
-                shown,
-                back,
-            } => {
-                let since = now.saturating_duration_since(at);
-                let growth = match back {
-                    Some(true) => grown * expand_left(since.saturating_sub(EXPAND_FADE)),
-                    _ => grown,
+            _ => 1.,
+        }
+    }
+
+    /// How far out of the origin it is at `now`, and how far in the surface
+    /// and what it holds are.
+    fn at(&self, now: Instant) -> (f32, Shown) {
+        let left = self.left(now);
+        let way = 1. - left;
+        match self.phase {
+            ExpandPhase::Open { grown, shown, .. } => {
+                let surface = mix(shown.surface, 1., ramp(way, 0., OPEN_SURFACE));
+                let content = if self.origin.is_some() {
+                    let (from, to) = OPEN_CONTENT;
+                    mix(shown.content, 1., ramp(way, from, to))
+                } else if way < CROSS_SWAP {
+                    mix(shown.content, CROSS_LOW, ramp(way, 0., CROSS_SWAP))
+                } else {
+                    mix(CROSS_LOW, 1., ramp(way, CROSS_SWAP, 1.))
                 };
-                (growth, fading(shown, since))
+                (1. - (1. - grown) * left, Shown { surface, content })
             }
-            ExpandPhase::Crossing { at, shown, .. } => {
-                (1., fading(shown, now.saturating_duration_since(at)))
+            ExpandPhase::Closing { grown, shown, .. } => (
+                grown * left,
+                Shown {
+                    surface: shown.surface * (1. - ramp(way, BACK_SURFACE, 1.)),
+                    content: shown.content * (1. - ramp(way, 0., BACK_CONTENT)),
+                },
+            ),
+            ExpandPhase::Leaving { at, shown } => {
+                let since = now.saturating_duration_since(at).as_secs_f32();
+                let out = (since / LEAVE_FADE.as_secs_f32()).min(1.);
+                (
+                    1.,
+                    Shown {
+                        content: shown.content * (1. - out),
+                        ..shown
+                    },
+                )
             }
-            ExpandPhase::Swapping { .. } => (1., 1.),
+            ExpandPhase::Crossing { shown, .. } => (1., shown),
+            ExpandPhase::Swapping { .. } => (1., Shown::FULLY),
         }
     }
 }
@@ -219,6 +288,9 @@ pub(super) struct Side {
     share: f32,
     /// Where the agent drawn was last drawn: a leaving one stays there.
     slot: SideMode,
+    /// How wide its card last was beside the lead: with no agent the body
+    /// lays out no width for one, and a card leaving is not measured again.
+    width: gpui::Pixels,
     sync_pending: bool,
     /// The card on its way out of what opened it, or back into it.
     expand: Option<Expand>,
@@ -231,6 +303,7 @@ impl Side {
             leaving: None,
             share: SIDE_SHARE,
             slot: SideMode::Slot,
+            width: px(0.),
             sync_pending: false,
             expand: None,
         }
@@ -267,15 +340,16 @@ pub(super) struct SideFrame {
     below_card: std::rc::Rc<std::cell::Cell<gpui::Pixels>>,
 }
 
-/// Where the surface comes from, how far it has grown from there, and
-/// where it rests instead of its place: see
-/// [`crate::motion::expand::Morph::from`] and
-/// [`crate::motion::expand::Morph::held`].
+/// Where the surface comes from, how far it has grown from there, where it
+/// rests instead of its place, where what it holds is laid out, and how far
+/// in it is: see [`crate::motion::expand::Morph`].
 #[derive(Clone, Copy)]
 struct Morphing {
     from: Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>,
     growth: f32,
     held: Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)>,
+    laid: Option<gpui::Bounds<gpui::Pixels>>,
+    surface: f32,
 }
 
 /// This frame of the card's way out of what opened it, or back into it,
@@ -528,20 +602,22 @@ impl ChatView {
             match (origin, from) {
                 (Some(origin), Some(from)) => {
                     // Out of an origin it is shrinking back into, it grows
-                    // again from where it is.
-                    let grown = self
+                    // again from where it is, as it is.
+                    let (grown, shown) = self
                         .side
                         .expand
                         .as_ref()
                         .filter(|expand| expand.origin.as_ref() == Some(&origin))
-                        .map_or(0., |expand| expand.at(now).0);
+                        .map_or((0., Shown::NOT), |expand| expand.at(now));
                     self.side.expand = Some(Expand {
                         origin: Some(origin),
                         from: Some(from),
                         held: None,
+                        laid: None,
                         phase: ExpandPhase::Open {
                             at: now,
-                            from: grown,
+                            grown,
+                            shown,
                         },
                     });
                 }
@@ -585,23 +661,24 @@ impl ChatView {
             .as_ref()
             .is_some_and(|expand| expand.origin.is_none() && !cx.reduce_motion());
         let drawn = self.side_origins.resolve(SURFACE);
+        let laid = was.as_ref().and_then(|was| was.laid);
         let (from, grown, shown, held) = match was {
             Some(was) if was.origin.is_some() && was.origin == origin => {
                 let (grown, shown) = was.at(now);
                 (was.from, grown, shown, None)
             }
             Some(was) => (None, 1., was.at(now).1, drawn),
-            None => (None, 1., 1., None),
+            None => (None, 1., Shown::FULLY, None),
         };
         self.side.expand = (origin.is_some() || crossing).then_some(Expand {
             origin,
             from,
             held,
+            laid,
             phase: ExpandPhase::Closing {
                 at: now,
                 grown,
                 shown,
-                back: None,
             },
         });
         if had_keyboard {
@@ -628,6 +705,9 @@ impl ChatView {
         }
         if open {
             self.cross_to(mode, cx);
+        }
+        if self.body.side() {
+            self.side.width = self.body.side_width();
         }
         let presence = self.body.side_presence();
         let expand = self.step_expand(window, cx);
@@ -739,9 +819,9 @@ impl ChatView {
     }
 
     /// Where the body's layout now draws the agent, `mode`, is not where it
-    /// was drawn: it crosses there from where it is on screen, what it holds
-    /// fading out first. Not on screen on the last frame, as on the first
-    /// frame of a scene, it is drawn there at once.
+    /// was drawn: it crosses there from where it is on screen. Not on screen
+    /// on the last frame, as on the first frame of a scene, it is drawn
+    /// there at once.
     fn cross_to(&mut self, mode: SideMode, cx: &App) {
         let leaves = self.side.slot;
         let crossing = self
@@ -757,12 +837,13 @@ impl ChatView {
         };
         let now = cx.background_executor().now();
         let was = self.side.expand.take();
-        let shown = was.as_ref().map_or(1., |was| was.at(now).1);
+        let shown = was.as_ref().map_or(Shown::FULLY, |was| was.at(now).1);
         self.side.expand = Some(Expand {
             origin: None,
             from: None,
-            // Partway somewhere, it stays where it is while it fades.
+            // Partway somewhere, it starts from where it is.
             held: was.is_some().then_some(drawn),
+            laid: was.and_then(|was| was.laid),
             phase: if cx.reduce_motion() {
                 ExpandPhase::Swapping { at: now, leaves }
             } else {
@@ -777,8 +858,8 @@ impl ChatView {
 
     /// The card's way out of what opened it or back into it, or from one
     /// place to the other, this frame: how far it has grown and from where,
-    /// how far in what it holds is, and how far in the card is while it
-    /// fades away instead.
+    /// how far in it and what it holds are, and how far in the card is while
+    /// it fades away instead.
     fn step_expand(&mut self, window: &mut Window, cx: &mut Context<Self>) -> ExpandFrame {
         let now = cx.background_executor().now();
         let Some(expand) = &mut self.side.expand else {
@@ -791,55 +872,70 @@ impl ChatView {
         if let Some(from) = on_screen {
             expand.from = Some(from);
         }
-        // Once what it holds has faded, it grows from where it was into the
-        // other place.
-        if let ExpandPhase::Crossing { at, .. } = expand.phase
-            && now.saturating_duration_since(at) >= EXPAND_FADE
+        // Drawn once where it was, it grows from there into the other place.
+        if let ExpandPhase::Crossing { at, shown, .. } = expand.phase
+            && now > at
         {
             expand.from = expand
                 .held
                 .take()
                 .or_else(|| self.side_origins.resolve(SURFACE));
+            expand.laid = self.side_origins.resolve(HELD).map(|(laid, _)| laid);
             expand.phase = ExpandPhase::Open {
-                at: at + EXPAND_FADE,
-                from: 0.,
+                at: now,
+                grown: 0.,
+                shown,
             };
         }
-        // Once what the card holds has faded, it shrinks back into the
-        // origin if that is on screen, and fades away otherwise.
-        if let ExpandPhase::Closing { at, back, .. } = &mut expand.phase
-            && back.is_none()
-            && now.saturating_duration_since(*at) >= EXPAND_FADE
+        // The frame it closed on drew the origin if it is on screen, so by
+        // the next one it is known, and otherwise there is none to go into.
+        if let ExpandPhase::Closing { at, grown, .. } = expand.phase
+            && now > at
+            && on_screen.is_none()
         {
-            *back = Some(on_screen.is_some() && expand.from.is_some());
+            let shown = expand.at(now).1;
+            // Already on its way, it stays where it is rather than going
+            // back to its place to leave.
+            if grown < 1. || expand.from.is_some() {
+                expand.held = self.side_origins.resolve(SURFACE);
+            }
+            expand.phase = ExpandPhase::Leaving { at: now, shown };
         }
-        let (growth, content) = expand.at(now);
+        let (growth, shown) = expand.at(now);
         let crossing = expand.origin.is_none();
-        let moving = |from, growth, held| Morphing { from, growth, held };
+        let left = expand.left(now);
+        // gpui has no way to fade a snapshot, and one `ChatView` is one
+        // layout: a second would lose the first's scroll, folds and built
+        // markdown. So what it holds changes size at the crossing's low
+        // point, rather than the two being drawn across each other.
+        if crossing && matches!(expand.phase, ExpandPhase::Open { .. }) && 1. - left >= CROSS_SWAP {
+            expand.laid = None;
+        }
+        let moving = |from, growth, held| Morphing {
+            from,
+            growth,
+            held,
+            laid: expand.laid,
+            surface: shown.surface,
+        };
         let (frame, done) = match expand.phase {
             ExpandPhase::Open { .. } => (
                 ExpandFrame {
                     morph: Some(moving(expand.from, growth, None)),
-                    content,
+                    content: shown.content,
                     presence: Some(1.),
                     crossing,
                     ..ExpandFrame::default()
                 },
-                1. - growth < EXPAND_REST || (crossing && expand.from.is_none()),
+                left < EXPAND_REST || (crossing && expand.from.is_none()),
             ),
-            ExpandPhase::Closing {
-                at,
-                back: Some(false),
-                ..
-            } => {
-                let gone = crate::motion::Curve::new(SHOW).progress(
-                    now.saturating_duration_since(at)
-                        .saturating_sub(EXPAND_FADE),
-                );
+            ExpandPhase::Leaving { at, .. } => {
+                let gone =
+                    crate::motion::Curve::new(SHOW).progress(now.saturating_duration_since(at));
                 (
                     ExpandFrame {
                         morph: Some(moving(None, 1., expand.held)),
-                        content: 0.,
+                        content: shown.content,
                         presence: Some(1. - gone),
                         fading: true,
                         ..ExpandFrame::default()
@@ -850,16 +946,16 @@ impl ChatView {
             ExpandPhase::Closing { .. } => (
                 ExpandFrame {
                     morph: Some(moving(expand.from, growth, expand.held)),
-                    content,
+                    content: shown.content,
                     presence: Some(1.),
                     ..ExpandFrame::default()
                 },
-                growth < EXPAND_REST,
+                left < EXPAND_REST,
             ),
             ExpandPhase::Crossing { .. } => (
                 ExpandFrame {
                     morph: Some(moving(None, 1., expand.held)),
-                    content,
+                    content: shown.content,
                     presence: Some(1.),
                     crossing,
                     ..ExpandFrame::default()
@@ -880,7 +976,10 @@ impl ChatView {
             }
         };
         if done {
-            let closed = matches!(expand.phase, ExpandPhase::Closing { .. });
+            let closed = matches!(
+                expand.phase,
+                ExpandPhase::Closing { .. } | ExpandPhase::Leaving { .. }
+            );
             self.side.expand = None;
             return if closed {
                 ExpandFrame {
@@ -926,9 +1025,11 @@ impl ChatView {
             morph.and_then(|morph| morph.from),
             morph.map_or(1., |morph| morph.growth),
         )
-        .held(morph.and_then(|morph| morph.held));
+        .held(morph.and_then(|morph| morph.held))
+        .laid(morph.and_then(|morph| morph.laid))
+        .surface(morph.map_or(1., |morph| morph.surface));
         if live {
-            surface.mark(&self.side_origins, SURFACE)
+            surface.mark(&self.side_origins, SURFACE, HELD)
         } else {
             surface
         }
@@ -976,7 +1077,7 @@ impl ChatView {
                 )
         });
         let card = self.side_surface("chat-side-card", content, morph, live, cx);
-        super::rail::slot(self.body.side_width(), fade.map_or(presence, |_| 1.), cx)
+        super::rail::slot(self.side.width, fade.map_or(presence, |_| 1.), cx)
             .when_some(fade, |slot, fade| slot.opacity(fade))
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<SideEdgeDrag>, _, cx| {
