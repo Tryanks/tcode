@@ -98,12 +98,12 @@ pub(crate) fn init(cx: &mut App) {
 }
 
 impl Overlays {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             dialogs: Vec::new(),
             next_dialog_id: 0,
             sheets: Vec::new(),
-            notifications: cx.new(|cx| NotificationList::new(window, cx)),
+            notifications: cx.new(NotificationList::new),
             toast_place: Default::default(),
         }
     }
@@ -952,6 +952,36 @@ mod tests {
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("compact-toast").is_none());
+    }
+
+    /// A card that stays until closed, closed long after it came in, still
+    /// plays its exit and unmounts.
+    #[gpui::test]
+    fn a_card_that_stays_leaves_when_closed_later(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        cx.update(|window, cx| {
+            window.push_notification(Notification::info("Stays").autohide(false), cx)
+        });
+        draw(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(30));
+        draw(cx);
+        assert!(cx.debug_bounds("wide-toast").is_some());
+
+        cx.update(|window, cx| window.clear_notifications(cx));
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE * 2);
+        draw(cx);
+        assert!(cx.debug_bounds("wide-toast").is_none());
+        overlays(&root, cx).read_with(cx, |root, cx| {
+            root.notifications.read(cx).assert_messages(cx, &[]);
+        });
     }
 
     #[gpui::test]
