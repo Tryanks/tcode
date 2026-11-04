@@ -421,8 +421,9 @@ mod tests {
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
-            store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         store.update(cx, |store, cx| {

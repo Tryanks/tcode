@@ -24,9 +24,11 @@ impl ChatView {
         let (last_user_id, last_assistant_id) = self
             .workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                latest_message_ids(&timeline.entries)
-            })
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| latest_message_ids(&timeline.entries),
+                cx,
+            )
             .unwrap_or_default();
 
         let highlighted_turn = self.highlighted_turn.and_then(|turn| {
@@ -76,6 +78,7 @@ impl ChatView {
                             trailer,
                         )
                     },
+                    cx,
                 ) else {
                     return div().into_any_element();
                 };

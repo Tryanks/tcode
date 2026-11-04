@@ -62,12 +62,14 @@ impl StoredThread {
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "the thread's history", |cx| {
-            store.read_with(cx, |store, _| {
-                !store.chat_loading_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| {
+                !store.chat_loading_for(store.sole_thread().as_deref(), cx)
                     && store
-                        .with_timeline_for(store.sole_thread().as_deref(), |timeline| {
-                            !timeline.entries.is_empty()
-                        })
+                        .with_timeline_for(
+                            store.sole_thread().as_deref(),
+                            |timeline| !timeline.entries.is_empty(),
+                            cx,
+                        )
                         .unwrap_or(false)
             })
         });
@@ -95,11 +97,13 @@ impl StoredThread {
 
     /// The thread's entries, as the chat draws them.
     pub(in crate::chat) fn entries(&self, cx: &mut VisualTestContext) -> Vec<Arc<TimelineEntry>> {
-        self.store.read_with(cx, |store, _| {
+        self.store.read_with(cx, |store, cx| {
             store
-                .with_timeline_for(store.sole_thread().as_deref(), |timeline| {
-                    timeline.entries.clone()
-                })
+                .with_timeline_for(
+                    store.sole_thread().as_deref(),
+                    |timeline| timeline.entries.clone(),
+                    cx,
+                )
                 .unwrap_or_default()
         })
     }

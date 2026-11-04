@@ -235,6 +235,10 @@ pub struct ChatView {
     /// resolves wheel and pan packets against the row indices it painted, so
     /// rows are only spliced during a frame, never between two frames.
     timeline_stale: bool,
+    /// The store's revision of the thread's timeline as the list last
+    /// mirrored it: a record streamed in moves it on without notifying the
+    /// store.
+    timeline_revision: Option<u64>,
     history_placeholder_height: gpui::Pixels,
     /// Height of the phone row floating over the foot of the timeline, as
     /// far as it has risen in: zero while it is absent. The last row's
@@ -533,6 +537,7 @@ impl ChatView {
             drawer_agent: None,
             list_state,
             timeline_stale: false,
+            timeline_revision: None,
             history_placeholder_height: px(0.),
             phone_strip_height: px(0.),
             reservation_scroll_back: None,
@@ -739,6 +744,14 @@ impl Render for ChatView {
         self.motion.sweep();
         self.side_origins.begin_frame();
         self.request_side_sync(window, cx);
+        let revision = self
+            .workspace_store
+            .read(cx)
+            .timeline_revision_for(self.session_id.as_deref(), cx);
+        if revision != self.timeline_revision {
+            self.timeline_revision = revision;
+            self.timeline_stale = true;
+        }
         if self.timeline_stale {
             self.sync_markdown_states(cx);
         }
@@ -837,7 +850,7 @@ impl Render for ChatView {
         let active = self
             .workspace_store
             .read(cx)
-            .chat_active_session_for(self.session_id.as_deref());
+            .chat_active_session_for(self.session_id.as_deref(), cx);
 
         let compact = self.window_state.read(cx).compact;
         // The composer follows the layout in place. Rebuilding it here would
@@ -875,7 +888,7 @@ impl Render for ChatView {
         let loading = self
             .workspace_store
             .read(cx)
-            .chat_loading_for(self.session_id.as_deref());
+            .chat_loading_for(self.session_id.as_deref(), cx);
         let surface = match (&active, loading) {
             (_, true) => SURFACE_SKELETON,
             (None, false) => SURFACE_EMPTY,
@@ -1031,7 +1044,7 @@ impl ChatView {
             let store = self.workspace_store.read(cx);
             self.session_id
                 .as_deref()
-                .map(|id| crate::agents_panel::Agents::of(store, id))
+                .map(|id| crate::agents_panel::Agents::of(store, id, cx))
                 .filter(|agents| !agents.is_empty())
         };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), agents.as_ref(), cx);
@@ -1196,7 +1209,7 @@ impl ChatView {
         let deliveries = self
             .workspace_store
             .read(cx)
-            .delivery_messages_for(self.session_id.as_deref());
+            .delivery_messages_for(self.session_id.as_deref(), cx);
         self.shown_deliveries = deliveries.iter().map(|(key, ..)| key.clone()).collect();
         let waiting = !self
             .workspace_store
@@ -1556,8 +1569,9 @@ pub(crate) mod tests {
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
-            store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         store.update(cx, |store, cx| {
@@ -2070,8 +2084,8 @@ pub(crate) mod tests {
         });
         store.update(cx, |store, cx| store.show_alone(first_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
-            store.read_with(cx, |store, _| {
-                !store.chat_loading_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| {
+                !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         store.update(cx, |store, cx| {
@@ -2103,9 +2117,9 @@ pub(crate) mod tests {
             });
             self.driver
                 .wait_until(cx, &store, "the bound thread's history", |cx| {
-                    store.read_with(cx, |store, _| {
+                    store.read_with(cx, |store, cx| {
                         store
-                            .with_timeline_for(store.sole_thread().as_deref(), |_| ())
+                            .with_timeline_for(store.sole_thread().as_deref(), |_| (), cx)
                             .is_some()
                     })
                 });
@@ -2175,17 +2189,18 @@ pub(crate) mod tests {
         }
         workspace_store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
-            workspace_store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
+            workspace_store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         driver.wait_until(cx, &workspace_store, "Git status", |cx| {
-            workspace_store.read_with(cx, |store, _| {
+            workspace_store.read_with(cx, |store, cx| {
                 store
-                    .chat_git_controls_for(store.sole_thread().as_deref())
+                    .chat_git_controls_for(store.sole_thread().as_deref(), cx)
                     .is_some()
             })
         });

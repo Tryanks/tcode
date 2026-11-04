@@ -940,7 +940,7 @@ impl PullRequestsPanel {
         move |cx| {
             let store = store.read(cx);
             if store
-                .session_status_for(session.as_deref())
+                .session_status_for(session.as_deref(), cx)
                 .is_none_or(|status| status.conversation_read_only)
             {
                 return None;
@@ -1833,7 +1833,7 @@ impl Render for AgentSees {
         let tools = self
             .store
             .read(cx)
-            .session_status_for(self.session_id.as_deref())
+            .session_status_for(self.session_id.as_deref(), cx)
             .and_then(|status| status.injected_tools.clone());
         div()
             .id("agent-sees-scroll")
@@ -2000,7 +2000,7 @@ impl PullRequestsPanel {
             .map(|meta| meta.pull_request_operations.clone())
             .unwrap_or_default();
         let read_only = store
-            .session_status_for(session.as_deref())
+            .session_status_for(session.as_deref(), cx)
             .is_none_or(|status| status.conversation_read_only);
         let watchable = session
             .as_deref()
@@ -2013,7 +2013,7 @@ impl PullRequestsPanel {
             .and_then(|id| store.thread_meta(id))
             .is_some_and(|meta| meta.pull_request_watches_paused);
         let agent_tools = store
-            .session_status_for(session.as_deref())
+            .session_status_for(session.as_deref(), cx)
             .and_then(|status| status.injected_tools.clone());
         let compact = self.window_state.read(cx).compact;
         let mut entries: Vec<(SharedString, ListEntry)> = Vec::new();
@@ -2433,7 +2433,7 @@ impl LinkDialog {
 impl Render for LinkDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let error = crate::motion::shown("pr-link-error", self.error.clone(), SHOW, window, cx);
-        let description = match self.store.read(cx).github_repository(&self.id) {
+        let description = match self.store.read(cx).github_repository(&self.id, cx) {
             Some(repository) => {
                 crate::tr!("pull_requests.dialog_desc_repo", repository = repository)
             }

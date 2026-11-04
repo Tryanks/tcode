@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use tcode_core::{
     project::WorktreeInfo,
-    session::{PendingUserInput, Timeline},
+    session::PendingUserInput,
     settings::Settings,
     ui::{RightTab, WorkspaceMode},
 };
@@ -79,7 +79,6 @@ pub struct ComposerState {
 
 pub(crate) fn composer_state(
     status: Option<&SessionStatus>,
-    _timeline: Option<&Timeline>,
     settings: &Settings,
     providers: &ProvidersStatus,
 ) -> ComposerState {
@@ -204,10 +203,7 @@ pub(crate) struct PanelState {
     pub terminal_height: f32,
 }
 
-pub(crate) fn panel_state(
-    ui: Option<&ConversationUiState>,
-    _timeline: Option<&Timeline>,
-) -> PanelState {
+pub(crate) fn panel_state(ui: Option<&ConversationUiState>) -> PanelState {
     PanelState {
         right_panel_open: ui.is_some_and(|ui| ui.right_panel_open),
         right_tab: ui.map_or_else(RightTab::default, |ui| ui.right_tab),
@@ -220,6 +216,7 @@ pub(crate) fn panel_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tcode_core::session::Timeline;
 
     fn session_status() -> SessionStatus {
         SessionStatus {
@@ -311,7 +308,7 @@ mod tests {
             },
         );
         status.usage = timeline.usage;
-        let custom = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+        let custom = composer_state(Some(&status), &settings, &providers);
         assert_eq!(custom.token_usage.unwrap().used_tokens, Some(1234));
         assert!(custom.usage.is_none());
         settings
@@ -321,7 +318,7 @@ mod tests {
             .settings
             .env
             .clear();
-        let native = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+        let native = composer_state(Some(&status), &settings, &providers);
         assert_eq!(
             native.usage.unwrap().error.as_deref(),
             Some("temporarily unreachable")
@@ -424,8 +421,7 @@ mod tests {
                     timeline.apply_at(Some(1 + recorded_events.len() as u64), &event);
                     status.usage = timeline.usage;
                     status.context_window = timeline.usage.and_then(|usage| usage.context_window);
-                    let snapshot =
-                        composer_state(Some(&status), Some(&timeline), &settings, &providers);
+                    let snapshot = composer_state(Some(&status), &settings, &providers);
                     if let agent::AgentEvent::ContextCompacted(c) = &event {
                         let u = snapshot.token_usage.unwrap();
                         if c.in_progress {
@@ -461,7 +457,7 @@ mod tests {
             });
             status.usage = timeline.usage;
             status.context_window = timeline.usage.and_then(|usage| usage.context_window);
-            let snapshot = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+            let snapshot = composer_state(Some(&status), &settings, &providers);
             let usage = snapshot.token_usage.unwrap();
             assert_eq!(usage.used_tokens, Some([500260, 60, 20764][index]));
             assert_eq!(
@@ -491,7 +487,7 @@ mod tests {
         replay.apply_at(None, &old);
         status.usage = replay.usage;
         status.context_window = replay.usage.and_then(|usage| usage.context_window);
-        let old = composer_state(Some(&status), Some(&replay), &settings, &providers)
+        let old = composer_state(Some(&status), &settings, &providers)
             .token_usage
             .unwrap();
         assert_eq!(old.freshness, agent::ContextFreshness::Unknown);

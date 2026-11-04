@@ -3001,7 +3001,7 @@ fn progress_view(
         let can_ask = !target
             .store
             .read(cx)
-            .session_status_for(Some(&target.session))
+            .session_status_for(Some(&target.session), cx)
             .is_none_or(|status| status.conversation_read_only);
         let ask = matches!(reason, StackRebaseFailure::Conflict).then(|| {
             let store = target.store.clone();

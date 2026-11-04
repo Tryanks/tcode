@@ -143,56 +143,60 @@ impl ChatView {
         let running = self
             .workspace_store
             .read(cx)
-            .session_status_for(self.session_id.as_deref())
+            .session_status_for(self.session_id.as_deref(), cx)
             .is_some_and(|status| status.activity.turn_running);
         let row_count = self.rows.len();
         let resident_ids = self.md_states.keys().cloned().collect();
         let (texts, decisions) = self
             .workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                let scope = ResidencyScope::new(
-                    row_count,
-                    self.markdown_visible_rows.clone(),
-                    one_shot_row_target,
-                    running,
-                );
-                let entries = markdown_entries_for_residency(timeline, &self.rows, &scope);
-                let decisions = decide(ResidencyInput {
-                    row_count,
-                    visible_rows: self.markdown_visible_rows.clone(),
-                    one_shot_row_target,
-                    entries: &entries,
-                    stream_running: running,
-                    resident_ids: &resident_ids,
-                });
-                let mut texts = Vec::new();
-                let last = timeline.entries.len().checked_sub(1);
-                for (index, entry) in timeline.entries.iter().enumerate() {
-                    if !decisions.build.contains(&entry.id) {
-                        continue;
-                    }
-                    let row = row_of_entry(&self.rows, index, entry.turn);
-                    // A running turn's text arrives into its last entry.
-                    let streaming = running && Some(index) == last;
-                    // A resident message whose entry is unchanged keeps its
-                    // text: it is neither copied out again nor compared.
-                    let text = if self
-                        .md_states
-                        .get(&entry.id)
-                        .is_some_and(|md| md.synced_from(entry))
-                    {
-                        None
-                    } else {
-                        let Some(text) = entry_markdown(entry) else {
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    let scope = ResidencyScope::new(
+                        row_count,
+                        self.markdown_visible_rows.clone(),
+                        one_shot_row_target,
+                        running,
+                    );
+                    let entries = markdown_entries_for_residency(timeline, &self.rows, &scope);
+                    let decisions = decide(ResidencyInput {
+                        row_count,
+                        visible_rows: self.markdown_visible_rows.clone(),
+                        one_shot_row_target,
+                        entries: &entries,
+                        stream_running: running,
+                        resident_ids: &resident_ids,
+                    });
+                    let mut texts = Vec::new();
+                    let last = timeline.entries.len().checked_sub(1);
+                    for (index, entry) in timeline.entries.iter().enumerate() {
+                        if !decisions.build.contains(&entry.id) {
                             continue;
+                        }
+                        let row = row_of_entry(&self.rows, index, entry.turn);
+                        // A running turn's text arrives into its last entry.
+                        let streaming = running && Some(index) == last;
+                        // A resident message whose entry is unchanged keeps its
+                        // text: it is neither copied out again nor compared.
+                        let text = if self
+                            .md_states
+                            .get(&entry.id)
+                            .is_some_and(|md| md.synced_from(entry))
+                        {
+                            None
+                        } else {
+                            let Some(text) = entry_markdown(entry) else {
+                                continue;
+                            };
+                            Some(text)
                         };
-                        Some(text)
-                    };
-                    texts.push((row, entry.clone(), text, streaming));
-                }
-                (texts, decisions)
-            })
+                        texts.push((row, entry.clone(), text, streaming));
+                    }
+                    (texts, decisions)
+                },
+                cx,
+            )
             .unwrap_or_default();
         self.md_states.retain(|id, _| !decisions.evict.contains(id));
         self.pending_md_builds
@@ -253,17 +257,21 @@ impl ChatView {
         let places = self
             .workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                timeline
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, entry)| {
-                        let md = self.md_states.get(&entry.id)?;
-                        Some((md.state.clone(), index as u64))
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    timeline
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, entry)| {
+                            let md = self.md_states.get(&entry.id)?;
+                            Some((md.state.clone(), index as u64))
+                        })
+                        .collect::<Vec<_>>()
+                },
+                cx,
+            )
             .unwrap_or_default();
         for (state, entry) in places {
             state.update(cx, |state, cx| {
@@ -275,13 +283,19 @@ impl ChatView {
     pub(in crate::chat) fn markdown_row(&self, id: &str, cx: &App) -> Option<usize> {
         self.workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                timeline
-                    .entries
-                    .iter()
-                    .position(|entry| entry.id == id)
-                    .and_then(|index| row_of_entry(&self.rows, index, timeline.entries[index].turn))
-            })
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    timeline
+                        .entries
+                        .iter()
+                        .position(|entry| entry.id == id)
+                        .and_then(|index| {
+                            row_of_entry(&self.rows, index, timeline.entries[index].turn)
+                        })
+                },
+                cx,
+            )
             .flatten()
     }
 
@@ -453,26 +467,32 @@ pub(in crate::chat) fn transcript_selection(
             let chat = chat.read(cx);
             chat.workspace_store
                 .read(cx)
-                .with_timeline_for(chat.session_id.as_deref(), |timeline| {
-                    let (start, end) = (*range.start() as usize, *range.end() as usize);
-                    timeline
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .skip(start)
-                        .take(end.saturating_sub(start) + 1)
-                        .filter_map(|(index, entry)| {
-                            let root = match chat.md_states.get(&entry.id) {
-                                Some(md) => md.state.read(cx).parsed_root(),
-                                None => Rc::new(
-                                    crate::markdown::parse::parse_document(&entry_markdown(entry)?)
+                .with_timeline_for(
+                    chat.session_id.as_deref(),
+                    |timeline| {
+                        let (start, end) = (*range.start() as usize, *range.end() as usize);
+                        timeline
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .skip(start)
+                            .take(end.saturating_sub(start) + 1)
+                            .filter_map(|(index, entry)| {
+                                let root = match chat.md_states.get(&entry.id) {
+                                    Some(md) => md.state.read(cx).parsed_root(),
+                                    None => Rc::new(
+                                        crate::markdown::parse::parse_document(&entry_markdown(
+                                            entry,
+                                        )?)
                                         .root,
-                                ),
-                            };
-                            Some((index as u64, root))
-                        })
-                        .collect()
-                })
+                                    ),
+                                };
+                                Some((index as u64, root))
+                            })
+                            .collect()
+                    },
+                    cx,
+                )
                 .unwrap_or_default()
         }))
     })

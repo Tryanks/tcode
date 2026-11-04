@@ -287,7 +287,7 @@ impl PreviewPanel {
     fn routed_key(&mut self, session_id: &str, cx: &mut Context<Self>) -> String {
         self.store
             .read(cx)
-            .preview_key_for(session_id)
+            .preview_key_for(session_id, cx)
             .unwrap_or_else(|| session_id.to_owned())
     }
 

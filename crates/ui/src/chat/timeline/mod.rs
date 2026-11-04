@@ -259,20 +259,24 @@ impl ChatView {
         let (list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                let list_sync = self.turn_index_cache.sync(
-                    &mut self.rows,
-                    &timeline.turns,
-                    &timeline.entries,
-                    &self.expanded,
-                    continuity,
-                );
-                self.screen.sync(&timeline.entries);
-                self.commands.sync(timeline);
-                let activity_snapshot_keys = awaiting_activity_snapshot
-                    .then(|| auto_activity_snapshot_keys(&timeline.entries));
-                (list_sync, activity_snapshot_keys)
-            })
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    let list_sync = self.turn_index_cache.sync(
+                        &mut self.rows,
+                        &timeline.turns,
+                        &timeline.entries,
+                        &self.expanded,
+                        continuity,
+                    );
+                    self.screen.sync(&timeline.entries);
+                    self.commands.sync(timeline);
+                    let activity_snapshot_keys = awaiting_activity_snapshot
+                        .then(|| auto_activity_snapshot_keys(&timeline.entries));
+                    (list_sync, activity_snapshot_keys)
+                },
+                cx,
+            )
             .unwrap_or_else(|| {
                 self.screen.sync(&[]);
                 self.commands = Default::default();
@@ -475,16 +479,20 @@ impl ChatView {
     fn row_of_activity(&self, turn: usize, entry_id: &str, cx: &App) -> Option<usize> {
         self.workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                let entries = &timeline.entries;
-                let start = entries.partition_point(|entry| entry.turn < turn);
-                let index = start
-                    + entries[start..]
-                        .iter()
-                        .take_while(|entry| entry.turn == turn)
-                        .position(|entry| entry.id == entry_id)?;
-                row_of_entry(&self.rows, index, turn)
-            })
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    let entries = &timeline.entries;
+                    let start = entries.partition_point(|entry| entry.turn < turn);
+                    let index = start
+                        + entries[start..]
+                            .iter()
+                            .take_while(|entry| entry.turn == turn)
+                            .position(|entry| entry.id == entry_id)?;
+                    row_of_entry(&self.rows, index, turn)
+                },
+                cx,
+            )
             .flatten()
     }
 
@@ -541,7 +549,7 @@ impl ChatView {
             .and_then(|session| {
                 // The newest delivery still on its way is the one just sent.
                 let key = store
-                    .delivery_messages_for(Some(&session))
+                    .delivery_messages_for(Some(&session), cx)
                     .into_iter()
                     .rfind(|(_, _, failure, acknowledged)| failure.is_none() && !acknowledged)?
                     .0;
@@ -564,7 +572,7 @@ impl ChatView {
         let delivery = self
             .workspace_store
             .read(cx)
-            .delivery_messages_for(Some(session))
+            .delivery_messages_for(Some(session), cx)
             .into_iter()
             .find(|(pending, ..)| pending == key);
         match delivery {
@@ -986,20 +994,24 @@ mod tests {
             });
             let turn = row.filter(|turn| highlighted == Some(first + *turn))?;
             store
-                .read_with(cx, |store, _| {
-                    store.with_timeline_for(store.sole_thread().as_deref(), |timeline| {
-                        timeline
-                            .entries
-                            .iter()
-                            .find(|entry| {
-                                entry.turn == turn
-                                    && matches!(
-                                        entry.content,
-                                        EntryContent::Item(ItemContent::UserMessage { .. })
-                                    )
-                            })
-                            .map(|entry| entry.id.clone())
-                    })
+                .read_with(cx, |store, cx| {
+                    store.with_timeline_for(
+                        store.sole_thread().as_deref(),
+                        |timeline| {
+                            timeline
+                                .entries
+                                .iter()
+                                .find(|entry| {
+                                    entry.turn == turn
+                                        && matches!(
+                                            entry.content,
+                                            EntryContent::Item(ItemContent::UserMessage { .. })
+                                        )
+                                })
+                                .map(|entry| entry.id.clone())
+                        },
+                        cx,
+                    )
                 })
                 .flatten()
         };
@@ -1572,8 +1584,8 @@ mod tests {
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
-            store.read_with(cx, |store, _| {
-                !store.chat_loading_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| {
+                !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
@@ -1597,19 +1609,24 @@ mod tests {
         );
 
         let streamed = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store
-                    .with_timeline_for(store.sole_thread().as_deref(), |timeline| {
-                        timeline
-                            .entries
-                            .last()
-                            .and_then(|entry| match &entry.content {
-                                EntryContent::Item(ItemContent::AssistantMessage {
-                                    text, ..
-                                }) => Some(text.len()),
-                                _ => None,
-                            })
-                    })
+                    .with_timeline_for(
+                        store.sole_thread().as_deref(),
+                        |timeline| {
+                            timeline
+                                .entries
+                                .last()
+                                .and_then(|entry| match &entry.content {
+                                    EntryContent::Item(ItemContent::AssistantMessage {
+                                        text,
+                                        ..
+                                    }) => Some(text.len()),
+                                    _ => None,
+                                })
+                        },
+                        cx,
+                    )
                     .flatten()
                     .unwrap_or(0)
             })
@@ -1717,8 +1734,9 @@ mod tests {
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
-            store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
@@ -2020,8 +2038,8 @@ mod tests {
             }
             store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
             driver.wait_until(cx, &store, "the conversation", |cx| {
-                store.read_with(cx, |store, _| {
-                    !store.chat_loading_for(store.sole_thread().as_deref())
+                store.read_with(cx, |store, cx| {
+                    !store.chat_loading_for(store.sole_thread().as_deref(), cx)
                 })
             });
             store.update(cx, |store, cx| {
@@ -2065,8 +2083,8 @@ mod tests {
             let send = cx.debug_bounds("send-message").expect("send button");
             cx.simulate_click(send.center(), Modifiers::default());
             driver.wait_until(cx, &store, "the send's outcome", |cx| {
-                store.read_with(cx, |store, _| {
-                    let deliveries = store.delivery_messages_for(Some(&session_id));
+                store.read_with(cx, |store, cx| {
+                    let deliveries = store.delivery_messages_for(Some(&session_id), cx);
                     match case {
                         Outcome::Refused => {
                             deliveries.iter().any(|(.., failure, _)| failure.is_some())
@@ -2490,8 +2508,8 @@ mod tests {
             pages
         };
         let replica = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| {
-                store.with_timeline_for(store.sole_thread().as_deref(), Timeline::clone)
+            store.read_with(cx, |store, cx| {
+                store.with_timeline_for(store.sole_thread().as_deref(), Timeline::clone, cx)
             })
         };
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
@@ -2529,7 +2547,7 @@ mod tests {
                         !chat
                             .workspace_store
                             .read(cx)
-                            .chat_loading_for(chat.session_id.as_deref())
+                            .chat_loading_for(chat.session_id.as_deref(), cx)
                     );
                     assert!(!chat.rows.is_empty(), "the conversation stays on screen");
                 });

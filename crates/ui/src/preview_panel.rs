@@ -335,7 +335,7 @@ impl PreviewPanel {
     /// The panel's thread, and its preview's stable key.
     fn identity(&self, cx: &App) -> Option<(String, String)> {
         let session_id = self.session_id.as_deref()?;
-        let key = self.store.read(cx).preview_key_for(session_id)?;
+        let key = self.store.read(cx).preview_key_for(session_id, cx)?;
         Some((session_id.to_owned(), key))
     }
 

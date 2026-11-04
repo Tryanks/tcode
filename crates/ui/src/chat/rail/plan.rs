@@ -16,7 +16,7 @@ use crate::chat::ChatView;
 fn plan<'a>(chat: &ChatView, cx: &'a App) -> Option<&'a SessionPlan> {
     chat.workspace_store
         .read(cx)
-        .session_plan_for(chat.session_id.as_deref())
+        .session_plan_for(chat.session_id.as_deref(), cx)
         .filter(|plan| !plan.steps.is_empty())
 }
 

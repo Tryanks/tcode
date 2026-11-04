@@ -238,7 +238,7 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
         workspace
             .driver
             .wait_until(cx, &store, "the second thread", |cx| {
-                store.read_with(cx, |store, _| !store.chat_loading_for(Some(&second)))
+                store.read_with(cx, |store, cx| !store.chat_loading_for(Some(&second), cx))
             });
         draw_settled(cx);
 
@@ -320,11 +320,13 @@ fn workspace_last(
     thread: &str,
     cx: &TestAppContext,
 ) -> Option<String> {
-    store.read_with(cx, |store, _| {
+    store.read_with(cx, |store, cx| {
         store
-            .with_timeline_for(Some(thread), |timeline| {
-                timeline.entries.last().map(|entry| entry.id.clone())
-            })
+            .with_timeline_for(
+                Some(thread),
+                |timeline| timeline.entries.last().map(|entry| entry.id.clone()),
+                cx,
+            )
             .flatten()
     })
 }

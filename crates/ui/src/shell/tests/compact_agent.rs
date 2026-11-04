@@ -118,8 +118,8 @@ fn mount_lead_scrolled(
     let (shell, host, cx) = mount_lead_with_agent(cx);
     as_mobile(cx);
     serve_long_lead(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(24)
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(24)
     });
     cx.simulate_resize(size(px(WIDTH), px(852.)));
     settle_panes(cx);
@@ -172,7 +172,7 @@ fn open_agent_served(
     open_agent(shell, id, cx);
     serve_agent(host, id);
     let id = id.to_owned();
-    await_restore_update(shell, cx, move |store| store.timeline_settled_for(&id));
+    await_restore_update(shell, cx, move |store, _| store.timeline_settled_for(&id));
     settle_panes(cx);
 }
 
@@ -285,7 +285,9 @@ fn agents_slide_in_and_out_over_what_opened_them(cx: &mut TestAppContext) {
     nested.parent_session_id = Some("agent-1".into());
     index.sessions.push(nested);
     send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-    await_restore_update(&shell, cx, |store| store.thread_meta("agent-2").is_some());
+    await_restore_update(&shell, cx, |store, _| {
+        store.thread_meta("agent-2").is_some()
+    });
 
     let half = |cx: &mut VisualTestContext| {
         cx.executor().advance_clock(NAV_TRANSITION / 2);
@@ -306,7 +308,7 @@ fn agents_slide_in_and_out_over_what_opened_them(cx: &mut TestAppContext) {
     sliding(cx);
     reading.assert_kept_beneath(cx);
     serve_agent(&host, "agent-1");
-    await_restore_update(&shell, cx, |store| store.timeline_settled_for("agent-1"));
+    await_restore_update(&shell, cx, |store, _| store.timeline_settled_for("agent-1"));
     settle_panes(cx);
     assert!(cx.debug_bounds(reading.question).is_none());
 
@@ -373,7 +375,9 @@ fn a_lead_is_held_under_its_agent_until_the_reader_goes_elsewhere(cx: &mut TestA
 
     serve_thread(&host, "thread-2");
     store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
-    await_restore_update(&shell, cx, |store| store.timeline_settled_for("thread-2"));
+    await_restore_update(&shell, cx, |store, _| {
+        store.timeline_settled_for("thread-2")
+    });
     settle_panes(cx);
     store.read_with(cx, |store, _| {
         assert!(!store.is_thread_open("thread-1"));
@@ -438,10 +442,12 @@ fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
         .debug_bounds("compact-thread-page")
         .expect("the agent's page");
     assert!(page.left() > px(0.), "it slides in: {page:?}");
-    await_restore_update(&shell, cx, |store| store.timeline_settled_for("agent-1"));
+    await_restore_update(&shell, cx, |store, _| store.timeline_settled_for("agent-1"));
     settle_panes(cx);
     serve_long_lead(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| store.timeline_settled_for("thread-1"));
+    await_restore_update(&shell, cx, |store, _| {
+        store.timeline_settled_for("thread-1")
+    });
     settle_panes(cx);
 
     touch_drag(
