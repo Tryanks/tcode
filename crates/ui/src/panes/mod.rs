@@ -144,7 +144,7 @@ impl MoveThreadToPane {
 pub(crate) struct OpenInNewPane(pub(crate) String);
 
 /// Lay the whole column out anew, as a layout swap (see [`LayoutSwap`]). The
-/// panes there fill the new slots in the layout's order, the last input
+/// panes there fill the new slots in the layout's order, the current pane
 /// first; panes left over close, and slots left over wait for a thread.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
@@ -153,7 +153,7 @@ pub(crate) enum PaneLayout {
     Grid,
     OneBesideTwo,
     Single,
-    /// The last input's thread on the left, its agents stacked on the right.
+    /// The current pane's thread on the left, its agents stacked on the right.
     SpreadAgents,
 }
 
@@ -210,7 +210,7 @@ impl PaneLayout {
 /// The most panes the chat column holds.
 pub(crate) const MAX_PANES: usize = 6;
 
-type FocusIn = Rc<dyn Fn(Entity<ThreadPanel>, &mut Window, &mut App)>;
+type Entered = Rc<dyn Fn(Entity<ThreadPanel>, &mut Window, &mut App)>;
 
 /// One thread shown in one pane.
 pub(crate) struct ThreadPanel {
@@ -257,18 +257,20 @@ pub(crate) struct ThreadPanel {
     /// its chat. Kept here because the dock draws the pane under a new
     /// parent whenever the layout around it changes (see [`ThreadPanes`]).
     motion: crate::motion::owned::Owned,
+    /// Hears the pane being entered.
+    on_entered: Entered,
     _focus: Subscription,
     _focus_in: Subscription,
     _release: Subscription,
 }
 
 impl ThreadPanel {
-    /// `on_focus_in` hears every time the keyboard enters the pane, once the
-    /// pane is no longer being updated.
+    /// `on_entered` hears every press anywhere in the pane and every time the
+    /// keyboard enters it, once the pane is no longer being updated.
     pub(crate) fn new(
         chat: Entity<ChatView>,
         drawer: Drawer,
-        on_focus_in: impl Fn(Entity<ThreadPanel>, &mut Window, &mut App) + 'static,
+        on_entered: impl Fn(Entity<ThreadPanel>, &mut Window, &mut App) + 'static,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -281,10 +283,13 @@ impl ThreadPanel {
                     .update(cx, |chat, cx| chat.focus_composer(window, cx));
             }
         });
-        let on_focus_in: FocusIn = Rc::new(on_focus_in);
-        let focus_in = cx.on_focus_in(&focus_handle, window, move |_, window, cx| {
-            let (pane, on_focus_in) = (cx.entity(), on_focus_in.clone());
-            window.defer(cx, move |window, cx| on_focus_in(pane, window, cx));
+        let on_entered: Entered = Rc::new(on_entered);
+        let focus_in = cx.on_focus_in(&focus_handle, window, {
+            let on_entered = on_entered.clone();
+            move |_, window, cx| {
+                let (pane, on_entered) = (cx.entity(), on_entered.clone());
+                window.defer(cx, move |window, cx| on_entered(pane, window, cx));
+            }
         });
         let session_id = chat.read(cx).session_id().map(str::to_owned);
         // A pane taken down mid-fade, or with its glide never landing,
@@ -308,6 +313,7 @@ impl ThreadPanel {
             held: Held::default(),
             flight: None,
             motion: Default::default(),
+            on_entered,
             _focus: focus,
             _focus_in: focus_in,
             _release: release,
@@ -477,6 +483,23 @@ impl ThreadPanel {
     /// was.
     fn act(&self, command: PaneCommand, cx: &mut Context<Self>) {
         crate::shell::pane_command(cx.entity(), command, cx);
+    }
+
+    /// Hears a press anywhere in the pane, whatever takes it there and
+    /// whether it stops or not: in the capture phase, and over all the pane
+    /// holds, as what occludes (an agent's card, a skeleton's shield) hides
+    /// the pane's root from the hit test. Its hitbox leaves the pointer to
+    /// what lies beneath, and overlays drawn over the pane cover it.
+    fn press_catcher(&self, cx: &Context<Self>) -> impl IntoElement {
+        let (pane, on_entered) = (cx.weak_entity(), self.on_entered.clone());
+        div()
+            .absolute()
+            .inset_0()
+            .capture_any_mouse_down(move |_, window, cx| {
+                if let Some(pane) = pane.upgrade() {
+                    on_entered(pane, window, cx);
+                }
+            })
     }
 
     /// The chat on its way in, drawn over the column where it is now, laid
@@ -666,6 +689,7 @@ impl Render for ThreadPanel {
                     })),
             )
             .when(self.closing, |pane| pane.child(crate::motion::shield()))
+            .child(self.press_catcher(cx))
     }
 }
 

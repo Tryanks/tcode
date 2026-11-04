@@ -1574,7 +1574,7 @@ impl SessionsSidebar {
     }
 
     fn reveal_selected_settled(&mut self, cx: &mut Context<Self>) {
-        let selected = self.last_input_row(cx);
+        let selected = self.current_row(cx);
         if selected == self.last_selected {
             return;
         }
@@ -2772,8 +2772,8 @@ impl SessionsSidebar {
     }
 
     /// The row of the thread in the pane last in use.
-    fn last_input_row(&self, cx: &App) -> Option<String> {
-        let thread = crate::shell::last_input_thread(cx)?;
+    fn current_row(&self, cx: &App) -> Option<String> {
+        let thread = crate::shell::current_thread(cx)?;
         Some(self.store.read(cx).roster_row(&thread))
     }
 
@@ -4335,7 +4335,7 @@ impl SessionsSidebar {
                 } else {
                     let reveal = std::mem::take(&mut this.compact_reveal_active)
                         .then(|| {
-                            let active = this.last_input_row(cx);
+                            let active = this.current_row(cx);
                             model.rows.iter().position(|row| {
                                 matches!(row, CompactListRow::Thread(row) if Some(&row.meta.id) == active.as_ref())
                             })

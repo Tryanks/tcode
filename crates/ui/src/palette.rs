@@ -526,7 +526,7 @@ impl CommandPalette {
                 Action::CheckUpdates,
             );
         }
-        if let Some(session_id) = crate::shell::last_input_thread(cx)
+        if let Some(session_id) = crate::shell::current_thread(cx)
             && let Some(meta) = store
                 .sidebar_sessions()
                 .into_iter()
@@ -674,7 +674,7 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleDiff => {
-                if let Some(session_id) = crate::shell::last_input_thread(cx) {
+                if let Some(session_id) = crate::shell::current_thread(cx) {
                     self.store.update(cx, |store, cx| {
                         store.toggle_tab_panel_for(&session_id, tcode_core::ui::RightTab::Diff, cx)
                     });
@@ -682,14 +682,14 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                let session_id = crate::shell::last_input_thread(cx).unwrap_or_default();
+                let session_id = crate::shell::current_thread(cx).unwrap_or_default();
                 self.store.update(cx, |store, cx| {
                     store.toggle_terminal_panel_for(session_id, cx)
                 });
                 self.close(cx);
             }
             Action::OpenPreview => {
-                let session_id = crate::shell::last_input_thread(cx);
+                let session_id = crate::shell::current_thread(cx);
                 self.store.update(cx, |store, cx| {
                     store.open_preview_panel_for(session_id.as_deref(), cx)
                 });
@@ -723,7 +723,7 @@ impl CommandPalette {
             }
             Action::Pane(action) => {
                 self.close(cx);
-                crate::shell::select_last_input(window, cx);
+                crate::shell::select_current_pane(window, cx);
                 window.dispatch_action(action.boxed_clone(), cx);
             }
             Action::OpenThread { session_id, turn } => {
