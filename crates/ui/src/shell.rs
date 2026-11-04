@@ -5954,9 +5954,12 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         store.read_with(cx, |store, _| {
             assert_eq!(store.remote_host_name(), Some("Pending host"));
-            assert_eq!(store.legacy_focus().as_deref(), Some("pending-thread"));
-            assert!(!store.chat_loading());
-            assert_eq!(store.delivery_messages()[0].1, "survives relaunch");
+            assert!(store.is_thread_open("pending-thread"));
+            assert!(!store.chat_loading_for(Some("pending-thread")));
+            assert_eq!(
+                store.delivery_messages_for(Some("pending-thread"))[0].1,
+                "survives relaunch"
+            );
             assert!(store.sidebar_sessions().is_empty());
         });
         assert!(cx.debug_bounds("pending-delivery-bubble").is_some());
@@ -5993,7 +5996,7 @@ pub(crate) mod tests {
         serve_thread(&host, "thread-2");
         cx.simulate_keystrokes("secondary-2");
         await_restore_update(&shell, cx, |store| {
-            store.legacy_focus().as_deref() == Some("thread-2") && !store.chat_loading()
+            store.is_thread_open("thread-2") && !store.chat_loading_for(Some("thread-2"))
         });
         assert_eq!(
             pane_threads(&shell, cx),
@@ -6019,9 +6022,7 @@ pub(crate) mod tests {
         };
         for (key, focused) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
             cx.simulate_keystrokes(key);
-            await_restore_update(&shell, cx, |store| {
-                store.legacy_focus().as_deref() == Some(focused)
-            });
+            await_restore_update(&shell, cx, |store| store.is_thread_open(focused));
             crate::test_frames::draw_settled(cx);
             assert_eq!(
                 pane_of(cx).as_deref(),
@@ -6121,7 +6122,9 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(shell, cx, |store| store.chat_active_session().is_some());
+        await_restore_update(shell, cx, |store| {
+            store.chat_active_session_for(Some("thread-a")).is_some()
+        });
     }
 
     /// The rest of the baseline a restored thread waits for, after
@@ -6289,10 +6292,7 @@ pub(crate) mod tests {
                         Destination::Thread
                     ]
                 );
-                assert_eq!(
-                    shell.store().unwrap().read(cx).legacy_focus().as_deref(),
-                    Some("thread-a")
-                );
+                assert_eq!(shell.page_thread(cx).as_deref(), Some("thread-a"));
             });
             restore_index(&shell, &host, true, cx);
             restore_index(&shell, &host, true, cx);
@@ -6353,7 +6353,9 @@ pub(crate) mod tests {
                     )
                     .unwrap();
             }
-            await_restore_update(&shell, cx, |store| !store.chat_loading());
+            await_restore_update(&shell, cx, |store| {
+                !store.chat_loading_for(Some("thread-a"))
+            });
             draw(cx);
             cx.update(|window, cx| {
                 window.simulate_next_frame(cx);
@@ -6445,7 +6447,7 @@ pub(crate) mod tests {
                     shell.window_state.read(cx).history(),
                     [Destination::Hosts, Destination::Threads]
                 );
-                assert_eq!(shell.store().unwrap().read(cx).legacy_focus(), None);
+                assert_eq!(shell.page_thread(cx), None);
             });
             cx.executor().advance_clock(Duration::from_millis(151));
             draw(cx);
@@ -6510,7 +6512,9 @@ pub(crate) mod tests {
                     )
                     .unwrap();
             }
-            await_restore_update(&shell, cx, |store| !store.chat_loading());
+            await_restore_update(&shell, cx, |store| {
+                !store.chat_loading_for(Some("thread-a"))
+            });
             shell.read_with(cx, |shell, cx| {
                 assert!(shell.pending_navigation_restore.is_none());
                 assert_eq!(
@@ -6518,7 +6522,12 @@ pub(crate) mod tests {
                     Some(&Destination::Panel)
                 );
                 assert_eq!(
-                    shell.store().unwrap().read(cx).panel_state().right_tab,
+                    shell
+                        .store()
+                        .unwrap()
+                        .read(cx)
+                        .panel_state_for(Some("thread-a"))
+                        .right_tab,
                     expected_tab
                 );
             });
@@ -6793,7 +6802,9 @@ pub(crate) mod tests {
         });
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+                store.baseline_ready()
+                    && !store.threads_loading()
+                    && !store.chat_loading_for(Some("thread-a"))
             })
         });
         draw(cx);
@@ -6928,7 +6939,9 @@ pub(crate) mod tests {
                 )
                 .unwrap();
         }
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-a"))
+        });
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
         let composer = shell.read_with(cx, |shell, cx| {
@@ -7074,7 +7087,7 @@ pub(crate) mod tests {
         // The app applies what the host sent as it arrives; a thread come
         // back to draws from what was kept until its window lands.
         await_restore_update(shell, cx, |store| {
-            !store.chat_loading() && store.timeline_settled_for(session)
+            !store.chat_loading_for(Some(session)) && store.timeline_settled_for(session)
         });
     }
 
@@ -7280,7 +7293,9 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(&shell, cx, |store| store.chat_active_session().is_some());
+        await_restore_update(&shell, cx, |store| {
+            store.chat_active_session_for(Some("thread-a")).is_some()
+        });
         host.incoming
             .try_send(
                 encode_line(&HostMessage::Event(EventEnvelope {
@@ -7310,8 +7325,12 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
-        assert!(store_of(&shell, cx).read_with(cx, |store, _| store.panel_state().terminal_open));
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-a"))
+        });
+        assert!(store_of(&shell, cx).read_with(cx, |store, _| {
+            store.panel_state_for(Some("thread-a")).terminal_open
+        }));
         cx.executor().advance_clock(Duration::from_secs(1));
         draw(cx);
         cx.update(|window, cx| {
@@ -7399,7 +7418,7 @@ pub(crate) mod tests {
         }
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some(session)));
         resize(cx, 1200.);
         let composer = shell.read_with(cx, |shell, cx| {
             shell
@@ -7502,7 +7521,9 @@ pub(crate) mod tests {
         serve_thread(&host, "thread-1");
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-1"))
+        });
         // The window settles before a pointer reaches it.
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
@@ -7655,11 +7676,9 @@ pub(crate) mod tests {
         cx: &mut VisualTestContext,
     ) {
         ack_draft(host, draft);
-        await_restore_update(shell, cx, |store| {
-            store.legacy_focus().as_deref() == Some(draft)
-        });
+        await_restore_update(shell, cx, |store| store.is_thread_open(draft));
         serve_thread(host, draft);
-        await_restore_update(shell, cx, |store| !store.chat_loading());
+        await_restore_update(shell, cx, |store| !store.chat_loading_for(Some(draft)));
         draw(cx);
     }
 
@@ -7706,7 +7725,7 @@ pub(crate) mod tests {
         cx.simulate_click(row.center(), alt);
         draw(cx);
         serve_thread(host, id);
-        await_restore_update(shell, cx, |store| !store.chat_loading());
+        await_restore_update(shell, cx, |store| !store.chat_loading_for(Some(id)));
         // The pane glides in before the pointer reaches it.
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
@@ -7771,7 +7790,9 @@ pub(crate) mod tests {
             "{carried:?} -> {landing:?} into {indicator:?}"
         );
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         assert!(cx.debug_bounds("pane-drop-indicator").is_none());
@@ -7783,7 +7804,7 @@ pub(crate) mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-2"));
             assert!(store.is_thread_open("thread-1"));
         });
     }
@@ -7899,11 +7920,13 @@ pub(crate) mod tests {
         cx.simulate_mouse_up(pane.center(), MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-2"));
             assert!(!store.is_thread_open("thread-1"));
         });
     }
@@ -7921,7 +7944,9 @@ pub(crate) mod tests {
         // that spawned the agent.
         cx.simulate_keystrokes("secondary-2");
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
         let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
             unreachable!("panes_index sends a snapshot");
         };
@@ -7982,7 +8007,7 @@ pub(crate) mod tests {
         );
         cx.simulate_keystrokes("secondary-1");
         await_restore_update(&shell, cx, |store| {
-            store.thread_meta("mirror").is_some() && !store.chat_loading()
+            store.thread_meta("mirror").is_some() && !store.chat_loading_for(Some("thread-1"))
         });
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
@@ -8022,7 +8047,8 @@ pub(crate) mod tests {
             )],
         );
         await_restore_update(&shell, cx, |store| {
-            !store.chat_loading() && store.native_subagent_readonly_for(Some("mirror"))
+            !store.chat_loading_for(Some("mirror"))
+                && store.native_subagent_readonly_for(Some("mirror"))
         });
         settle_panes(cx);
         let store = store_of(&shell, cx);
@@ -8045,7 +8071,7 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         assert!(!lead_typing(cx), "the keyboard is with the agent");
         store.read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("mirror"));
         });
         // The agent's composer is its settings row, which has no field: a
@@ -8218,7 +8244,7 @@ pub(crate) mod tests {
                 serve_subagent_status(&host, id);
             }
             await_restore_update(&shell, cx, |store| {
-                !store.chat_loading()
+                !store.chat_loading_for(Some(id))
                     && store.timeline_settled_for(id)
                     && (id == "agent-1" || store.native_subagent_readonly_for(Some(id)))
             });
@@ -8251,7 +8277,9 @@ pub(crate) mod tests {
                 cx.simulate_click(at, gpui::Modifiers::default());
                 settle_panes(cx);
                 assert_eq!(keyboard_pane(&shell, cx), Some(1));
-                store.update(cx, |store, cx| store.toggle_agents_panel(cx));
+                store.update(cx, |store, cx| {
+                    store.toggle_tab_panel_for("agent-1", tcode_core::ui::RightTab::Agents, cx)
+                });
                 settle_panes(cx);
                 press("agent-row-spawn-2", cx);
             }
@@ -8400,7 +8428,7 @@ pub(crate) mod tests {
         // The app applies what the host sent as it arrives; an agent come
         // back to draws from what was kept until its window lands.
         await_restore_update(shell, cx, |store| {
-            !store.chat_loading() && store.timeline_settled_for("agent-1")
+            !store.chat_loading_for(Some("agent-1")) && store.timeline_settled_for("agent-1")
         });
         settle_panes(cx);
     }
@@ -8441,7 +8469,9 @@ pub(crate) mod tests {
             .expect("the lead's composer");
 
         for round in 0..3 {
-            store.update(cx, |store, cx| store.toggle_agents_panel(cx));
+            store.update(cx, |store, cx| {
+                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
+            });
             settle_panes(cx);
             assert!(cx.debug_bounds("right-panel").is_some(), "round {round}");
             open_agent_from_panel(&shell, &host, cx);
@@ -8485,7 +8515,7 @@ pub(crate) mod tests {
             assert!(lead.right() < card.left(), "{lead:?} clear of {card:?}");
             assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
             store.read_with(cx, |store, _| {
-                assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
+                assert!(store.is_thread_open("thread-1"));
                 assert!(store.is_thread_open("agent-1"), "round {round}");
             });
 
@@ -8508,12 +8538,14 @@ pub(crate) mod tests {
             assert_eq!(cx.debug_bounds("right-panel"), None, "round {round}");
             assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
             store.read_with(cx, |store, _| {
-                assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
+                assert!(store.is_thread_open("thread-1"));
                 assert!(!store.is_thread_open("agent-1"), "round {round}");
             });
         }
 
-        store.update(cx, |store, cx| store.toggle_agents_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
+        });
         settle_panes(cx);
         open_agent_from_panel(&shell, &host, cx);
         let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
@@ -8644,7 +8676,7 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         serve_finished_turns(&host, "thread-1", 60, false);
         await_restore_update(&shell, cx, |store| {
-            store.with_active_timeline(|timeline| timeline.turns.len()) == Some(60)
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(60)
         });
         settle_frames(cx);
         let slack = px(1.);
@@ -8683,7 +8715,7 @@ pub(crate) mod tests {
         }
         let first = first.expect("the agent's card comes in");
         await_restore_update(&shell, cx, |store| {
-            !store.chat_loading()
+            !store.chat_loading_for(Some("thread-1"))
                 && store.timeline_settled_for("agent-1")
                 && store.native_subagent_readonly_for(Some("agent-1"))
         });
@@ -9211,7 +9243,7 @@ pub(crate) mod tests {
         });
         draw(cx);
         await_restore_update(&shell, cx, |store| {
-            !store.chat_loading()
+            !store.chat_loading_for(Some("thread-1"))
                 && store.timeline_settled_for("agent-1")
                 && store.native_subagent_readonly_for(Some("agent-1"))
         });
@@ -9374,7 +9406,9 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_lead_with_agent(cx);
         as_mobile(cx);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.toggle_agents_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
+        });
         settle_panes(cx);
         open_agent_from_panel(&shell, &host, cx);
         assert!(cx.debug_bounds("chat-side-header").is_some());
@@ -9384,7 +9418,7 @@ pub(crate) mod tests {
         assert!(shell.read_with(cx, |shell, cx| shell.compact(cx)));
         assert!(cx.debug_bounds("chat-side-header").is_none());
         store.read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-1"));
             assert!(!store.is_thread_open("agent-1"));
         });
         resize(cx, 2000.);
@@ -9409,11 +9443,11 @@ pub(crate) mod tests {
         draw(cx);
         serve_thread(&host, "agent-1");
         await_restore_update(&shell, cx, |store| {
-            !store.chat_loading() && store.timeline_settled_for("agent-1")
+            !store.chat_loading_for(Some("agent-1")) && store.timeline_settled_for("agent-1")
         });
         settle_panes(cx);
         store.read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("agent-1"));
+            assert!(store.is_thread_open("agent-1"));
         });
         assert!(cx.debug_bounds("chat-side-header").is_none());
 
@@ -9421,7 +9455,7 @@ pub(crate) mod tests {
         cx.simulate_click(back.center(), gpui::Modifiers::default());
         settle_panes(cx);
         store.read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-1"));
             assert!(!store.is_thread_open("agent-1"));
         });
         assert!(cx.debug_bounds("compact-thread-page").is_some());
@@ -9485,7 +9519,9 @@ pub(crate) mod tests {
 
         cx.simulate_keystrokes("secondary-alt-right secondary-2");
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
         draw(cx);
         assert_eq!(
             pane_threads(&shell, cx),
@@ -9511,7 +9547,7 @@ pub(crate) mod tests {
         settle(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-2"));
             assert!(!store.is_thread_open("thread-1"));
         });
 
@@ -9921,7 +9957,7 @@ pub(crate) mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         store.read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("draft-1"));
+            assert!(store.is_thread_open("draft-1"));
             assert!(store.is_thread_open("thread-1"));
         });
 
@@ -9929,7 +9965,7 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
+            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
             Some("thread-1".into())
         );
     }
@@ -9962,7 +9998,9 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_panes(cx);
         serve_status(&host, "thread-1", true);
         await_restore_update(&shell, cx, |store| {
-            store.session_status().is_some_and(|status| status.draft)
+            store
+                .session_status_for(Some("thread-1"))
+                .is_some_and(|status| status.draft)
         });
         draw(cx);
         let _ = sent(&host);
@@ -9996,7 +10034,7 @@ pub(crate) mod tests {
             [Some("thread-1".into()), Some("thread-2".into())]
         );
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-2"));
             assert!(store.is_thread_open("thread-1"));
         });
     }
@@ -10009,7 +10047,9 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_panes(cx);
         serve_status(&host, "thread-1", true);
         await_restore_update(&shell, cx, |store| {
-            store.session_status().is_some_and(|status| status.draft)
+            store
+                .session_status_for(Some("thread-1"))
+                .is_some_and(|status| status.draft)
         });
         draw(cx);
         let split = |cx: &mut VisualTestContext| {
@@ -10088,7 +10128,7 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-2"));
             assert!(!store.is_thread_open("thread-1"));
             assert!(!store.is_thread_open("draft-1"));
         });
@@ -10141,7 +10181,7 @@ pub(crate) mod tests {
         click(right.center(), Default::default(), cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
+            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
             Some("thread-1".into())
         );
 
@@ -10197,7 +10237,7 @@ pub(crate) mod tests {
         settle_panes(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
+            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
             Some("thread-2".into())
         );
 
@@ -10695,8 +10735,8 @@ pub(crate) mod tests {
             window.dispatch_event(gpui::PlatformInput::MouseUp(release), cx);
         });
         store.read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
-            assert_eq!(store.diff_selected_turn(), Some(0));
+            assert!(store.is_thread_open("thread-2"));
+            assert_eq!(store.diff_selected_turn_for(Some("thread-2")), Some(0));
         });
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
@@ -10782,7 +10822,7 @@ pub(crate) mod tests {
             "half a thought"
         );
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
@@ -10854,7 +10894,7 @@ pub(crate) mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-2"));
             assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
@@ -10912,7 +10952,9 @@ pub(crate) mod tests {
     fn pane_keys_in_a_terminal_leave_the_panes_alone(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_panes(cx);
-        store_of(&shell, cx).update(cx, |store, cx| store.toggle_terminal_panel(cx));
+        store_of(&shell, cx).update(cx, |store, cx| {
+            store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
+        });
         draw(cx);
         let terminal = shell.read_with(cx, |shell, cx| {
             shell
@@ -11235,7 +11277,7 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
+            assert!(store.is_thread_open("thread-2"));
         });
     }
 
@@ -11265,7 +11307,7 @@ pub(crate) mod tests {
         });
         draw(cx);
         serve_thread(&host, "agent-1");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some("agent-1")));
         settle_panes(cx);
         assert_eq!(
             pane_threads(&shell, cx),
@@ -11289,7 +11331,7 @@ pub(crate) mod tests {
         });
         store.update(cx, |store, cx| store.show_thread("agent-1".into(), cx));
         serve_thread(&host, "agent-1");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some("agent-1")));
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("agent-1".into())]);
 
@@ -11674,7 +11716,7 @@ pub(crate) mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("draft-1"));
+            assert!(store.is_thread_open("draft-1"));
             assert!(!store.is_thread_open("thread-1"));
         });
         assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
@@ -11745,7 +11787,7 @@ pub(crate) mod tests {
             cx.simulate_click(row.center(), gpui::Modifiers::default());
             draw(cx);
             serve_thread(&host, id);
-            await_restore_update(&shell, cx, |store| !store.chat_loading());
+            await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some(id)));
         };
         assert_eq!(pane_outlines(&shell, cx), [None]);
         assert_eq!(row("sidebar-thread-thread-1", cx), None);
@@ -12098,7 +12140,7 @@ pub(crate) mod tests {
         wait(settle, cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-1"));
             assert!(!store.is_thread_open("draft-1"));
         });
     }
@@ -12199,7 +12241,7 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("secondary-1");
         draw(cx);
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
+            assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
         assert_eq!(
@@ -12232,7 +12274,9 @@ pub(crate) mod tests {
             store.show_thread_replacing("thread-3".into(), Some("thread-2".into()), cx)
         });
         serve_thread(&host, "thread-3");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-3"))
+        });
         draw(cx);
         assert_eq!(
             pane_threads(&shell, cx),
@@ -12249,7 +12293,9 @@ pub(crate) mod tests {
         cx.update(|window, cx| window.blur(cx));
         store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-2"))
+        });
         draw(cx);
         assert_eq!(
             pane_threads(&shell, cx),
@@ -12478,10 +12524,12 @@ pub(crate) mod tests {
             loop {
                 driver.step(cx, &store);
                 draw(cx);
+                let page = shell.read_with(cx, |shell, cx| shell.page_thread(cx));
                 if store.read_with(cx, |store, _| {
-                    !store.chat_loading()
+                    page.is_some()
+                        && !store.chat_loading_for(page.as_deref())
                         && store
-                            .chat_active_session()
+                            .chat_active_session_for(page.as_deref())
                             .is_some_and(|(_, cwd, draft)| cwd == expected.root && draft)
                 }) {
                     break;
@@ -12547,7 +12595,7 @@ pub(crate) mod tests {
                     });
                 }
             }
-            let selected = store.read_with(cx, |store, _| store.legacy_focus());
+            let selected = shell.read_with(cx, |shell, cx| shell.page_thread(cx));
             assert!(selected.is_some());
             if reopen {
                 assert_eq!(
@@ -12590,7 +12638,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
         }
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| !store.chat_loading_for(None));
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         for (width, selector) in [(1024., "toggle-sidebar"), (393., "compact-search")] {
             if width < 900. {
@@ -13567,7 +13615,9 @@ pub(crate) mod tests {
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+                store.baseline_ready()
+                    && !store.threads_loading()
+                    && !store.chat_loading_for(Some("first"))
             })
         });
         resize(cx, 1600.);
@@ -13626,7 +13676,9 @@ pub(crate) mod tests {
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+                store.baseline_ready()
+                    && !store.threads_loading()
+                    && !store.chat_loading_for(Some("first"))
             })
         });
         let search = shell.read_with(cx, |shell, cx| {
@@ -13720,7 +13772,9 @@ pub(crate) mod tests {
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+                store.baseline_ready()
+                    && !store.threads_loading()
+                    && !store.chat_loading_for(Some("first"))
             })
         });
         resize(cx, 1200.);
@@ -13737,8 +13791,8 @@ pub(crate) mod tests {
         cx.simulate_keystrokes(second_key);
         draw(cx);
         assert_eq!(
-            store
-                .read_with(cx, |store, _| store.legacy_focus())
+            shell
+                .read_with(cx, |shell, cx| shell.page_thread(cx))
                 .as_deref(),
             Some("first"),
             "model picker must keep number keys"
@@ -13757,12 +13811,14 @@ pub(crate) mod tests {
             cx.simulate_keystrokes(keys);
             driver.wait_until(cx, &store, "selected thread baseline", |cx| {
                 store.read_with(cx, |store, _| {
-                    store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
+                    store.baseline_ready()
+                        && !store.threads_loading()
+                        && !store.chat_loading_for(Some(expected))
                 })
             });
             assert_eq!(
-                store
-                    .read_with(cx, |store, _| store.legacy_focus())
+                shell
+                    .read_with(cx, |shell, cx| shell.page_thread(cx))
                     .as_deref(),
                 Some(expected),
                 "{keys}"
@@ -13772,8 +13828,8 @@ pub(crate) mod tests {
         draw(cx);
         cx.simulate_keystrokes(second_key);
         assert_eq!(
-            store
-                .read_with(cx, |store, _| store.legacy_focus())
+            shell
+                .read_with(cx, |shell, cx| shell.page_thread(cx))
                 .as_deref(),
             Some("second"),
             "shortcuts work without a focused input"
@@ -13793,8 +13849,8 @@ pub(crate) mod tests {
         });
         cx.simulate_keystrokes("ctrl-tab");
         assert_eq!(
-            store
-                .read_with(cx, |store, _| store.legacy_focus())
+            shell
+                .read_with(cx, |shell, cx| shell.page_thread(cx))
                 .as_deref(),
             Some("second"),
             "compact navigation uses the same shortcuts"
@@ -13973,7 +14029,7 @@ pub(crate) mod tests {
 
         // The thread, the draft and the composer itself all survive.
         assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
+            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
             Some("thread-1".into())
         );
         composer.read_with(cx, |composer, cx| {
@@ -14045,7 +14101,7 @@ pub(crate) mod tests {
         restore_index(&shell, &host, true, cx);
         restore_status(&shell, &host, cx);
         await_restore_update(&shell, cx, |store| {
-            store.preview_active_identity().is_some()
+            store.preview_key_for("thread-a").is_some()
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
@@ -14059,9 +14115,9 @@ pub(crate) mod tests {
             shell.attachment.as_ref().unwrap().last_input.clone()
         });
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
-        let key = store.read_with(cx, |store, _| store.preview_active_identity().unwrap().1);
+        let key = store.read_with(cx, |store, _| store.preview_key_for("thread-a").unwrap());
         store.update(cx, |store, cx| {
-            store.toggle_preview_panel(cx);
+            store.toggle_tab_panel_for("thread-a", tcode_core::ui::RightTab::Preview, cx);
             store.set_preview_url(&key, "https://example.com/".into(), cx);
         });
         lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
@@ -14700,7 +14756,9 @@ pub(crate) mod tests {
         as_mobile(cx);
         resize(cx, 1024.);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+        });
         draw_until(&shell, cx, &host, "diff-body", None);
         resize(cx, 899.);
         shell.update(cx, |shell, cx| shell.go(Destination::Panel, cx));
@@ -14975,7 +15033,7 @@ pub(crate) mod tests {
             );
         });
         assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
+            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
             Some("thread-1".into())
         );
     }
@@ -15232,7 +15290,8 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         await_restore_update(&shell, cx, |store| {
-            store.composer_state().turn_running && !store.chat_loading()
+            store.composer_state_for(Some(session)).turn_running
+                && !store.chat_loading_for(Some(session))
         });
         resize(cx, 1024.);
         assert!(cx.debug_bounds("working-status-19").is_some());
@@ -15370,7 +15429,9 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount(cx);
         seed_wide_diff(&shell, &host, cx);
         resize(cx, 1024.);
-        store_of(&shell, cx).update(cx, |store, cx| store.toggle_diff_panel(cx));
+        store_of(&shell, cx).update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+        });
         draw_until(&shell, cx, &host, "diff-body", None);
         assert!(cx.debug_bounds("right-panel-tabs").is_some());
         assert!(cx.debug_bounds("diff-close").is_some());
@@ -15459,7 +15520,9 @@ pub(crate) mod tests {
         serve_thread(&host, "thread-1");
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
-        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        await_restore_update(&shell, cx, |store| {
+            !store.chat_loading_for(Some("thread-1"))
+        });
         resize(cx, 1200.);
         crate::test_frames::draw_settled(cx);
         let width = |cx: &mut VisualTestContext| {
@@ -15651,7 +15714,9 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         resize(cx, 1600.);
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+        });
         draw_until(&shell, cx, &host, "diff-body", None);
         let chosen = Rc::new(Cell::new(px(560.)));
 
@@ -15742,7 +15807,9 @@ pub(crate) mod tests {
 
         // Expanded, the panel takes everything beside the sidebar, however
         // wide the window; restored, it is back at the width the user chose.
-        store.update(cx, |store, cx| store.toggle_diff_expanded(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_diff_expanded_for(Some("thread-1"), cx)
+        });
         for width in [1600., 2000.] {
             resize(cx, width);
             draw_until(&shell, cx, &host, "diff-body", None);
@@ -15767,7 +15834,9 @@ pub(crate) mod tests {
             let edge = cx.debug_bounds("right-panel").expect("the expanded panel");
             drag(cx, gpui::point(edge.left(), px(400.)), px(12.));
         }
-        store.update(cx, |store, cx| store.toggle_diff_expanded(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_diff_expanded_for(Some("thread-1"), cx)
+        });
         walk(cx, &[1600.]);
 
         window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
@@ -15779,7 +15848,9 @@ pub(crate) mod tests {
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         draw(cx);
         assert!(
-            !store.read_with(cx, |store, _| store.panel_state().right_panel_open),
+            !store.read_with(cx, |store, _| store
+                .panel_state_for(Some("thread-1"))
+                .right_panel_open),
             "nothing covers the close button"
         );
     }
@@ -15807,7 +15878,9 @@ pub(crate) mod tests {
         });
         let open = |cx: &mut VisualTestContext| {
             cx.update(|window, cx| input.focus(window, cx));
-            store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+            store.update(cx, |store, cx| {
+                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+            });
             settle_panes(cx);
             cx.update(|window, _| assert!(!input.is_focused(window), "the panel has the keyboard"));
         };
@@ -15825,8 +15898,12 @@ pub(crate) mod tests {
         );
         draw(cx);
         cx.update(|window, _| assert!(input.is_focused(window), "the press reaches the chat"));
-        assert!(store.read_with(cx, |store, _| store.panel_state().right_panel_open));
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        assert!(store.read_with(cx, |store, _| {
+            store.panel_state_for(Some("thread-1")).right_panel_open
+        }));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+        });
         settle_panes(cx);
 
         open(cx);
@@ -15865,7 +15942,9 @@ pub(crate) mod tests {
         let diff = cx.debug_bounds("menu-item-2").expect("the diff's row");
         cx.simulate_click(diff.center(), gpui::Modifiers::default());
         draw_until(&shell, cx, &host, "diff-body", None);
-        assert!(store.read_with(cx, |store, _| store.panel_state().right_panel_open));
+        assert!(store.read_with(cx, |store, _| {
+            store.panel_state_for(Some("thread-1")).right_panel_open
+        }));
     }
 
     /// The right panel slides in from the window's edge over the chat as it
@@ -15895,7 +15974,9 @@ pub(crate) mod tests {
             cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
             draw(cx);
         };
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+        });
         draw(cx);
         half_way(cx);
         let opening = left(cx).expect("the panel slides in");
@@ -15909,13 +15990,17 @@ pub(crate) mod tests {
 
         cx.simulate_keystrokes("escape");
         draw(cx);
-        assert!(!store.read_with(cx, |store, _| store.panel_state().right_panel_open));
+        assert!(!store.read_with(cx, |store, _| {
+            store.panel_state_for(Some("thread-1")).right_panel_open
+        }));
         half_way(cx);
         let closing = left(cx).expect("the panel slides out");
         assert!(closing > open && closing < px(1600.), "{closing:?}");
         assert!(cx.debug_bounds("diff-body").is_some(), "drawn as it goes");
 
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+        });
         draw(cx);
         let turning = left(cx).expect("the panel turns back");
         assert!(
@@ -15947,7 +16032,7 @@ pub(crate) mod tests {
             shell.attachment.as_ref().unwrap().preview.clone()
         });
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
-        let key = store.read_with(cx, |store, _| store.preview_active_identity().unwrap().1);
+        let key = store.read_with(cx, |store, _| store.preview_key_for("thread-1").unwrap());
         let page = |cx: &mut VisualTestContext| {
             lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key))
         };
@@ -15985,7 +16070,7 @@ pub(crate) mod tests {
         };
         let open = |cx: &mut VisualTestContext| {
             store.update(cx, |store, cx| {
-                store.toggle_preview_panel(cx);
+                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Preview, cx);
                 store.set_preview_url(&key, "https://example.com/".into(), cx);
             });
             lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
@@ -15993,7 +16078,9 @@ pub(crate) mod tests {
         };
 
         open(cx);
-        store.update(cx, |store, cx| store.close_diff_panel(cx));
+        store.update(cx, |store, cx| {
+            store.close_right_panel_for(Some("thread-1"), cx)
+        });
         draw(cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         draw(cx);
@@ -16014,7 +16101,9 @@ pub(crate) mod tests {
         arrive(cx);
         assert!(store.read_with(cx, |store, _| store.turn_running_for("thread-1")));
         open(cx);
-        store.update(cx, |store, cx| store.close_diff_panel(cx));
+        store.update(cx, |store, cx| {
+            store.close_right_panel_for(Some("thread-1"), cx)
+        });
         crate::test_frames::draw_settled(cx);
         assert!(page(cx), "the running turn's agent may drive the page");
         working(false);
@@ -16167,16 +16256,22 @@ pub(crate) mod tests {
         };
         let closed = at_rest(cx);
 
-        store.update(cx, |store, cx| store.toggle_terminal_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
+        });
         let opening = partway(cx);
         let open = at_rest(cx);
-        let height = store.read_with(cx, |store, _| store.panel_state().terminal_height);
+        let height = store.read_with(cx, |store, _| {
+            store.panel_state_for(Some("thread-1")).terminal_height
+        });
         assert_eq!(closed - open, px(height), "the drawer rests at its height");
         assert!(
             open < opening && opening < closed,
             "the drawer is partway up: {opening:?} between {open:?} and {closed:?}"
         );
-        store.update(cx, |store, cx| store.toggle_terminal_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
+        });
         let closing = partway(cx);
         assert!(
             open < closing && closing < closed,
@@ -16197,7 +16292,9 @@ pub(crate) mod tests {
         cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+        });
         draw_until(&shell, cx, &host, "diff-body", None);
 
         let press_expand = |cx: &mut VisualTestContext| {
@@ -16208,7 +16305,9 @@ pub(crate) mod tests {
         };
         let expanded = press_expand(cx);
         assert!(
-            store.read_with(cx, |store, _| store.panel_state().right_panel_expanded),
+            store.read_with(cx, |store, _| store
+                .panel_state_for(Some("thread-1"))
+                .right_panel_expanded),
             "the press expands the panel"
         );
         assert!(
@@ -16217,7 +16316,9 @@ pub(crate) mod tests {
         );
         let restored = press_expand(cx);
         assert!(
-            !store.read_with(cx, |store, _| store.panel_state().right_panel_expanded),
+            !store.read_with(cx, |store, _| store
+                .panel_state_for(Some("thread-1"))
+                .right_panel_expanded),
             "the second press restores it"
         );
         assert_eq!(
@@ -16244,7 +16345,7 @@ pub(crate) mod tests {
         );
 
         store.update(cx, |store, cx| {
-            store.set_right_tab(RightTab::PullRequests, cx)
+            store.set_right_tab_for(Some("thread-1"), RightTab::PullRequests, cx)
         });
         draw(cx);
         let changed = tcode_protocol::GitDiffResult {
@@ -16259,7 +16360,9 @@ pub(crate) mod tests {
             }],
             ..Default::default()
         };
-        store.update(cx, |store, cx| store.set_right_tab(RightTab::Diff, cx));
+        store.update(cx, |store, cx| {
+            store.set_right_tab_for(Some("thread-1"), RightTab::Diff, cx)
+        });
         assert_eq!(
             draw_until(&shell, cx, &host, "diff-body", Some(&changed)),
             1,
@@ -16363,7 +16466,9 @@ pub(crate) mod tests {
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         resize(cx, 1200.);
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for(session, tcode_core::ui::RightTab::Diff, cx)
+        });
     }
 
     /// Lets the client run and draw while the host holds every working-tree read; any other
@@ -16858,7 +16963,9 @@ pub(crate) mod tests {
         settle_frames(cx);
         let _ = sent(&host);
         let toggle = |cx: &mut VisualTestContext| {
-            store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+            store.update(cx, |store, cx| {
+                store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+            });
         };
         let off = button_fill("diff-panel", cx);
         toggle(cx);
@@ -17147,7 +17254,7 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_panes(cx);
         serve_finished_turns(&host, "thread-1", 1, true);
         await_restore_update(&shell, cx, |store| {
-            store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
         });
         settle_frames(cx);
         assert!(cx.debug_bounds("turn-time-row").is_some());
@@ -17173,7 +17280,7 @@ pub(crate) mod tests {
             draw(cx);
             assert_eq!(pane_threads(&shell, cx), [Some(id.into())]);
             let shown = store.read_with(cx, |store, _| {
-                store.with_active_timeline(|timeline| timeline.turns.len())
+                store.with_timeline_for(Some(id), |timeline| timeline.turns.len())
             });
             assert_eq!(shown, Some(turns));
             let drawn = |cx: &mut VisualTestContext| {
@@ -17212,7 +17319,7 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_panes(cx);
         serve_finished_turns(&host, "thread-1", 1, false);
         await_restore_update(&shell, cx, |store| {
-            store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
         });
         for width in [2000., 900., 640.] {
             resize(cx, width);
@@ -17261,7 +17368,7 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_panes(cx);
         serve_finished_turns(&host, "thread-1", 1, false);
         await_restore_update(&shell, cx, |store| {
-            store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
         });
         settle_frames(cx);
         let total = cx

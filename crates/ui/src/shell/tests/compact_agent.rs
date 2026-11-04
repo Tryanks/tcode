@@ -119,7 +119,7 @@ fn mount_lead_scrolled(
     as_mobile(cx);
     serve_long_lead(&host, "thread-1");
     await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(24)
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(24)
     });
     cx.simulate_resize(size(px(WIDTH), px(852.)));
     settle_panes(cx);
@@ -177,7 +177,7 @@ fn open_agent_served(
 }
 
 fn focused(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> Option<String> {
-    store_of(shell, cx).read_with(cx, |store, _| store.legacy_focus())
+    shell.read_with(cx, |shell, cx| shell.page_thread(cx))
 }
 
 /// The edge swipe from an agent to its lead: the agent's page is at the

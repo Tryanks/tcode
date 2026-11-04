@@ -602,7 +602,7 @@ impl WorkspaceStore {
         }
     }
 
-    pub(super) fn open_threads(&self) -> Vec<String> {
+    pub(crate) fn open_threads(&self) -> Vec<String> {
         self.threads
             .iter()
             .filter(|(_, thread)| thread.open)
