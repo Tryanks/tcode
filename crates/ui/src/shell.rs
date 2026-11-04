@@ -375,6 +375,7 @@ enum ThreadBody {
 struct ThreadPage {
     page: EntityId,
     chat: Entity<ChatView>,
+    frame: Entity<crate::chat::ChatFrame>,
     session_id: String,
 }
 
@@ -3811,6 +3812,7 @@ impl AppShell {
         let lead_chat = pane.update(cx, |pane, cx| pane.replace_chat(chat, None, cx));
         attachment.leads.push(ThreadPage {
             page,
+            frame: lead_chat.read(cx).frame(),
             chat: lead_chat,
             session_id: lead,
         });
@@ -3850,6 +3852,7 @@ impl AppShell {
         if let Some(attachment) = &mut self.attachment {
             attachment.leads.push(ThreadPage {
                 page,
+                frame: chat.read(cx).frame(),
                 chat,
                 session_id: lead,
             });
@@ -3890,6 +3893,7 @@ impl AppShell {
         if let (Some(page), Some(session_id)) = (top, agent) {
             attachment.leaving.push(ThreadPage {
                 page,
+                frame: chat.read(cx).frame(),
                 chat,
                 session_id,
             });
@@ -3980,16 +3984,16 @@ impl AppShell {
     /// then its chat rising over it.
     fn compact_thread_body(
         &mut self,
-        kept: Option<Entity<ChatView>>,
+        kept: Option<Entity<crate::chat::ChatFrame>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Under the id and layer of a body at rest, so what the chat keeps by
         // element is the same on either side of the page keeping it.
-        if let Some(chat) = kept {
+        if let Some(frame) = kept {
             return crate::motion::Scene::default()
                 .sample("compact-thread-body", ThreadBody::Chat, window, cx)
-                .render([chat.into_any_element()])
+                .render([frame.into_any_element()])
                 .into_any_element();
         }
         let pending = self.pending_navigation_restore.is_some();
@@ -4004,6 +4008,7 @@ impl AppShell {
         // A chat comes in over what the page shows once it appears; until
         // then it readies itself unseen beneath, and the page holds still.
         let chat = attachment.chat(cx);
+        let chat_frame = attachment.page().read(cx).frame();
         let holding = attachment
             .thread_body_shown
             .filter(|shown| *shown != wanted && wanted != ThreadBody::Skeleton)
@@ -4021,7 +4026,7 @@ impl AppShell {
             .scenes()
             .map(|key| match key {
                 ThreadBody::Skeleton => crate::material::loading_skeleton(cx),
-                ThreadBody::Chat => chat.clone().into_any_element(),
+                ThreadBody::Chat => chat_frame.clone().into_any_element(),
             })
             .collect();
         frame
@@ -4032,7 +4037,7 @@ impl AppShell {
                         .absolute()
                         .inset_0()
                         .opacity(0.)
-                        .child(chat.clone())
+                        .child(chat_frame.clone())
                         .child(crate::motion::shield()),
                 )
             })
@@ -4308,7 +4313,7 @@ impl AppShell {
             .copied();
         let back = self.back_action(beneath.unwrap_or(Destination::Thread).back_label(), cx);
         let body =
-            self.compact_thread_body(kept.as_ref().map(|kept| kept.chat.clone()), window, cx);
+            self.compact_thread_body(kept.as_ref().map(|kept| kept.frame.clone()), window, cx);
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };

@@ -152,6 +152,11 @@ pub struct ChatView {
     /// The thread this view shows and acts on.
     session_id: Option<String>,
     edges: WindowEdges,
+    /// What lays the view out ([`ChatFrame`]), and the width it gave the
+    /// view this frame, which the header's tiers, the rail's room and the
+    /// column's centre follow.
+    frame: Entity<ChatFrame>,
+    width: gpui::Pixels,
     /// The close button at the header's right end, while the conversation's
     /// pane shares the column: the pane's focus handle, faded in and out by
     /// the shell, which samples it above the dock.
@@ -501,11 +506,17 @@ impl ChatView {
             .panel_state_for(session_id.as_deref())
             .terminal_open;
 
+        let frame = {
+            let chat = cx.entity().downgrade();
+            cx.new(|_| ChatFrame { chat, width: None })
+        };
         let mut this = Self {
             pull_requests,
             workspace_store,
             session_id,
             edges: WindowEdges::BOTH,
+            frame,
+            width: px(0.),
             pane_close: None,
             pane_controls: None,
             header_scroll: gpui::ScrollHandle::default(),
@@ -587,6 +598,11 @@ impl ChatView {
 
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// What draws the view, wherever it is drawn.
+    pub(crate) fn frame(&self) -> Entity<ChatFrame> {
+        self.frame.clone()
     }
 
     /// How wide the pane drawing this view is, its right panel's room
@@ -715,6 +731,37 @@ impl ChatView {
         self.scene_shown = false;
         self.scene_at = cx.background_executor().now();
         self.painted_rows.set(None);
+    }
+}
+
+/// Lays a conversation out at the width it is given this frame, and hands
+/// the conversation that width before it is laid out. A view of its own
+/// whose render is only the query: gpui-fast lays a container query's content
+/// out as a layout root of its own and draws no view around one again from
+/// last frame, so a query inside the conversation would build all of it
+/// again for any change in it, a keystroke or a terminal's output.
+pub(crate) struct ChatFrame {
+    chat: gpui::WeakEntity<ChatView>,
+    /// The width last handed to the conversation.
+    width: Option<gpui::Pixels>,
+}
+
+impl Render for ChatFrame {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (frame, chat) = (cx.weak_entity(), self.chat.clone());
+        gpui::container_query(move |size, _, cx| {
+            let Some(chat) = chat.upgrade() else {
+                return div().into_any_element();
+            };
+            let handed = frame
+                .update(cx, |frame, _| frame.width.replace(size.width))
+                .ok()
+                .flatten();
+            if handed != Some(size.width) {
+                chat.update(cx, |chat, _| chat.width = size.width);
+            }
+            chat.into_any_element()
+        })
     }
 }
 
@@ -931,7 +978,7 @@ impl Render for ChatView {
                 v_flex()
                     .size_full()
                     .when(!compact && !self.is_side(), |el| {
-                        el.child(self.render_header(None, false, None, None, cx))
+                        el.child(self.render_header(None, false, None, None, window, cx))
                     })
                     .child(self.render_empty_state(window, cx))
                     .into_any_element(),
@@ -946,7 +993,7 @@ impl Render for ChatView {
         if let Some(active) = active.filter(|_| !loading) {
             layers.push((
                 SURFACE_THREAD,
-                self.render_thread(active, show_jump_to_latest, cx),
+                self.render_thread(active, show_jump_to_latest, window, cx),
             ));
         }
         // An agent beside its lead keeps its header, and its way back, while
@@ -1027,6 +1074,7 @@ impl ChatView {
         &mut self,
         (title, cwd, is_draft): (String, std::path::PathBuf, bool),
         show_jump_to_latest: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
@@ -1038,21 +1086,23 @@ impl ChatView {
                 .map(|id| crate::agents_panel::Agents::of(store, id, cx))
                 .filter(|agents| !agents.is_empty())
         };
-        let header = self.render_header(title, is_draft, Some(cwd.clone()), agents.as_ref(), cx);
-        // Laid out at the width the header leaves it in this frame, before
-        // anything in it is: the rail's room moves the rows and the composer.
-        let view = cx.entity();
-        let body = gpui::container_query(move |size, window, cx| {
-            view.update(cx, |this, cx| {
-                this.render_body(
-                    size.width,
-                    (&cwd, is_draft, agents),
-                    show_jump_to_latest,
-                    window,
-                    cx,
-                )
-            })
-        });
+        let header = self.render_header(
+            title,
+            is_draft,
+            Some(cwd.clone()),
+            agents.as_ref(),
+            window,
+            cx,
+        );
+        // The body is as wide as the view: the rail's room moves the rows and
+        // the composer.
+        let body = self.render_body(
+            self.width,
+            (&cwd, is_draft, agents),
+            show_jump_to_latest,
+            window,
+            cx,
+        );
         v_flex()
             .size_full()
             .when(!compact && !self.is_side(), |el| el.child(header))
@@ -1569,7 +1619,7 @@ pub(crate) mod tests {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -1655,7 +1705,7 @@ pub(crate) mod tests {
         );
         let (store, window_state, session_id) = seed_chat(cx, plain.clone());
         window_state.update(cx, |state, _| state.compact = true);
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -1749,9 +1799,12 @@ pub(crate) mod tests {
             bottom: gpui::Pixels,
         }
         impl Render for OccludedChat {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 // Reserve the system-occluded area, as the shell's window seam does.
-                div().size_full().pb(self.bottom).child(self.chat.clone())
+                div()
+                    .size_full()
+                    .pb(self.bottom)
+                    .child(self.chat.read(cx).frame())
             }
         }
         let mut timeline = synthetic_markdown_timeline(30);
@@ -1836,8 +1889,8 @@ pub(crate) mod tests {
         };
         struct Around(Entity<ChatView>);
         impl Render for Around {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().child(self.0.clone())
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.read(cx).frame())
             }
         }
         let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(6));
@@ -1866,6 +1919,34 @@ pub(crate) mod tests {
                 "the idle chat asked for another frame"
             );
         }
+    }
+
+    /// A window drawing the conversation `build` makes as the panes draw
+    /// one: through its frame.
+    pub(crate) fn add_chat_window(
+        cx: &mut TestAppContext,
+        build: impl FnOnce(&mut gpui::Window, &mut gpui::Context<ChatView>) -> ChatView,
+    ) -> (Entity<ChatView>, &mut gpui::VisualTestContext) {
+        struct Framed {
+            chat: Entity<ChatView>,
+            frame: Entity<super::ChatFrame>,
+        }
+        impl gpui::Render for Framed {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                self.frame.clone()
+            }
+        }
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let chat = cx.new(|cx| build(window, cx));
+            let frame = chat.read(cx).frame();
+            Framed { chat, frame }
+        });
+        let chat = root.read_with(cx, |root, _| root.chat.clone());
+        (chat, cx)
     }
 
     pub(crate) fn entry(id: &str, content: EntryContent) -> Arc<TimelineEntry> {
@@ -2471,7 +2552,7 @@ pub(crate) mod tests {
         ) -> (Entity<ChatView>, &'a mut VisualTestContext) {
             let store = self.store.clone();
             let window_state = cx.new(|_| WindowState::new(false));
-            let (view, cx) = cx.add_window_view(|window, cx| {
+            let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store, window_state, Some(THREAD.to_owned()), window, cx)
             });
             cx.simulate_resize(size);

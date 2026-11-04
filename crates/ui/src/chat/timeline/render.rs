@@ -1817,7 +1817,7 @@ mod tests {
 
         let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (_view, cx) = cx.add_window_view(|window, cx| {
+        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
         });
         let cx: &mut VisualTestContext = cx;
@@ -1866,7 +1866,7 @@ mod tests {
 
         let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (_view, cx) = cx.add_window_view(|window, cx| {
+        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
         });
         let cx: &mut VisualTestContext = cx;
@@ -1905,7 +1905,7 @@ mod tests {
                 let fill = hover.reveal(key, window, cx);
                 self.drawn.borrow_mut().insert(key, fill);
             }
-            gpui::div().size_full().child(self.chat.clone())
+            gpui::div().size_full().child(self.chat.read(cx).frame())
         }
     }
 
@@ -2002,7 +2002,7 @@ mod tests {
             .push(entry("assistant", assistant("Done.")));
 
         let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
         });
         let cx: &mut VisualTestContext = cx;
@@ -2093,7 +2093,7 @@ mod tests {
         ));
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -2247,7 +2247,7 @@ mod tests {
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let (_, cx) = cx.add_window_view(|window, cx| {
+        let (_, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -2455,7 +2455,7 @@ mod tests {
         });
 
         let window_state = cx.new(|_| WindowState::new(false));
-        let (chat, cx) = cx.add_window_view(|window, cx| {
+        let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -2717,7 +2717,7 @@ This begins after the hard break."#;
         });
         let window_state = cx.new(|_| WindowState::new(false));
 
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 workspace_store.clone(),
                 window_state,
@@ -2804,7 +2804,7 @@ This begins after the hard break."#;
             ]);
             let (workspace_store, window_state, session_id, _driver) =
                 seed_chat_with_history_on(cx, timeline, false, Some(provider));
-            let (_view, window) = cx.add_window_view(|window, cx| {
+            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
             });
             let window: &mut VisualTestContext = window;
@@ -2852,7 +2852,7 @@ This begins after the hard break."#;
         }];
         timeline.entries = vec![entry("user", user_item("go")), command_with_output("first")];
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
-        let (_view, cx) = cx.add_window_view(|window, cx| {
+        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,

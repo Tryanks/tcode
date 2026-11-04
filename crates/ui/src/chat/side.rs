@@ -124,6 +124,7 @@ struct SideHost {
     /// The lead's thread it was opened beside.
     lead: String,
     chat: Entity<ChatView>,
+    frame: Entity<super::ChatFrame>,
     /// Whether the host opened the thread, and so closes it.
     opened: bool,
     /// What it was opened from, in the lead's [`ChatView::side_origins`],
@@ -585,6 +586,7 @@ impl ChatView {
                 SideHost {
                     session_id: id.clone(),
                     lead: lead.clone(),
+                    frame: chat.read(cx).frame(),
                     chat,
                     opened: false,
                     origin: None,
@@ -1250,13 +1252,13 @@ impl ChatView {
             .relative()
             .key_context(SIDE_CONTEXT)
             .on_action(cx.listener(|this, _: &CloseSide, window, cx| this.close_side(window, cx)))
-            .children(under.map(|under| div().absolute().inset_0().child(under.chat.clone())))
+            .children(under.map(|under| div().absolute().inset_0().child(under.frame.clone())))
             .children(current.map(|current| {
                 div()
                     .absolute()
                     .inset_0()
                     .when(under.is_some(), |layer| layer.opacity(swap))
-                    .child(current.chat.clone())
+                    .child(current.frame.clone())
             }))
             .into_any_element()
     }

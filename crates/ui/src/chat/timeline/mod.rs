@@ -718,7 +718,7 @@ mod tests {
 
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -820,7 +820,7 @@ mod tests {
             ),
         ];
         let (store, window_state, session_id) = seed_chat(cx, timeline);
-        let (_view, cx) = cx.add_window_view(|window, cx| {
+        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });
         for (mode, width) in [
@@ -963,7 +963,7 @@ mod tests {
             "the recorded events are the log's only rows: {page:?}"
         );
         let window_state = cx.new(|_| WindowState::new(false));
-        let (chat, cx) = cx.add_window_view(|window, cx| {
+        let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -981,7 +981,7 @@ mod tests {
         });
 
         let opened = |cx: &mut VisualTestContext| {
-            let view = cx.update(|window, _| window.root::<ChatView>().flatten())?;
+            let view = chat.clone();
             let (row, highlighted, first) = view.read_with(cx, |chat, cx| {
                 let row = chat.list_state.logical_scroll_top().item_ix;
                 (
@@ -1043,8 +1043,8 @@ mod tests {
 
         struct ChatRoot(Entity<ChatView>);
         impl Render for ChatRoot {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.clone()
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.read(cx).frame()
             }
         }
 
@@ -1130,8 +1130,8 @@ mod tests {
         };
         struct TouchChat(Entity<ChatView>);
         impl Render for TouchChat {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.clone()
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.read(cx).frame()
             }
         }
         let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
@@ -1195,8 +1195,8 @@ mod tests {
         };
         struct TouchChat(Entity<ChatView>);
         impl Render for TouchChat {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.clone()
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.read(cx).frame()
             }
         }
         let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
@@ -1278,7 +1278,7 @@ mod tests {
     fn a_drag_right_after_a_flick_scrolls_the_timeline(cx: &mut TestAppContext) {
         use gpui::{point, px};
         let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
@@ -1330,8 +1330,8 @@ mod tests {
 
         struct TouchChat(Entity<ChatView>);
         impl Render for TouchChat {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.clone()
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.read(cx).frame()
             }
         }
         let full = synthetic_markdown_timeline(120);
@@ -1415,8 +1415,8 @@ mod tests {
         use gpui::{Context, IntoElement, Render, Window, px};
         struct TouchChat(Entity<ChatView>);
         impl Render for TouchChat {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.clone()
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.read(cx).frame()
             }
         }
         for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Moved] {
@@ -1589,7 +1589,7 @@ mod tests {
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -1763,7 +1763,7 @@ mod tests {
                     }
                 }
                 self.ready.set(loaded);
-                self.chat.clone()
+                self.chat.read(cx).frame()
             }
         }
         let ready = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -1877,7 +1877,7 @@ mod tests {
         for reduce in [false, true] {
             let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
             cx.update(|cx| cx.set_reduce_motion(reduce));
-            let (view, cx) = cx.add_window_view(|window, cx| {
+            let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store, window_state, Some(session_id), window, cx)
             });
             cx.simulate_resize(gpui::size(px(800.), px(700.)));
@@ -2046,7 +2046,7 @@ mod tests {
                 store.set_session_replica_for_test(session_id.clone(), timeline, cx)
             });
             let window_state = cx.new(|_| WindowState::new(false));
-            let (view, cx) = cx.add_window_view(|window, cx| {
+            let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(
                     store.clone(),
                     window_state,
@@ -2124,8 +2124,8 @@ mod tests {
 
         struct TouchChat(Entity<ChatView>);
         impl Render for TouchChat {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.clone()
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.read(cx).frame()
             }
         }
         let full = synthetic_markdown_timeline(120);
@@ -2294,7 +2294,7 @@ mod tests {
     ) {
         use gpui::{FollowMode, ListOffset, px};
         let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(60));
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
@@ -2405,7 +2405,7 @@ mod tests {
         tail.entries = vec![entry("assistant-1", assistant(&long_answer))];
         let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
@@ -2669,7 +2669,7 @@ mod tests {
             }
             let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
             cx.update(|cx| cx.set_reduce_motion(true));
-            let (view, cx) = cx.add_window_view(|window, cx| {
+            let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(
                     store.clone(),
                     window_state,
@@ -2757,7 +2757,7 @@ mod tests {
                 }
             }
             let (store, window_state, session_id) = seed_chat(cx, timeline);
-            let (view, cx) = cx.add_window_view(|window, cx| {
+            let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store, window_state, Some(session_id), window, cx)
             });
             cx.simulate_resize(size(px(width), px(700.)));
@@ -2799,7 +2799,7 @@ mod tests {
         let (store, window_state, session_id, _driver) =
             seed_chat_with_history(cx, synthetic_markdown_timeline(1), true);
         // Opening the window draws its first frame.
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });
         let cx: &mut VisualTestContext = cx;

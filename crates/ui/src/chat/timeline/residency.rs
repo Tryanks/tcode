@@ -565,7 +565,7 @@ mod tests {
         }
         timeline.entries.push(entry("late", assistant("Done.")));
         let (store, window_state, session_id) = seed_chat(cx, timeline);
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });
         let cx: &mut VisualTestContext = cx;
@@ -608,7 +608,7 @@ mod tests {
         Arc::make_mut(&mut timeline.entries[TARGET + 2]).content =
             assistant("```\nAssistant 40\n```");
         let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
         });
         let cx: &mut VisualTestContext = cx;

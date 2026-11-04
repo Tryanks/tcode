@@ -5062,7 +5062,7 @@ pub(crate) mod tests {
             "a rejected write must be visible without a snapshot"
         );
         let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
-        let (_chat, visual) = cx.add_window_view(|window, cx| {
+        let (_chat, visual) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             crate::chat::ChatView::new(
                 store.clone(),
                 window_state,

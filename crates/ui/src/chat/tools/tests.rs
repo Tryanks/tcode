@@ -74,7 +74,7 @@ impl StoredThread {
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let (_, cx) = cx.add_window_view(|window, cx| {
+        let (_, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
