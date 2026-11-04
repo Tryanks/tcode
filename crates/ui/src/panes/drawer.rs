@@ -104,6 +104,12 @@ fn rest_width(chosen: Pixels, pane: Pixels) -> Rest {
 
 /// What one pane keeps of its drawer. Its tabs are made as it first opens
 /// and stay for the pane's life, what they built let go once it has shut.
+///
+/// An entity of its own rather than the pane's state: the panel is laid out
+/// in the frame's prepaint, once the pane's width is known, and what it
+/// keeps from frame to frame is written there. Written into the pane, that
+/// would draw again every view that reads the pane (the threads list reads
+/// which thread it shows) on the frame after each one the pane draws.
 pub(crate) struct Drawer {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -126,8 +132,6 @@ pub(crate) struct Drawer {
     subject: Option<String>,
     /// The panel's room in the group last frame, while it is drawn.
     laid_out: Option<Pixels>,
-    /// Where the conversation was last painted.
-    conversation: Rc<Cell<Bounds<Pixels>>>,
     /// Where the panel's content holds the keyboard.
     focus: FocusHandle,
     /// What had the keyboard when the reader opened the panel, given back
@@ -174,7 +178,6 @@ impl Drawer {
             split: cx.new(|_| ResizableState::default()),
             subject: None,
             laid_out: None,
-            conversation: Rc::default(),
             focus: cx.focus_handle(),
             return_to: None,
             open: false,
@@ -184,27 +187,126 @@ impl Drawer {
     }
 }
 
-impl ThreadPanel {
-    /// The thread the pane's drawer shows.
-    fn drawer_subject(&self, cx: &App) -> Option<String> {
+/// What the drawer reads of the pane it sits in, as the pane is now.
+struct Host {
+    session_id: Option<String>,
+    chat: Entity<ChatView>,
+    /// The pane's own focus, which a panel narrowing over it takes the
+    /// keyboard from.
+    focus: FocusHandle,
+    /// Whether another pane is drawn over this one.
+    covered: bool,
+    /// Where the pane's conversation was last painted, which the drawer
+    /// records as it paints it.
+    conversation: Rc<Cell<Bounds<Pixels>>>,
+}
+
+impl Host {
+    /// The thread the drawer shows.
+    fn subject(&self, cx: &App) -> Option<String> {
         self.session_id.as_ref()?;
         self.chat.read(cx).drawer_subject().map(str::to_owned)
+    }
+}
+
+impl ThreadPanel {
+    fn drawer_host(&self) -> Host {
+        Host {
+            session_id: self.session_id.clone(),
+            chat: self.chat.clone(),
+            focus: self.focus_handle.clone(),
+            covered: self.zoom.beneath,
+            conversation: self.conversation.clone(),
+        }
     }
 
     /// The Diff, Plan, Agents and Pull Requests tabs of the pane's drawer,
     /// made now if they never showed: the compact layout's panel page shows
     /// the same entity, as a page.
     pub(crate) fn drawer_tabs(&mut self, cx: &mut Context<Self>) -> Entity<DiffPanel> {
-        let subject = self.drawer_subject(cx);
-        let lead = self
+        let host = self.drawer_host();
+        self.drawer
+            .update(cx, |drawer, cx| drawer.tabs_for(&host, cx))
+    }
+
+    /// The Preview tab of the pane's drawer, made now if it never showed.
+    pub(crate) fn drawer_preview(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PreviewPanel> {
+        let host = self.drawer_host();
+        self.drawer
+            .update(cx, |drawer, cx| drawer.preview_for(&host, window, cx))
+    }
+
+    /// The compact layout's panel page shows the Preview tab, or no longer.
+    pub(crate) fn select_compact_preview(
+        &mut self,
+        selected: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !selected && self.drawer.read(cx).preview.is_none() {
+            return;
+        }
+        self.drawer_preview(window, cx).update(cx, |preview, cx| {
+            preview.set_compact_panel_selected(selected, cx)
+        });
+    }
+
+    /// Let go of the page the pane's Preview tab shows, and of its chrome.
+    pub(crate) fn release_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(preview) = self.drawer.read(cx).preview.clone() {
+            preview.update(cx, |preview, cx| preview.release_preview(cx));
+        }
+    }
+
+    /// Hide the pane's page before the layout it sits in goes: a native view
+    /// outlives its element.
+    pub(crate) fn sync_preview(this: &Entity<Self>, cx: &mut App) {
+        if let Some(preview) = this.read(cx).drawer.read(cx).preview.clone() {
+            preview.update(cx, |preview, cx| preview.sync_visibility(cx));
+        }
+    }
+
+    /// Another pane is drawn over this one, or no longer.
+    pub(super) fn set_preview_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
+        if let Some(preview) = self.drawer.read(cx).preview.clone() {
+            PreviewPanel::set_covered(&preview, covered, cx);
+        }
+    }
+
+    /// Where the pane's conversation is drawn: the pane less the panel's room.
+    pub(super) fn conversation_bounds(&self) -> Bounds<Pixels> {
+        self.conversation.get()
+    }
+
+    /// The pane's content once its width is known: `conversation`, and the
+    /// panel while it is drawn.
+    pub(super) fn split(&self, conversation: impl IntoElement + 'static) -> impl IntoElement {
+        let (drawer, host) = (self.drawer.clone(), self.drawer_host());
+        gpui::container_query(move |size, window, cx| {
+            drawer.update(cx, |drawer, cx| {
+                drawer.render_split(&host, conversation, size.width, window, cx)
+            })
+        })
+    }
+}
+
+impl Drawer {
+    /// The Diff, Plan, Agents and Pull Requests tabs, made now if they never
+    /// showed.
+    fn tabs_for(&mut self, host: &Host, cx: &mut Context<Self>) -> Entity<DiffPanel> {
+        let subject = host.subject(cx);
+        let lead = host
             .session_id
             .clone()
-            .filter(|_| self.session_id != subject);
-        let at_corner = self.chat.read(cx).at_window_corner();
-        let tabs = self.drawer.tabs.get_or_insert_with(|| {
-            let (store, window_state) =
-                (self.drawer.store.clone(), self.drawer.window_state.clone());
-            let scene = self.drawer.scene.clone();
+            .filter(|_| host.session_id != subject);
+        let at_corner = host.chat.read(cx).at_window_corner();
+        let tabs = self.tabs.get_or_insert_with(|| {
+            let (store, window_state) = (self.store.clone(), self.window_state.clone());
+            let scene = self.scene.clone();
             cx.new(|cx| {
                 let mut tabs = DiffPanel::new(store, window_state, subject.clone(), cx);
                 tabs.share_scene(&scene, cx);
@@ -218,104 +320,62 @@ impl ThreadPanel {
         tabs
     }
 
-    /// The Preview tab of the pane's drawer, made now if it never showed.
-    pub(crate) fn drawer_preview(
+    /// The Preview tab, made now if it never showed.
+    fn preview_for(
         &mut self,
+        host: &Host,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<PreviewPanel> {
-        let subject = self.drawer_subject(cx);
-        let at_corner = self.chat.read(cx).at_window_corner();
-        let covered = self.zoom.beneath;
-        let preview = match &self.drawer.preview {
+        let subject = host.subject(cx);
+        let at_corner = host.chat.read(cx).at_window_corner();
+        let preview = match &self.preview {
             Some(preview) => preview.clone(),
             None => {
-                let preview = self.drawer.browser.clone().update(cx, |browser, cx| {
+                let preview = self.browser.clone().update(cx, |browser, cx| {
                     browser.for_pane(subject.clone(), window, cx)
                 });
-                preview.update(cx, |preview, _| preview.share_scene(&self.drawer.scene));
-                self.drawer.preview = Some(preview.clone());
+                preview.update(cx, |preview, _| preview.share_scene(&self.scene));
+                self.preview = Some(preview.clone());
                 preview
             }
         };
         PreviewPanel::set_session(&preview, subject, cx);
         PreviewPanel::set_at_window_corner(&preview, at_corner, cx);
-        PreviewPanel::set_covered(&preview, covered, cx);
+        PreviewPanel::set_covered(&preview, host.covered, cx);
         preview
     }
-
-    /// The compact layout's panel page shows the Preview tab, or no longer.
-    pub(crate) fn select_compact_preview(
-        &mut self,
-        selected: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !selected && self.drawer.preview.is_none() {
-            return;
-        }
-        self.drawer_preview(window, cx).update(cx, |preview, cx| {
-            preview.set_compact_panel_selected(selected, cx)
-        });
-    }
-
-    /// Let go of the page the pane's Preview tab shows, and of its chrome.
-    pub(crate) fn release_preview(&mut self, cx: &mut Context<Self>) {
-        if let Some(preview) = &self.drawer.preview {
-            preview.update(cx, |preview, cx| preview.release_preview(cx));
-        }
-    }
-
-    /// Hide the pane's page before the layout it sits in goes: a native view
-    /// outlives its element.
-    pub(crate) fn sync_preview(this: &Entity<Self>, cx: &mut App) {
-        if let Some(preview) = this.read(cx).drawer.preview.clone() {
-            preview.update(cx, |preview, cx| preview.sync_visibility(cx));
-        }
-    }
-
-    /// Another pane is drawn over this one, or no longer.
-    pub(super) fn set_preview_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
-        if let Some(preview) = &self.drawer.preview {
-            PreviewPanel::set_covered(preview, covered, cx);
-        }
-    }
-
-    /// Where the pane's conversation is drawn: the pane less the panel's room.
-    pub(super) fn conversation_bounds(&self) -> Bounds<Pixels> {
-        self.drawer.conversation.get()
-    }
-
     /// This frame of a pane `pane_width` wide: `conversation`, and the panel
     /// while it is drawn. One group whether or not the panel is open, so the
     /// conversation keeps its place in the tree as the panel comes and goes;
     /// and the panel always in the group's last slot, whatever it is doing,
     /// so what it holds keeps its place as it goes from docked to covering.
-    pub(super) fn render_split(
+    fn render_split(
         &mut self,
+        host: &Host,
         conversation: impl IntoElement,
         pane_width: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let new_scene = self.drawer.scene.show(self.session_id.as_deref());
-        let subject = self.drawer_subject(cx);
+        let new_scene = self.scene.show(host.session_id.as_deref());
+        let subject = host.subject(cx);
         // An open panel changing thread within the pane's own shows the new
         // one at once, content at rest; a shut one slides in on it.
-        if std::mem::replace(&mut self.drawer.subject, subject.clone()) != subject
-            && self.drawer.open
+        if std::mem::replace(&mut self.subject, subject.clone()) != subject
+            && self.open
             && !new_scene
         {
-            self.drawer.scene.restart();
+            self.scene.restart();
         }
-        if let Some(tabs) = &self.drawer.tabs {
+        if let Some(tabs) = &self.tabs {
             DiffPanel::set_session(tabs, subject.clone(), cx);
         }
-        if self.drawer.preview.is_some() {
-            self.drawer_preview(window, cx);
+        if self.preview.is_some() {
+            self.preview_for(host, window, cx);
         }
-        ChatView::set_pane_width(&self.chat, pane_width, cx);
-        let store = self.drawer.store.clone();
+        ChatView::set_pane_width(&host.chat, pane_width, cx);
+        let store = self.store.clone();
         let panel = store.read(cx).panel_state_for(subject.as_deref());
         let panel_open = panel.right_panel_open;
         let right_tab = panel.right_tab;
@@ -327,7 +387,7 @@ impl ThreadPanel {
             .map_or(px(RIGHT_PANEL_WIDTH), |width| px(width as f32));
         let rest = rest_width(chosen, pane_width);
         let covering = rest == Rest::Cover;
-        let motion = self.drawer.motion.clone();
+        let motion = self.motion.clone();
         let slide = motion.transition(
             "right-panel-in",
             if panel_open { 1f32 } else { 0. },
@@ -358,10 +418,10 @@ impl ThreadPanel {
         let lift = cover.max(expand);
         let panel_width = docked + (pane_width - docked) * lift;
 
-        let glide = self.drawer.glide.sample(
+        let glide = self.glide.sample(
             &[Panel::flex(true), Panel::sized(room, panel_open)],
             true,
-            &self.drawer.split,
+            &self.split,
             window,
             cx,
         );
@@ -376,55 +436,53 @@ impl ThreadPanel {
         // widening hands it back, unless the reader went on inside the panel.
         // Another thread in the pane shows its own panel as that thread left
         // it, keyboard and all.
-        let was_open = std::mem::replace(&mut self.drawer.open, panel_open);
-        let was_covering = std::mem::replace(&mut self.drawer.covering, covering);
+        let was_open = std::mem::replace(&mut self.open, panel_open);
+        let was_covering = std::mem::replace(&mut self.covering, covering);
         if new_scene {
-            self.drawer.return_to = None;
+            self.return_to = None;
         } else if panel_open && !was_open {
-            if !self.drawer.focus.contains_focused(window, cx) {
-                self.drawer.return_to = window.focused(cx);
+            if !self.focus.contains_focused(window, cx) {
+                self.return_to = window.focused(cx);
             }
             if covering {
-                self.drawer.focus.focus(window, cx);
+                self.focus.focus(window, cx);
             }
         } else if !panel_open
             && was_open
-            && let Some(previous) = self.drawer.return_to.take()
-            && self.drawer.focus.contains_focused(window, cx)
+            && let Some(previous) = self.return_to.take()
+            && self.focus.contains_focused(window, cx)
         {
             previous.focus(window, cx);
         } else if panel_open && covering && !was_covering {
-            if self.focus_handle.contains_focused(window, cx)
-                && !self.drawer.focus.contains_focused(window, cx)
-            {
-                self.drawer.return_to = window.focused(cx);
-                self.drawer.focus.focus(window, cx);
+            if host.focus.contains_focused(window, cx) && !self.focus.contains_focused(window, cx) {
+                self.return_to = window.focused(cx);
+                self.focus.focus(window, cx);
             }
         } else if panel_open
             && !covering
             && was_covering
-            && self.drawer.focus.is_focused(window)
-            && let Some(previous) = self.drawer.return_to.take()
+            && self.focus.is_focused(window)
+            && let Some(previous) = self.return_to.take()
         {
             previous.focus(window, cx);
         }
         // Once the panel has gone, its content is taken down and what it
         // built to draw is let go. Another thread in the pane keeps its own
         // panel as it left it, page included.
-        let was_drawn = std::mem::replace(&mut self.drawer.drawn, drawn);
-        if !drawn && self.session_id != subject {
-            self.chat.update(cx, |chat, _| chat.release_drawer_agent());
+        let was_drawn = std::mem::replace(&mut self.drawn, drawn);
+        if !drawn && host.session_id != subject {
+            host.chat.update(cx, |chat, _| chat.release_drawer_agent());
         }
         if was_drawn && !drawn {
-            if let Some(tabs) = &self.drawer.tabs {
+            if let Some(tabs) = &self.tabs {
                 tabs.update(cx, |tabs, cx| tabs.release(cx));
             }
             if !new_scene {
-                self.drawer.scene.restart();
+                self.scene.restart();
                 // A frame in the new scene, so the panel's next opening
                 // glides from where this one left it.
                 window.request_animation_frame();
-                if let Some(preview) = &self.drawer.preview {
+                if let Some(preview) = &self.preview {
                     preview.update(cx, |preview, cx| preview.release_page(cx));
                 }
             }
@@ -434,12 +492,12 @@ impl ThreadPanel {
         // new to the group has its size but not yet the conversation's; a
         // room that changes is held at that size this frame, and the state
         // takes it once the frame has laid both out.
-        let moved = drawn && self.drawer.laid_out.replace(room) != Some(room);
+        let moved = drawn && self.laid_out.replace(room) != Some(room);
         if !drawn {
-            self.drawer.laid_out = None;
+            self.laid_out = None;
         }
         if moved && glide.size(1).is_none() {
-            let split = self.drawer.split.clone();
+            let split = self.split.clone();
             window.defer(cx, move |window, cx| {
                 split.update(cx, |state, cx| state.resize_panel(1, room, window, cx));
             });
@@ -458,6 +516,7 @@ impl ThreadPanel {
             let covering_away = panel_width * (1. - slide);
             let away = docked_away + (covering_away - docked_away) * cover;
             let panel = self.render_panel(
+                host,
                 PanelFrame {
                     tab: right_tab,
                     covers: expanded || covering,
@@ -505,7 +564,7 @@ impl ThreadPanel {
                 .h_full()
                 .occlude()
         });
-        let conversation_bounds = self.drawer.conversation.clone();
+        let conversation_bounds = host.conversation.clone();
         let conversation = div()
             .debug_selector(|| "pane-conversation".into())
             .size_full()
@@ -513,7 +572,7 @@ impl ThreadPanel {
             .child(conversation);
         let chat_min = (pane_width - room).min(px(CONVERSATION_MIN_WIDTH));
         let group = h_resizable("right-panel-split")
-            .with_state(&self.drawer.split)
+            .with_state(&self.split)
             .on_resize(move |state, _, cx| {
                 if !expanded
                     && !covering
@@ -541,6 +600,7 @@ impl ThreadPanel {
     /// The panel itself.
     fn render_panel(
         &mut self,
+        host: &Host,
         frame: PanelFrame,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -550,7 +610,6 @@ impl ThreadPanel {
         // its own layer, so the one left fades out under the one chosen; a
         // page leaving the Preview fades natively as it is let go.
         let fade = self
-            .drawer
             .motion
             .layers(
                 "right-panel-body",
@@ -563,18 +622,18 @@ impl ThreadPanel {
             .fill();
         let mut layers: Vec<(usize, AnyElement)> = Vec::new();
         if fade.shows(0) {
-            layers.push((0, self.drawer_tabs(cx).into_any_element()));
+            layers.push((0, self.tabs_for(host, cx).into_any_element()));
         }
         if fade.shows(1) {
-            layers.push((1, self.drawer_preview(window, cx).into_any_element()));
+            layers.push((1, self.preview_for(host, window, cx).into_any_element()));
         }
         // Under the scene's id, so what the tabs key in element state starts
         // over with it.
         let content = div()
-            .id(self.drawer.scene.id("right-panel-scene"))
+            .id(self.scene.id("right-panel-scene"))
             .size_full()
             .child(fade.render(layers).size_full());
-        let closing = self.drawer.store.downgrade();
+        let closing = self.store.downgrade();
         let subject = frame.subject;
         crate::material::lifting_panel(
             div().id("right-panel"),
@@ -586,7 +645,7 @@ impl ThreadPanel {
         .size_full()
         .role(gpui::Role::Complementary)
         .tab_group()
-        .track_focus(&self.drawer.focus)
+        .track_focus(&self.focus)
         .when(frame.covers, |panel| panel.key_context(RIGHT_PANEL_CONTEXT))
         .on_action(move |_: &CloseRightPanel, _, cx| {
             _ = closing.update(cx, |store, cx| {
