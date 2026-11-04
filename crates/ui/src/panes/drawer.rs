@@ -27,8 +27,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, AppContext as _, Axis, Bounds, Context, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    StatefulInteractiveElement as _, Styled as _, Window, actions, div,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::{ElementExt as _, ResizableState, h_resizable, resizable_panel};
@@ -111,6 +111,10 @@ fn rest_width(chosen: Pixels, pane: Pixels) -> Rest {
 /// would draw again every view that reads the pane (the threads list reads
 /// which thread it shows) on the frame after each one the pane draws.
 pub(crate) struct Drawer {
+    /// The pane it draws, whose conversation it lays out beside its panel.
+    pane: WeakEntity<ThreadPanel>,
+    /// The pane's width this frame, handed by [`Split`].
+    pane_width: Pixels,
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     /// The attachment's panel, which owns the pages this pane's shows.
@@ -162,7 +166,33 @@ struct PanelFrame {
     subject: Option<String>,
 }
 
+/// Lays a pane's content out at the pane's width this frame: the drawer
+/// works out the panel's room from it before the conversation is laid out in
+/// what is left.
+pub(super) type Split = crate::width_frame::WidthFrame<Drawer>;
+
+impl Render for Drawer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(pane) = self.pane.upgrade() else {
+            return div().into_any_element();
+        };
+        let host = pane.read(cx).drawer_host();
+        let conversation = ThreadPanel::conversation(&pane, window, cx);
+        self.render_split(&host, conversation, self.pane_width, window, cx)
+    }
+}
+
 impl Drawer {
+    /// The drawer of `pane`.
+    pub(super) fn in_pane(mut self, pane: WeakEntity<ThreadPanel>) -> Self {
+        self.pane = pane;
+        self
+    }
+
+    pub(super) fn set_pane_width(&mut self, width: Pixels) {
+        self.pane_width = width;
+    }
+
     /// Where the drawer keeps its Preview tab once made.
     pub(super) fn preview(&self) -> Rc<std::cell::RefCell<Option<Entity<PreviewPanel>>>> {
         self.preview.clone()
@@ -178,6 +208,8 @@ impl Drawer {
         let scene = crate::motion::Epoch::default();
         scene.show(session_id);
         Self {
+            pane: WeakEntity::new_invalid(),
+            pane_width: px(0.),
             store,
             window_state,
             browser,
@@ -295,17 +327,6 @@ impl ThreadPanel {
     /// Where the pane's conversation is drawn: the pane less the panel's room.
     pub(super) fn conversation_bounds(&self) -> Bounds<Pixels> {
         self.conversation.get()
-    }
-
-    /// The pane's content once its width is known: `conversation`, and the
-    /// panel while it is drawn.
-    pub(super) fn split(&self, conversation: impl IntoElement + 'static) -> impl IntoElement {
-        let (drawer, host) = (self.drawer.clone(), self.drawer_host());
-        gpui::container_query(move |size, window, cx| {
-            drawer.update(cx, |drawer, cx| {
-                drawer.render_split(&host, conversation, size.width, window, cx)
-            })
-        })
     }
 }
 

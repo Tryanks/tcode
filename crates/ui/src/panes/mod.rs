@@ -223,6 +223,9 @@ pub(crate) struct ThreadPanel {
     /// draws.
     frame: Entity<crate::chat::ChatFrame>,
     drawer: Entity<Drawer>,
+    /// What lays the pane's content out at the pane's width: the drawer,
+    /// which draws the conversation and the panel beside it.
+    split: Entity<drawer::Split>,
     /// The drawer's Preview tab once made: the window syncs its page on
     /// every frame, and a read of the drawer, which writes itself as it lays
     /// the pane out, would build the window again after each.
@@ -308,12 +311,22 @@ impl ThreadPanel {
         // A pane taken down mid-fade, or with its glide never landing,
         // lets its lease go with it.
         let release = cx.on_release(|panel: &mut Self, cx| panel.hold(None, cx));
+        let preview = drawer.preview();
+        let drawer = {
+            let pane = cx.weak_entity();
+            cx.new(|_| drawer.in_pane(pane))
+        };
         let mut panel = Self {
             session_id: None,
             chat,
             frame,
-            preview: drawer.preview(),
-            drawer: cx.new(|_| drawer),
+            preview,
+            split: drawer::Split::new(
+                drawer.downgrade(),
+                |drawer: &mut Drawer, width| drawer.set_pane_width(width),
+                cx,
+            ),
+            drawer,
             conversation: Rc::default(),
             focus_handle,
             group: None,
@@ -576,23 +589,34 @@ impl Focusable for ThreadPanel {
     }
 }
 
-impl Render for ThreadPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl ThreadPanel {
+    /// A pane beside others waits for a thread rather than offering the
+    /// empty workspace's way to start one.
+    fn waiting(&self) -> bool {
+        self.among_others && (self.session_id.is_none() || self.awaiting)
+    }
+
+    /// The pane's conversation: its chat, or the waiting hint over a pane
+    /// beside others with no thread yet, the two cross-fading. The drawer
+    /// draws it beside its panel; the pane changes only as a chat's flight
+    /// lands or a closed thread has faded out.
+    pub(super) fn conversation(
+        this: &Entity<Self>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         const WAITING: usize = 0;
         const CHAT: usize = 1;
-        let bounds = self.bounds.clone();
-        let held = self.held;
-        // A pane beside others waits for a thread rather than offering the
-        // empty workspace's way to start one.
-        if self.awaiting && self.chat.read(cx).appears(cx) {
-            self.await_chat(false, cx);
-        }
-        if self.awaiting {
-            window.request_animation_frame();
-        }
-        let waiting = self.among_others && (self.session_id.is_none() || self.awaiting);
-        let content = self
-            .motion
+        let (waiting, awaiting, fading_out, motion) = {
+            let pane = this.read(cx);
+            (
+                pane.waiting(),
+                pane.awaiting,
+                pane.fading_out,
+                pane.motion.clone(),
+            )
+        };
+        let content = motion
             .layers(
                 "pane-content",
                 if waiting { WAITING } else { CHAT },
@@ -602,7 +626,7 @@ impl Render for ThreadPanel {
                 cx,
             )
             .fill();
-        let content = if self.awaiting {
+        let content = if awaiting {
             content.stage(CHAT)
         } else {
             content
@@ -629,35 +653,55 @@ impl Render for ThreadPanel {
                             .absolute()
                             .top(spacing)
                             .right(spacing)
-                            .child(close_button("waiting-pane-close", cx.weak_entity())),
+                            .child(close_button("waiting-pane-close", this.downgrade())),
                     )
                     .into_any_element(),
             ));
         }
         if content.shows(CHAT) {
+            let pane = this.read(cx);
             let flying = !cx.reduce_motion()
-                && self
+                && pane
                     .flight
                     .is_some_and(|(_, at)| flight_progress(at, cx) < 1.);
+            let landed = !flying && pane.flight.is_some();
             let chat = if flying {
                 window.request_animation_frame();
-                self.flying_chat(cx)
+                pane.flying_chat(cx)
             } else {
-                self.flight = None;
-                self.frame.clone().into_any_element()
+                pane.frame.clone().into_any_element()
             };
             layers.push((CHAT, chat));
-        } else if self.fading_out {
+            if landed {
+                this.update(cx, |pane, _| pane.flight = None);
+            }
+        } else if fading_out {
             // The closed thread has faded out: the chat lets it go.
-            self.fading_out = false;
-            cx.defer_in(window, |panel, _, cx| {
-                if panel.session_id.is_none() && !panel.fading_out {
-                    panel.hold(None, cx);
-                    panel.chat.update(cx, |chat, cx| chat.set_session(None, cx));
-                }
+            this.update(cx, |pane, cx| {
+                pane.fading_out = false;
+                cx.defer_in(window, |panel, _, cx| {
+                    if panel.session_id.is_none() && !panel.fading_out {
+                        panel.hold(None, cx);
+                        panel.chat.update(cx, |chat, cx| chat.set_session(None, cx));
+                    }
+                });
             });
         }
-        let conversation = content.render(layers).size_full();
+        content.render(layers).size_full().into_any_element()
+    }
+}
+
+impl Render for ThreadPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let bounds = self.bounds.clone();
+        let held = self.held;
+        if self.awaiting && self.chat.read(cx).appears(cx) {
+            self.await_chat(false, cx);
+        }
+        if self.awaiting {
+            window.request_animation_frame();
+        }
+        let waiting = self.waiting();
         // A slot gliding below the dock's slot floor runs past its split's
         // end, where the split's frame clips it: the pane's bounds are the
         // part that shows. Content held wider than the slot is clipped by
@@ -710,7 +754,7 @@ impl Render for ThreadPanel {
                         None => content.h_full(),
                     })
                     .opacity(held.opacity)
-                    .child(self.split(conversation)),
+                    .child(self.split.clone()),
             )
             .when(self.closing, |pane| pane.child(crate::motion::shield()))
             .child(self.press_catcher(cx))

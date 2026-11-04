@@ -506,10 +506,11 @@ impl ChatView {
             .panel_state_for(session_id.as_deref())
             .terminal_open;
 
-        let frame = {
-            let chat = cx.entity().downgrade();
-            cx.new(|_| ChatFrame { chat, width: None })
-        };
+        let frame = ChatFrame::new(
+            cx.entity().downgrade(),
+            |chat: &mut ChatView, width| chat.width = width,
+            cx,
+        );
         let mut this = Self {
             pull_requests,
             workspace_store,
@@ -734,36 +735,8 @@ impl ChatView {
     }
 }
 
-/// Lays a conversation out at the width it is given this frame, and hands
-/// the conversation that width before it is laid out. A view of its own
-/// whose render is only the query: gpui-fast lays a container query's content
-/// out as a layout root of its own and draws no view around one again from
-/// last frame, so a query inside the conversation would build all of it
-/// again for any change in it, a keystroke or a terminal's output.
-pub(crate) struct ChatFrame {
-    chat: gpui::WeakEntity<ChatView>,
-    /// The width last handed to the conversation.
-    width: Option<gpui::Pixels>,
-}
-
-impl Render for ChatFrame {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (frame, chat) = (cx.weak_entity(), self.chat.clone());
-        gpui::container_query(move |size, _, cx| {
-            let Some(chat) = chat.upgrade() else {
-                return div().into_any_element();
-            };
-            let handed = frame
-                .update(cx, |frame, _| frame.width.replace(size.width))
-                .ok()
-                .flatten();
-            if handed != Some(size.width) {
-                chat.update(cx, |chat, _| chat.width = size.width);
-            }
-            chat.into_any_element()
-        })
-    }
-}
+/// What draws a conversation, at the width it is laid out at this frame.
+pub(crate) type ChatFrame = crate::width_frame::WidthFrame<ChatView>;
 
 /// An opaque backing for a control floating over the timeline: an outline or
 /// ghost button's fill is near transparent, and the chat text scrolling

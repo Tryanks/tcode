@@ -80,6 +80,7 @@ mod touch_selection;
 pub mod typography;
 pub(crate) mod usage;
 pub mod widgets;
+mod width_frame;
 mod window_caption;
 pub(crate) mod window_seam;
 mod window_state;
