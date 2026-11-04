@@ -220,7 +220,8 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
         let mut workspace = Workspace::new(cx);
         let window_state = cx.new(|_| WindowState::new(false));
         let store = workspace.store.clone();
-        let window = cx.add_window(|window, cx| ChatView::new(store, window_state, window, cx));
+        let window =
+            cx.add_window(|window, cx| ChatView::new(store, window_state, None, window, cx));
         let chat = window.root(cx).unwrap();
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         cx.simulate_resize(size(px(1_024.), px(700.)));

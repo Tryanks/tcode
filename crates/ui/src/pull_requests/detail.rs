@@ -296,15 +296,7 @@ impl PullRequestView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = [
-            observe_store_topics(
-                &store,
-                &[
-                    TopicKind::Index,
-                    TopicKind::SessionStatus,
-                    TopicKind::ActiveSession,
-                ],
-                cx,
-            ),
+            observe_store_topics(&store, &[TopicKind::Index, TopicKind::SessionStatus], cx),
             cx.observe(&window_state, |_, _, cx| cx.notify()),
         ];
         Self {

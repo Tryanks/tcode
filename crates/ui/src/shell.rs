@@ -1294,7 +1294,7 @@ impl AppShell {
         let panel_scene = crate::motion::Epoch::default();
         panel_scene.show(observed_session_id.as_deref());
         preview.update(cx, |preview, _| preview.share_scene(&panel_scene));
-        let thread_panel = self.new_pane(&store, window, cx);
+        let thread_panel = self.new_pane(&store, observed_session_id.clone(), window, cx);
         let shell = cx.entity().downgrade();
         let drop_landing = Rc::new(Cell::new(None));
         let drop_target: crate::panes::DropTarget = Rc::new({
@@ -1394,10 +1394,19 @@ impl AppShell {
     fn new_pane(
         &self,
         store: &Entity<WorkspaceStore>,
+        session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ThreadPanel> {
-        let chat = cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), window, cx));
+        let chat = cx.new(|cx| {
+            ChatView::new(
+                store.clone(),
+                self.window_state.clone(),
+                session_id,
+                window,
+                cx,
+            )
+        });
         let shell = cx.entity().downgrade();
         cx.new(|cx| {
             ThreadPanel::new(
@@ -1603,8 +1612,7 @@ impl AppShell {
         let beside = from.read(cx).session_id().map(str::to_owned);
         let store = attachment.link.store.clone();
         let area = attachment.thread_panes.clone();
-        let pane = self.new_pane(&store, window, cx);
-        pane.update(cx, |pane, cx| pane.set_session(None, cx));
+        let pane = self.new_pane(&store, None, window, cx);
         self.attachment.as_mut()?.zoom.zoom_out();
         let before = self.glide_before_edit(window, cx);
         area.update(cx, |area, cx| {
@@ -2523,8 +2531,7 @@ impl AppShell {
             let pane = match slot {
                 Slot::Pane(pane) => pane,
                 Slot::Waiting | Slot::Thread(_) => {
-                    let pane = self.new_pane(&store, window, cx);
-                    pane.update(cx, |pane, cx| pane.set_session(None, cx));
+                    let pane = self.new_pane(&store, None, window, cx);
                     if let Slot::Thread(session_id) = slot {
                         threads.push((pane.clone(), session_id));
                     }
@@ -3527,9 +3534,14 @@ impl AppShell {
         let Some(attachment) = &mut self.attachment else {
             return;
         };
-        let chat = cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx));
-        chat.update(cx, |chat, cx| {
-            chat.set_session(Some(session_id.clone()), cx)
+        let chat = cx.new(|cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
         });
         let pane = attachment.focused_pane.clone();
         let left = pane.update(cx, |pane, cx| pane.replace_chat(chat, None, cx));

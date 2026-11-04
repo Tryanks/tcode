@@ -368,10 +368,11 @@ mod tests {
                 .push(command_with_output(&format!("command-{index}")));
         }
 
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (_view, cx) = cx
-            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
@@ -403,8 +404,15 @@ mod tests {
         timeline.entries = vec![entry("user", user_item("go")), command_with_output("first")];
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (_view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
         let mut show = |commands: &[&str], cx: &mut VisualTestContext| {
@@ -465,8 +473,15 @@ mod tests {
         timeline.entries = vec![entry("user", user_item("go")), command_with_output("first")];
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
         cx.update(|cx| cx.set_reduce_motion(false));
-        let (_view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
         // A running turn's spinner never rests, so frames are delivered one
@@ -550,7 +565,13 @@ mod tests {
             let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
             cx.update(|cx| cx.set_reduce_motion(true));
             let (_, cx) = cx.add_window_view(|window, cx| {
-                ChatView::new(store.clone(), window_state, window, cx)
+                ChatView::new(
+                    store.clone(),
+                    window_state,
+                    Some(session_id.clone()),
+                    window,
+                    cx,
+                )
             });
             cx.simulate_resize(size(px(1_024.), px(900.)));
             draw_settled(cx);
@@ -634,8 +655,15 @@ mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         let window_state = cx.new(|_| WindowState::new(false));
         let store = threads.store.clone();
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(threads.first.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
         let show = |thread: &str, commands: &[&str], cx: &mut VisualTestContext| {

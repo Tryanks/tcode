@@ -574,10 +574,10 @@ mod tests {
             })
         });
         store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let (composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new_with_layout(store.clone(), compact, window, cx)
+            Composer::new_with_layout(store.clone(), Some(session_id), compact, window, cx)
         });
         (store, composer, cx)
     }

@@ -858,7 +858,7 @@ impl ChatView {
         let store = self.workspace_store.read(cx);
         let request = self.pending_plan_request(&entry.id, cx);
         let enabled = request.as_ref().is_some_and(|request| {
-            !store.approval_delivery_pending(&request.id)
+            !store.approval_delivery_pending_for(self.session_id.as_deref(), &request.id)
                 && !store.native_subagent_readonly_for(self.session_id.as_deref())
                 && store.connection_state().is_connected()
         });
@@ -1801,10 +1801,11 @@ mod tests {
             ),
         ]);
 
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (_view, cx) = cx
-            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
@@ -1849,10 +1850,11 @@ mod tests {
             ),
         ]);
 
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (_view, cx) = cx
-            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
@@ -1913,11 +1915,13 @@ mod tests {
             timeline
                 .entries
                 .push(entry("assistant", assistant("Done.")));
-            let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+            let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
             cx.update(|cx| cx.set_reduce_motion(reduce));
             let drawn = std::rc::Rc::default();
             let (_, cx) = cx.add_window_view(|window, cx| HoverProbe {
-                chat: cx.new(|cx| ChatView::new(workspace_store, window_state, window, cx)),
+                chat: cx.new(|cx| {
+                    ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+                }),
                 keys,
                 drawn: std::rc::Rc::clone(&drawn),
             });
@@ -1983,9 +1987,10 @@ mod tests {
             .entries
             .push(entry("assistant", assistant("Done.")));
 
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
-        let (view, cx) = cx
-            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
@@ -2074,8 +2079,15 @@ mod tests {
         ));
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(600.), px(900.)));
         draw_settled(cx);
@@ -2219,8 +2231,15 @@ mod tests {
             store.read_with(cx, |store, _| !store.chat_loading())
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let (_, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
 
@@ -2420,8 +2439,15 @@ mod tests {
         });
 
         let window_state = cx.new(|_| WindowState::new(false));
-        let (chat, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (chat, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(800.)));
         chat.update(cx, |chat, cx| {
@@ -2670,12 +2696,18 @@ This begins after the hard break."#;
             })
         });
         workspace_store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::new(false));
 
         let (view, cx) = cx.add_window_view(|window, cx| {
-            ChatView::new(workspace_store.clone(), window_state, window, cx)
+            ChatView::new(
+                workspace_store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
         });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
@@ -2753,10 +2785,10 @@ This begins after the hard break."#;
                 at_turn(entry("user-1", user_item("second")), 1),
                 at_turn(entry("assistant-1", assistant("Two.")), 1),
             ]);
-            let (workspace_store, window_state, _, _driver) =
+            let (workspace_store, window_state, session_id, _driver) =
                 seed_chat_with_history_on(cx, timeline, false, Some(provider));
             let (_view, window) = cx.add_window_view(|window, cx| {
-                ChatView::new(workspace_store, window_state, window, cx)
+                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
             });
             let window: &mut VisualTestContext = window;
             window.simulate_resize(size(px(1_024.), px(700.)));
@@ -2803,8 +2835,15 @@ This begins after the hard break."#;
         }];
         timeline.entries = vec![entry("user", user_item("go")), command_with_output("first")];
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
-        let (_view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
         // The pulse never rests while the turn runs: frames as a display

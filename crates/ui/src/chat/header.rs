@@ -1613,9 +1613,10 @@ mod tests {
     #[gpui::test]
     fn header_labels_follow_the_width_of_the_frame(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(1));
-        let (_view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(1));
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store, window_state, Some(session_id), window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         draw(cx);
         // A resize draws its frame at the new size.
@@ -1719,9 +1720,17 @@ mod tests {
         use crate::test_frames::draw_settled;
         use gpui::{AppContext as _, VisualTestContext, px, size};
 
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(1));
+        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(1));
         let (root, cx) = cx.add_window_view(|window, cx| Reparented {
-            chat: cx.new(|cx| ChatView::new(store.clone(), window_state.clone(), window, cx)),
+            chat: cx.new(|cx| {
+                ChatView::new(
+                    store.clone(),
+                    window_state.clone(),
+                    Some(session_id),
+                    window,
+                    cx,
+                )
+            }),
             moved: false,
         });
         let cx: &mut VisualTestContext = cx;
@@ -1781,7 +1790,15 @@ mod tests {
         );
         let (store, window_state, session_id) = seed_chat(cx, plain.clone());
         let (root, cx) = cx.add_window_view(|window, cx| Reparented {
-            chat: cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)),
+            chat: cx.new(|cx| {
+                ChatView::new(
+                    store.clone(),
+                    window_state,
+                    Some(session_id.clone()),
+                    window,
+                    cx,
+                )
+            }),
             moved: false,
         });
         let cx: &mut VisualTestContext = cx;

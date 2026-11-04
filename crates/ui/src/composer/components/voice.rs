@@ -363,11 +363,11 @@ mod tests {
             })
         });
         store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let sink = Rc::new(RefCell::new(None::<async_channel::Sender<PlatformEvent>>));
         let (composer, cx) = cx.add_window_view(|window, cx| {
-            let composer = Composer::new(store.clone(), window, cx);
+            let composer = Composer::new(store.clone(), Some(session_id), window, cx);
             composer.voice.state.update(cx, |state, cx| {
                 *state = SpeechState::new(cx).recognizer(Rc::new(Recognizer(sink.clone())));
             });

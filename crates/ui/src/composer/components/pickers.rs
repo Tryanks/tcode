@@ -954,7 +954,10 @@ fn render_model_pane(
                 let row = key_rows[n - 1].clone();
                 store_key.update(cx, |store, _cx| {
                     if row.acp {
-                        store.set_active_acp_agent(row.id);
+                        store.set_active_acp_agent_for(
+                            key_session.clone().unwrap_or_default(),
+                            row.id,
+                        );
                     } else {
                         store.set_active_model_for(
                             key_session.clone().unwrap_or_default(),
@@ -1154,7 +1157,7 @@ fn render_model_row(
             let profile_id = profile_id.clone();
             store_select.update(cx, |store, _cx| {
                 if is_acp {
-                    store.set_active_acp_agent(id);
+                    store.set_active_acp_agent_for(session_id.clone().unwrap_or_default(), id);
                 } else {
                     store.set_active_model_for(
                         session_id.clone().unwrap_or_default(),

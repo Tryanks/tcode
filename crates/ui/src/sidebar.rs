@@ -1045,10 +1045,7 @@ impl SessionsSidebar {
             cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
                 if matches!(
                     change.topic,
-                    TopicKind::Index
-                        | TopicKind::Settings
-                        | TopicKind::ActiveSession
-                        | TopicKind::SessionStatus
+                    TopicKind::Index | TopicKind::Settings | TopicKind::SessionStatus
                 ) {
                     this.compact_model_dirty = true;
                     cx.notify();

@@ -63,10 +63,6 @@ impl WorkspaceStore {
         self.delivery_messages_for(self.focus())
     }
 
-    pub(crate) fn approval_delivery_pending(&self, request: &str) -> bool {
-        self.approval_delivery_pending_for(self.focus(), request)
-    }
-
     pub fn roster_session_id(&self) -> Option<String> {
         self.focus().map(|id| self.roster_row(id))
     }
@@ -102,10 +98,6 @@ impl WorkspaceStore {
 
     pub fn add_review_comment(&mut self, comment: ReviewComment) {
         self.add_review_comment_for(self.legacy_focus().unwrap_or_default(), comment);
-    }
-
-    pub fn set_active_acp_agent(&mut self, id: String) {
-        self.set_active_acp_agent_for(self.legacy_focus().unwrap_or_default(), id);
     }
 
     pub fn write_relaunch_marker(&mut self, reopen_settings: String) {

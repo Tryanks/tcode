@@ -67,7 +67,6 @@ pub enum TopicKind {
     Providers,
     GitStatus,
     RuntimeEvents,
-    ActiveSession,
     Terminal,
     CommandOutput,
     Preview,
@@ -4555,7 +4554,13 @@ pub(crate) mod tests {
         );
         let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
         let (_chat, visual) = cx.add_window_view(|window, cx| {
-            crate::chat::ChatView::new(store.clone(), window_state, window, cx)
+            crate::chat::ChatView::new(
+                store.clone(),
+                window_state,
+                Some("scripted".to_owned()),
+                window,
+                cx,
+            )
         });
         visual.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(700.)));
         visual.update(|window, cx| {

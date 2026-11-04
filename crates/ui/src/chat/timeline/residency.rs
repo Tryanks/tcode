@@ -532,9 +532,10 @@ mod tests {
             timeline.entries.push(command(&format!("command-{index}")));
         }
         timeline.entries.push(entry("late", assistant("Done.")));
-        let (store, window_state, _) = seed_chat(cx, timeline);
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let (store, window_state, session_id) = seed_chat(cx, timeline);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store, window_state, Some(session_id), window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(1_900.)));
         draw_settled(cx);
@@ -574,9 +575,10 @@ mod tests {
         // lines exist only once the message is rendered as Markdown.
         Arc::make_mut(&mut timeline.entries[TARGET + 2]).content =
             assistant("```\nAssistant 40\n```");
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
-        let (view, cx) = cx
-            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
@@ -615,10 +617,11 @@ mod tests {
         ] {
             assert_eq!(text.len() >= ASYNC_MARKDOWN_THRESHOLD_BYTES, asynchronous);
             let timeline = single_assistant_timeline(id, &text);
-            let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+            let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
             // Opening the window draws a frame before any background work runs.
-            let window = cx
-                .add_window(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+            let window = cx.add_window(|window, cx| {
+                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+            });
             let cx = &mut VisualTestContext::from_window(window.into(), cx);
             cx.simulate_resize(size(px(1_024.), px(700.)));
             assert_eq!(
@@ -647,7 +650,13 @@ mod tests {
         let timeline = single_assistant_timeline("large", &original);
         let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
         let window = cx.add_window(|window, cx| {
-            ChatView::new(workspace_store.clone(), window_state, window, cx)
+            ChatView::new(
+                workspace_store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
         });
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         cx.simulate_resize(size(px(1_024.), px(700.)));
@@ -684,7 +693,9 @@ mod tests {
         let mut threads = seed_two_threads(cx, single_assistant_timeline("large", &text));
         let window_state = cx.new(|_| WindowState::new(false));
         let store = threads.store.clone();
-        let window = cx.add_window(|window, cx| ChatView::new(store, window_state, window, cx));
+        let window = cx.add_window(|window, cx| {
+            ChatView::new(store, window_state, Some(threads.first.clone()), window, cx)
+        });
         let view = window.root(cx).expect("the chat is the window's root");
         let cx = &mut VisualTestContext::from_window(window.into(), cx);
         cx.simulate_resize(size(px(1_024.), px(700.)));

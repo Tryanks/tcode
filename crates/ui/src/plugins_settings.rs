@@ -134,7 +134,7 @@ impl PluginsSettingsPanel {
                         }
                         cx.notify();
                     }
-                    TopicKind::ActiveSession | TopicKind::SessionStatus => cx.notify(),
+                    TopicKind::SessionStatus => cx.notify(),
                     _ => {}
                 },
             ),

@@ -705,8 +705,9 @@ mod tests {
         let mut threads = seed_two_threads(cx, timeline(0));
         let store = threads.store.clone();
         let window_state = cx.new(|_| WindowState::new(false));
-        let (chat, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let (chat, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store, window_state, Some(threads.first.clone()), window, cx)
+        });
         cx.simulate_resize(size(px(1_400.), px(560.)));
         let first = threads.first.clone();
         threads.bind(&chat, &first, timeline(0), cx);

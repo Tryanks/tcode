@@ -40,7 +40,6 @@ impl PlanPanel {
         let subscriptions = vec![observe_store_topics(
             &store,
             &[
-                TopicKind::ActiveSession,
                 TopicKind::SessionStatus,
                 TopicKind::SessionPlan,
                 TopicKind::SessionEvents,
