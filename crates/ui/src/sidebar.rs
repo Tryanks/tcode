@@ -6131,23 +6131,30 @@ mod tests {
             state.go(crate::window_state::Destination::Threads, cx);
         });
         draw(cx);
+        let row = cx
+            .debug_bounds(if compact {
+                "compact-row-rename-thread"
+            } else {
+                "sidebar-thread-rename-thread"
+            })
+            .unwrap();
+        let trigger = row.center();
+        // How much of the list hover fill is painted over the row, every
+        // layer of it counted.
+        let held = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let fill = cx.theme().list_hover;
+                let bounds = row.scale(window.scale_factor());
+                crate::test_frames::painted_quads(window)
+                    .iter()
+                    .filter(|quad| quad.bounds == bounds)
+                    .filter_map(|quad| quad.background.as_solid())
+                    .filter(|painted| painted.h == fill.h && painted.l == fill.l)
+                    .map(|painted| painted.a / fill.a)
+                    .sum::<f32>()
+            })
+        };
         if compact {
-            let row = cx.debug_bounds("compact-row-rename-thread").unwrap();
-            let trigger = row.center();
-            // How much of the list hover fill is painted over the row.
-            let held = |cx: &mut VisualTestContext| {
-                cx.update(|window, cx| {
-                    let fill = cx.theme().list_hover;
-                    let bounds = row.scale(window.scale_factor());
-                    crate::test_frames::painted_quads(window)
-                        .iter()
-                        .filter(|quad| quad.bounds == bounds)
-                        .filter_map(|quad| quad.background.as_solid())
-                        .filter(|painted| painted.h == fill.h && painted.l == fill.l)
-                        .map(|painted| painted.a / fill.a)
-                        .fold(0., f32::max)
-                })
-            };
             let touch = |cx: &mut VisualTestContext, phase, position| {
                 cx.simulate_event(gpui::TouchEvent {
                     id: gpui::TouchId(1),
@@ -6218,6 +6225,67 @@ mod tests {
                 crate::window_state::Destination::Threads,
                 "clicking the rename editor must not open the thread"
             );
+        } else {
+            // The fill over each of the display frames that follow.
+            let frames = |cx: &mut VisualTestContext| {
+                (0..24)
+                    .map(|_| {
+                        cx.executor()
+                            .advance_clock(std::time::Duration::from_millis(16));
+                        cx.update(|window, cx| {
+                            window.simulate_next_frame(cx);
+                            let _ = window.draw(cx);
+                        });
+                        held(cx)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let pointer = |cx: &mut VisualTestContext, position| {
+                cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
+            };
+            let away = gpui::point(px(340.), px(760.));
+            pointer(cx, trigger);
+            crate::test_frames::draw_settled(cx);
+            assert_eq!(held(cx), 1., "the row under the pointer takes its fill");
+            let (button, modifiers) = (gpui::MouseButton::Right, gpui::Modifiers::none());
+            cx.simulate_mouse_down(trigger, button, modifiers);
+            cx.simulate_mouse_up(trigger, button, modifiers);
+            assert_eq!(
+                frames(cx),
+                [1.; 24],
+                "the fill does not move as the menu opens under the pointer"
+            );
+            let item = cx
+                .debug_bounds("menu-item-0")
+                .expect("thread menu opens")
+                .center();
+            pointer(cx, item);
+            assert_eq!(
+                frames(cx),
+                [1.; 24],
+                "the fill does not move as the pointer goes on to the menu"
+            );
+            pointer(cx, away);
+            crate::test_frames::draw_settled(cx);
+            assert_eq!(held(cx), 1., "the row stays marked with the pointer away");
+            pointer(cx, gpui::point(row.left() + px(4.), row.center().y));
+            crate::test_frames::draw_settled(cx);
+            assert_eq!(
+                held(cx),
+                1.,
+                "the row back under the pointer takes no second fill"
+            );
+            pointer(cx, away);
+            crate::test_frames::draw_settled(cx);
+            cx.simulate_click(away, gpui::Modifiers::default());
+            let leaving = frames(cx);
+            assert!(
+                leaving.iter().any(|fill| *fill > 0. && *fill < 1.)
+                    && leaving.windows(2).all(|pair| pair[1] <= pair[0]),
+                "the fill fades out with the menu: {leaving:?}"
+            );
+            crate::test_frames::draw_settled(cx);
+            assert_eq!(held(cx), 0., "the mark leaves with the menu");
         }
         cx.update(|window, cx| {
             sidebar.update(cx, |sidebar, cx| {
