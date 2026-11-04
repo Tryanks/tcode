@@ -853,15 +853,19 @@ application ping after 15 seconds of silence with the same 20-second reply
 budget; browser timers may be delayed in background tabs, and making the page
 visible or coming online wakes reconnection.
 
-Native foreground cancels pending backoff. After at least 10 s in the background
-the app reconnects outright and replays subscriptions from applied cursors;
-after a shorter absence it probes once with the application ping. Foreground
-and Active from the same return do not issue duplicate probes. On Android, the
-system's default-network callback (a change of transport or validation, not a
-signal-strength update) and every resume, and on iOS every return to the
-foreground, additionally tell the device endpoint to rebind its paths and probe
-every live connection at once, so a stale link does not wait for the idle
-timer. The desktop relies on the timers alone.
+Native foreground cancels pending backoff. Once the app has been in the
+background for 10 s its link is parked: the connection closes and nothing
+dials, pings or backs off until the app returns, since that return reconnects
+outright anyway and replays subscriptions from applied cursors. After a shorter
+absence the return probes once with the application ping. Foreground and Active
+from the same return do not issue duplicate probes. A change of the device's own
+addresses, as iroh's network monitor sees it, probes every live connection at
+once, so a stale link does not wait for the idle timer. Android has no such
+monitor for native code: there the system's default-network callback (another
+network, a change of transport, validation or addresses, not a signal-strength
+update) and a resume that finds a different network than the callback last
+reported, and on iOS every return to the foreground, also tell the device
+endpoint to rebind its paths.
 
 Outgoing commands and queries are bounded to 256 lines and 8 MiB per attachment,
 including lines held for retry. A full queue rejects the new line with
@@ -1021,7 +1025,8 @@ nothing else:
   type while it hosts — desktop and headless alike, whatever its Traverse sources
   — with its bound UDP port and a TXT record `v=1`, `id=<machine id>`,
   `name=<machine name>`; loopback is never advertised, and the record
-  follows the machine's interfaces as they change. The device keeps only the
+  follows the machine's interfaces when iroh's network monitor sees their
+  addresses change. The device keeps only the
   instance whose `id` is the machine it wants. This is a standard
   advertisement, so `dns-sd -B _tcode._udp` on macOS or Android's
   `NsdManager` list it too; on iOS the app browses through the system's

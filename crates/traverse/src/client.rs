@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     identity::DeviceIdentity,
-    lan::{InterfaceWatch, LanLookup},
+    lan::LanLookup,
     manifest::{Manifest, ManifestLoader, ManifestSource, live},
     runtime::{block_on, runtime},
     wire::{self, ClientLine, HelloRejection, HostLine, LineReader, PairRejection},
@@ -92,21 +92,27 @@ fn saved_addrs(data_dir: &Path, id: EndpointId) -> Vec<std::net::SocketAddr> {
         .collect()
 }
 
-/// Rebind and probe whenever the device's own addresses change — another
-/// Wi-Fi network, a hotspot, a new lease — so a machine that moved with it
-/// is looked up at once instead of at the next backoff. Ends with the
-/// identity.
-async fn watch_interfaces(inner: Weak<crate::identity::DeviceInner>) {
-    let mut watch = InterfaceWatch::new(crate::lan::local_networks());
-    loop {
-        tokio::time::sleep(crate::lan::INTERFACE_POLL).await;
+/// Probe every live transport whenever the device's own addresses change,
+/// so a machine that moved with it is looked up at once instead of at the
+/// next backoff. iroh's network monitor sees the change and has already
+/// rebound the endpoint. On Android iroh has no monitor (an upstream gap):
+/// the activity's connectivity callback reports a change through
+/// [`DeviceIdentity::network_changed`], and these addresses follow it. Ends
+/// with the endpoint or the identity.
+async fn watch_addresses(
+    mut addresses: impl iroh::Watcher<Value = EndpointAddr>,
+    inner: Weak<crate::identity::DeviceInner>,
+) {
+    let mut known = addresses.get().ip_addrs().copied().collect();
+    while crate::lan::address_change(&mut addresses, &mut known)
+        .await
+        .is_some()
+    {
         let Some(inner) = inner.upgrade() else {
             return;
         };
-        if watch.observe(crate::lan::local_networks()) {
-            log::info!("local network addresses changed");
-            DeviceIdentity::from_inner(inner).network_changed();
-        }
+        log::info!("local network addresses changed");
+        DeviceIdentity::from_inner(inner).probe_transports();
     }
 }
 
@@ -342,7 +348,7 @@ impl DeviceIdentity {
                     sources: Mutex::new(HashMap::new()),
                     relays: tokio::sync::Mutex::new(relays),
                 });
-                runtime().spawn(watch_interfaces(self.downgrade()));
+                runtime().spawn(watch_addresses(endpoint.watch_addr(), self.downgrade()));
                 for (source, loader, manifest) in in_hand {
                     lookups.sources.lock().unwrap().insert(
                         source.clone(),
@@ -383,6 +389,13 @@ impl DeviceIdentity {
         };
         let endpoint = client.endpoint.clone();
         runtime().spawn(async move { endpoint.network_change().await });
+        self.probe_transports();
+    }
+
+    fn probe_transports(&self) {
+        let Some(client) = self.inner().endpoint.get() else {
+            return;
+        };
         let mut transports = client.transports.lock().unwrap();
         transports.retain(|transport| !transport.is_closed());
         for transport in transports.iter() {

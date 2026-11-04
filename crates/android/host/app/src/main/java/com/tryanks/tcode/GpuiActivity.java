@@ -23,6 +23,8 @@ import android.view.Display;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
@@ -47,7 +49,10 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Objects;
+import java.util.Set;
 
 /** Minimal NativeActivity host for GPUI. */
 public final class GpuiActivity extends NativeActivity {
@@ -160,44 +165,110 @@ public final class GpuiActivity extends NativeActivity {
 
     /**
      * Tells the Traverse endpoint to rebind and probe when the default network
-     * changes. {@code onCapabilitiesChanged} also fires for signal-strength
-     * updates, so only a change of transport or validation counts; the
-     * callback runs on the connectivity thread and the native side forwards
-     * to the GPUI thread.
+     * changes: another network, a change of transport or validation, or new
+     * addresses (a new lease). {@code onCapabilitiesChanged} also fires for
+     * signal-strength updates, which do not count. The callback runs on the
+     * connectivity thread and the native side forwards to the GPUI thread.
      */
     private void watchDefaultNetwork() {
         ConnectivityManager connectivity = (ConnectivityManager)
             getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
         if (connectivity == null) return;
         networkCallback = new ConnectivityManager.NetworkCallback() {
-            private Network current;
-            private int transports = -1;
-            private boolean validated;
-
             @Override public void onAvailable(Network network) {
-                current = network;
-                transports = -1;
+                defaultNetwork.available(network);
                 nativeNetworkChanged();
             }
 
             @Override public void onLost(Network network) {
-                if (network.equals(current)) current = null;
+                defaultNetwork.lost(network);
                 nativeNetworkChanged();
             }
 
             @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
-                int bits = transportBits(capabilities);
-                boolean valid = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
-                if (bits == transports && valid == validated) return;
-                boolean first = transports == -1;
-                transports = bits;
-                validated = valid;
-                // onAvailable already reported the network; its first
-                // capabilities are not a second change.
-                if (!first) nativeNetworkChanged();
+                if (defaultNetwork.capabilities(capabilities)) nativeNetworkChanged();
+            }
+
+            @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) {
+                if (defaultNetwork.addresses(properties)) nativeNetworkChanged();
             }
         };
         connectivity.registerDefaultNetworkCallback(networkCallback);
+    }
+
+    /**
+     * The default network as the callback last reported it. A network's first
+     * capabilities and addresses follow {@code onAvailable}, which already
+     * reported it, so they are not a second change.
+     */
+    private static final class DefaultNetwork {
+        private Network network;
+        private int transports = -1;
+        private boolean validated;
+        private Set<LinkAddress> addresses;
+
+        synchronized void available(Network network) {
+            this.network = network;
+            transports = -1;
+            addresses = null;
+        }
+
+        synchronized void lost(Network network) {
+            if (network.equals(this.network)) this.network = null;
+        }
+
+        synchronized boolean capabilities(NetworkCapabilities capabilities) {
+            int bits = transportBits(capabilities);
+            boolean valid = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+            if (bits == transports && valid == validated) return false;
+            boolean first = transports == -1;
+            transports = bits;
+            validated = valid;
+            return !first;
+        }
+
+        synchronized boolean addresses(LinkProperties properties) {
+            Set<LinkAddress> current = new HashSet<>(properties.getLinkAddresses());
+            if (current.equals(addresses)) return false;
+            boolean first = addresses == null;
+            addresses = current;
+            return !first;
+        }
+
+        /**
+         * Whether the default network now differs from the last one reported,
+         * recording it: a stopped or frozen app may not have been told.
+         */
+        synchronized boolean differs(Network network, NetworkCapabilities capabilities, LinkProperties properties) {
+            boolean changed = !Objects.equals(network, this.network);
+            this.network = network;
+            if (capabilities != null) {
+                int bits = transportBits(capabilities);
+                boolean valid = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                changed |= bits != transports || valid != validated;
+                transports = bits;
+                validated = valid;
+            }
+            if (properties != null) {
+                Set<LinkAddress> current = new HashSet<>(properties.getLinkAddresses());
+                changed |= !current.equals(addresses);
+                addresses = current;
+            }
+            return changed;
+        }
+    }
+
+    private final DefaultNetwork defaultNetwork = new DefaultNetwork();
+
+    /** Rebind only when the network changed while the activity was away. */
+    private void checkDefaultNetwork() {
+        ConnectivityManager connectivity = (ConnectivityManager)
+            getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivity == null) return;
+        Network network = connectivity.getActiveNetwork();
+        NetworkCapabilities capabilities = network == null ? null : connectivity.getNetworkCapabilities(network);
+        LinkProperties properties = network == null ? null : connectivity.getLinkProperties(network);
+        if (defaultNetwork.differs(network, capabilities, properties)) nativeNetworkChanged();
     }
 
     private static int transportBits(NetworkCapabilities capabilities) {
@@ -337,9 +408,7 @@ public final class GpuiActivity extends NativeActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // The network may have changed while the activity was stopped without
-        // the callback being delivered; the endpoint probes on every return.
-        nativeNetworkChanged();
+        checkDefaultNetwork();
         View decor = getWindow().getDecorView();
         decor.post(() -> {
             WindowInsets insets = decor.getRootWindowInsets();

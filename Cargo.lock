@@ -11460,7 +11460,6 @@ dependencies = [
  "futures-lite",
  "futures-util",
  "getrandom 0.4.3",
- "if-addrs",
  "iroh",
  "libc",
  "log",
