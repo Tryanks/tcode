@@ -527,10 +527,7 @@ impl CommandPalette {
             );
         }
         if let Some(session_id) = crate::shell::current_thread(cx)
-            && let Some(meta) = store
-                .sidebar_sessions()
-                .into_iter()
-                .find(|meta| meta.id == session_id)
+            && let Some(meta) = store.thread_meta(&session_id)
         {
             if meta.worktree.is_some() {
                 push_action(

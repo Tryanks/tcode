@@ -2474,7 +2474,7 @@ impl AppShell {
                     .store
                     .read(cx)
                     .sidebar_sessions()
-                    .into_iter()
+                    .iter()
                     .filter(|meta| {
                         meta.parent_session_id.as_deref() == Some(parent)
                             && meta.archived_at.is_none()
@@ -2484,7 +2484,7 @@ impl AppShell {
                 agents.sort_by_key(|meta| std::cmp::Reverse(meta.created_at));
                 let agents = agents.into_iter().map(|meta| {
                     self.pane_showing(&meta.id, cx)
-                        .map_or(Slot::Thread(meta.id), Slot::Pane)
+                        .map_or_else(|| Slot::Thread(meta.id.clone()), Slot::Pane)
                 });
                 (
                     first.chain(agents).take(crate::panes::MAX_PANES).collect(),

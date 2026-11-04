@@ -1,5 +1,6 @@
 use super::*;
 use crate::widgets::TooltipTrigger as _;
+use tcode_core::project::SessionMeta;
 
 /// How long a value drawn here takes to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -68,17 +69,16 @@ const PARENT_LINK_COMPACT_WIDTH: f32 = 28.;
 
 const PARENT_LINK_LABELLED_WIDTH: f32 = 273.;
 
-/// The thread `session_id`'s was reached from: its id and title.
-fn parent_session(store: &WorkspaceStore, session_id: Option<&str>) -> Option<(String, String)> {
-    let active = session_id?;
-    let sessions = store.sidebar_sessions();
-    let parent_id = sessions
-        .iter()
-        .find(|meta| meta.id == active)?
+/// The thread `session_id`'s was reached from.
+fn parent_session<'a>(
+    store: &'a WorkspaceStore,
+    session_id: Option<&str>,
+) -> Option<&'a SessionMeta> {
+    let parent_id = store
+        .thread_meta(session_id?)?
         .parent_session_id
-        .clone()?;
-    let parent = sessions.iter().find(|meta| meta.id == parent_id)?;
-    Some((parent_id, parent.title.clone()))
+        .as_deref()?;
+    store.thread_meta(parent_id)
 }
 
 /// The header's left inset in place of the bar's own. Collapsed, the sidebar
@@ -365,7 +365,8 @@ impl ChatView {
     /// it is its arrow, named by its tooltip and its accessibility label.
     fn parent_link(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (parent_id, title) =
-            parent_session(self.workspace_store.read(cx), self.session_id.as_deref())?;
+            parent_session(self.workspace_store.read(cx), self.session_id.as_deref())
+                .map(|parent| (parent.id.clone(), parent.title.clone()))?;
         let name: SharedString = crate::tr!("agents.back_to_parent", title = title)
             .into_owned()
             .into();
@@ -727,11 +728,9 @@ impl ChatView {
             .is_some_and(|control| control.self_settle.is_some());
         let movable = !is_draft && {
             let active = self.session_id.as_deref();
-            self.workspace_store
-                .read(cx)
-                .sidebar_sessions()
-                .iter()
-                .any(|meta| Some(meta.id.as_str()) == active && meta.worktree.is_none())
+            active
+                .and_then(|id| self.workspace_store.read(cx).thread_meta(id))
+                .is_some_and(|meta| meta.worktree.is_none())
         };
         let title_menu = {
             let title = title.clone();

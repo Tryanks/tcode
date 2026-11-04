@@ -80,7 +80,7 @@ impl ChatView {
         }
         let projects = self.workspace_store.read(cx).projects();
         let sessions = self.workspace_store.read(cx).sidebar_sessions();
-        let hub_projects = start_hub_projects(&projects, &sessions);
+        let hub_projects = start_hub_projects(&projects, sessions);
         let add_project = Button::new("add-project-empty")
             .motion(&self.motion)
             .ghost()

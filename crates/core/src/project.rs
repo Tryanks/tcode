@@ -435,16 +435,17 @@ pub struct ProjectGroup {
 
 /// Group `sessions` under their `projects` and order projects using `sort`.
 /// Callers choose the row order for their lifecycle or archive surface.
-pub fn group_sessions(
+pub fn group_sessions<'a>(
     projects: &[Project],
-    sessions: &[SessionMeta],
+    sessions: impl IntoIterator<Item = &'a SessionMeta> + Clone,
     sort: ProjectSort,
 ) -> Vec<ProjectGroup> {
     let mut groups: Vec<ProjectGroup> = projects
         .iter()
         .map(|project| {
             let sessions: Vec<SessionMeta> = sessions
-                .iter()
+                .clone()
+                .into_iter()
                 .filter(|s| s.project_id.as_deref() == Some(project.id.as_str()))
                 .cloned()
                 .collect();

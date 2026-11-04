@@ -1036,11 +1036,11 @@ impl ChatView {
         let child_id = callback.child_id.clone();
         let exists = {
             let store = self.workspace_store.read(cx);
-            store
-                .sidebar_sessions()
-                .iter()
-                .chain(store.archived_sessions())
-                .any(|meta| meta.id == child_id)
+            store.thread_meta(&child_id).is_some()
+                || store
+                    .archived_sessions()
+                    .iter()
+                    .any(|meta| meta.id == child_id)
         };
         let store = self.workspace_store.clone();
         let host = self.agent_host(cx);
