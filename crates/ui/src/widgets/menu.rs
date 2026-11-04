@@ -580,6 +580,7 @@ pub trait ContextMenuExt:
             trigger: self,
             builder: Rc::new(builder),
             touch: false,
+            reveal: None,
         }
     }
 }
@@ -591,11 +592,23 @@ pub struct ContextMenu<T: InteractiveElement + ParentElement + Styled + IntoElem
     trigger: T,
     builder: MenuBuilder,
     touch: bool,
+    reveal: Option<(crate::motion::ListHover, SharedString)>,
 }
 
 impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> ContextMenu<T> {
     pub fn touch(mut self, touch: bool) -> Self {
         self.touch = touch;
+        self
+    }
+
+    /// A trigger that is `item` of the list `hover`: what it reveals stays
+    /// for as long as the menu holds its hover fill.
+    pub(crate) fn reveals(
+        mut self,
+        hover: &crate::motion::ListHover,
+        item: impl Into<SharedString>,
+    ) -> Self {
+        self.reveal = Some((hover.clone(), item.into()));
         self
     }
 }
@@ -605,6 +618,7 @@ struct ContextMenuState {
     menu: Option<Entity<PopupMenu>>,
     /// Dismissed, and kept only to be drawn while it leaves.
     closing: bool,
+    reveal: Option<crate::motion::HoverHold>,
     position: Point<Pixels>,
     _subscription: Option<Subscription>,
     _deferred: Option<gpui_base::DeferredPopover>,
@@ -620,6 +634,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
         });
         let builder = self.builder;
         let touch = self.touch;
+        let reveal = self.reveal;
         let open = Rc::new(
             move |position: Point<Pixels>,
                   long_press: bool,
@@ -726,7 +741,14 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             );
             // A finger lifts and a pointer moves on to the menu, and nothing
             // else marks which row the menu acts on.
-            crate::motion::hold_hover_layer(self.id, !closing, window, cx);
+            let held = !closing;
+            crate::motion::hold_hover_layer(self.id, held, window, cx);
+            if let Some((hover, item)) = reveal {
+                state.update(cx, |state, cx| {
+                    state.reveal =
+                        held.then(|| state.reveal.take().unwrap_or_else(|| hover.hold(item, cx)));
+                });
+            }
             presence
         });
         if presence.is_some_and(|presence| !presence.should_render()) {

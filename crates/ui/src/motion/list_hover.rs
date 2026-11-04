@@ -7,9 +7,17 @@
 //! one hovered item, with the fades of the items the pointer just entered or
 //! left: at rest it holds one key, whatever the list's length.
 
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashSet,
+    rc::{Rc, Weak},
+};
 
 use gpui::{App, SharedString, Window};
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use super::{Curve, owned::Owned};
 
@@ -35,11 +43,52 @@ struct Hover {
     /// hands those parts the same handler, and the item stays hovered while
     /// the pointer is over any of them, whichever order they hear it in.
     hovered: Option<(SharedString, usize)>,
+    /// The items kept in with the pointer gone, each for as long as its
+    /// [`HoverHold`] lives.
+    held: Vec<(SharedString, Weak<()>)>,
     /// The reveals on their way in or out, by item, their glides in `fades`.
     fading: HashSet<SharedString>,
     fades: Owned,
     curve: Curve,
 }
+
+impl Hover {
+    fn is_held(&self, item: &str) -> bool {
+        self.held
+            .iter()
+            .any(|(held, hold)| held == item && hold.strong_count() > 0)
+    }
+
+    /// Whether `item`'s reveal is in or on its way there.
+    fn is_shown(&self, item: &str) -> bool {
+        self.is_held(item) || self.hovered.as_ref().is_some_and(|(held, _)| held == item)
+    }
+
+    /// Starts the glide of `item`'s reveal from `from`, unless it is moving.
+    fn fade(&mut self, item: SharedString, from: f32, now: Instant) {
+        if self.fading.insert(item.clone()) {
+            self.fades.seed(item, from, now);
+        }
+    }
+
+    /// Forgets the holds let go, the reveals only they kept in fading out.
+    fn release(&mut self, now: Instant) {
+        let (live, released): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition(|(_, hold)| hold.strong_count() > 0);
+        self.held = live;
+        for (item, _) in released {
+            if !self.is_shown(&item) {
+                self.fade(item, 1., now);
+            }
+        }
+    }
+}
+
+/// An item of a [`ListHover`] kept hovered ([`ListHover::hold`]) until this
+/// is dropped: a weak count, so a holder that goes away with its row lets go
+/// with it.
+pub(crate) struct HoverHold(#[allow(dead_code, reason = "held for its drop")] Rc<()>);
 
 impl ListHover {
     /// The hover of one list, nothing hovered, its reveals moving along
@@ -48,6 +97,7 @@ impl ListHover {
         Self {
             hover: Rc::new(RefCell::new(Hover {
                 hovered: None,
+                held: Vec::new(),
                 fading: HashSet::new(),
                 fades: Owned::default(),
                 curve: curve.into(),
@@ -67,6 +117,7 @@ impl ListHover {
         let mut hover = self.hover.borrow_mut();
         if self.scene.entered() {
             hover.hovered = None;
+            hover.held.clear();
             hover.fading.clear();
             hover.fades = Owned::default();
         }
@@ -119,12 +170,13 @@ impl ListHover {
         let now = cx.background_executor().now();
         {
             let mut hover = self.hover();
+            hover.release(now);
             for (item, from) in [(previous, 1f32), (next, 0.)] {
                 let Some(item) = item else { continue };
                 // A reveal at rest starts its glide from where it rests; one
-                // still moving turns from where it is.
-                if hover.fading.insert(item.clone()) {
-                    hover.fades.seed(item, from, now);
+                // still moving turns from where it is. A held one stays.
+                if !hover.is_held(&item) {
+                    hover.fade(item, from, now);
                 }
             }
         }
@@ -134,15 +186,25 @@ impl ListHover {
         window.refresh();
     }
 
+    /// Keeps `item` hovered, wherever the pointer goes, until the hold is
+    /// dropped.
+    pub(crate) fn hold(&self, item: impl Into<SharedString>, cx: &App) -> HoverHold {
+        let item = item.into();
+        let hold = Rc::new(());
+        let mut hover = self.hover();
+        if !hover.is_shown(&item) {
+            hover.fade(item.clone(), 0., cx.background_executor().now());
+        }
+        hover.held.push((item, Rc::downgrade(&hold)));
+        HoverHold(hold)
+    }
+
     /// How far `item`'s hover reveal is in, from 0 to 1, keeping frames
     /// coming while it moves.
     pub(crate) fn reveal(&self, item: &str, window: &mut Window, cx: &App) -> f32 {
         let mut hover = self.hover();
-        let target = if hover.hovered.as_ref().is_some_and(|(held, _)| held == item) {
-            1f32
-        } else {
-            0.
-        };
+        hover.release(cx.background_executor().now());
+        let target = if hover.is_shown(item) { 1f32 } else { 0. };
         if !hover.fading.contains(item) {
             return target;
         }
