@@ -80,7 +80,7 @@ impl Render for ContextWindowDialog {
         let composer = self
             .store
             .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+            .composer_state_for(self.session_id.as_deref(), cx);
         let Some((options, default_value)) = context_window_descriptor(&composer) else {
             return div().into_any_element();
         };
@@ -215,7 +215,7 @@ fn largest_window(store: &Entity<WorkspaceStore>, session_id: Option<&str>, cx: 
     context_window::largest(
         &store
             .read(cx)
-            .composer_state_for(session_id)
+            .composer_state_for(session_id, cx)
             .active_option_descriptors,
     )
     .unwrap_or(1_000_000)

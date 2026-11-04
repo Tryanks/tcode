@@ -54,8 +54,8 @@ fn open_agent(shell: &Entity<AppShell>, host: &MountedShell, cx: &mut VisualTest
         )
     });
     draw(cx);
-    await_restore_update(shell, cx, |store| {
-        !store.chat_loading_for(Some("thread-1")) && store.timeline_settled_for("agent-1")
+    await_restore_update(shell, cx, |store, cx| {
+        !store.chat_loading_for(Some("thread-1"), cx) && store.timeline_settled_for("agent-1")
     });
     settle_panes(cx);
     settle_frames(cx);
@@ -71,8 +71,8 @@ fn the_leads_scrollbar_stands_left_of_the_slot(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_lead_with_agent(cx);
     serve_finished_turns(&host, "thread-1", 60, false);
-    await_restore_update(&shell, cx, |store| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(60)
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(60)
     });
     let slack = px(0.5);
 
@@ -217,8 +217,8 @@ fn the_body_starts_at_the_headers_bottom_edge(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_lead_with_agent(cx);
     serve_finished_turns(&host, "thread-1", 60, false);
-    await_restore_update(&shell, cx, |store| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(60)
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(60)
     });
     let under_header = |top: Pixels, what: &str, cx: &mut VisualTestContext| {
         let header = cx.debug_bounds("chat-header-scroll").expect("the header");

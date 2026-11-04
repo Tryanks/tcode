@@ -19,15 +19,19 @@ const CHANGE: Duration = Duration::from_millis(200);
 fn latest(chat: &ChatView, cx: &App) -> Option<usize> {
     chat.workspace_store
         .read(cx)
-        .with_timeline_for(chat.session_id.as_deref(), |timeline| {
-            timeline.turns.iter().rposition(|turn| {
-                !turn.running
-                    && turn
-                        .changes
-                        .as_ref()
-                        .is_some_and(|changes| !changes.changes.is_empty())
-            })
-        })
+        .with_timeline_for(
+            chat.session_id.as_deref(),
+            |timeline| {
+                timeline.turns.iter().rposition(|turn| {
+                    !turn.running
+                        && turn
+                            .changes
+                            .as_ref()
+                            .is_some_and(|changes| !changes.changes.is_empty())
+                })
+            },
+            cx,
+        )
         .flatten()
 }
 
@@ -54,40 +58,45 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     let store = chat.workspace_store.read(cx);
     let session = chat.session_id.as_deref();
     let (files, partial, ended, (added, deleted)) = store
-        .with_timeline_for(session, |timeline| {
-            let at = timeline.turns.get(turn)?;
-            let changes = at.changes.as_ref()?;
-            let counted = (
-                turn,
-                changes.changes.len(),
-                changes
-                    .changes
-                    .iter()
-                    .map(|change| change.diff.as_deref().map_or(0, str::len))
-                    .sum(),
-            );
-            let mut totals = totals.borrow_mut();
-            let sums = match *totals {
-                Some((at, sums)) if at == counted => sums,
-                _ => {
-                    let sums = changes
+        .with_timeline_for(
+            session,
+            |timeline| {
+                let at = timeline.turns.get(turn)?;
+                let changes = at.changes.as_ref()?;
+                let counted = (
+                    turn,
+                    changes.changes.len(),
+                    changes
                         .changes
                         .iter()
-                        .fold((0, 0), |(added, deleted), change| {
-                            let (a, d) = diff_stats(change.diff.as_deref());
-                            (added + a, deleted + d)
-                        });
-                    *totals = Some((counted, sums));
-                    sums
-                }
-            };
-            Some((
-                changes.changes.len(),
-                changes.completeness == ChangeCompleteness::Partial,
-                at.end_ts,
-                sums,
-            ))
-        })
+                        .map(|change| change.diff.as_deref().map_or(0, str::len))
+                        .sum(),
+                );
+                let mut totals = totals.borrow_mut();
+                let sums = match *totals {
+                    Some((at, sums)) if at == counted => sums,
+                    _ => {
+                        let sums =
+                            changes
+                                .changes
+                                .iter()
+                                .fold((0, 0), |(added, deleted), change| {
+                                    let (a, d) = diff_stats(change.diff.as_deref());
+                                    (added + a, deleted + d)
+                                });
+                        *totals = Some((counted, sums));
+                        sums
+                    }
+                };
+                Some((
+                    changes.changes.len(),
+                    changes.completeness == ChangeCompleteness::Partial,
+                    at.end_ts,
+                    sums,
+                ))
+            },
+            cx,
+        )
         .flatten()?;
     let mut parts = vec![
         crate::tr!(
@@ -140,30 +149,34 @@ pub(super) fn body(
                     // diffs and all, are copied out only when they change.
                     let held = chat.motion.keep::<HeldChanges>("rail-changes-held");
                     let changes = store
-                        .with_timeline_for(session, |timeline| {
-                            let changes = &timeline.turns.get(turn)?.changes.as_ref()?.changes;
-                            let key = (
-                                turn,
-                                changes.len(),
-                                changes
-                                    .iter()
-                                    .map(|change| change.diff.as_deref().map_or(0, str::len))
-                                    .sum::<usize>(),
-                            );
-                            let mut held = held.borrow_mut();
-                            match &*held {
-                                Some((at, kept)) if *at == key => Some(kept.clone()),
-                                _ => {
-                                    let kept: Rc<[FileChange]> = changes.clone().into();
-                                    *held = Some((key, kept.clone()));
-                                    Some(kept)
+                        .with_timeline_for(
+                            session,
+                            |timeline| {
+                                let changes = &timeline.turns.get(turn)?.changes.as_ref()?.changes;
+                                let key = (
+                                    turn,
+                                    changes.len(),
+                                    changes
+                                        .iter()
+                                        .map(|change| change.diff.as_deref().map_or(0, str::len))
+                                        .sum::<usize>(),
+                                );
+                                let mut held = held.borrow_mut();
+                                match &*held {
+                                    Some((at, kept)) if *at == key => Some(kept.clone()),
+                                    _ => {
+                                        let kept: Rc<[FileChange]> = changes.clone().into();
+                                        *held = Some((key, kept.clone()));
+                                        Some(kept)
+                                    }
                                 }
-                            }
-                        })
+                            },
+                            cx,
+                        )
                         .flatten()
                         .unwrap_or_else(|| Rc::from([]));
                     let cwd = store
-                        .session_status_for(session)
+                        .session_status_for(session, cx)
                         .map(|status| status.cwd.clone())
                         .unwrap_or_default();
                     (changes, cwd)

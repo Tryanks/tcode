@@ -38,7 +38,7 @@ use super::model::{
 use super::parse::{RowKind, is_binary_patch};
 use crate::agents_panel::{Agents, AgentsPanel};
 use crate::plan_panel::PlanPanel;
-use crate::store::WorkspaceStore;
+use crate::store::{StoreChange, WorkspaceStore};
 use crate::widgets::menu::DropdownMenu as _;
 use crate::window_caption;
 use crate::window_state::WindowState;
@@ -246,13 +246,22 @@ impl DiffPanel {
                 cx,
             )
         });
-        let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), session_id.clone(), cx));
+        let plan = cx.new(|_| PlanPanel::new(workspace_store.clone(), session_id.clone()));
         let agents = cx.new(|cx| AgentsPanel::new(workspace_store.clone(), session_id.clone(), cx));
-        let subscriptions = vec![cx.observe(&workspace_store, |this, _, cx| {
-            this.sync_agents_shown(cx);
-            this.sync_review_comments(cx);
-            cx.notify();
-        })];
+        let subscriptions = vec![
+            cx.observe(&workspace_store, |this, _, cx| {
+                this.sync_agents_shown(cx);
+                this.sync_review_comments(cx);
+                cx.notify();
+            }),
+            // A status replaced notifies only its thread's readers, and the
+            // drafts it carries are compared here, not as the panel renders.
+            cx.subscribe(&workspace_store, |this, _, change: &StoreChange, cx| {
+                if change.topic == crate::store::TopicKind::SessionStatus {
+                    this.sync_review_comments(cx);
+                }
+            }),
+        ];
         let mut panel = Self {
             workspace_store,
             window_state,
@@ -287,7 +296,7 @@ impl DiffPanel {
         let comments = self
             .workspace_store
             .read(cx)
-            .session_status_for(self.session_id.as_deref())
+            .session_status_for(self.session_id.as_deref(), cx)
             .map_or(&[][..], |status| &status.review_comment_drafts);
         if self.observed_review_comments != comments {
             self.observed_review_comments = comments.to_vec();
@@ -387,7 +396,7 @@ impl DiffPanel {
             .or_else(|| {
                 self.workspace_store
                     .read(cx)
-                    .diff_selected_turn_for(self.session_id.as_deref())
+                    .diff_selected_turn_for(self.session_id.as_deref(), cx)
                     .map(DiffScope::Turn)
             })
             .or(Some(DiffScope::WorkingTree))
@@ -414,7 +423,7 @@ impl DiffPanel {
                 .pending_diff_focus_for(self.session_id.as_deref())
                 .filter(|request| request.session == session && request.turn == turn);
             let cwd = store
-                .diff_active_state_for(self.session_id.as_deref())
+                .diff_active_state_for(self.session_id.as_deref(), cx)
                 .filter(|active| active.session == session)
                 .map(|active| active.cwd);
             (request, cwd)
@@ -659,7 +668,7 @@ impl DiffPanel {
         let dark = cx.theme().mode.is_dark();
         let (session, scope, revision, cwd) = {
             let store = self.workspace_store.read(cx);
-            let Some(active) = store.diff_active_state_for(self.session_id.as_deref()) else {
+            let Some(active) = store.diff_active_state_for(self.session_id.as_deref(), cx) else {
                 self.cache = None;
                 return false;
             };
@@ -742,6 +751,7 @@ impl DiffPanel {
                                 let _completeness = completeness;
                                 changes.to_vec()
                             },
+                            cx,
                         )
                         .unwrap_or_default();
                     (changes, Vec::new())
@@ -812,7 +822,7 @@ impl DiffPanel {
         let agents = {
             let store = self.workspace_store.read(cx);
             self.session_id.as_deref().and_then(|id| {
-                let agents = Agents::of(store, id);
+                let agents = Agents::of(store, id, cx);
                 (!agents.is_empty() || active == RightTab::Agents).then(|| agents.outstanding())
             })
         };
@@ -893,7 +903,7 @@ impl DiffPanel {
                 .as_deref()
                 .zip(self.session_id.as_deref())
                 .map(|(lead, agent)| {
-                    let title = Agents::of(store, lead).title(store, agent);
+                    let title = Agents::of(store, lead, cx).title(store, agent);
                     crate::tr!("diff.agent_subject", title = title.as_str()).into_owned()
                 })
         };
@@ -1099,7 +1109,7 @@ impl DiffPanel {
         match self
             .workspace_store
             .read(cx)
-            .diff_active_state_for(self.session_id.as_deref())
+            .diff_active_state_for(self.session_id.as_deref(), cx)
         {
             Some(active) => active.cwd.join(path).to_string_lossy().into_owned(),
             None => file.path.clone(),
@@ -1136,7 +1146,7 @@ impl DiffPanel {
         let active_state = self
             .workspace_store
             .read(cx)
-            .diff_active_state_for(self.session_id.as_deref());
+            .diff_active_state_for(self.session_id.as_deref(), cx);
         let session = active_state
             .as_ref()
             .map(|active| active.session.clone())
@@ -1145,7 +1155,7 @@ impl DiffPanel {
         let turns: Rc<[usize]> = self
             .workspace_store
             .read(cx)
-            .diff_turns_for(self.session_id.as_deref())
+            .diff_turns_for(self.session_id.as_deref(), cx)
             .into_iter()
             .rev()
             .collect();
@@ -1914,7 +1924,7 @@ impl DiffListHost for DiffPanel {
         let cwd = self
             .workspace_store
             .read(cx)
-            .diff_active_state_for(self.session_id.as_deref())
+            .diff_active_state_for(self.session_id.as_deref(), cx)
             .map(|active| active.cwd);
         Rc::new(move |menu, _, _| menu.path_items(&path, cwd.as_deref()))
     }

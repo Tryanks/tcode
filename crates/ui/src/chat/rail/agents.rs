@@ -26,7 +26,7 @@ const CHANGE: Duration = Duration::from_millis(200);
 
 fn agents(chat: &ChatView, cx: &App) -> Option<Agents> {
     let lead = chat.session_id.as_deref()?;
-    Some(Agents::of(chat.workspace_store.read(cx), lead)).filter(|agents| !agents.is_empty())
+    Some(Agents::of(chat.workspace_store.read(cx), lead, cx)).filter(|agents| !agents.is_empty())
 }
 
 /// Whether the card has something to show for `chat`'s thread now.
@@ -66,7 +66,7 @@ pub(super) fn body(
     if let Some(agents) = agents(chat, cx) {
         let store = chat.workspace_store.read(cx);
         let lead = chat.session_id.as_deref().unwrap_or_default();
-        last.replace(agents.with_results(store, lead).lines());
+        last.replace(agents.with_results(store, lead, cx).lines());
     }
     let lines = last.borrow().clone();
     if lines.is_empty() {

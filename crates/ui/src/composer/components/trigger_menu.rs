@@ -212,7 +212,7 @@ impl Composer {
     fn thread_rows(&self, query: &str, cx: &App) -> Vec<MenuRow> {
         let store = self.workspace_store.read(cx);
         let Some(status) = store
-            .session_status_for(self.session_id.as_deref())
+            .session_status_for(self.session_id.as_deref(), cx)
             .filter(|status| !status.draft)
         else {
             return Vec::new();
@@ -558,8 +558,9 @@ mod tests {
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
-            store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         store.update(cx, |store, cx| {
@@ -578,7 +579,7 @@ mod tests {
         composer.update_in(cx, |composer, window, cx| {
             let cwd = store
                 .read(cx)
-                .composer_state_for(store.read(cx).sole_thread().as_deref())
+                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
                 .active_cwd
                 .unwrap();
             composer.workspace = Some((cwd, vec![PathEntry::from_rel("file.rs".into(), false)]));
@@ -633,8 +634,8 @@ mod tests {
         composer.update_in(cx, |composer, window, cx| {
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
-        assert!(store.read_with(cx, |store, _| compact_offered(
-            &store.composer_state_for(store.sole_thread().as_deref())
+        assert!(store.read_with(cx, |store, cx| compact_offered(
+            &store.composer_state_for(store.sole_thread().as_deref(), cx)
         )));
         cx.simulate_input("/comp");
         cx.update(|window, cx| _ = window.draw(cx));
@@ -664,7 +665,7 @@ mod tests {
         composer.update_in(cx, |composer, window, cx| {
             let cwd = store
                 .read(cx)
-                .composer_state_for(store.read(cx).sole_thread().as_deref())
+                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx)
                 .active_cwd
                 .unwrap();
             let entries = (0..FILE_MENU_ROW_CAP)

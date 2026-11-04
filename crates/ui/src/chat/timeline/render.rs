@@ -245,7 +245,7 @@ impl ChatView {
                             let resets_at = *resets_at;
                             let store = self.workspace_store.read(cx);
                             let queued = store
-                                .session_status_for(self.session_id.as_deref())
+                                .session_status_for(self.session_id.as_deref(), cx)
                                 .map_or(&[][..], |status| &status.queued_messages);
                             let queued_id = queued
                                 .iter()
@@ -253,9 +253,13 @@ impl ChatView {
                                 .map(|message| message.id);
                             let queue_empty = queued.is_empty();
                             let ends_thread = store
-                                .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                                    !timeline.turn_running && index + 1 == timeline.turns.len()
-                                })
+                                .with_timeline_for(
+                                    self.session_id.as_deref(),
+                                    |timeline| {
+                                        !timeline.turn_running && index + 1 == timeline.turns.len()
+                                    },
+                                    cx,
+                                )
                                 .unwrap_or(false);
                             match limit_resume_action(
                                 resets_at,
@@ -321,25 +325,32 @@ impl ChatView {
                     let retry = self
                         .workspace_store
                         .read(cx)
-                        .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                            timeline
-                                .turn_retry
-                                .as_ref()
-                                .filter(|retry| {
-                                    !timeline.turn_running
-                                        && turn.provider_turn_id.as_deref()
-                                            == Some(retry.turn_id.as_str())
-                                        && timeline
-                                            .entries
-                                            .iter()
-                                            .rev()
-                                            .find(|entry| {
-                                                matches!(entry.content, EntryContent::Error { .. })
-                                            })
-                                            .is_some_and(|last| last.id == entry.id)
-                                })
-                                .cloned()
-                        })
+                        .with_timeline_for(
+                            self.session_id.as_deref(),
+                            |timeline| {
+                                timeline
+                                    .turn_retry
+                                    .as_ref()
+                                    .filter(|retry| {
+                                        !timeline.turn_running
+                                            && turn.provider_turn_id.as_deref()
+                                                == Some(retry.turn_id.as_str())
+                                            && timeline
+                                                .entries
+                                                .iter()
+                                                .rev()
+                                                .find(|entry| {
+                                                    matches!(
+                                                        entry.content,
+                                                        EntryContent::Error { .. }
+                                                    )
+                                                })
+                                                .is_some_and(|last| last.id == entry.id)
+                                    })
+                                    .cloned()
+                            },
+                            cx,
+                        )
                         .flatten();
                     let resume = retry
                         .map(|retry| {
@@ -393,10 +404,11 @@ impl ChatView {
         // Changed-file evidence is the turn's settled summary: while the turn
         // still runs, the live per-file rows inside the work log carry this
         // information, so the section folds in only once the turn finishes.
-        let (changes, completeness) = self
-            .workspace_store
-            .read(cx)
-            .chat_turn_changes_for(self.session_id.as_deref(), index);
+        let (changes, completeness) = self.workspace_store.read(cx).chat_turn_changes_for(
+            self.session_id.as_deref(),
+            index,
+            cx,
+        );
         let changes_fold = self
             .motion
             .shown(
@@ -456,7 +468,7 @@ impl ChatView {
             let requested_model = self
                 .workspace_store
                 .read(cx)
-                .chat_requested_model_for(self.session_id.as_deref());
+                .chat_requested_model_for(self.session_id.as_deref(), cx);
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
@@ -674,7 +686,7 @@ impl ChatView {
         if self
             .workspace_store
             .read(cx)
-            .delivery_messages_for(self.session_id.as_deref())
+            .delivery_messages_for(self.session_id.as_deref(), cx)
             .iter()
             .any(|(key, _, _, _)| {
                 entry_id == format!("local-user-{key}") || entry_id == format!("local-steer-{key}")
@@ -690,9 +702,11 @@ impl ChatView {
         let rewind_menu = steering
             .is_none()
             .then(|| {
-                self.workspace_store
-                    .read(cx)
-                    .chat_native_rewind_state_for(self.session_id.as_deref(), turn)
+                self.workspace_store.read(cx).chat_native_rewind_state_for(
+                    self.session_id.as_deref(),
+                    turn,
+                    cx,
+                )
             })
             .flatten()
             .map(|state| components::bubble::RewindMenu {
@@ -795,11 +809,11 @@ impl ChatView {
             None => bubble,
         };
 
-        let bubble = if let Some(author) = self
-            .workspace_store
-            .read(cx)
-            .message_byline_for(self.session_id.as_deref(), entry_id)
-        {
+        let bubble = if let Some(author) = self.workspace_store.read(cx).message_byline_for(
+            self.session_id.as_deref(),
+            entry_id,
+            cx,
+        ) {
             // Inset by the bubble's own padding, so the name lines up with the
             // message text rather than the bubble's rounded corner.
             v_flex()
@@ -857,7 +871,7 @@ impl ChatView {
         let request = self.pending_plan_request(&entry.id, cx);
         let enabled = request.as_ref().is_some_and(|request| {
             !store.approval_delivery_pending_for(self.session_id.as_deref(), &request.id)
-                && !store.native_subagent_readonly_for(self.session_id.as_deref())
+                && !store.native_subagent_readonly_for(self.session_id.as_deref(), cx)
                 && store.connection_state().is_connected()
         });
         let session_id = self.session_id.clone().unwrap_or_default();
@@ -907,7 +921,7 @@ impl ChatView {
         let deciding = self
             .workspace_store
             .read(cx)
-            .session_status_for(self.session_id.as_deref())
+            .session_status_for(self.session_id.as_deref(), cx)
             .and_then(|status| {
                 status
                     .pending_approvals
@@ -935,7 +949,7 @@ impl ChatView {
     fn pending_plan_request(&self, item_id: &str, cx: &App) -> Option<agent::ApprovalRequest> {
         self.workspace_store
             .read(cx)
-            .session_status_for(self.session_id.as_deref())?
+            .session_status_for(self.session_id.as_deref(), cx)?
             .pending_approvals
             .iter()
             .find(|request| {
@@ -1442,9 +1456,11 @@ impl ChatView {
         let elided = self
             .workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                timeline.elided_outputs.contains_key(&entry.id)
-            })
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| timeline.elided_outputs.contains_key(&entry.id),
+                cx,
+            )
             .unwrap_or(false);
         let label = crate::tr!("chat.copy_output").into_owned();
         let whole_output = (elided && copy.iter().any(|(item, _)| *item == label)).then(|| {
@@ -1611,12 +1627,11 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Option<tools::ElidedOutput> {
         use tools::ElidedOutput;
-        let full_bytes = self
-            .workspace_store
-            .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                timeline.elided_outputs.get(item_id).copied()
-            })??;
+        let full_bytes = self.workspace_store.read(cx).with_timeline_for(
+            self.session_id.as_deref(),
+            |timeline| timeline.elided_outputs.get(item_id).copied(),
+            cx,
+        )??;
         let load = || -> tools::ClickHandler {
             let item_id = item_id.to_owned();
             Box::new(cx.listener(move |this, _, _, cx| {
@@ -2227,8 +2242,8 @@ mod tests {
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
-            store.read_with(cx, |store, _| {
-                !store.chat_loading_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| {
+                !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
@@ -2259,16 +2274,16 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let watched = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store
-                    .command_output_for(store.sole_thread().as_deref(), "run")
+                    .command_output_for(store.sole_thread().as_deref(), "run", cx)
                     .and_then(|output| output.watched())
             })
         };
         let frame = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store
-                    .command_output_for(store.sole_thread().as_deref(), "run")
+                    .command_output_for(store.sole_thread().as_deref(), "run", cx)
                     .and_then(|output| output.frame().cloned())
             })
         };
@@ -2692,8 +2707,9 @@ This begins after the hard break."#;
         });
         workspace_store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
-            workspace_store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
+            workspace_store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         workspace_store.update(cx, |store, cx| {

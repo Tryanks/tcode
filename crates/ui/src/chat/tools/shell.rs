@@ -344,7 +344,7 @@ pub(in crate::chat) fn shell_body(run: ShellRun<'_>, ctx: &mut ToolCtx<'_, '_>) 
             });
         });
         let store = ctx.chat.workspace_store.read(ctx.cx);
-        let replica = store.command_output_for(ctx.chat.session_id.as_deref(), &id);
+        let replica = store.command_output_for(ctx.chat.session_id.as_deref(), &id, ctx.cx);
         let watched = replica.and_then(|replica| replica.watched());
         let frame = replica.and_then(|replica| replica.frame()).cloned();
         let screen = OutputScreen {

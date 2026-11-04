@@ -54,7 +54,7 @@ impl Composer {
         let deliveries = self
             .workspace_store
             .read(cx)
-            .delivery_messages_for(self.session_id.as_deref());
+            .delivery_messages_for(self.session_id.as_deref(), cx);
         let rows = std::mem::take(&mut queue.messages)
             .into_iter()
             .filter(|message| {

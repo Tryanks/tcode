@@ -8,7 +8,7 @@ const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 impl Composer {
     fn control_status(&self, cx: &App) -> Option<(String, ControlStatus)> {
         let store = self.workspace_store.read(cx);
-        let status = store.session_status_for(self.session_id.as_deref())?;
+        let status = store.session_status_for(self.session_id.as_deref(), cx)?;
         if status.draft {
             return None;
         }

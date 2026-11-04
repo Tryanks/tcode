@@ -22,7 +22,7 @@ use crate::icon::{Icon, IconName};
 use crate::material;
 use crate::overlay::{DialogButtons, OverlayExt as _};
 use crate::sizing::Sizable as _;
-use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -163,7 +163,7 @@ pub(crate) struct Agents {
 impl Agents {
     /// The thread's agents as the host reports them. Results are left out:
     /// only the lists that show them read them, see [`Self::with_results`].
-    pub(crate) fn of(store: &WorkspaceStore, parent_id: &str) -> Self {
+    pub(crate) fn of(store: &WorkspaceStore, parent_id: &str, cx: &App) -> Self {
         let live = store.sidebar_sessions();
         let parent = store.thread_meta(parent_id);
         let attention = |id: Option<&str>| {
@@ -177,7 +177,7 @@ impl Agents {
             }
         };
         let lead_branch = store
-            .session_status_for(Some(parent_id))
+            .session_status_for(Some(parent_id), cx)
             .and_then(|status| status.git_branch.clone())
             .or_else(|| {
                 parent
@@ -188,57 +188,61 @@ impl Agents {
             store.latest_activity(id?).filter(|_| execution.running())
         };
         let mut native = Vec::new();
-        store.with_timeline_for(Some(parent_id), |timeline| {
-            for entry in &timeline.entries {
-                let EntryContent::Item(ItemContent::Subagent {
-                    agent_type,
-                    description,
-                    status,
-                    summary,
-                    model,
-                    effort,
-                }) = &entry.content
-                else {
-                    continue;
-                };
-                let mirror = live.iter().find(|meta| {
-                    meta.parent_session_id.as_deref() == Some(parent_id)
-                        && meta.native_subagent.as_deref() == Some(entry.id.as_str())
-                });
-                let provider = parent.map(|parent| parent.provider);
-                let execution = match status {
-                    ItemStatus::InProgress => AgentExecution::Working,
-                    ItemStatus::Completed => AgentExecution::Finished,
-                    ItemStatus::Interrupted => AgentExecution::Interrupted,
-                    ItemStatus::Failed | ItemStatus::Declined => AgentExecution::Failed,
-                };
-                native.push(AgentRow {
-                    key: entry.id.clone(),
-                    title: Some(compact(description))
-                        .filter(|title| !title.is_empty())
-                        .unwrap_or_else(|| agent_type.clone()),
-                    provider,
-                    model: model.clone(),
-                    effort: effort.clone(),
-                    execution: Some(execution),
-                    attention: attention(mirror.map(|meta| meta.id.as_str())),
-                    // It runs in its lead's process, on its lead's checkout.
-                    branch: None,
-                    delivery: None,
-                    report: AgentReport::None,
-                    archived: false,
-                    activity: running_activity(mirror.map(|meta| meta.id.as_str()), execution),
-                    preview: summary.as_deref().map(compact).filter(|s| !s.is_empty()),
-                    open: mirror.map(|meta| meta.id.clone()),
-                    agent: None,
-                    managed_by: provider.map(|provider| provider.display_name()),
-                    agent_type: Some(agent_type.clone()),
-                    // A native subagent's end is not reported, only its start.
-                    started_at: entry.ts.filter(|_| execution.running()),
-                    ended_at: None,
-                });
-            }
-        });
+        store.with_timeline_for(
+            Some(parent_id),
+            |timeline| {
+                for entry in &timeline.entries {
+                    let EntryContent::Item(ItemContent::Subagent {
+                        agent_type,
+                        description,
+                        status,
+                        summary,
+                        model,
+                        effort,
+                    }) = &entry.content
+                    else {
+                        continue;
+                    };
+                    let mirror = live.iter().find(|meta| {
+                        meta.parent_session_id.as_deref() == Some(parent_id)
+                            && meta.native_subagent.as_deref() == Some(entry.id.as_str())
+                    });
+                    let provider = parent.map(|parent| parent.provider);
+                    let execution = match status {
+                        ItemStatus::InProgress => AgentExecution::Working,
+                        ItemStatus::Completed => AgentExecution::Finished,
+                        ItemStatus::Interrupted => AgentExecution::Interrupted,
+                        ItemStatus::Failed | ItemStatus::Declined => AgentExecution::Failed,
+                    };
+                    native.push(AgentRow {
+                        key: entry.id.clone(),
+                        title: Some(compact(description))
+                            .filter(|title| !title.is_empty())
+                            .unwrap_or_else(|| agent_type.clone()),
+                        provider,
+                        model: model.clone(),
+                        effort: effort.clone(),
+                        execution: Some(execution),
+                        attention: attention(mirror.map(|meta| meta.id.as_str())),
+                        // It runs in its lead's process, on its lead's checkout.
+                        branch: None,
+                        delivery: None,
+                        report: AgentReport::None,
+                        archived: false,
+                        activity: running_activity(mirror.map(|meta| meta.id.as_str()), execution),
+                        preview: summary.as_deref().map(compact).filter(|s| !s.is_empty()),
+                        open: mirror.map(|meta| meta.id.clone()),
+                        agent: None,
+                        managed_by: provider.map(|provider| provider.display_name()),
+                        agent_type: Some(agent_type.clone()),
+                        // A native subagent's end is not reported, only its start.
+                        started_at: entry.ts.filter(|_| execution.running()),
+                        ended_at: None,
+                    });
+                }
+            },
+            cx,
+        );
         native.reverse();
 
         let mut dispatched: Vec<_> = live
@@ -307,23 +311,32 @@ impl Agents {
 
     /// Add each dispatched agent's result: the report its latest callback
     /// delivered to the lead, as the child wrote it.
-    pub(crate) fn with_results(mut self, store: &WorkspaceStore, parent_id: &str) -> Self {
+    pub(crate) fn with_results(
+        mut self,
+        store: &WorkspaceStore,
+        parent_id: &str,
+        cx: &App,
+    ) -> Self {
         let mut results = std::collections::HashMap::new();
-        store.with_timeline_for(Some(parent_id), |timeline| {
-            for entry in &timeline.entries {
-                let Some(HostNotice::Orchestrate(callbacks)) =
-                    crate::chat::model::user_notice(&entry.content)
-                else {
-                    continue;
-                };
-                for callback in callbacks {
-                    let report = compact(callback.report().unwrap_or_default());
-                    if !report.is_empty() {
-                        results.insert(callback.child_id, report);
+        store.with_timeline_for(
+            Some(parent_id),
+            |timeline| {
+                for entry in &timeline.entries {
+                    let Some(HostNotice::Orchestrate(callbacks)) =
+                        crate::chat::model::user_notice(&entry.content)
+                    else {
+                        continue;
+                    };
+                    for callback in callbacks {
+                        let report = compact(callback.report().unwrap_or_default());
+                        if !report.is_empty() {
+                            results.insert(callback.child_id, report);
+                        }
                     }
                 }
-            }
-        });
+            },
+            cx,
+        );
         for row in self.needs_settle.iter_mut().chain(&mut self.done) {
             row.preview = results.remove(&row.key);
         }
@@ -780,15 +793,12 @@ impl AgentsPanel {
         session_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![
-            observe_store_topics(&store, &[TopicKind::SessionEvents, TopicKind::Index], cx),
-            cx.on_release(|this, cx| {
-                if this.shown {
-                    this.store
-                        .update(cx, |store, _| store.release_archived_sessions());
-                }
-            }),
-        ];
+        let subscriptions = vec![cx.on_release(|this, cx| {
+            if this.shown {
+                this.store
+                    .update(cx, |store, _| store.release_archived_sessions());
+            }
+        })];
         Self {
             store,
             session_id,
@@ -1302,7 +1312,7 @@ impl Render for AgentsPanel {
             let store = self.store.read(cx);
             self.session_id
                 .as_deref()
-                .map(|id| Agents::of(store, id).with_results(store, id))
+                .map(|id| Agents::of(store, id, cx).with_results(store, id, cx))
                 .unwrap_or_default()
         };
         let root = v_flex()
@@ -1579,8 +1589,8 @@ mod tests {
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
 
-        store.read_with(cx, |store, _| {
-            let agents = Agents::of(store, "lead");
+        store.read_with(cx, |store, cx| {
+            let agents = Agents::of(store, "lead", cx);
             let keys = |rows: &[super::AgentRow]| {
                 rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>()
             };
@@ -1662,8 +1672,8 @@ mod tests {
             store.read_with(cx, |store, _| store.agent_status("asking").is_some())
         });
 
-        store.read_with(cx, |store, _| {
-            let agents = Agents::of(store, "lead");
+        store.read_with(cx, |store, cx| {
+            let agents = Agents::of(store, "lead", cx);
             let lines = agents.lines();
             assert_eq!(
                 lines[0].state,
@@ -1815,9 +1825,9 @@ mod tests {
                 },
             ))
             .unwrap();
-        let lines_of = |store: &WorkspaceStore| {
-            let lines = Agents::of(store, "lead")
-                .with_results(store, "lead")
+        let lines_of = |store: &WorkspaceStore, cx: &gpui::App| {
+            let lines = Agents::of(store, "lead", cx)
+                .with_results(store, "lead", cx)
                 .lines();
             let line = |key: &str| {
                 let line = lines.iter().find(|line| line.key == key).unwrap();
@@ -1826,12 +1836,12 @@ mod tests {
             [line("worker"), line("spawn")]
         };
         driver.wait_until(cx, &store, "the lead's transcript", |cx| {
-            store.read_with(cx, |store, _| {
-                lines_of(store)[1].0 == Some(LatestActivity::Thinking)
+            store.read_with(cx, |store, cx| {
+                lines_of(store, cx)[1].0 == Some(LatestActivity::Thinking)
             })
         });
         assert_eq!(
-            store.read_with(cx, |store, _| lines_of(store)),
+            store.read_with(cx, |store, cx| lines_of(store, cx)),
             [
                 (Some(command), None),
                 (Some(LatestActivity::Thinking), None)
@@ -1901,10 +1911,10 @@ mod tests {
             incoming.try_send(message).unwrap();
         }
         driver.wait_until(cx, &store, "the agents to settle", |cx| {
-            store.read_with(cx, |store, _| lines_of(store)[0].1.is_some())
+            store.read_with(cx, |store, cx| lines_of(store, cx)[0].1.is_some())
         });
         assert_eq!(
-            store.read_with(cx, |store, _| lines_of(store)),
+            store.read_with(cx, |store, cx| lines_of(store, cx)),
             [
                 (None, Some("The tests pass.".to_owned())),
                 (None, Some("Surveyed".to_owned()))

@@ -590,10 +590,10 @@ impl ChatView {
                     origin: None,
                 }
             });
-            host.opened = store.update(cx, |store, _| {
+            host.opened = store.update(cx, |store, cx| {
                 let opens = !store.is_thread_open(&id);
                 if opens {
-                    store.open_thread(&id);
+                    store.open_thread(&id, cx);
                 }
                 opens
             });
@@ -1274,7 +1274,7 @@ impl ChatView {
         let session = self.session_id.clone()?;
         let (heading, title, lead_title) = {
             let store = self.workspace_store.read(cx);
-            let agents = crate::agents_panel::Agents::of(store, &of.lead_session);
+            let agents = crate::agents_panel::Agents::of(store, &of.lead_session, cx);
             (
                 agents.heading(&session),
                 agents.title(store, &session),

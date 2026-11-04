@@ -45,7 +45,7 @@ pub(crate) use images::{
     MAX_PREVIEW_PIXELS, MediaState, image_preview, item_image_preview, pull_request_media,
     pull_request_media_state, remote_image, retry_failed_pull_request_media,
 };
-use thread::ThreadReplica;
+use thread::{Part, ThreadReplica};
 mod snapshots;
 
 pub(crate) use snapshots::PanelState;
@@ -241,6 +241,14 @@ pub struct WorkspaceStore {
     /// ask for one more draft per index event while it resolves.
     draft_fallback_pending: bool,
     creation_request_generation: u64,
+}
+
+/// What an envelope changed, and so whom applying it tells.
+enum Reach {
+    /// What the store's readers at large may read: they are all told.
+    Store,
+    /// Only these parts of one thread's replica: only their readers are.
+    Thread(String, &'static [Part]),
 }
 
 /// Where a window of a thread's log sits in the whole log.
@@ -443,7 +451,9 @@ impl WorkspaceStore {
                 match events.try_recv() {
                     Ok(envelope) => match envelope.event {
                         ServerEvent::Runtime(event) => cx.emit(event),
-                        event => store.apply_domain_event(EventEnvelope { event, ..envelope }, cx),
+                        event => {
+                            store.apply_domain_event(EventEnvelope { event, ..envelope }, cx);
+                        }
                     },
                     Err(async_channel::TryRecvError::Empty) => {
                         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -717,7 +727,7 @@ impl WorkspaceStore {
                     });
                 }
                 for session_id in self.open_threads() {
-                    self.reopen_thread(&session_id);
+                    self.reopen_thread(&session_id, cx);
                 }
             }
             Scope::Full => {}
@@ -853,6 +863,7 @@ impl WorkspaceStore {
     pub(crate) fn delivery_messages_for(
         &self,
         session_id: Option<&str>,
+        cx: &App,
     ) -> Vec<(String, String, Option<String>, bool)> {
         let active = session_id.unwrap_or_default();
         let message = |command: &Command| match command {
@@ -892,7 +903,12 @@ impl WorkspaceStore {
                     .into_iter()
                     .filter_map(|entry| {
                         let text = message(&entry.command)?;
-                        let thread = self.threads.get(active);
+                        // It stops showing once its thread's status queues it
+                        // or its log records it.
+                        let thread = self.watched(Some(active), Part::Timeline, cx);
+                        if let Some(thread) = thread {
+                            thread.watch(Part::Status, cx);
+                        }
                         let queued = thread
                             .and_then(|thread| thread.status.as_ref())
                             .is_some_and(|status| {
@@ -1020,8 +1036,8 @@ impl WorkspaceStore {
 
     /// Whether a conversation showing `session_id`, or no thread, is still
     /// waiting for what it draws.
-    pub fn chat_loading_for(&self, session_id: Option<&str>) -> bool {
-        if !self.delivery_messages_for(session_id).is_empty() {
+    pub fn chat_loading_for(&self, session_id: Option<&str>, cx: &App) -> bool {
+        if !self.delivery_messages_for(session_id, cx).is_empty() {
             return false;
         }
         if !self.index_hydrated || !self.settings_hydrated {
@@ -1096,16 +1112,27 @@ impl WorkspaceStore {
         self.threads.get(session_id?)
     }
 
-    fn thread_status(&self, session_id: Option<&str>) -> Option<&SessionStatus> {
-        self.thread(session_id)?.status.as_ref()
+    /// The thread's replica, read as a view depending on its `part`: what
+    /// changes there alone, as records stream in or a status is replaced,
+    /// draws such a view again without the store being notified.
+    fn watched(&self, session_id: Option<&str>, part: Part, cx: &App) -> Option<&ThreadReplica> {
+        let thread = self.thread(session_id)?;
+        thread.watch(part, cx);
+        Some(thread)
     }
 
-    fn thread_timeline(&self, session_id: Option<&str>) -> Option<&Timeline> {
-        self.thread(session_id)?.timeline.as_ref()
+    fn thread_status(&self, session_id: Option<&str>, cx: &App) -> Option<&SessionStatus> {
+        self.watched(session_id, Part::Status, cx)?.status.as_ref()
     }
 
-    fn thread_git(&self, session_id: Option<&str>) -> Option<&GitStatusStatus> {
-        self.thread(session_id)?.git.as_ref()
+    fn thread_timeline(&self, session_id: Option<&str>, cx: &App) -> Option<&Timeline> {
+        self.watched(session_id, Part::Timeline, cx)?
+            .timeline
+            .as_ref()
+    }
+
+    fn thread_git(&self, session_id: Option<&str>, cx: &App) -> Option<&GitStatusStatus> {
+        self.watched(session_id, Part::Status, cx)?.git.as_ref()
     }
 
     /// The conversation state of the thread's destination.
@@ -1140,14 +1167,23 @@ impl WorkspaceStore {
         let change = StoreChange {
             topic: TopicKind::from(&envelope.topic),
         };
-        self.apply_domain_event(EventEnvelope { event, ..envelope }, cx);
+        match self.apply_domain_event(EventEnvelope { event, ..envelope }, cx) {
+            Reach::Store => cx.notify(),
+            Reach::Thread(session_id, parts) => {
+                if let Some(thread) = self.threads.get(&session_id) {
+                    for part in parts {
+                        thread.bump(*part, cx);
+                    }
+                }
+            }
+        }
         cx.emit(change);
-        cx.notify();
     }
 
-    fn apply_domain_event(&mut self, envelope: EventEnvelope, cx: &mut Context<Self>) {
+    /// Apply `envelope` to the replicas: what it reached.
+    fn apply_domain_event(&mut self, envelope: EventEnvelope, cx: &mut Context<Self>) -> Reach {
         if !self.host.subscription_reply_is_current(&envelope) {
-            return;
+            return Reach::Store;
         }
         if matches!(
             TopicKind::from(&envelope.topic),
@@ -1168,12 +1204,12 @@ impl WorkspaceStore {
                 self.apply_scope(scope, cx);
                 self.applied_scope_request = envelope.request_id;
             }
-            return;
+            return Reach::Store;
         }
         if matches!(envelope.topic, Topic::Index | Topic::SpaceIndex { .. })
             && envelope.topic != self.index_topic()
         {
-            return;
+            return Reach::Store;
         }
         if !self.scope.is_full()
             && matches!(
@@ -1186,7 +1222,7 @@ impl WorkspaceStore {
                     | Topic::Hosting
             )
         {
-            return;
+            return Reach::Store;
         }
         let index_topic = self.index_topic();
         let index = Topic::Index;
@@ -1231,6 +1267,7 @@ impl WorkspaceStore {
         } else {
             &envelope_topic
         };
+        let mut reach = Reach::Store;
         // What the replicas keep is moved into them rather than copied.
         let event = match (topic, event) {
             (
@@ -1257,13 +1294,26 @@ impl WorkspaceStore {
                     window,
                     records,
                 ) {
-                    return;
+                    return Reach::Store;
                 }
                 None
             }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
+                // A turn's start and end change what reaches past the thread
+                // (its conversation state, its recovery card); a record in
+                // between changes the thread's log alone.
+                let within_turn = !matches!(
+                    record.event,
+                    agent::AgentEvent::TurnStarted { .. }
+                        | agent::AgentEvent::TurnCompleted { .. }
+                        | agent::AgentEvent::RewindCompleted { .. }
+                        | agent::AgentEvent::PlanUpdated { .. }
+                );
                 if !self.apply_live_record(session_id, &envelope_topic, record) {
-                    return;
+                    return Reach::Store;
+                }
+                if within_turn {
+                    reach = Reach::Thread(session_id.clone(), &[Part::Timeline]);
                 }
                 None
             }
@@ -1286,6 +1336,7 @@ impl WorkspaceStore {
                 ServerEvent::CommandOutputReplaced(frame),
             ) => {
                 self.apply_command_output(session_id, item_id, *cols, *frame);
+                reach = Reach::Thread(session_id.clone(), &[Part::Outputs]);
                 None
             }
             (_, event) => Some(event),
@@ -1313,7 +1364,10 @@ impl WorkspaceStore {
                         cols,
                     },
                     ServerEvent::CommandOutputDelta(delta),
-                ) => self.apply_command_output_delta(session_id, item_id, *cols, delta),
+                ) => {
+                    self.apply_command_output_delta(session_id, item_id, *cols, delta);
+                    reach = Reach::Thread(session_id.clone(), &[Part::Outputs]);
+                }
                 (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                     if let Some(archived) = &mut self.archived_replica {
                         archived.sessions.retain(|archived| archived.id != meta.id);
@@ -1510,7 +1564,8 @@ impl WorkspaceStore {
                 }
                 (Topic::GitStatus { session_id }, ServerEvent::GitStatusReplaced(status)) => {
                     if let Some(thread) = self.threads.get_mut(session_id) {
-                        thread.git = Some(status.clone());
+                        thread.git = Some(std::mem::take(status));
+                        reach = Reach::Thread(session_id.clone(), &[Part::Status]);
                     }
                 }
                 (
@@ -1526,8 +1581,22 @@ impl WorkspaceStore {
                         thread.status = Some(status);
                         if thread.open {
                             thread.resettle();
+                            let destination = thread.destination.clone();
+                            let conversations = self.conversation_ui.len();
                             self.sync_terminal_topics();
                             self.sync_conversation_ui(session_id);
+                            // A status that moves the thread's conversation
+                            // state, or first brings it, reaches past the
+                            // thread.
+                            if !loaded
+                                && self.conversation_ui.len() == conversations
+                                && self.threads[session_id].destination == destination
+                            {
+                                reach = Reach::Thread(
+                                    session_id.clone(),
+                                    &[Part::Status, Part::Timeline],
+                                );
+                            }
                             // The host owns the drawer, which lives only with its
                             // running terminals: a conversation that loads shows it
                             // as the host has it, not as this client last left it.
@@ -1553,14 +1622,18 @@ impl WorkspaceStore {
                     {
                         status.usage = *usage;
                         status.context_window = *context_window;
+                        reach = Reach::Thread(session_id.clone(), &[Part::Status]);
                     }
                 }
                 (Topic::SessionPlan { session_id }, ServerEvent::SessionPlanReplaced(plan))
                     if plan.session_id == *session_id =>
                 {
-                    self.baseline_topics.insert(envelope_topic.clone());
+                    let loaded = self.baseline_topics.insert(envelope_topic.clone());
                     if let Some(thread) = self.threads.get_mut(session_id) {
                         thread.plan = Some(plan.clone());
+                        if !loaded {
+                            reach = Reach::Thread(session_id.clone(), &[Part::Status]);
+                        }
                     }
                 }
                 (Topic::SessionEvents { session_id }, ServerEvent::SessionHistoryError(error)) => {
@@ -1643,6 +1716,7 @@ impl WorkspaceStore {
             }
         }
         self.acknowledge_read(cx);
+        reach
     }
 
     /// A window of the thread's log, answering its subscription or a page:
@@ -1836,7 +1910,7 @@ impl WorkspaceStore {
                         .status
                         .as_ref()
                         .is_some_and(|status| self.left_index(status))
-                    && self.delivery_messages_for(Some(id)).is_empty()
+                    && self.delivery_messages_for(Some(id), cx).is_empty()
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -1891,7 +1965,7 @@ impl WorkspaceStore {
                 .iter()
                 .any(|meta| meta.id == session_id)
                 || self
-                    .session_status_for(Some(&session_id))
+                    .session_status_for(Some(&session_id), cx)
                     .is_some_and(|status| {
                         status.draft
                             && status.project_id.as_ref().is_some_and(|project| {
@@ -1906,7 +1980,7 @@ impl WorkspaceStore {
                         session_id: session_id.clone(),
                     })
             {
-                self.reopen_thread(&session_id);
+                self.reopen_thread(&session_id, cx);
             } else if !visible && !self.scope.is_full() {
                 self.close_thread(&session_id, cx);
             }
@@ -1914,11 +1988,11 @@ impl WorkspaceStore {
     }
 
     /// Subscribe an open thread afresh; a reply in flight is from before.
-    fn reopen_thread(&mut self, session_id: &str) {
+    fn reopen_thread(&mut self, session_id: &str, cx: &mut App) {
         self.selection_moved_on();
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
-        self.open_thread(session_id);
+        self.open_thread(session_id, cx);
     }
 
     fn session_visible(&self, session_id: &str) -> bool {
@@ -2208,9 +2282,8 @@ impl WorkspaceStore {
     }
 
     /// The repository a bare pull request number refers to in this thread, when known.
-    pub fn github_repository(&self, session_id: &str) -> Option<String> {
-        self.threads
-            .get(session_id)
+    pub fn github_repository(&self, session_id: &str, cx: &App) -> Option<String> {
+        self.watched(Some(session_id), Part::Status, cx)
             .filter(|thread| thread.open)?
             .git
             .as_ref()?
@@ -2818,11 +2891,11 @@ impl WorkspaceStore {
         self.providers_replica.usage_checking.contains(profile_id)
     }
 
-    pub fn shell_window_title_for(&self, session_id: Option<&str>) -> String {
+    pub fn shell_window_title_for(&self, session_id: Option<&str>, cx: &App) -> String {
         if !self.scope.is_full() {
             return self.machine_label();
         }
-        match self.thread_status(session_id) {
+        match self.thread_status(session_id, cx) {
             Some(status) if status.draft => crate::tr!("chat.new_thread").into_owned(),
             Some(status) => status.title.clone(),
             None => crate::tr!("app.name").into_owned(),
@@ -2831,8 +2904,8 @@ impl WorkspaceStore {
 
     /// The stable key of `session_id`'s preview: a project draft's belongs
     /// to its project, whichever draft thread stands for it.
-    pub(crate) fn preview_key_for(&self, session_id: &str) -> Option<String> {
-        self.thread_status(Some(session_id))
+    pub(crate) fn preview_key_for(&self, session_id: &str, cx: &App) -> Option<String> {
+        self.thread_status(Some(session_id), cx)
             .map(|status| Self::destination(status).preference_key())
     }
 
@@ -3009,8 +3082,8 @@ impl WorkspaceStore {
             .find(|catalog| catalog.profile_id == profile_id)
     }
 
-    pub fn session_cwd_for(&self, session_id: Option<&str>) -> Option<PathBuf> {
-        self.thread_status(session_id)
+    pub fn session_cwd_for(&self, session_id: Option<&str>, cx: &App) -> Option<PathBuf> {
+        self.thread_status(session_id, cx)
             .map(|status| status.cwd.clone())
     }
 
@@ -3157,9 +3230,13 @@ impl WorkspaceStore {
         })
     }
 
-    pub(crate) fn commit_dialog_state_for(&self, session_id: Option<&str>) -> CommitDialogState {
+    pub(crate) fn commit_dialog_state_for(
+        &self,
+        session_id: Option<&str>,
+        cx: &App,
+    ) -> CommitDialogState {
         let status = self
-            .thread_git(session_id)
+            .thread_git(session_id, cx)
             .and_then(|git| git.status.as_ref());
         CommitDialogState {
             files: status
@@ -3173,8 +3250,9 @@ impl WorkspaceStore {
     pub(crate) fn diff_active_state_for(
         &self,
         session_id: Option<&str>,
+        cx: &App,
     ) -> Option<DiffActiveState> {
-        self.thread_status(session_id)
+        self.thread_status(session_id, cx)
             .map(|status| DiffActiveState {
                 session: status.session_id.clone(),
                 cwd: status.cwd.clone(),
@@ -3182,25 +3260,29 @@ impl WorkspaceStore {
             })
     }
 
-    pub fn diff_turns_for(&self, session_id: Option<&str>) -> Vec<usize> {
-        self.with_timeline_for(session_id, |timeline| {
-            timeline
-                .turns
-                .iter()
-                .enumerate()
-                .filter_map(|(turn, meta)| {
-                    meta.changes
-                        .as_ref()
-                        .is_some_and(|changes| !changes.changes.is_empty())
-                        .then_some(turn)
-                })
-                .collect()
-        })
+    pub fn diff_turns_for(&self, session_id: Option<&str>, cx: &App) -> Vec<usize> {
+        self.with_timeline_for(
+            session_id,
+            |timeline| {
+                timeline
+                    .turns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(turn, meta)| {
+                        meta.changes
+                            .as_ref()
+                            .is_some_and(|changes| !changes.changes.is_empty())
+                            .then_some(turn)
+                    })
+                    .collect()
+            },
+            cx,
+        )
         .unwrap_or_default()
     }
 
-    pub fn diff_selected_turn_for(&self, session_id: Option<&str>) -> Option<usize> {
-        let turns = self.diff_turns_for(session_id);
+    pub fn diff_selected_turn_for(&self, session_id: Option<&str>, cx: &App) -> Option<usize> {
+        let turns = self.diff_turns_for(session_id, cx);
         let explicit = self
             .thread_conversation_ui(session_id)
             .and_then(|ui| ui.diff_selected_turn);
@@ -3215,11 +3297,16 @@ impl WorkspaceStore {
         session_id: Option<&str>,
         turn: usize,
         read: impl FnOnce(&[agent::FileChange], agent::ChangeCompleteness) -> R,
+        cx: &App,
     ) -> Option<R> {
-        self.with_timeline_for(session_id, |timeline| {
-            let changes = timeline.turns.get(turn)?.changes.as_ref()?;
-            Some(read(&changes.changes, changes.completeness))
-        })
+        self.with_timeline_for(
+            session_id,
+            |timeline| {
+                let changes = timeline.turns.get(turn)?.changes.as_ref()?;
+                Some(read(&changes.changes, changes.completeness))
+            },
+            cx,
+        )
         .flatten()
     }
 
@@ -3278,14 +3365,11 @@ impl WorkspaceStore {
 
     /// The panels of `session_id`'s conversation, or of no thread.
     pub(crate) fn panel_state_for(&self, session_id: Option<&str>) -> PanelState {
-        snapshots::panel_state(
-            self.thread_conversation_ui(session_id),
-            self.thread_timeline(session_id),
-        )
+        snapshots::panel_state(self.thread_conversation_ui(session_id))
     }
 
-    pub fn review_comments_for(&self, session_id: Option<&str>) -> Vec<ReviewComment> {
-        self.thread_status(session_id)
+    pub fn review_comments_for(&self, session_id: Option<&str>, cx: &App) -> Vec<ReviewComment> {
+        self.thread_status(session_id, cx)
             .map(|status| status.review_comment_drafts.clone())
             .unwrap_or_default()
     }
@@ -3486,8 +3570,12 @@ impl WorkspaceStore {
         &self,
         session_id: Option<&str>,
         entry_id: &str,
+        cx: &App,
     ) -> Option<String> {
-        let held = self.thread(session_id)?.history.as_ref()?;
+        let held = self
+            .watched(session_id, Part::Timeline, cx)?
+            .history
+            .as_ref()?;
         let attribution = &held.attribution;
         // The lead's messages to a child carry no author: they are no member's.
         if attribution.origins.get(entry_id) == Some(&tcode_core::session::MessageOrigin::Agent) {
@@ -3512,8 +3600,15 @@ impl WorkspaceStore {
         &self,
         session_id: Option<&str>,
         read: impl FnOnce(&Timeline) -> R,
+        cx: &App,
     ) -> Option<R> {
-        self.thread_timeline(session_id).map(read)
+        self.thread_timeline(session_id, cx).map(read)
+    }
+
+    /// Moves on with every change to `session_id`'s timeline, read as a view
+    /// depending on it: the store is not notified of a record streamed in.
+    pub(crate) fn timeline_revision_for(&self, session_id: Option<&str>, cx: &App) -> Option<u64> {
+        Some(self.thread(session_id)?.watch(Part::Timeline, cx))
     }
 
     /// Changes each time `session_id`'s timeline is folded whole from the
@@ -3549,7 +3644,7 @@ impl WorkspaceStore {
         cx: &mut Context<Self>,
     ) {
         if !self.is_thread_open(&session_id) {
-            self.open_thread(&session_id);
+            self.open_thread(&session_id, cx);
             self.put_back_thread(session_id.clone(), cx);
         }
         self.threads
@@ -3565,8 +3660,9 @@ impl WorkspaceStore {
         &self,
         session_id: Option<&str>,
         read: impl FnOnce(bool, &str, Option<&str>) -> R,
+        cx: &App,
     ) -> Option<R> {
-        self.thread_status(session_id).map(|status| {
+        self.thread_status(session_id, cx).map(|status| {
             read(
                 status.draft,
                 &status.session_id,
@@ -3575,16 +3671,15 @@ impl WorkspaceStore {
         })
     }
 
-    pub(crate) fn native_subagent_readonly_for(&self, session_id: Option<&str>) -> bool {
-        self.thread_status(session_id)
+    pub(crate) fn native_subagent_readonly_for(&self, session_id: Option<&str>, cx: &App) -> bool {
+        self.thread_status(session_id, cx)
             .is_some_and(|status| status.conversation_read_only)
     }
 
     /// The composer of `session_id`'s thread, or of no thread.
-    pub fn composer_state_for(&self, session_id: Option<&str>) -> ComposerState {
+    pub fn composer_state_for(&self, session_id: Option<&str>, cx: &App) -> ComposerState {
         snapshots::composer_state(
-            self.thread_status(session_id),
-            self.thread_timeline(session_id),
+            self.thread_status(session_id, cx),
             &self.settings_replica,
             &self.providers_replica,
         )
@@ -3605,22 +3700,30 @@ impl WorkspaceStore {
 
     /// Whether text from [`Self::append_to_composer`] or a native rewind's
     /// prefill waits for the thread's composer.
-    pub fn composer_text_waiting_for(&self, session_id: Option<&str>) -> bool {
-        self.thread_status(session_id).is_some_and(|status| {
+    pub fn composer_text_waiting_for(&self, session_id: Option<&str>, cx: &App) -> bool {
+        self.thread_status(session_id, cx).is_some_and(|status| {
             self.composer_appends.contains_key(&status.session_id)
                 || self.native_rewind_prefills.contains_key(&status.session_id)
         })
     }
 
     /// Consume the thread's text from [`Self::append_to_composer`].
-    pub fn take_composer_append_for(&mut self, session_id: Option<&str>) -> Option<String> {
-        let session_id = self.thread_status(session_id)?.session_id.clone();
+    pub fn take_composer_append_for(
+        &mut self,
+        session_id: Option<&str>,
+        cx: &App,
+    ) -> Option<String> {
+        let session_id = self.thread_status(session_id, cx)?.session_id.clone();
         self.composer_appends.remove(&session_id)
     }
 
     /// Consume the thread's prefill delivered by `NativeRewindPrefill`.
-    pub fn take_native_rewind_prefill_for(&mut self, session_id: Option<&str>) -> Option<String> {
-        let session_id = self.thread_status(session_id)?.session_id.clone();
+    pub fn take_native_rewind_prefill_for(
+        &mut self,
+        session_id: Option<&str>,
+        cx: &App,
+    ) -> Option<String> {
+        let session_id = self.thread_status(session_id, cx)?.session_id.clone();
         let prefill = self.native_rewind_prefills.remove(&session_id)?;
         if let Some(status) = self
             .threads
@@ -3633,26 +3736,30 @@ impl WorkspaceStore {
     }
 
     /// The classifier stop the thread is currently showing, if any.
-    pub fn fallback_block_for(&self, session_id: Option<&str>) -> Option<&FallbackBlock> {
-        let status = self.thread_status(session_id)?;
+    pub fn fallback_block_for(&self, session_id: Option<&str>, cx: &App) -> Option<&FallbackBlock> {
+        let status = self.thread_status(session_id, cx)?;
         self.fallback_blocks.get(&status.session_id)
     }
 
-    pub fn dismiss_fallback_block_for(&mut self, session_id: Option<&str>) {
-        if let Some(status) = self.thread_status(session_id) {
+    pub fn dismiss_fallback_block_for(&mut self, session_id: Option<&str>, cx: &App) {
+        if let Some(status) = self.thread_status(session_id, cx) {
             let session_id = status.session_id.clone();
             self.fallback_blocks.remove(&session_id);
         }
     }
 
     /// The advisory review of the thread's classifier stop, if any.
-    pub fn fallback_review_for(&self, session_id: Option<&str>) -> Option<&FallbackReview> {
-        let status = self.thread_status(session_id)?;
+    pub fn fallback_review_for(
+        &self,
+        session_id: Option<&str>,
+        cx: &App,
+    ) -> Option<&FallbackReview> {
+        let status = self.thread_status(session_id, cx)?;
         self.fallback_reviews.get(&status.session_id)
     }
 
-    pub fn dismiss_fallback_review_for(&mut self, session_id: Option<&str>) {
-        if let Some(status) = self.thread_status(session_id) {
+    pub fn dismiss_fallback_review_for(&mut self, session_id: Option<&str>, cx: &App) {
+        if let Some(status) = self.thread_status(session_id, cx) {
             let session_id = status.session_id.clone();
             self.fallback_reviews.remove(&session_id);
         }
@@ -3660,21 +3767,31 @@ impl WorkspaceStore {
 
     /// The thread's last user message: its turn index and the words the
     /// user actually typed (any injected context prefix stripped).
-    pub fn last_user_message_for(&self, session_id: Option<&str>) -> Option<(usize, String)> {
-        self.with_timeline_for(session_id, |timeline| {
-            timeline.entries.iter().rev().find_map(|entry| {
-                let EntryContent::Item(agent::ItemContent::UserMessage {
-                    text, context_len, ..
-                }) = &entry.content
-                else {
-                    return None;
-                };
-                let visible = context_len
-                    .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
-                    .map_or(text.as_str(), |len| &text[len..]);
-                Some((entry.turn, visible.to_string()))
-            })
-        })
+    pub fn last_user_message_for(
+        &self,
+        session_id: Option<&str>,
+        cx: &App,
+    ) -> Option<(usize, String)> {
+        self.with_timeline_for(
+            session_id,
+            |timeline| {
+                timeline.entries.iter().rev().find_map(|entry| {
+                    let EntryContent::Item(agent::ItemContent::UserMessage {
+                        text,
+                        context_len,
+                        ..
+                    }) = &entry.content
+                    else {
+                        return None;
+                    };
+                    let visible = context_len
+                        .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
+                        .map_or(text.as_str(), |len| &text[len..]);
+                    Some((entry.turn, visible.to_string()))
+                })
+            },
+            cx,
+        )
         .flatten()
     }
 
@@ -3684,8 +3801,9 @@ impl WorkspaceStore {
         &self,
         session_id: Option<&str>,
         read: impl FnOnce(&TerminalWorkspace) -> R,
+        cx: &App,
     ) -> Option<R> {
-        let status = self.thread_status(session_id)?;
+        let status = self.thread_status(session_id, cx)?;
         let workspace = TerminalWorkspace::from_replica(status, |id| self.client_terminal(id));
         Some(read(&workspace))
     }
@@ -3806,8 +3924,9 @@ impl WorkspaceStore {
     pub fn chat_active_session_for(
         &self,
         session_id: Option<&str>,
+        cx: &App,
     ) -> Option<(String, PathBuf, bool)> {
-        self.thread_status(session_id)
+        self.thread_status(session_id, cx)
             .map(|status| (status.title.clone(), status.cwd.clone(), status.draft))
             .or_else(|| {
                 let id = session_id?;
@@ -3818,7 +3937,7 @@ impl WorkspaceStore {
                     .map(|meta| (meta.title.clone(), meta.cwd.clone(), false))
             })
             .or_else(|| {
-                (!self.delivery_messages_for(session_id).is_empty()).then(|| {
+                (!self.delivery_messages_for(session_id, cx).is_empty()).then(|| {
                     (
                         crate::tr!("chat.waiting_connection").into_owned(),
                         PathBuf::new(),
@@ -3828,8 +3947,8 @@ impl WorkspaceStore {
             })
     }
 
-    pub fn chat_requested_model_for(&self, session_id: Option<&str>) -> Option<String> {
-        self.thread_status(session_id)
+    pub fn chat_requested_model_for(&self, session_id: Option<&str>, cx: &App) -> Option<String> {
+        self.thread_status(session_id, cx)
             .and_then(|status| status.requested_model.clone())
     }
 
@@ -3837,14 +3956,19 @@ impl WorkspaceStore {
         &self,
         session_id: Option<&str>,
         turn: usize,
+        cx: &App,
     ) -> (Vec<agent::FileChange>, agent::ChangeCompleteness) {
-        self.with_timeline_for(session_id, |timeline| {
-            timeline
-                .turns
-                .get(turn)
-                .and_then(|turn| turn.changes.as_ref())
-                .map(|changes| (changes.changes.clone(), changes.completeness))
-        })
+        self.with_timeline_for(
+            session_id,
+            |timeline| {
+                timeline
+                    .turns
+                    .get(turn)
+                    .and_then(|turn| turn.changes.as_ref())
+                    .map(|changes| (changes.changes.clone(), changes.completeness))
+            },
+            cx,
+        )
         .flatten()
         .unwrap_or((Vec::new(), agent::ChangeCompleteness::Partial))
     }
@@ -3855,17 +3979,22 @@ impl WorkspaceStore {
         &self,
         session_id: Option<&str>,
         turn: usize,
+        cx: &App,
     ) -> Option<NativeRewindState> {
-        let status = self.thread_status(session_id)?;
+        let status = self.thread_status(session_id, cx)?;
         let rewind = status.provider.caps().native_rewind?;
         let has_checkpoint = self
-            .with_timeline_for(session_id, |timeline| {
-                timeline
-                    .turns
-                    .get(turn)
-                    .and_then(|turn| turn.provider_checkpoint_id.as_ref())
-                    .is_some()
-            })
+            .with_timeline_for(
+                session_id,
+                |timeline| {
+                    timeline
+                        .turns
+                        .get(turn)
+                        .and_then(|turn| turn.provider_checkpoint_id.as_ref())
+                        .is_some()
+                },
+                cx,
+            )
             .unwrap_or(false);
         let absolute = self.absolute_turn_for(session_id, turn);
         let modes: Vec<agent::RewindMode> = rewind
@@ -3883,8 +4012,9 @@ impl WorkspaceStore {
     pub fn chat_git_controls_for(
         &self,
         session_id: Option<&str>,
+        cx: &App,
     ) -> Option<(QuickAction, Vec<MenuItem>)> {
-        let git = self.thread_git(session_id)?;
+        let git = self.thread_git(session_id, cx)?;
         git.status
             .as_ref()
             .map(|status| (quick_action(status, git.busy), menu_items(status, git.busy)))
@@ -3920,12 +4050,12 @@ impl WorkspaceStore {
                 .map_or(0, |thread| thread.turn_offset)
     }
 
-    pub fn session_plan_for(&self, session_id: Option<&str>) -> Option<&SessionPlan> {
-        self.thread(session_id)?.plan.as_ref()
+    pub fn session_plan_for(&self, session_id: Option<&str>, cx: &App) -> Option<&SessionPlan> {
+        self.watched(session_id, Part::Status, cx)?.plan.as_ref()
     }
 
-    pub fn session_status_for(&self, session_id: Option<&str>) -> Option<&SessionStatus> {
-        self.thread_status(session_id)
+    pub fn session_status_for(&self, session_id: Option<&str>, cx: &App) -> Option<&SessionStatus> {
+        self.thread_status(session_id, cx)
     }
 
     /// How many threads deleting `session_id` removes (the host deletes every
@@ -4051,7 +4181,7 @@ impl EventEmitter<tcode_protocol::HostingState> for WorkspaceStore {}
 #[cfg(test)]
 pub(crate) mod tests {
     use agent::{AgentEvent, ItemContent, ProviderKind, ThreadItem, TurnStatus};
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{App, AppContext as _, TestAppContext};
     use tcode_core::{
         git::{GitFileEntry, GitStatus},
         project::{Project, SessionMeta},
@@ -4879,8 +5009,8 @@ pub(crate) mod tests {
         ));
         let key = request.key.clone().unwrap();
         assert_eq!(
-            store.read_with(cx, |store, _| store
-                .delivery_messages_for(store.sole_thread().as_deref())),
+            store.read_with(cx, |store, cx| store
+                .delivery_messages_for(store.sole_thread().as_deref(), cx)),
             vec![(key.clone(), "hello".into(), None, false)]
         );
         replies
@@ -4900,8 +5030,8 @@ pub(crate) mod tests {
         let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
         assert_eq!(
-            store.read_with(cx, |store, _| store
-                .delivery_messages_for(store.sole_thread().as_deref())),
+            store.read_with(cx, |store, cx| store
+                .delivery_messages_for(store.sole_thread().as_deref(), cx)),
             vec![(
                 key.clone(),
                 "hello".into(),
@@ -4910,8 +5040,8 @@ pub(crate) mod tests {
             )]
         );
         assert!(
-            !store.read_with(cx, |store, _| store
-                .chat_loading_for(store.sole_thread().as_deref())),
+            !store.read_with(cx, |store, cx| store
+                .chat_loading_for(store.sole_thread().as_deref(), cx)),
             "a rejected write must be visible without a snapshot"
         );
         let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
@@ -4945,8 +5075,8 @@ pub(crate) mod tests {
             .unwrap();
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
         assert_eq!(
-            store.read_with(cx, |store, _| store
-                .delivery_messages_for(store.sole_thread().as_deref())),
+            store.read_with(cx, |store, cx| store
+                .delivery_messages_for(store.sole_thread().as_deref(), cx)),
             vec![(retry.key.clone().unwrap(), "hello".into(), None, true)]
         );
         let accepted_key = retry.key.unwrap();
@@ -4980,7 +5110,7 @@ pub(crate) mod tests {
                 cx,
             );
             assert_eq!(
-                store.delivery_messages_for(store.sole_thread().as_deref()),
+                store.delivery_messages_for(store.sole_thread().as_deref(), cx),
                 vec![(accepted_key.clone(), "hello".into(), None, true)]
             );
             store.show_alone("another".into(), cx);
@@ -5001,7 +5131,7 @@ pub(crate) mod tests {
             store.show_alone("scripted".into(), cx);
             assert!(
                 store
-                    .delivery_messages_for(store.sole_thread().as_deref())
+                    .delivery_messages_for(store.sole_thread().as_deref(), cx)
                     .is_empty()
             );
         });
@@ -5041,8 +5171,8 @@ pub(crate) mod tests {
         assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
         store.update(cx, |store, cx| store.show_alone("scripted".into(), cx));
         assert!(
-            store.read_with(cx, |store, _| store
-                .delivery_messages_for(store.sole_thread().as_deref())
+            store.read_with(cx, |store, cx| store
+                .delivery_messages_for(store.sole_thread().as_deref(), cx)
                 .is_empty()),
             "a replica received before its Ack must stay adopted"
         );
@@ -5356,20 +5486,20 @@ pub(crate) mod tests {
         );
         link.set_connection_state(tcode_client::ConnectionState::Connected { path: None });
         driver.wait_until(cx, &workspace, "rejected send", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .delivery_messages_for(store.sole_thread().as_deref())
+                    .delivery_messages_for(store.sole_thread().as_deref(), cx)
                     .iter()
                     .any(|(_, _, error, _)| error.is_some())
             })
         });
-        workspace.read_with(cx, |store, _| {
+        workspace.read_with(cx, |store, cx| {
             assert_eq!(store.sole_thread().as_deref(), Some("deleted"));
             assert_eq!(
-                store.delivery_messages_for(store.sole_thread().as_deref())[0].1,
+                store.delivery_messages_for(store.sole_thread().as_deref(), cx)[0].1,
                 "keep my failed send"
             );
-            assert!(!store.chat_loading_for(store.sole_thread().as_deref()));
+            assert!(!store.chat_loading_for(store.sole_thread().as_deref(), cx));
         });
         let key = link.failed_commands()[0].0.key.clone();
         workspace.update(cx, |store, _| store.discard_delivery(&key));
@@ -5482,7 +5612,7 @@ pub(crate) mod tests {
                 store.session_loading_for(&store.sole_thread().unwrap_or_default()),
                 "retired load must not replace the skeleton"
             );
-            assert!(store.thread_timeline(Some("two")).is_none());
+            assert!(store.thread_timeline(Some("two"), cx).is_none());
         });
     }
 
@@ -5535,7 +5665,7 @@ pub(crate) mod tests {
                     store.receive(reply(current_id), cx);
                     let held = store.threads["a"].history.as_ref().unwrap();
                     assert_eq!((held.from, held.end), (10, if empty { 12 } else { 14 }));
-                    let timeline = &store.thread_timeline(Some("a")).unwrap();
+                    let timeline = &store.thread_timeline(Some("a"), cx).unwrap();
                     assert_eq!(timeline.entries.len(), 1);
                     assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == if empty { "cached" } else { "cached continued" }));
                     let end = if empty { 12 } else { 14 };
@@ -5547,7 +5677,7 @@ pub(crate) mod tests {
                     store.receive(replacement, cx);
                     let held = store.threads["a"].history.as_ref().unwrap();
                     assert_eq!((held.from, held.end), (end, end + 2));
-                    let timeline = &store.thread_timeline(Some("a")).unwrap();
+                    let timeline = &store.thread_timeline(Some("a"), cx).unwrap();
                     assert_eq!(timeline.entries.len(), 1);
                     assert!(matches!(&timeline.entries[0].content, EntryContent::Item(ItemContent::AssistantMessage { text, .. }) if text == "replacement"));
                 });
@@ -5662,7 +5792,8 @@ pub(crate) mod tests {
             })
             .unwrap();
             let reconnect_id = host.subscription_request_id(&topic).unwrap();
-            let retained_entry = store.thread_timeline(Some("large")).unwrap().entries[0].clone();
+            let retained_entry =
+                store.thread_timeline(Some("large"), cx).unwrap().entries[0].clone();
             store.receive(
                 EventEnvelope {
                     request_id: Some(reconnect_id),
@@ -5685,7 +5816,7 @@ pub(crate) mod tests {
             assert!(
                 std::sync::Arc::ptr_eq(
                     &retained_entry,
-                    &store.thread_timeline(Some("large")).unwrap().entries[0]
+                    &store.thread_timeline(Some("large"), cx).unwrap().entries[0]
                 ),
                 "empty replay must retain the existing timeline"
             );
@@ -5755,10 +5886,11 @@ pub(crate) mod tests {
                 (10, 20)
             );
             assert_eq!(
-                store.with_timeline_for(store.sole_thread().as_deref(), |timeline| timeline
-                    .elided_outputs
-                    .get("shot")
-                    .copied()),
+                store.with_timeline_for(
+                    store.sole_thread().as_deref(),
+                    |timeline| timeline.elided_outputs.get("shot").copied(),
+                    cx,
+                ),
                 Some(Some(700_000))
             );
             store.receive(
@@ -5854,7 +5986,7 @@ pub(crate) mod tests {
             store.show_alone("shared".into(), cx);
             store.receive(snapshot(vec![message("owner", None)]), cx);
             assert_eq!(
-                store.message_byline_for(store.sole_thread().as_deref(), "owner"),
+                store.message_byline_for(store.sole_thread().as_deref(), "owner", cx),
                 None
             );
 
@@ -5865,7 +5997,7 @@ pub(crate) mod tests {
             store.receive(snapshot(vec![message("member", Some(member))]), cx);
             assert_eq!(
                 store
-                    .message_byline_for(store.sole_thread().as_deref(), "member")
+                    .message_byline_for(store.sole_thread().as_deref(), "member", cx)
                     .as_deref(),
                 Some("Alex's laptop")
             );
@@ -5881,13 +6013,13 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 store
-                    .message_byline_for(store.sole_thread().as_deref(), "owner")
+                    .message_byline_for(store.sole_thread().as_deref(), "owner", cx)
                     .as_deref(),
                 Some(crate::tr!("member.owner").as_ref())
             );
             assert_eq!(
                 store
-                    .message_byline_for(store.sole_thread().as_deref(), "member")
+                    .message_byline_for(store.sole_thread().as_deref(), "member", cx)
                     .as_deref(),
                 Some("Alex's laptop")
             );
@@ -5907,7 +6039,7 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 store
-                    .message_byline_for(store.sole_thread().as_deref(), "lead")
+                    .message_byline_for(store.sole_thread().as_deref(), "lead", cx)
                     .as_deref(),
                 Some(crate::tr!("chat.from_orchestrator").as_ref())
             );
@@ -6290,15 +6422,19 @@ pub(crate) mod tests {
     }
 
     fn live_turn(workspace: &gpui::Entity<WorkspaceStore>, cx: &TestAppContext) -> Option<u64> {
-        workspace.read_with(cx, |store, _| {
+        workspace.read_with(cx, |store, cx| {
             store
-                .with_timeline_for(store.sole_thread().as_deref(), |timeline| {
-                    timeline
-                        .turns
-                        .last()
-                        .filter(|turn| turn.running)
-                        .and_then(|turn| turn.start_ts)
-                })
+                .with_timeline_for(
+                    store.sole_thread().as_deref(),
+                    |timeline| {
+                        timeline
+                            .turns
+                            .last()
+                            .filter(|turn| turn.running)
+                            .and_then(|turn| turn.start_ts)
+                    },
+                    cx,
+                )
                 .flatten()
         })
     }
@@ -6359,9 +6495,9 @@ pub(crate) mod tests {
             });
             crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
             let open_question = |cx: &TestAppContext| {
-                workspace.read_with(cx, |store, _| {
+                workspace.read_with(cx, |store, cx| {
                     store
-                        .composer_state_for(store.sole_thread().as_deref())
+                        .composer_state_for(store.sole_thread().as_deref(), cx)
                         .pending_user_input
                         .map(|pending| pending.request_id)
                 })
@@ -6387,7 +6523,11 @@ pub(crate) mod tests {
                 } else {
                     store.receive(snapshot.clone(), cx);
                     assert_eq!(
-                        store.with_timeline_for(store.sole_thread().as_deref(), |t| t.turn_running),
+                        store.with_timeline_for(
+                            store.sole_thread().as_deref(),
+                            |t| t.turn_running,
+                            cx
+                        ),
                         Some(false)
                     );
                     store.receive(status_event(Some(0), Some(question())), cx);
@@ -6402,9 +6542,11 @@ pub(crate) mod tests {
             });
             assert_eq!(live_turn(&workspace, cx), None);
             assert_eq!(
-                workspace.read_with(cx, |store, _| store
-                    .with_timeline_for(store.sole_thread().as_deref(), |timeline| timeline
-                        .turn_running)),
+                workspace.read_with(cx, |store, cx| store.with_timeline_for(
+                    store.sole_thread().as_deref(),
+                    |timeline| timeline.turn_running,
+                    cx,
+                )),
                 Some(true)
             );
 
@@ -6436,41 +6578,48 @@ pub(crate) mod tests {
         crate::store::tests::seed_full_scope(&workspace, &incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
             store.show_alone(a.session_id.clone(), cx);
-            store.open_thread(&b.session_id);
+            store.open_thread(&b.session_id, cx);
             store.receive(status(&a), cx);
             store.receive(session_snapshot(&a.session_id, 0, vec![reply(1)]), cx);
             store.receive(status(&b), cx);
             store.receive(session_snapshot(&b.session_id, 0, vec![reply(2)]), cx);
         });
-        let shown = |store: &WorkspaceStore, id: &str| {
+        let shown = |store: &WorkspaceStore, id: &str, cx: &App| {
             (
                 store
-                    .composer_state_for(Some(id))
+                    .composer_state_for(Some(id), cx)
                     .pending_user_input
                     .map(|pending| pending.request_id),
-                store.with_timeline_for(Some(id), |timeline| {
-                    timeline
-                        .entries
-                        .iter()
-                        .map(|entry| entry.id.clone())
-                        .collect::<Vec<_>>()
-                }),
+                store.with_timeline_for(
+                    Some(id),
+                    |timeline| {
+                        timeline
+                            .entries
+                            .iter()
+                            .map(|entry| entry.id.clone())
+                            .collect::<Vec<_>>()
+                    },
+                    cx,
+                ),
             )
         };
         let a_shows = (None, Some(vec!["reply-1".to_string()]));
         let b_shows = (Some("ask".to_string()), Some(vec!["reply-2".to_string()]));
-        workspace.read_with(cx, |store, _| {
-            assert_eq!(shown(store, &a.session_id), a_shows);
-            assert_eq!(shown(store, &b.session_id), b_shows);
+        workspace.read_with(cx, |store, cx| {
+            assert_eq!(shown(store, &a.session_id, cx), a_shows);
+            assert_eq!(shown(store, &b.session_id, cx), b_shows);
         });
 
         // Each keeps receiving its events.
         workspace.update(cx, |store, cx| {
             store.receive(status(&with_running_turn(&a, None, Some(question()))), cx);
         });
-        workspace.read_with(cx, |store, _| {
-            assert_eq!(shown(store, &a.session_id), (b_shows.0.clone(), a_shows.1));
-            assert_eq!(shown(store, &b.session_id), b_shows);
+        workspace.read_with(cx, |store, cx| {
+            assert_eq!(
+                shown(store, &a.session_id, cx),
+                (b_shows.0.clone(), a_shows.1)
+            );
+            assert_eq!(shown(store, &b.session_id, cx), b_shows);
         });
     }
 
@@ -6549,8 +6698,8 @@ pub(crate) mod tests {
             open.into_iter().next()
         }
 
-        pub(crate) fn sole_status(&self) -> Option<&tcode_protocol::SessionStatus> {
-            self.session_status_for(self.sole_thread().as_deref())
+        pub(crate) fn sole_status(&self, cx: &App) -> Option<&tcode_protocol::SessionStatus> {
+            self.session_status_for(self.sole_thread().as_deref(), cx)
         }
 
         /// The pane shows `session_id` in place of what it showed.
@@ -6565,7 +6714,7 @@ pub(crate) mod tests {
             }
             if !self.is_thread_open(&session_id) {
                 self.selection_moved_on();
-                self.open_thread(&session_id);
+                self.open_thread(&session_id, cx);
             }
             cx.notify();
         }
@@ -6959,7 +7108,7 @@ pub(crate) mod tests {
             store.apply_connection_state(state);
             assert!(!store.threads_loading(), "cached list remains visible");
             assert!(
-                !store.chat_loading_for(store.sole_thread().as_deref()),
+                !store.chat_loading_for(store.sole_thread().as_deref(), cx),
                 "cached thread remains visible"
             );
             assert_eq!(store.sole_thread().as_deref(), Some("one"));
@@ -7039,7 +7188,7 @@ pub(crate) mod tests {
                 "other current baselines are still pending"
             );
             assert!(
-                !store.chat_loading_for(store.sole_thread().as_deref()),
+                !store.chat_loading_for(store.sole_thread().as_deref(), cx),
                 "cached thread remains visible"
             );
             for event in deferred_events {
@@ -7174,9 +7323,9 @@ pub(crate) mod tests {
         });
         let total = end + missed.len() as u64;
         driver.wait_until(cx, &workspace, "the kept thread's continuation", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 held_window(store, kept).is_some_and(|held| held.end == total)
-                    && store.thread_timeline(Some(kept)).is_some()
+                    && store.thread_timeline(Some(kept), cx).is_some()
             })
         });
         let after_reselect = answer(kept, 153);
@@ -7227,18 +7376,18 @@ pub(crate) mod tests {
         });
         let fresh = driver.workspace(cx);
         open(&mut driver, cx, &fresh, released);
-        let fresh = fresh.read_with(cx, |store, _| {
+        let fresh = fresh.read_with(cx, |store, cx| {
             (
-                store.thread_timeline(Some(released)).cloned(),
+                store.thread_timeline(Some(released), cx).cloned(),
                 store
                     .thread(store.sole_thread().as_deref())
                     .map_or(0, |thread| thread.turn_offset),
             )
         });
-        workspace.read_with(cx, |store, _| {
+        workspace.read_with(cx, |store, cx| {
             assert_eq!(
                 (
-                    store.thread_timeline(Some(released)).cloned(),
+                    store.thread_timeline(Some(released), cx).cloned(),
                     store
                         .thread(store.sole_thread().as_deref())
                         .map_or(0, |thread| thread.turn_offset)
@@ -7292,9 +7441,9 @@ pub(crate) mod tests {
         let mut driver = LocalHostDriver::new(&host);
         let workspace = driver.workspace(cx);
         let terminals = |cx: &TestAppContext| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .session_status_for(Some("one"))
+                    .session_status_for(Some("one"), cx)
                     .map(|status| status.terminals.clone())
                     .unwrap_or_default()
             })
@@ -7397,9 +7546,9 @@ pub(crate) mod tests {
         workspace: &gpui::Entity<WorkspaceStore>,
         session_id: &str,
     ) -> bool {
-        workspace.read_with(cx, |store, _| {
+        workspace.read_with(cx, |store, cx| {
             store
-                .sole_status()
+                .sole_status(cx)
                 .is_some_and(|status| status.session_id == session_id)
         })
     }
@@ -7787,9 +7936,9 @@ pub(crate) mod tests {
             store.start_draft("p".into(), root.clone(), cx)
         });
         driver.wait_until(cx, &workspace, "draft for the last project", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .sole_status()
+                    .sole_status(cx)
                     .is_some_and(|status| status.draft && status.project_id.as_deref() == Some("p"))
             })
         });
@@ -7878,11 +8027,11 @@ pub(crate) mod tests {
             shown.borrow().is_some()
         });
         let draft = shown.borrow().clone().expect("the draft");
-        workspace.update(cx, |store, _| store.open_thread(&draft));
+        workspace.update(cx, |store, cx| store.open_thread(&draft, cx));
         driver.wait_until(cx, &workspace, "a draft in the thread's project", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .session_status_for(Some(&draft))
+                    .session_status_for(Some(&draft), cx)
                     .is_some_and(|status| status.draft && status.project_id.as_deref() == Some("p"))
             })
         });
@@ -7926,16 +8075,16 @@ pub(crate) mod tests {
                 false,
                 cx,
             );
-            store.open_thread("one");
-            store.open_thread("two");
+            store.open_thread("one", cx);
+            store.open_thread("two", cx);
             store
         });
         driver.wait_until(cx, &workspace, "both threads' baselines", |cx| {
             workspace.read_with(cx, |store, _| store.baseline_ready())
         });
-        workspace.read_with(cx, |store, _| {
-            assert!(store.session_status_for(Some("one")).is_some());
-            assert!(store.session_status_for(Some("two")).is_some());
+        workspace.read_with(cx, |store, cx| {
+            assert!(store.session_status_for(Some("one"), cx).is_some());
+            assert!(store.session_status_for(Some("two"), cx).is_some());
         });
         driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
@@ -7974,8 +8123,8 @@ pub(crate) mod tests {
         });
         place_shown_threads(&workspace, cx);
         driver.wait_until(cx, &workspace, "remembered project draft", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store.sole_status().is_some_and(|status| {
+            workspace.read_with(cx, |store, cx| {
+                store.sole_status(cx).is_some_and(|status| {
                     status.draft && status.project_id.as_deref() == Some("remembered")
                 })
             })
@@ -8023,7 +8172,7 @@ pub(crate) mod tests {
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone("reconnect".into(), cx));
         driver.wait_until(cx, &workspace, "selected status", |cx| {
-            workspace.read_with(cx, |store, _| store.sole_status().is_some())
+            workspace.read_with(cx, |store, cx| store.sole_status(cx).is_some())
         });
         update_host!(&host, |state, cx| {
             for (ts, text) in [(1, "one"), (2, "two"), (3, "three")] {
@@ -8122,10 +8271,10 @@ pub(crate) mod tests {
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &workspace, "initial session timeline replica", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store.sole_thread().as_ref() == Some(&session_id)
                     && store
-                        .thread_timeline(Some(&session_id))
+                        .thread_timeline(Some(&session_id), cx)
                         .is_some_and(|timeline| timeline.turns.len() == 1)
             })
         });
@@ -8220,9 +8369,9 @@ pub(crate) mod tests {
                 })
             },
         );
-        let replica = workspace.read_with(cx, |store, _| {
+        let replica = workspace.read_with(cx, |store, cx| {
             let timeline = store
-                .thread_timeline(Some(&session_id))
+                .thread_timeline(Some(&session_id), cx)
                 .expect("session replica");
             assert_eq!(store.sole_thread().as_ref(), Some(&session_id));
             (
@@ -8402,9 +8551,9 @@ pub(crate) mod tests {
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &workspace, "selected session status", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .sole_status()
+                    .sole_status(cx)
                     .is_some_and(|status| status.session_id == session_id)
             })
         });
@@ -8449,17 +8598,17 @@ pub(crate) mod tests {
                     .session_status_snapshot(&live_id)
                     .expect("live session status")
             });
-            workspace.read_with(cx, |store, _| {
-                store.sole_status().is_some_and(|status| {
+            workspace.read_with(cx, |store, cx| {
+                store.sole_status(cx).is_some_and(|status| {
                     status.queued_messages.len() == 1
                         && status.review_comment_drafts.len() == 1
                         && *status == live
                 })
             })
         });
-        let replica = workspace.read_with(cx, |store, _| {
+        let replica = workspace.read_with(cx, |store, cx| {
             store
-                .sole_status()
+                .sole_status(cx)
                 .cloned()
                 .expect("session status replica")
         });
@@ -8468,8 +8617,8 @@ pub(crate) mod tests {
         assert_eq!(replica.queued_messages[0].text, "queued for replication");
         assert_eq!(replica.review_comment_drafts.len(), 1);
         assert_eq!(
-            workspace.read_with(cx, |store, _cx| store
-                .review_comments_for(store.sole_thread().as_deref())),
+            workspace.read_with(cx, |store, cx| store
+                .review_comments_for(store.sole_thread().as_deref(), cx)),
             replica.review_comment_drafts
         );
 
@@ -8495,9 +8644,9 @@ pub(crate) mod tests {
         let workspace = driver.workspace(cx);
         workspace.update(cx, |store, cx| store.show_alone(first.id.clone(), cx));
         driver.wait_until(cx, &workspace, "first selected session", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .sole_status()
+                    .sole_status(cx)
                     .is_some_and(|status| status.session_id == first.id)
             })
         });
@@ -8533,21 +8682,21 @@ pub(crate) mod tests {
         });
 
         assert_eq!(
-            workspace.update(cx, |store, _cx| store
-                .take_native_rewind_prefill_for(store.sole_thread().as_deref())),
+            workspace.update(cx, |store, cx| store
+                .take_native_rewind_prefill_for(store.sole_thread().as_deref(), cx)),
             Some("first parked prefill".into())
         );
         workspace.update(cx, |store, cx| store.show_alone(second.id.clone(), cx));
         driver.wait_until(cx, &workspace, "second selected session", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .sole_status()
+                    .sole_status(cx)
                     .is_some_and(|status| status.session_id == second.id)
             })
         });
         assert_eq!(
-            workspace.update(cx, |store, _cx| store
-                .take_native_rewind_prefill_for(store.sole_thread().as_deref())),
+            workspace.update(cx, |store, cx| store
+                .take_native_rewind_prefill_for(store.sole_thread().as_deref(), cx)),
             Some("second parked prefill".into())
         );
 
@@ -8589,9 +8738,9 @@ pub(crate) mod tests {
             }));
         });
         driver.wait_until(cx, &workspace, "classifier block", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .fallback_block_for(store.sole_thread().as_deref())
+                    .fallback_block_for(store.sole_thread().as_deref(), cx)
                     .is_some()
             })
         });
@@ -8611,21 +8760,21 @@ pub(crate) mod tests {
             }));
         });
         driver.wait_until(cx, &workspace, "review ready", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .fallback_review_for(store.sole_thread().as_deref())
+                    .fallback_review_for(store.sole_thread().as_deref(), cx)
                     .is_some()
             })
         });
-        workspace.read_with(cx, |store, _| {
+        workspace.read_with(cx, |store, cx| {
             let block = store
-                .fallback_block_for(store.sole_thread().as_deref())
+                .fallback_block_for(store.sole_thread().as_deref(), cx)
                 .unwrap();
             assert_eq!(block.category, Some(agent::ClassifierCategory::Cyber));
             assert_eq!(block.model.as_deref(), Some("claude-sonnet-4-5"));
             assert_eq!(block.detail, "request blocked by classifier");
             let review = store
-                .fallback_review_for(store.sole_thread().as_deref())
+                .fallback_review_for(store.sole_thread().as_deref(), cx)
                 .unwrap();
             assert_eq!(review.assessment, "looks like a false positive");
             assert_eq!(review.draft, "I am auditing my own service.");
@@ -8647,12 +8796,12 @@ pub(crate) mod tests {
             &workspace,
             "block and review cleared by the next turn",
             |cx| {
-                workspace.read_with(cx, |store, _| {
+                workspace.read_with(cx, |store, cx| {
                     store
-                        .fallback_block_for(store.sole_thread().as_deref())
+                        .fallback_block_for(store.sole_thread().as_deref(), cx)
                         .is_none()
                         && store
-                            .fallback_review_for(store.sole_thread().as_deref())
+                            .fallback_review_for(store.sole_thread().as_deref(), cx)
                             .is_none()
                 })
             },
@@ -8680,9 +8829,9 @@ pub(crate) mod tests {
         // (non-repo) cwd. Let that probe land before injecting the fixture
         // status, or its late result overwrites the injected one.
         driver.wait_until(cx, &workspace, "initial git probe", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .thread_git(Some("git-replica"))
+                    .thread_git(Some("git-replica"), cx)
                     .is_some_and(|git| git.status.is_some())
             })
         });
@@ -8725,10 +8874,10 @@ pub(crate) mod tests {
             state.git_busy.insert("git-replica".into());
         });
         driver.wait_until(cx, &workspace, "provider and git replicas", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store.providers_replica.providers_checking
                     && store
-                        .thread_git(Some("git-replica"))
+                        .thread_git(Some("git-replica"), cx)
                         .and_then(|git| git.status.as_ref())
                         .is_some_and(|status| status.branch.as_deref() == Some("feature/replica"))
             })
@@ -8740,11 +8889,11 @@ pub(crate) mod tests {
                 state.git_status_snapshot("git-replica"),
             )
         });
-        let (replica_providers, replica_git) = workspace.read_with(cx, |store, _| {
+        let (replica_providers, replica_git) = workspace.read_with(cx, |store, cx| {
             (
                 store.providers_replica.clone(),
                 store
-                    .thread_git(Some("git-replica"))
+                    .thread_git(Some("git-replica"), cx)
                     .cloned()
                     .expect("git replica"),
             )
@@ -8815,8 +8964,8 @@ pub(crate) mod tests {
                 store.start_draft("doomed".into(), root.clone(), cx)
             });
             driver.wait_until(cx, &workspace, "draft for the doomed project", |cx| {
-                workspace.read_with(cx, |store, _| {
-                    store.sole_status().is_some_and(|status| {
+                workspace.read_with(cx, |store, cx| {
+                    store.sole_status(cx).is_some_and(|status| {
                         status.draft && status.project_id.as_deref() == Some("doomed")
                     })
                 })
@@ -8842,8 +8991,8 @@ pub(crate) mod tests {
             assert_no_draft_state(cx, &workspace);
             if viewing_draft {
                 driver.wait_until(cx, &workspace, "kept project's draft", |cx| {
-                    workspace.read_with(cx, |store, _| {
-                        store.sole_status().is_some_and(|status| {
+                    workspace.read_with(cx, |store, cx| {
+                        store.sole_status(cx).is_some_and(|status| {
                             status.draft && status.project_id.as_deref() == Some("kept")
                         })
                     })
@@ -8877,9 +9026,9 @@ pub(crate) mod tests {
             store.start_draft("p".into(), root.clone(), cx)
         });
         driver.wait_until(cx, &workspace, "draft for p", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .sole_status()
+                    .sole_status(cx)
                     .is_some_and(|status| status.draft && status.project_id.as_deref() == Some("p"))
             })
         });
@@ -8894,7 +9043,7 @@ pub(crate) mod tests {
                 .right_panel_open = true;
         });
 
-        let provider = workspace.read_with(cx, |store, _| store.sole_status().unwrap().provider);
+        let provider = workspace.read_with(cx, |store, cx| store.sole_status(cx).unwrap().provider);
         let scripted = tcode_runtime::app::scripted_provider(provider);
         let launcher = scripted.launcher.clone();
         update_host!(&host, move |state, _| state
@@ -8909,9 +9058,9 @@ pub(crate) mod tests {
             },
         );
         driver.wait_until(cx, &workspace, "draft committed", |cx| {
-            workspace.read_with(cx, |store, _| {
+            workspace.read_with(cx, |store, cx| {
                 store
-                    .sole_status()
+                    .sole_status(cx)
                     .is_some_and(|status| !status.draft && status.session_id == draft_id)
             })
         });

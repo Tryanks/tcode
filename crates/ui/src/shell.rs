@@ -1012,7 +1012,7 @@ impl AppShell {
             self.pending_navigation_restore = None;
             return;
         }
-        if store.read(cx).chat_loading_for(shown.as_deref()) {
+        if store.read(cx).chat_loading_for(shown.as_deref(), cx) {
             return;
         }
         let pending = self
@@ -1182,7 +1182,6 @@ impl AppShell {
                     if change.topic == TopicKind::Settings {
                         this.adopt_host_settings(window, cx);
                     }
-                    cx.notify();
                 },
             ),
         ];
@@ -1452,7 +1451,7 @@ impl AppShell {
         let panes = attachment.panes(cx);
         store.update(cx, |store, cx| {
             if !store.is_thread_open(session_id) {
-                store.open_thread(session_id);
+                store.open_thread(session_id, cx);
                 cx.notify();
             }
         });
@@ -3739,10 +3738,10 @@ impl AppShell {
         {
             return false;
         }
-        store.update(cx, |store, _| {
+        store.update(cx, |store, cx| {
             store.lease_timeline(&lead);
             if !store.is_thread_open(&session_id) {
-                store.open_thread(&session_id);
+                store.open_thread(&session_id, cx);
             }
         });
         let state = window_state.clone();
@@ -3778,10 +3777,10 @@ impl AppShell {
         let Some((store, lead)) = self.agent_lead(cx) else {
             return;
         };
-        store.update(cx, |store, _| {
+        store.update(cx, |store, cx| {
             store.lease_timeline(&lead);
             if !store.is_thread_open(&lead) {
-                store.open_thread(&lead);
+                store.open_thread(&lead, cx);
             }
         });
         let window_state = self.window_state.clone();
@@ -4254,8 +4253,8 @@ impl AppShell {
         };
         let store = attachment.link.store.read(cx);
         let active = match &kept {
-            Some(kept) => store.chat_active_session_for(Some(&kept.session_id)),
-            None => store.chat_active_session_for(self.page_thread(cx).as_deref()),
+            Some(kept) => store.chat_active_session_for(Some(&kept.session_id), cx),
+            None => store.chat_active_session_for(self.page_thread(cx).as_deref(), cx),
         };
         let project = active
             .as_ref()
@@ -4341,7 +4340,7 @@ impl AppShell {
             .map(|pending| pending.panel.id());
         let terminal = selected_panel.map_or(self.panel_shows_terminal, |id| id == "terminal");
         let show_agents = session.is_some_and(|id| {
-            !crate::agents_panel::Agents::of(store, &id).is_empty()
+            !crate::agents_panel::Agents::of(store, &id, cx).is_empty()
                 || panel.right_tab == RightTab::Agents
                 || selected_panel == Some("agents")
         });
@@ -5600,7 +5599,7 @@ impl Render for AppShell {
                 .link
                 .store
                 .read(cx)
-                .shell_window_title_for(self.page_thread(cx).as_deref());
+                .shell_window_title_for(self.page_thread(cx).as_deref(), cx);
             if title != self.window_title {
                 window.set_window_title(&title);
                 self.window_title = title;
@@ -6036,12 +6035,12 @@ pub(crate) mod tests {
         cx.simulate_resize(size(px(1024.), px(700.)));
         draw(cx);
         let store = store_of(&shell, cx);
-        store.read_with(cx, |store, _| {
+        store.read_with(cx, |store, cx| {
             assert_eq!(store.remote_host_name(), Some("Pending host"));
             assert!(store.is_thread_open("pending-thread"));
-            assert!(!store.chat_loading_for(Some("pending-thread")));
+            assert!(!store.chat_loading_for(Some("pending-thread"), cx));
             assert_eq!(
-                store.delivery_messages_for(Some("pending-thread"))[0].1,
+                store.delivery_messages_for(Some("pending-thread"), cx)[0].1,
                 "survives relaunch"
             );
             assert!(store.sidebar_sessions().is_empty());
@@ -6079,8 +6078,8 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("secondary-d");
         serve_thread(&host, "thread-2");
         cx.simulate_keystrokes("secondary-2");
-        await_restore_update(&shell, cx, |store| {
-            store.is_thread_open("thread-2") && !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            store.is_thread_open("thread-2") && !store.chat_loading_for(Some("thread-2"), cx)
         });
         assert_eq!(
             pane_threads(&shell, cx),
@@ -6106,7 +6105,7 @@ pub(crate) mod tests {
         };
         for (key, focused) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
             cx.simulate_keystrokes(key);
-            await_restore_update(&shell, cx, |store| store.is_thread_open(focused));
+            await_restore_update(&shell, cx, |store, _| store.is_thread_open(focused));
             crate::test_frames::draw_settled(cx);
             assert_eq!(
                 pane_of(cx).as_deref(),
@@ -6119,13 +6118,13 @@ pub(crate) mod tests {
     fn await_restore_update(
         shell: &Entity<AppShell>,
         cx: &mut VisualTestContext,
-        ready: impl Fn(&WorkspaceStore) -> bool,
+        ready: impl Fn(&WorkspaceStore, &App) -> bool,
     ) {
         let store = store_of(shell, cx);
         for _ in 0..500 {
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             draw(cx);
-            if store.read_with(cx, |store, _| ready(store)) {
+            if store.read_with(cx, |store, cx| ready(store, cx)) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -6187,7 +6186,7 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(shell, cx, WorkspaceStore::index_hydrated);
+        await_restore_update(shell, cx, |store, _| store.index_hydrated());
     }
 
     fn restore_status(shell: &Entity<AppShell>, host: &MountedShell, cx: &mut VisualTestContext) {
@@ -6206,8 +6205,10 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(shell, cx, |store| {
-            store.chat_active_session_for(Some("thread-a")).is_some()
+        await_restore_update(shell, cx, |store, cx| {
+            store
+                .chat_active_session_for(Some("thread-a"), cx)
+                .is_some()
         });
     }
 
@@ -6261,7 +6262,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
         }
-        await_restore_update(shell, cx, WorkspaceStore::baseline_ready);
+        await_restore_update(shell, cx, |store, _| store.baseline_ready());
     }
 
     /// A phone that goes back to the thread list before the thread's
@@ -6437,8 +6438,8 @@ pub(crate) mod tests {
                     )
                     .unwrap();
             }
-            await_restore_update(&shell, cx, |store| {
-                !store.chat_loading_for(Some("thread-a"))
+            await_restore_update(&shell, cx, |store, cx| {
+                !store.chat_loading_for(Some("thread-a"), cx)
             });
             draw(cx);
             cx.update(|window, cx| {
@@ -6596,8 +6597,8 @@ pub(crate) mod tests {
                     )
                     .unwrap();
             }
-            await_restore_update(&shell, cx, |store| {
-                !store.chat_loading_for(Some("thread-a"))
+            await_restore_update(&shell, cx, |store, cx| {
+                !store.chat_loading_for(Some("thread-a"), cx)
             });
             shell.read_with(cx, |shell, cx| {
                 assert!(shell.pending_navigation_restore.is_none());
@@ -6860,8 +6861,8 @@ pub(crate) mod tests {
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         state.update(cx, |state, cx| state.close_settings(cx));
         store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         settle_panes(cx);
         assert!(composer_has_keyboard(&shell, 0, cx));
@@ -6901,10 +6902,10 @@ pub(crate) mod tests {
             store.show_thread("thread-a".into(), cx);
         });
         driver.wait_until(cx, &store, "selected conversation", |cx| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
-                    && !store.chat_loading_for(Some("thread-a"))
+                    && !store.chat_loading_for(Some("thread-a"), cx)
             })
         });
         draw(cx);
@@ -7039,8 +7040,8 @@ pub(crate) mod tests {
                 )
                 .unwrap();
         }
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-a"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-a"), cx)
         });
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
@@ -7186,8 +7187,8 @@ pub(crate) mod tests {
         }
         // The app applies what the host sent as it arrives; a thread come
         // back to draws from what was kept until its window lands.
-        await_restore_update(shell, cx, |store| {
-            !store.chat_loading_for(Some(session)) && store.timeline_settled_for(session)
+        await_restore_update(shell, cx, |store, cx| {
+            !store.chat_loading_for(Some(session), cx) && store.timeline_settled_for(session)
         });
     }
 
@@ -7393,8 +7394,10 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(&shell, cx, |store| {
-            store.chat_active_session_for(Some("thread-a")).is_some()
+        await_restore_update(&shell, cx, |store, cx| {
+            store
+                .chat_active_session_for(Some("thread-a"), cx)
+                .is_some()
         });
         host.incoming
             .try_send(
@@ -7425,8 +7428,8 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-a"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-a"), cx)
         });
         assert!(store_of(&shell, cx).read_with(cx, |store, _| {
             store.panel_state_for(Some("thread-a")).terminal_open
@@ -7518,7 +7521,9 @@ pub(crate) mod tests {
         }
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
-        await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some(session)));
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some(session), cx)
+        });
         resize(cx, 1200.);
         let composer = shell.read_with(cx, |shell, cx| {
             shell
@@ -7621,8 +7626,8 @@ pub(crate) mod tests {
         serve_thread(&host, "thread-1");
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-1"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
         });
         // The window settles before a pointer reaches it.
         cx.executor().advance_clock(Duration::from_millis(250));
@@ -7776,9 +7781,11 @@ pub(crate) mod tests {
         cx: &mut VisualTestContext,
     ) {
         ack_draft(host, draft);
-        await_restore_update(shell, cx, |store| store.is_thread_open(draft));
+        await_restore_update(shell, cx, |store, _| store.is_thread_open(draft));
         serve_thread(host, draft);
-        await_restore_update(shell, cx, |store| !store.chat_loading_for(Some(draft)));
+        await_restore_update(shell, cx, |store, cx| {
+            !store.chat_loading_for(Some(draft), cx)
+        });
         draw(cx);
     }
 
@@ -7825,7 +7832,7 @@ pub(crate) mod tests {
         cx.simulate_click(row.center(), alt);
         draw(cx);
         serve_thread(host, id);
-        await_restore_update(shell, cx, |store| !store.chat_loading_for(Some(id)));
+        await_restore_update(shell, cx, |store, cx| !store.chat_loading_for(Some(id), cx));
         // The pane glides in before the pointer reaches it.
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
@@ -7890,8 +7897,8 @@ pub(crate) mod tests {
             "{carried:?} -> {landing:?} into {indicator:?}"
         );
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
@@ -7976,8 +7983,8 @@ pub(crate) mod tests {
         cx.simulate_mouse_up(pane.center(), MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
@@ -8000,8 +8007,8 @@ pub(crate) mod tests {
         // that spawned the agent.
         cx.simulate_keystrokes("secondary-2");
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
             unreachable!("panes_index sends a snapshot");
@@ -8062,8 +8069,8 @@ pub(crate) mod tests {
             ],
         );
         cx.simulate_keystrokes("secondary-1");
-        await_restore_update(&shell, cx, |store| {
-            store.thread_meta("mirror").is_some() && !store.chat_loading_for(Some("thread-1"))
+        await_restore_update(&shell, cx, |store, cx| {
+            store.thread_meta("mirror").is_some() && !store.chat_loading_for(Some("thread-1"), cx)
         });
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
@@ -8102,9 +8109,9 @@ pub(crate) mod tests {
                 ServerEvent::SessionStatusReplaced(Box::new(status)),
             )],
         );
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("mirror"))
-                && store.native_subagent_readonly_for(Some("mirror"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("mirror"), cx)
+                && store.native_subagent_readonly_for(Some("mirror"), cx)
         });
         settle_panes(cx);
         let store = store_of(&shell, cx);
@@ -8281,7 +8288,9 @@ pub(crate) mod tests {
             index.sessions.push(agent);
         }
         send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-        await_restore_update(&shell, cx, |store| store.thread_meta("agent-3").is_some());
+        await_restore_update(&shell, cx, |store, _| {
+            store.thread_meta("agent-3").is_some()
+        });
         settle_panes(cx);
         let press = |selector: &'static str, cx: &mut VisualTestContext| {
             let at = cx
@@ -8301,10 +8310,10 @@ pub(crate) mod tests {
             if id != "agent-1" {
                 serve_subagent_status(&host, id);
             }
-            await_restore_update(&shell, cx, |store| {
-                !store.chat_loading_for(Some(id))
+            await_restore_update(&shell, cx, |store, cx| {
+                !store.chat_loading_for(Some(id), cx)
                     && store.timeline_settled_for(id)
-                    && (id == "agent-1" || store.native_subagent_readonly_for(Some(id)))
+                    && (id == "agent-1" || store.native_subagent_readonly_for(Some(id), cx))
             });
             settle_panes(cx);
             settle_frames(cx);
@@ -8391,7 +8400,9 @@ pub(crate) mod tests {
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
         let (shell, host, cx) = mount_panes(cx);
         send_events(&host, vec![lead_with_agent_index("thread-1")]);
-        await_restore_update(&shell, cx, |store| store.thread_meta("agent-1").is_some());
+        await_restore_update(&shell, cx, |store, _| {
+            store.thread_meta("agent-1").is_some()
+        });
         draw(cx);
         (shell, host, cx)
     }
@@ -8494,8 +8505,8 @@ pub(crate) mod tests {
         serve_thread(host, "agent-1");
         // The app applies what the host sent as it arrives; an agent come
         // back to draws from what was kept until its window lands.
-        await_restore_update(shell, cx, |store| {
-            !store.chat_loading_for(Some("agent-1")) && store.timeline_settled_for("agent-1")
+        await_restore_update(shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("agent-1"), cx) && store.timeline_settled_for("agent-1")
         });
         settle_panes(cx);
     }
@@ -8756,8 +8767,9 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_lead_with_agent(cx);
         let store = store_of(&shell, cx);
         serve_finished_turns(&host, "thread-1", 60, false);
-        await_restore_update(&shell, cx, |store| {
-            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(60)
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
+                == Some(60)
         });
         settle_frames(cx);
         let slack = px(1.);
@@ -8795,10 +8807,10 @@ pub(crate) mod tests {
             display_frame(cx);
         }
         let first = first.expect("the agent's card comes in");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-1"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
                 && store.timeline_settled_for("agent-1")
-                && store.native_subagent_readonly_for(Some("agent-1"))
+                && store.native_subagent_readonly_for(Some("agent-1"), cx)
         });
         settle_frames(cx);
         let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
@@ -9084,7 +9096,7 @@ pub(crate) mod tests {
         let row = press_side("rail-agent-agent-1", cx);
         serve_finished_turns(host, "agent-1", 3, false);
         serve_subagent_status(host, "agent-1");
-        await_restore_update(shell, cx, |store| store.timeline_settled_for("agent-1"));
+        await_restore_update(shell, cx, |store, _| store.timeline_settled_for("agent-1"));
         row
     }
 
@@ -9480,10 +9492,10 @@ pub(crate) mod tests {
             )
         });
         draw(cx);
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-1"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
                 && store.timeline_settled_for("agent-1")
-                && store.native_subagent_readonly_for(Some("agent-1"))
+                && store.native_subagent_readonly_for(Some("agent-1"), cx)
         });
         settle_frames(cx);
         let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
@@ -9574,7 +9586,7 @@ pub(crate) mod tests {
                 "thread-1, a lead with a longer title",
             )],
         );
-        await_restore_update(&shell, cx, |store| {
+        await_restore_update(&shell, cx, |store, _| {
             store
                 .thread_meta("thread-1")
                 .is_some_and(|meta| meta.title.ends_with("longer title"))
@@ -9680,8 +9692,8 @@ pub(crate) mod tests {
         });
         draw(cx);
         serve_thread(&host, "agent-1");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("agent-1")) && store.timeline_settled_for("agent-1")
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("agent-1"), cx) && store.timeline_settled_for("agent-1")
         });
         settle_panes(cx);
         store.read_with(cx, |store, _| {
@@ -9757,8 +9769,8 @@ pub(crate) mod tests {
 
         cx.simulate_keystrokes("secondary-alt-right secondary-2");
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         draw(cx);
         assert_eq!(
@@ -9850,7 +9862,7 @@ pub(crate) mod tests {
             index.sessions.push(agent);
         }
         send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-        await_restore_update(&shell, cx, |store| {
+        await_restore_update(&shell, cx, |store, _| {
             store.thread_meta("agent-settled").is_some()
         });
         draw(cx);
@@ -10235,9 +10247,9 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         serve_status(&host, "thread-1", true);
-        await_restore_update(&shell, cx, |store| {
+        await_restore_update(&shell, cx, |store, cx| {
             store
-                .session_status_for(Some("thread-1"))
+                .session_status_for(Some("thread-1"), cx)
                 .is_some_and(|status| status.draft)
         });
         draw(cx);
@@ -10284,9 +10296,9 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         serve_status(&host, "thread-1", true);
-        await_restore_update(&shell, cx, |store| {
+        await_restore_update(&shell, cx, |store, cx| {
             store
-                .session_status_for(Some("thread-1"))
+                .session_status_for(Some("thread-1"), cx)
                 .is_some_and(|status| status.draft)
         });
         draw(cx);
@@ -10394,8 +10406,8 @@ pub(crate) mod tests {
         // thread-2 in thread-1's place, so thread-1 is left and kept.
         click(row("sidebar-thread-thread-2", cx), Default::default(), cx);
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         settle_panes(cx);
         let alt = gpui::Modifiers {
@@ -10410,8 +10422,8 @@ pub(crate) mod tests {
             [Some("thread-2".into()), Some("thread-1".into())]
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        store.read_with(cx, |store, _| {
-            assert!(!store.chat_loading_for(Some("thread-1")));
+        store.read_with(cx, |store, cx| {
+            assert!(!store.chat_loading_for(Some("thread-1"), cx));
             assert!(!store.timeline_settled_for("thread-1"), "it is catching up");
         });
 
@@ -10424,7 +10436,9 @@ pub(crate) mod tests {
         );
 
         serve_thread(&host, "thread-1");
-        await_restore_update(&shell, cx, |store| store.timeline_settled_for("thread-1"));
+        await_restore_update(&shell, cx, |store, _| {
+            store.timeline_settled_for("thread-1")
+        });
         settle_panes(cx);
         cx.simulate_input("typed as it caught up");
         draw(cx);
@@ -10464,7 +10478,7 @@ pub(crate) mod tests {
         settle_panes(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         assert!(
-            store.read_with(cx, |store, _| store.chat_loading_for(Some("thread-2"))),
+            store.read_with(cx, |store, cx| store.chat_loading_for(Some("thread-2"), cx)),
             "the right pane's thread has not been answered"
         );
 
@@ -10480,8 +10494,8 @@ pub(crate) mod tests {
         );
 
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         settle_panes(cx);
         cx.simulate_input("typed as it loaded");
@@ -10514,7 +10528,9 @@ pub(crate) mod tests {
         cx.simulate_click(row.center(), alt);
         settle_panes(cx);
         serve();
-        await_restore_update(shell, cx, |store| !store.chat_loading_for(Some("thread-2")));
+        await_restore_update(shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
+        });
         settle_panes(cx);
         cx.simulate_keystrokes("secondary-alt-left");
         settle_panes(cx);
@@ -10634,8 +10650,9 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_lead_with_agent(cx);
         let store = store_of(&shell, cx);
         serve_changed_turn(&host, "thread-1", "lead.rs");
-        await_restore_update(&shell, cx, |store| {
-            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
+                == Some(1)
         });
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Agents, cx)
@@ -10644,8 +10661,8 @@ pub(crate) mod tests {
         open_agent_from_panel(&shell, &host, cx);
         serve_changed_turn(&host, "agent-1", "agent.rs");
         serve_changed_turn(&host, "agent-1", "later.rs");
-        await_restore_update(&shell, cx, |store| {
-            store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len()) == Some(2)
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len(), cx) == Some(2)
         });
         settle_panes(cx);
 
@@ -10709,8 +10726,8 @@ pub(crate) mod tests {
         draw(cx);
         serve_thread(&host, "agent-1");
         serve_changed_turn(&host, "agent-1", "agent.rs");
-        await_restore_update(&shell, cx, |store| {
-            store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len()) == Some(1)
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("agent-1"), |timeline| timeline.turns.len(), cx) == Some(1)
         });
         settle_panes(cx);
 
@@ -11008,9 +11025,9 @@ pub(crate) mod tests {
             window.dispatch_event(gpui::PlatformInput::MouseDown(press), cx);
             window.dispatch_event(gpui::PlatformInput::MouseUp(release), cx);
         });
-        store.read_with(cx, |store, _| {
+        store.read_with(cx, |store, cx| {
             assert!(store.is_thread_open("thread-2"));
-            assert_eq!(store.diff_selected_turn_for(Some("thread-2")), Some(0));
+            assert_eq!(store.diff_selected_turn_for(Some("thread-2"), cx), Some(0));
         });
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
@@ -11038,7 +11055,9 @@ pub(crate) mod tests {
         agent.parent_session_id = Some("thread-2".into());
         index.sessions.push(agent);
         send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-        await_restore_update(&shell, cx, |store| store.thread_meta("agent-1").is_some());
+        await_restore_update(&shell, cx, |store, _| {
+            store.thread_meta("agent-1").is_some()
+        });
         side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
 
         cx.simulate_keystrokes("secondary-alt-right");
@@ -11046,7 +11065,9 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| store.show_thread("agent-1".into(), cx));
         settle_panes(cx);
         serve_thread(&host, "agent-1");
-        await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some("agent-1")));
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("agent-1"), cx)
+        });
         settle_panes(cx);
         cx.simulate_keystrokes("secondary-alt-left");
         settle_panes(cx);
@@ -11441,8 +11462,9 @@ pub(crate) mod tests {
                 },
             )],
         );
-        await_restore_update(&shell, cx, |store| {
-            store.with_timeline_for(Some("thread-2"), |timeline| timeline.entries.len()) == Some(1)
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("thread-2"), |timeline| timeline.entries.len(), cx)
+                == Some(1)
         });
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("user-bubble-hello").is_some());
@@ -11451,8 +11473,10 @@ pub(crate) mod tests {
     }
 
     fn holds_thread_2(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> bool {
-        store_of(shell, cx).read_with(cx, |store, _| {
-            store.with_timeline_for(Some("thread-2"), |_| ()).is_some()
+        store_of(shell, cx).read_with(cx, |store, cx| {
+            store
+                .with_timeline_for(Some("thread-2"), |_| (), cx)
+                .is_some()
         })
     }
 
@@ -11465,7 +11489,7 @@ pub(crate) mod tests {
         let (shell, host, cx) = a_thread_with_a_message_beside(cx);
 
         send_events(&host, vec![panes_index(&["thread-2"])]);
-        await_restore_update(&shell, cx, |store| !store.is_thread_open("thread-2"));
+        await_restore_update(&shell, cx, |store, _| !store.is_thread_open("thread-2"));
         draw(cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         draw(cx);
@@ -11492,7 +11516,7 @@ pub(crate) mod tests {
         let (shell, host, cx) = a_thread_with_a_message_beside(cx);
 
         send_events(&host, vec![panes_index(&["thread-2"])]);
-        await_restore_update(&shell, cx, |store| !store.is_thread_open("thread-2"));
+        await_restore_update(&shell, cx, |store, _| !store.is_thread_open("thread-2"));
         draw(cx);
         assert!(holds_thread_2(&shell, cx));
         let panes = shell.read_with(cx, |shell, cx| {
@@ -11530,7 +11554,7 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
 
         send_events(&host, vec![panes_index(&["thread-1"])]);
-        await_restore_update(&shell, cx, |store| !store.is_thread_open("thread-1"));
+        await_restore_update(&shell, cx, |store, _| !store.is_thread_open("thread-1"));
         draw(cx);
         // It glides shut first.
         cx.executor().advance_clock(crate::edge_back::SETTLE);
@@ -11568,7 +11592,9 @@ pub(crate) mod tests {
         });
         draw(cx);
         serve_thread(&host, "agent-1");
-        await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some("agent-1")));
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("agent-1"), cx)
+        });
         settle_panes(cx);
         assert_eq!(
             pane_threads(&shell, cx),
@@ -11577,14 +11603,14 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
 
         send_events(&host, vec![archive_agent(true)]);
-        await_restore_update(&shell, cx, |store| !store.is_thread_open("agent-1"));
+        await_restore_update(&shell, cx, |store, _| !store.is_thread_open("agent-1"));
         draw(cx);
         assert_ne!(keyboard_pane(&shell, cx), Some(0));
         settle_panes(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
 
         send_events(&host, vec![archive_agent(false)]);
-        await_restore_update(&shell, cx, |store| {
+        await_restore_update(&shell, cx, |store, _| {
             store
                 .sidebar_sessions()
                 .iter()
@@ -11592,12 +11618,14 @@ pub(crate) mod tests {
         });
         store.update(cx, |store, cx| store.show_thread("agent-1".into(), cx));
         serve_thread(&host, "agent-1");
-        await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some("agent-1")));
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("agent-1"), cx)
+        });
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("agent-1".into())]);
 
         send_events(&host, vec![archive_agent(true)]);
-        await_restore_update(&shell, cx, |store| !store.is_thread_open("agent-1"));
+        await_restore_update(&shell, cx, |store, _| !store.is_thread_open("agent-1"));
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
     }
@@ -12018,7 +12046,9 @@ pub(crate) mod tests {
         third.updated_at = 0;
         index.sessions.push(third);
         send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-        await_restore_update(&shell, cx, |store| store.thread_meta("thread-3").is_some());
+        await_restore_update(&shell, cx, |store, _| {
+            store.thread_meta("thread-3").is_some()
+        });
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         let store = store_of(&shell, cx);
         let panes = pane_bounds(&shell, cx);
@@ -12082,7 +12112,7 @@ pub(crate) mod tests {
         });
         draw(cx);
         serve_thread(&host, "agent-1");
-        await_restore_update(&shell, cx, |store| store.timeline_settled_for("agent-1"));
+        await_restore_update(&shell, cx, |store, _| store.timeline_settled_for("agent-1"));
         settle_panes(cx);
         press_only(panes[1].center(), cx);
         current(false, "the right timeline", cx);
@@ -12106,8 +12136,8 @@ pub(crate) mod tests {
         );
         press_only(panes[0].center(), cx);
         serve_thread(&host, "thread-3");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-3"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-3"), cx)
         });
         draw(cx);
         press_only(panes[1].center(), cx);
@@ -12247,7 +12277,7 @@ pub(crate) mod tests {
         });
         draw(cx);
         serve_thread(&host, "agent-1");
-        await_restore_update(&shell, cx, |store| store.timeline_settled_for("agent-1"));
+        await_restore_update(&shell, cx, |store, _| store.timeline_settled_for("agent-1"));
         assert_eq!(settled(cx), lit, "the agent beside it lights its lead");
 
         let state = shell.read_with(cx, |shell, _| shell.window_state());
@@ -12322,7 +12352,9 @@ pub(crate) mod tests {
         draw(cx);
         serve_status(&host, "thread-2", false);
         serve_answer(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| store.timeline_settled_for("thread-2"));
+        await_restore_update(&shell, cx, |store, _| {
+            store.timeline_settled_for("thread-2")
+        });
         settle_panes(cx);
         let active = cx.update(|_, cx| cx.theme().list_active);
         let (full, weak) = (active.a, active.a * 0.5);
@@ -12410,7 +12442,9 @@ pub(crate) mod tests {
         third.updated_at = 0;
         index.sessions.push(third);
         send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-        await_restore_update(&shell, cx, |store| store.thread_meta("thread-3").is_some());
+        await_restore_update(&shell, cx, |store, _| {
+            store.thread_meta("thread-3").is_some()
+        });
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         let click = |selector: &'static str, cx: &mut VisualTestContext| {
             let row = cx.debug_bounds(selector).expect("the thread's row");
@@ -12441,8 +12475,8 @@ pub(crate) mod tests {
 
         click("sidebar-thread-thread-3", cx);
         serve_thread(&host, "thread-3");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-3"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-3"), cx)
         });
         settle_panes(cx);
         assert_eq!(
@@ -12684,8 +12718,8 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
 
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         draw(cx);
         assert!(composer_has_keyboard(&shell, 0, cx));
@@ -12701,8 +12735,8 @@ pub(crate) mod tests {
         serve_thread(&host, "thread-2");
         cx.update(|window, cx| window.blur(cx));
         store.update(cx, |store, cx| store.put_back_thread("thread-2".into(), cx));
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         draw(cx);
         assert!(composer_has_keyboard(&shell, 0, cx), "nothing held it");
@@ -12718,8 +12752,8 @@ pub(crate) mod tests {
         cx.update(|window, _| assert!(query.is_focused(window)));
         serve_thread(&host, "thread-1");
         store.update(cx, |store, cx| store.put_back_thread("thread-1".into(), cx));
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-1"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
         });
         settle_panes(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
@@ -12960,8 +12994,8 @@ pub(crate) mod tests {
             store.show_thread_replacing("thread-3".into(), Some("thread-2".into()), cx)
         });
         serve_thread(&host, "thread-3");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-3"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-3"), cx)
         });
         draw(cx);
         assert_eq!(
@@ -12979,8 +13013,8 @@ pub(crate) mod tests {
         cx.update(|window, cx| window.blur(cx));
         store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
         serve_thread(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-2"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
         });
         draw(cx);
         assert_eq!(
@@ -13056,7 +13090,7 @@ pub(crate) mod tests {
                 ),
             ],
         );
-        await_restore_update(&shell, cx, |store| store.index_hydrated());
+        await_restore_update(&shell, cx, |store, _| store.index_hydrated());
         draw(cx);
         let request = std::iter::from_fn(|| host.outgoing.try_recv().ok())
             .map(|line| decode_client_line(&line).expect("client line"))
@@ -13078,7 +13112,7 @@ pub(crate) mod tests {
                 .unwrap(),
             )
             .unwrap();
-        await_restore_update(&shell, cx, |store| store.is_thread_open("draft-1"));
+        await_restore_update(&shell, cx, |store, _| store.is_thread_open("draft-1"));
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
         shell.read_with(cx, |shell, cx| {
@@ -13213,11 +13247,11 @@ pub(crate) mod tests {
                 driver.step(cx, &store);
                 draw(cx);
                 let page = shell.read_with(cx, |shell, cx| shell.page_thread(cx));
-                if store.read_with(cx, |store, _| {
+                if store.read_with(cx, |store, cx| {
                     page.is_some()
-                        && !store.chat_loading_for(page.as_deref())
+                        && !store.chat_loading_for(page.as_deref(), cx)
                         && store
-                            .chat_active_session_for(page.as_deref())
+                            .chat_active_session_for(page.as_deref(), cx)
                             .is_some_and(|(_, cwd, draft)| cwd == expected.root && draft)
                 }) {
                     break;
@@ -13326,7 +13360,7 @@ pub(crate) mod tests {
                 )
                 .unwrap();
         }
-        await_restore_update(&shell, cx, |store| !store.chat_loading_for(None));
+        await_restore_update(&shell, cx, |store, cx| !store.chat_loading_for(None, cx));
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         for (width, selector) in [(1024., "toggle-sidebar"), (393., "compact-search")] {
             if width < 900. {
@@ -14369,10 +14403,10 @@ pub(crate) mod tests {
             store.show_thread("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
-                    && !store.chat_loading_for(Some("first"))
+                    && !store.chat_loading_for(Some("first"), cx)
             })
         });
         resize(cx, 1600.);
@@ -14430,10 +14464,10 @@ pub(crate) mod tests {
             store.show_thread("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
-                    && !store.chat_loading_for(Some("first"))
+                    && !store.chat_loading_for(Some("first"), cx)
             })
         });
         let search = shell.read_with(cx, |shell, cx| {
@@ -14526,10 +14560,10 @@ pub(crate) mod tests {
             store.show_thread("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store.baseline_ready()
                     && !store.threads_loading()
-                    && !store.chat_loading_for(Some("first"))
+                    && !store.chat_loading_for(Some("first"), cx)
             })
         });
         resize(cx, 1200.);
@@ -14565,10 +14599,10 @@ pub(crate) mod tests {
         ] {
             cx.simulate_keystrokes(keys);
             driver.wait_until(cx, &store, "selected thread baseline", |cx| {
-                store.read_with(cx, |store, _| {
+                store.read_with(cx, |store, cx| {
                     store.baseline_ready()
                         && !store.threads_loading()
-                        && !store.chat_loading_for(Some(expected))
+                        && !store.chat_loading_for(Some(expected), cx)
                 })
             });
             assert_eq!(
@@ -14855,8 +14889,8 @@ pub(crate) mod tests {
         let store = store_of(&shell, cx);
         restore_index(&shell, &host, true, cx);
         restore_status(&shell, &host, cx);
-        await_restore_update(&shell, cx, |store| {
-            store.preview_key_for("thread-a").is_some()
+        await_restore_update(&shell, cx, |store, cx| {
+            store.preview_key_for("thread-a", cx).is_some()
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
@@ -14870,7 +14904,9 @@ pub(crate) mod tests {
             shell.attachment.as_ref().unwrap().current_pane.clone()
         });
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
-        let key = store.read_with(cx, |store, _| store.preview_key_for("thread-a").unwrap());
+        let key = store.read_with(cx, |store, cx| {
+            store.preview_key_for("thread-a", cx).unwrap()
+        });
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-a", tcode_core::ui::RightTab::Preview, cx);
             store.set_preview_url(&key, "https://example.com/".into(), cx);
@@ -16044,9 +16080,9 @@ pub(crate) mod tests {
         }
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread(session.into(), cx));
-        await_restore_update(&shell, cx, |store| {
-            store.composer_state_for(Some(session)).turn_running
-                && !store.chat_loading_for(Some(session))
+        await_restore_update(&shell, cx, |store, cx| {
+            store.composer_state_for(Some(session), cx).turn_running
+                && !store.chat_loading_for(Some(session), cx)
         });
         resize(cx, 1024.);
         assert!(cx.debug_bounds("working-status-19").is_some());
@@ -16275,8 +16311,8 @@ pub(crate) mod tests {
         serve_thread(&host, "thread-1");
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading_for(Some("thread-1"))
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
         });
         resize(cx, 1200.);
         crate::test_frames::draw_settled(cx);
@@ -16289,7 +16325,7 @@ pub(crate) mod tests {
         for numbers in [&[7, 42][..], &[7]] {
             let before = width(cx);
             send_events(&host, vec![index(numbers)]);
-            await_restore_update(&shell, cx, |store| {
+            await_restore_update(&shell, cx, |store, _| {
                 store.pull_requests("thread-1").len() == numbers.len()
             });
             draw(cx);
@@ -16793,7 +16829,9 @@ pub(crate) mod tests {
             shell.attachment.as_ref().unwrap().preview.clone()
         });
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
-        let key = store.read_with(cx, |store, _| store.preview_key_for("thread-1").unwrap());
+        let key = store.read_with(cx, |store, cx| {
+            store.preview_key_for("thread-1", cx).unwrap()
+        });
         let page = |cx: &mut VisualTestContext| {
             lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key))
         };
@@ -17940,8 +17978,9 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         serve_finished_turns(&host, "thread-1", 1, true);
-        await_restore_update(&shell, cx, |store| {
-            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
+                == Some(1)
         });
         settle_frames(cx);
         assert!(cx.debug_bounds("turn-time-row").is_some());
@@ -17966,8 +18005,8 @@ pub(crate) mod tests {
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             draw(cx);
             assert_eq!(pane_threads(&shell, cx), [Some(id.into())]);
-            let shown = store.read_with(cx, |store, _| {
-                store.with_timeline_for(Some(id), |timeline| timeline.turns.len())
+            let shown = store.read_with(cx, |store, cx| {
+                store.with_timeline_for(Some(id), |timeline| timeline.turns.len(), cx)
             });
             assert_eq!(shown, Some(turns));
             let drawn = |cx: &mut VisualTestContext| {
@@ -18005,8 +18044,9 @@ pub(crate) mod tests {
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         let (shell, host, cx) = mount_panes(cx);
         serve_finished_turns(&host, "thread-1", 1, false);
-        await_restore_update(&shell, cx, |store| {
-            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
+                == Some(1)
         });
         for width in [2000., 900., 640.] {
             resize(cx, width);
@@ -18054,8 +18094,9 @@ pub(crate) mod tests {
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         let (shell, host, cx) = mount_panes(cx);
         serve_finished_turns(&host, "thread-1", 1, false);
-        await_restore_update(&shell, cx, |store| {
-            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+        await_restore_update(&shell, cx, |store, cx| {
+            store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx)
+                == Some(1)
         });
         settle_frames(cx);
         let total = cx
@@ -18518,7 +18559,7 @@ pub(crate) mod tests {
                 ),
             ],
         );
-        await_restore_update(&shell, cx, |store| {
+        await_restore_update(&shell, cx, |store, _| {
             store
                 .provider_plugin_catalog("claude")
                 .is_some_and(|catalog| catalog.entries.len() == 30)
@@ -18767,7 +18808,7 @@ pub(crate) mod tests {
             }];
         }
         send_events(&host, vec![(topic, index)]);
-        await_restore_update(&shell, cx, |store| !store.projects().is_empty());
+        await_restore_update(&shell, cx, |store, _| !store.projects().is_empty());
         cx.simulate_keystrokes("secondary-d");
         settle_frames(cx);
         cx.simulate_keystrokes("secondary-alt-left");

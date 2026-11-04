@@ -5,14 +5,14 @@ use crate::widgets::spinner::Spinner;
 use agent::{PlanStep, PlanStepStatus};
 use gpui::{
     AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, prelude::FluentBuilder as _, px,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
 
 use crate::material;
 use crate::sizing::Sizable as _;
-use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::WorkspaceStore;
 
 /// How long a value drawn here takes to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -33,30 +33,15 @@ pub struct PlanPanel {
     /// The explanation and steps last shown, drawn while an emptied plan
     /// fades out.
     last: (Option<String>, Vec<PlanStep>),
-    _subscriptions: Vec<Subscription>,
 }
 
 impl PlanPanel {
-    pub fn new(
-        store: Entity<WorkspaceStore>,
-        session_id: Option<String>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let subscriptions = vec![observe_store_topics(
-            &store,
-            &[
-                TopicKind::SessionStatus,
-                TopicKind::SessionPlan,
-                TopicKind::SessionEvents,
-            ],
-            cx,
-        )];
+    pub fn new(store: Entity<WorkspaceStore>, session_id: Option<String>) -> Self {
         Self {
             store,
             session_id,
             vscroll: ScrollHandle::new(),
             last: (None, Vec::new()),
-            _subscriptions: subscriptions,
         }
     }
 
@@ -83,7 +68,7 @@ impl Render for PlanPanel {
         let plan = self
             .store
             .read(cx)
-            .session_plan_for(self.session_id.as_deref())
+            .session_plan_for(self.session_id.as_deref(), cx)
             .filter(|plan| !plan.steps.is_empty())
             .map(|plan| (explanation(plan), plan.steps.clone()));
         // The plan and the empty state cross-fade; a plan that empties
@@ -451,8 +436,8 @@ mod tests {
         plan(&[("Read", Completed), ("Plan", Pending), ("Build", Pending)]);
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (_, cx) = cx
-            .add_window_view(|_, cx| PlanPanel::new(store.clone(), Some("thread".to_owned()), cx));
+        let (_, cx) =
+            cx.add_window_view(|_, _| PlanPanel::new(store.clone(), Some("thread".to_owned())));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(600.)));
         draw_settled(cx);

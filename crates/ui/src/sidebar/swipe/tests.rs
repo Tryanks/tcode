@@ -341,7 +341,7 @@ fn a_refused_settle_leaves_the_row_at_rest(cx: &mut TestAppContext) {
     phone.until(cx, "the thread to open", |phone, cx| {
         phone
             .store
-            .read_with(cx, |store, _| !store.chat_loading_for(Some("swipe-0")))
+            .read_with(cx, |store, cx| !store.chat_loading_for(Some("swipe-0"), cx))
     });
     // The host hears of the turn before the store does.
     smol::block_on(phone.host.update_state_for_test(|state, cx| {

@@ -17,7 +17,10 @@ use tcode_protocol::{
     SettingsPatch,
 };
 
-use super::{ArchivedDeletion, KEPT_THREADS, ShowThread, StoreChange, TopicKind, WorkspaceStore};
+use super::{
+    ArchivedDeletion, KEPT_THREADS, ShowThread, StoreChange, TopicKind, WorkspaceStore,
+    thread::ThreadReplica,
+};
 
 impl WorkspaceStore {
     pub(crate) fn local_settings_changed(&self, cx: &mut Context<Self>) {
@@ -618,7 +621,7 @@ impl WorkspaceStore {
     /// Show a thread: subscribe its topics and fold what the client already
     /// holds of it, so a kept thread is ready to draw as soon as its window
     /// brings it up to date.
-    pub(crate) fn open_thread(&mut self, session_id: &str) {
+    pub(crate) fn open_thread(&mut self, session_id: &str, cx: &mut gpui::App) {
         self.baseline_topics
             .remove(&tcode_protocol::Topic::SessionStatus {
                 session_id: session_id.to_owned(),
@@ -631,7 +634,10 @@ impl WorkspaceStore {
             .remove(&tcode_protocol::Topic::SessionEvents {
                 session_id: session_id.to_owned(),
             });
-        let thread = self.threads.entry(session_id.to_owned()).or_default();
+        let thread = self
+            .threads
+            .entry(session_id.to_owned())
+            .or_insert_with(|| ThreadReplica::new(cx));
         if !thread.open {
             thread.open = true;
             thread.generation = thread.generation.wrapping_add(1);
@@ -974,7 +980,7 @@ impl WorkspaceStore {
     /// draft, which would be that same draft.
     pub(crate) fn start_draft_beside(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
         if self
-            .session_status_for(session_id)
+            .session_status_for(session_id, cx)
             .is_some_and(|status| status.draft)
         {
             return;
@@ -1110,7 +1116,7 @@ impl WorkspaceStore {
         cx: &mut Context<Self>,
     ) {
         let closes_drawer = self
-            .thread_status(Some(&session_id))
+            .thread_status(Some(&session_id), cx)
             .is_some_and(|status| status.terminals.len() <= 1);
         if closes_drawer && let Some(ui) = self.thread_conversation_ui_mut(Some(&session_id)) {
             ui.terminal_open = false;

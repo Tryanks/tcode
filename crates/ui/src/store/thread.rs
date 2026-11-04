@@ -2,11 +2,73 @@
 
 use std::collections::HashMap;
 
-use gpui::Task;
+use gpui::{App, AppContext as _, Entity, Task};
 use tcode_core::{session::Timeline, ui::ConversationDestination};
 use tcode_protocol::{GitStatusStatus, SessionPlan, SessionStatus};
 
 use super::{command_output::CommandOutputReplica, history::HeldHistory};
+
+/// A part of the store a view can depend on alone. The store bumps it (an
+/// update that notifies) whenever the part changes, and the accessors of the
+/// part read it: in gpui-fast a view is drawn again when an entity it read as
+/// it rendered changed, so a view drawn from the part is drawn again for it,
+/// not for everything else the store holds.
+pub(crate) struct Revision(u64);
+
+impl Revision {
+    pub(super) fn new(cx: &mut App) -> Entity<Self> {
+        cx.new(|_| Self(0))
+    }
+
+    pub(super) fn bump(this: &Entity<Self>, cx: &mut App) {
+        this.update(cx, |revision, cx| {
+            revision.0 = revision.0.wrapping_add(1);
+            cx.notify();
+        });
+    }
+
+    /// Where the part stands, read as a view depending on it.
+    pub(super) fn watch(this: &Entity<Self>, cx: &App) -> u64 {
+        this.read(cx).0
+    }
+}
+
+/// The parts of a thread's replica that change on their own, each with the
+/// revision its readers depend on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Part {
+    /// The held log and its fold: every live record.
+    Timeline,
+    /// Status, plan and Git, and what the thread's status topic carries
+    /// besides (a rewind's prefill, a classifier stop).
+    Status,
+    /// The screens of its commands' outputs.
+    Outputs,
+}
+
+pub(super) struct Revisions {
+    timeline: Entity<Revision>,
+    status: Entity<Revision>,
+    outputs: Entity<Revision>,
+}
+
+impl Revisions {
+    fn new(cx: &mut App) -> Self {
+        Self {
+            timeline: Revision::new(cx),
+            status: Revision::new(cx),
+            outputs: Revision::new(cx),
+        }
+    }
+
+    pub(super) fn of(&self, part: Part) -> &Entity<Revision> {
+        match part {
+            Part::Timeline => &self.timeline,
+            Part::Status => &self.status,
+            Part::Outputs => &self.outputs,
+        }
+    }
+}
 
 /// One thread's replicas and the client-side paging state over them.
 ///
@@ -14,8 +76,8 @@ use super::{command_output::CommandOutputReplica, history::HeldHistory};
 /// subscribed and events apply to it. A closed thread keeps its replicas for
 /// a while ([`super::KEPT_THREADS`]) so reopening it fetches only what it
 /// missed.
-#[derive(Default)]
 pub(super) struct ThreadReplica {
+    pub(super) revisions: Revisions,
     pub(super) open: bool,
     /// Bumped whenever the thread opens or closes; a task spawned for one
     /// opening finds a different number after the thread was left.
@@ -56,6 +118,40 @@ pub(super) struct ThreadReplica {
 }
 
 impl ThreadReplica {
+    pub(super) fn new(cx: &mut App) -> Self {
+        Self {
+            revisions: Revisions::new(cx),
+            open: false,
+            generation: 0,
+            left_at: 0,
+            history: None,
+            total_turns: None,
+            status: None,
+            plan: None,
+            git: None,
+            timeline: None,
+            folds: 0,
+            turn_offset: 0,
+            catching_up: false,
+            history_task: None,
+            history_trim: None,
+            history_error: None,
+            history_pages_fetched: 0,
+            history_logged_records: None,
+            command_outputs: HashMap::new(),
+            read_acknowledged: None,
+            destination: None,
+        }
+    }
+
+    /// The part's revision, read as a view depending on it.
+    pub(super) fn watch(&self, part: Part, cx: &App) -> u64 {
+        Revision::watch(self.revisions.of(part), cx)
+    }
+
+    pub(super) fn bump(&self, part: Part, cx: &mut App) {
+        Revision::bump(self.revisions.of(part), cx);
+    }
     pub(super) fn fold_held_records(&self) -> Timeline {
         Timeline::fold_stored(
             self.history

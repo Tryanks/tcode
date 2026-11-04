@@ -86,7 +86,7 @@ use crate::palette::fuzzy_score;
 use crate::provider_card::provider_glyph;
 use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
-use crate::store::{ComposerState, TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{ComposerState, WorkspaceStore};
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::{mime_from_path, validate_attachment};
 use tcode_core::provider_models::{FastLevel, FastMode};
@@ -266,7 +266,7 @@ impl Composer {
     fn subagent(&self, cx: &App) -> bool {
         self.workspace_store
             .read(cx)
-            .native_subagent_readonly_for(self.session_id.as_deref())
+            .native_subagent_readonly_for(self.session_id.as_deref(), cx)
     }
 
     /// What the composer draws from the store for its thread. Within a
@@ -278,7 +278,7 @@ impl Composer {
             Rc::new(
                 self.workspace_store
                     .read(cx)
-                    .composer_state_for(self.session_id.as_deref()),
+                    .composer_state_for(self.session_id.as_deref(), cx),
             )
         })
     }
@@ -440,20 +440,6 @@ impl Composer {
             disabled: false,
         });
         let subscriptions = vec![
-            // Re-render when app state changes (e.g. the provider's commands /
-            // skills feed arrives after session start, feeding the `/`+`$` menus).
-            observe_store_topics(
-                &workspace_store,
-                &[
-                    TopicKind::Index,
-                    TopicKind::SessionStatus,
-                    TopicKind::SessionPlan,
-                    TopicKind::SessionEvents,
-                    TopicKind::Settings,
-                    TopicKind::Providers,
-                ],
-                cx,
-            ),
             cx.subscribe_in(
                 &user_input_custom,
                 window,
@@ -584,7 +570,7 @@ impl Composer {
         let destination = self
             .workspace_store
             .read(cx)
-            .with_composer_destination_for(self.session_id.as_deref(), composer_destination)
+            .with_composer_destination_for(self.session_id.as_deref(), composer_destination, cx)
             .flatten();
         if self.input_destination == destination {
             return;
@@ -629,8 +615,8 @@ impl Composer {
     /// Put that provider-owned prefill into the ordinary composer so the user
     /// can edit or resend it; no inline transcript editor is involved.
     fn sync_native_rewind_prefill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let prefill = self.workspace_store.update(cx, |store, _cx| {
-            store.take_native_rewind_prefill_for(self.session_id.as_deref())
+        let prefill = self.workspace_store.update(cx, |store, cx| {
+            store.take_native_rewind_prefill_for(self.session_id.as_deref(), cx)
         });
         let Some(prefill) = prefill else {
             return;
@@ -640,8 +626,8 @@ impl Composer {
 
     /// Text another surface put here goes after what the user typed, which it never replaces.
     fn sync_composer_append(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = self.workspace_store.update(cx, |store, _cx| {
-            store.take_composer_append_for(self.session_id.as_deref())
+        let Some(text) = self.workspace_store.update(cx, |store, cx| {
+            store.take_composer_append_for(self.session_id.as_deref(), cx)
         }) else {
             return;
         };
@@ -740,7 +726,7 @@ impl Composer {
             return;
         }
         let Some(queue) = store
-            .session_status_for(self.session_id.as_deref())
+            .session_status_for(self.session_id.as_deref(), cx)
             .map(|status| &status.queued_messages)
         else {
             return;
@@ -769,12 +755,12 @@ impl Composer {
             || self
                 .workspace_store
                 .read(cx)
-                .session_status_for(self.session_id.as_deref())
+                .session_status_for(self.session_id.as_deref(), cx)
                 .is_some_and(|status| !status.terminal_contexts.is_empty())
             || !self
                 .workspace_store
                 .read(cx)
-                .review_comments_for(self.session_id.as_deref())
+                .review_comments_for(self.session_id.as_deref(), cx)
                 .is_empty()
     }
 
@@ -1365,7 +1351,7 @@ impl Composer {
         let store = self.workspace_store.read(cx);
         let composer_state = self.composer_state(cx);
         let terminal = &composer_state.terminal_contexts;
-        let review = store.review_comments_for(self.session_id.as_deref());
+        let review = store.review_comments_for(self.session_id.as_deref(), cx);
         let mut rows = Vec::new();
         if !terminal.is_empty() {
             rows.push((
@@ -1555,7 +1541,7 @@ impl Render for Composer {
         self.frame_state = Some(Rc::new(
             self.workspace_store
                 .read(cx)
-                .composer_state_for(self.session_id.as_deref()),
+                .composer_state_for(self.session_id.as_deref(), cx),
         ));
         let composer = self.render_composer(window, cx);
         self.frame_state = None;
@@ -1574,7 +1560,7 @@ impl Composer {
         if self
             .workspace_store
             .read(cx)
-            .composer_text_waiting_for(self.session_id.as_deref())
+            .composer_text_waiting_for(self.session_id.as_deref(), cx)
         {
             self.sync_native_rewind_prefill(window, cx);
             self.sync_composer_append(window, cx);
@@ -1878,12 +1864,12 @@ impl Composer {
         let fallback_block = self
             .workspace_store
             .read(cx)
-            .fallback_block_for(self.session_id.as_deref())
+            .fallback_block_for(self.session_id.as_deref(), cx)
             .cloned();
         let fallback_review = self
             .workspace_store
             .read(cx)
-            .fallback_review_for(self.session_id.as_deref())
+            .fallback_review_for(self.session_id.as_deref(), cx)
             .cloned();
 
         let composer = cx.entity();
@@ -2796,9 +2782,9 @@ mod replica_tests {
         });
         store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "the draft's status", |cx| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store
-                    .composer_state_for(Some(&session_id))
+                    .composer_state_for(Some(&session_id), cx)
                     .active_model
                     .is_some()
             })
@@ -2853,9 +2839,9 @@ mod replica_tests {
         cx.simulate_keystrokes("secondary-2");
         draw_settled(cx);
         driver.wait_until(cx, &store, "the pick to reach the thread", |cx| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store
-                    .composer_state_for(Some(&session_id))
+                    .composer_state_for(Some(&session_id), cx)
                     .active_model
                     .is_some_and(|active| {
                         active.model.as_deref() == Some("shared-model")
@@ -2956,9 +2942,9 @@ mod replica_tests {
         });
         cx.simulate_keystrokes("secondary-1");
         driver.wait_until(cx, &store, "the favourite's pick", |cx| {
-            store.read_with(cx, |store, _| {
+            store.read_with(cx, |store, cx| {
                 store
-                    .composer_state_for(Some(&session_id))
+                    .composer_state_for(Some(&session_id), cx)
                     .active_model
                     .is_some_and(|active| {
                         active.model.as_deref() == Some("shared-model")

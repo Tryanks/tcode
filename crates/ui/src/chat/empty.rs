@@ -25,7 +25,7 @@ impl ChatView {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default()
             });
-        let composer = store.composer_state_for(self.session_id.as_deref());
+        let composer = store.composer_state_for(self.session_id.as_deref(), cx);
         let model = composer
             .active_model
             .as_ref()

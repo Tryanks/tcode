@@ -48,7 +48,9 @@ impl CommitDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let state = store.read(cx).commit_dialog_state_for(Some(&session_id));
+        let state = store
+            .read(cx)
+            .commit_dialog_state_for(Some(&session_id), cx);
         let files = state.files;
         let branch = state.branch;
         let on_default_branch = state.on_default_branch;

@@ -1004,7 +1004,7 @@ fn render_compact_model_footer(
 ) -> AnyElement {
     let composer_state = store_entity
         .read(cx)
-        .composer_state_for(session_id.as_deref());
+        .composer_state_for(session_id.as_deref(), cx);
     let selections = composer_state.active_option_selections.clone();
     let effort = composer_state
         .active_option_descriptors
@@ -1557,7 +1557,7 @@ fn render_effort_slider(
 ) -> Option<AnyElement> {
     let composer_state = store_entity
         .read(cx)
-        .composer_state_for(session_id.as_deref());
+        .composer_state_for(session_id.as_deref(), cx);
     let (levels, current) = composer_state.active_option_descriptors.iter().find_map(
         |descriptor| match descriptor {
             OptionDescriptor::Select {
@@ -2364,7 +2364,7 @@ mod sheet_tests {
                         } else {
                             let mut composer = store
                                 .read(cx)
-                                .composer_state_for(store.read(cx).sole_thread().as_deref());
+                                .composer_state_for(store.read(cx).sole_thread().as_deref(), cx);
                             composer.provider = Some(ProviderKind::ClaudeCode);
                             let control = PermissionControl::from_composer(&composer).unwrap();
                             let session_id = store.read(cx).sole_thread();

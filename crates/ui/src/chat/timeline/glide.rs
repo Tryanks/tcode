@@ -43,36 +43,40 @@ impl ChatView {
         let stamps = self
             .workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                arrived
-                    .into_iter()
-                    .filter(|(index, _)| following || *index > top)
-                    .filter_map(|(index, arrival)| {
-                        let row = rows.get(index)?;
-                        // A message this window sent was on screen as its
-                        // delivery bubble, and a steer taken after everything
-                        // in its turn as its pending steer in the trailer just
-                        // above: the row is that message moving into place. A
-                        // steer taken before what followed it opens its place
-                        // as its pending one folds away and it travels there.
-                        let on_screen = (!row.entry_range.is_empty())
-                            .then(|| timeline.entries.get(row.entry_range.start))
-                            .flatten()
-                            .is_some_and(|entry| {
-                                matches!(entry.content, EntryContent::Steer { .. })
-                                    && arrival == Arrival::Appended
-                                    || shown
-                                        .iter()
-                                        .any(|key| entry.id == format!("local-user-{key}"))
-                            });
-                        (!on_screen).then_some((
-                            row.identity,
-                            arrival,
-                            old_last_turn.is_none_or(|turn| row.turn > turn),
-                        ))
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    arrived
+                        .into_iter()
+                        .filter(|(index, _)| following || *index > top)
+                        .filter_map(|(index, arrival)| {
+                            let row = rows.get(index)?;
+                            // A message this window sent was on screen as its
+                            // delivery bubble, and a steer taken after everything
+                            // in its turn as its pending steer in the trailer just
+                            // above: the row is that message moving into place. A
+                            // steer taken before what followed it opens its place
+                            // as its pending one folds away and it travels there.
+                            let on_screen = (!row.entry_range.is_empty())
+                                .then(|| timeline.entries.get(row.entry_range.start))
+                                .flatten()
+                                .is_some_and(|entry| {
+                                    matches!(entry.content, EntryContent::Steer { .. })
+                                        && arrival == Arrival::Appended
+                                        || shown
+                                            .iter()
+                                            .any(|key| entry.id == format!("local-user-{key}"))
+                                });
+                            (!on_screen).then_some((
+                                row.identity,
+                                arrival,
+                                old_last_turn.is_none_or(|turn| row.turn > turn),
+                            ))
+                        })
+                        .collect::<Vec<_>>()
+                },
+                cx,
+            )
             .unwrap_or_default();
         for (key, arrival, brings_turn) in stamps {
             self.rows_motion.arrive(key, arrival, brings_turn, at);
@@ -93,27 +97,31 @@ impl ChatView {
         let rows = self
             .workspace_store
             .read(cx)
-            .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                left.into_iter()
-                    .filter(|(index, _)| old[*index].part != RowPart::WorkLogLive)
-                    .filter_map(|(index, attach)| {
-                        let row = &old[index];
-                        let own = timeline.entries.get(row.entry_range.clone())?.to_vec();
-                        Some((
-                            row.identity,
-                            LeftRow {
-                                row: TimelineRow {
-                                    last_in_turn: false,
-                                    ..row.clone()
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    left.into_iter()
+                        .filter(|(index, _)| old[*index].part != RowPart::WorkLogLive)
+                        .filter_map(|(index, attach)| {
+                            let row = &old[index];
+                            let own = timeline.entries.get(row.entry_range.clone())?.to_vec();
+                            Some((
+                                row.identity,
+                                LeftRow {
+                                    row: TimelineRow {
+                                        last_in_turn: false,
+                                        ..row.clone()
+                                    },
+                                    turn: timeline.turns.get(row.turn).cloned().unwrap_or_default(),
+                                    own,
                                 },
-                                turn: timeline.turns.get(row.turn).cloned().unwrap_or_default(),
-                                own,
-                            },
-                            attach,
-                        ))
-                    })
-                    .collect()
-            })
+                                attach,
+                            ))
+                        })
+                        .collect()
+                },
+                cx,
+            )
             .unwrap_or_default();
         Leaving(rows)
     }

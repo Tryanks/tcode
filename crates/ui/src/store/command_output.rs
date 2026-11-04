@@ -34,8 +34,11 @@ impl WorkspaceStore {
         &self,
         session_id: Option<&str>,
         item_id: &str,
+        cx: &gpui::App,
     ) -> Option<&CommandOutputReplica> {
-        self.thread(session_id)?.command_outputs.get(item_id)
+        self.watched(session_id, super::thread::Part::Outputs, cx)?
+            .command_outputs
+            .get(item_id)
     }
 
     /// Hold `item_id`'s output at `cols` on the open thread. The host

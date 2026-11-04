@@ -112,16 +112,16 @@ fn the_composer_of_a_thread_come_back_to_starts_at_rest(cx: &mut TestAppContext)
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     serve_running(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.composer_state_for(Some("thread-1")).turn_running
+    await_restore_update(&shell, cx, |store, cx| {
+        store.composer_state_for(Some("thread-1"), cx).turn_running
     });
     settle_frames(cx);
     let send = |cx: &mut VisualTestContext| cx.debug_bounds("send-message");
     assert_eq!(send(cx), None, "the running turn shows its stop button");
 
     serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        !store.composer_state_for(Some("thread-1")).turn_running
+    await_restore_update(&shell, cx, |store, cx| {
+        !store.composer_state_for(Some("thread-1"), cx).turn_running
     });
     display_frame(cx);
     serve_finished(&host, "thread-2");
@@ -161,8 +161,8 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     serve_with_terminals(&host, "thread-1", &[1, 2]);
-    await_restore_update(&shell, cx, |store| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
     });
     // Thread-1 was first shown with its drawer shut; the reader opens it.
     store_of(&shell, cx).update(cx, |store, cx| {
@@ -199,8 +199,8 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
     });
     store_of(&shell, cx).update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
@@ -267,8 +267,8 @@ fn the_right_panel_of_a_thread_switched_to_shows_its_tab_at_once(cx: &mut TestAp
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
     });
     let store = store_of(&shell, cx);
     store.update(cx, |store, cx| {
@@ -410,8 +410,8 @@ fn mount_finished(
 ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext, f32) {
     let (shell, host, cx) = mount_panes(cx);
     serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| {
-        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
     });
     settle_frames(cx);
     let rest = bubble_fill("thread-1", cx).expect("thread-1's question");

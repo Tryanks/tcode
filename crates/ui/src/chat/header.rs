@@ -718,12 +718,12 @@ impl ChatView {
         let agent_tools = self
             .workspace_store
             .read(cx)
-            .session_status_for(self.session_id.as_deref())
+            .session_status_for(self.session_id.as_deref(), cx)
             .is_some_and(|status| status.injected_tools.is_some());
         let self_settles = self
             .workspace_store
             .read(cx)
-            .session_status_for(self.session_id.as_deref())
+            .session_status_for(self.session_id.as_deref(), cx)
             .and_then(|status| status.control.as_ref())
             .is_some_and(|control| control.self_settle.is_some());
         let movable = !is_draft && {
@@ -1174,7 +1174,7 @@ impl ChatView {
         let (quick, items) = self
             .workspace_store
             .read(cx)
-            .chat_git_controls_for(self.session_id.as_deref())?;
+            .chat_git_controls_for(self.session_id.as_deref(), cx)?;
         let border = cx.theme().border;
 
         let label: SharedString = crate::tr!(git_action_label_key(quick.label))

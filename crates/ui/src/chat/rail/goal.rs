@@ -22,7 +22,7 @@ const CHANGE: Duration = Duration::from_millis(200);
 fn goal<'a>(chat: &ChatView, cx: &'a App) -> Option<&'a Goal> {
     chat.workspace_store
         .read(cx)
-        .session_status_for(chat.session_id.as_deref())?
+        .session_status_for(chat.session_id.as_deref(), cx)?
         .goal
         .as_ref()
 }
