@@ -214,9 +214,9 @@ impl WorkspaceStore {
         self.terminals.get(&id).cloned()
     }
 
-    pub(super) fn apply_terminal_frame(&mut self, id: u64, frame: &TerminalFrame) {
+    pub(super) fn apply_terminal_frame(&mut self, id: u64, frame: TerminalFrame) {
         if let Some(terminal) = self.terminals.get(&id) {
-            terminal.apply_frame(frame.clone());
+            terminal.apply_frame(frame);
         }
     }
 
