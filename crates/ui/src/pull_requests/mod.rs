@@ -590,11 +590,12 @@ struct ChangeWatch {
 
 fn change_watch<T: 'static>(
     store: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     action: &ChangeWatch,
     window: &mut Window,
     cx: &mut Context<T>,
 ) {
-    let Some(session_id) = store.read(cx).legacy_focus() else {
+    let Some(session_id) = session_id else {
         return;
     };
     let number = action.key.number;
@@ -627,16 +628,14 @@ fn change_watch<T: 'static>(
     })
     .detach();
 }
-/// Pauses or resumes every watch of the active thread.
+/// Pauses or resumes every watch of `session_id`'s thread.
 fn set_watches_paused(
     store: &Entity<WorkspaceStore>,
+    session_id: String,
     paused: bool,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(session_id) = store.read(cx).legacy_focus() else {
-        return;
-    };
     let task = store.update(cx, |store, cx| {
         store.command(
             Command::SetPullRequestWatchesPaused { session_id, paused },
@@ -661,11 +660,12 @@ fn set_watches_paused(
 }
 fn change_link<T: 'static>(
     store: &Entity<WorkspaceStore>,
+    session_id: Option<String>,
     action: &ChangeLink,
     window: &mut Window,
     cx: &mut Context<T>,
 ) {
-    let Some(session_id) = store.read(cx).legacy_focus() else {
+    let Some(session_id) = session_id else {
         return;
     };
     let command = if action.linking {
@@ -782,18 +782,16 @@ fn row_menu(
     )
 }
 
-/// Opens a pull request of the active thread here: inside the tab in a wide window, as a page
+/// Opens a pull request of `session`'s thread here: inside the tab in a wide window, as a page
 /// over the thread on a phone.
 fn open_pull_request(
     store: &Entity<WorkspaceStore>,
     window_state: &Entity<WindowState>,
+    session: String,
     key: PullRequestKey,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(session) = store.read(cx).legacy_focus() else {
-        return;
-    };
     store.update(cx, |store, cx| {
         store.set_open_pull_request(&session, Some(key), cx)
     });
@@ -845,6 +843,7 @@ struct PullRequestRow<'a> {
 }
 pub struct PullRequestsPanel {
     store: Entity<WorkspaceStore>,
+    session_id: Option<String>,
     window_state: Entity<WindowState>,
     scroll: ScrollHandle,
     /// The watched row whose eye the pointer is over, which then shows what a click does.
@@ -858,7 +857,7 @@ pub struct PullRequestsPanel {
     /// panel under another parent: as it turns compact or wide.
     motion: crate::motion::owned::Owned,
     detail: Entity<PullRequestView>,
-    /// The pull request the active thread had open when last drawn.
+    /// The pull request the thread had open when last drawn.
     shown: Option<PullRequestKey>,
     _subscriptions: [Subscription; 3],
 }
@@ -866,6 +865,7 @@ impl PullRequestsPanel {
     pub fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
+        session_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = [
@@ -873,10 +873,10 @@ impl PullRequestsPanel {
             cx.observe(&window_state, |_, _, cx| cx.notify()),
             // Opening or leaving a pull request is client state, not a host topic.
             cx.observe(&store, |this: &mut Self, store, cx| {
-                let store = store.read(cx);
-                let open = store
-                    .legacy_focus()
-                    .and_then(|id| store.open_pull_request(&id).cloned());
+                let open = this
+                    .session_id
+                    .as_deref()
+                    .and_then(|id| store.read(cx).open_pull_request(id).cloned());
                 if this.shown != open {
                     this.shown = open;
                     cx.notify();
@@ -886,6 +886,7 @@ impl PullRequestsPanel {
         let detail = cx.new(|cx| PullRequestView::new(store.clone(), window_state.clone(), cx));
         Self {
             store,
+            session_id,
             window_state,
             scroll: ScrollHandle::new(),
             eye_hovered: None,
@@ -899,8 +900,16 @@ impl PullRequestsPanel {
         }
     }
 
-    /// Keep the panel's motion in `scene`, its host's: the right panel's,
-    /// which shows the focused thread's pull requests.
+    /// Show the pull requests of `session_id`'s thread, or none.
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        if self.session_id != session_id {
+            self.session_id = session_id;
+            cx.notify();
+        }
+    }
+
+    /// Keep the panel's motion in `scene`, its host's: what the host shows
+    /// is what the panel shows.
     pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch, cx: &mut App) {
         self.motion = crate::motion::owned::Owned::in_scene(scene);
         self.hover = crate::motion::ListHover::new(crate::material::HOVER).in_scene(scene);
@@ -918,31 +927,32 @@ impl PullRequestsPanel {
         self.detail.clone()
     }
     fn change_watch(&mut self, action: &ChangeWatch, window: &mut Window, cx: &mut Context<Self>) {
-        change_watch(&self.store, action, window, cx);
+        change_watch(&self.store, self.session_id.clone(), action, window, cx);
     }
     fn change_link(&mut self, action: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
-        change_link(&self.store, action, window, cx);
+        change_link(&self.store, self.session_id.clone(), action, window, cx);
     }
     /// A list row offers what its link shows, as its menu opens; the host reads the rest
     /// before it writes.
     fn offer(&self, key: &PullRequestKey) -> impl Fn(&App) -> Option<lifecycle::Offer> + 'static {
         let (store, detail, key) = (self.store.clone(), self.detail.clone(), key.clone());
+        let session = self.session_id.clone();
         move |cx| {
             let store = store.read(cx);
             if store
-                .session_status()
+                .session_status_for(session.as_deref())
                 .is_none_or(|status| status.conversation_read_only)
             {
                 return None;
             }
-            let session = store.legacy_focus()?;
-            let busy = detail.read(cx).lifecycle_busy(&session, &key);
+            let session = session.as_deref()?;
+            let busy = detail.read(cx).lifecycle_busy(session, &key);
             let operations = store
-                .thread_meta(&session)
+                .thread_meta(session)
                 .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
             lifecycle::Offer::new(
                 &key,
-                store.pull_requests(&session),
+                store.pull_requests(session),
                 operations,
                 None,
                 None,
@@ -957,7 +967,7 @@ impl PullRequestsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.store.read(cx).legacy_focus() else {
+        let Some(session) = self.session_id.clone() else {
             return;
         };
         let target = self.detail.update(cx, |detail, cx| {
@@ -1227,8 +1237,8 @@ impl PullRequestsPanel {
         );
         if let Some(eye) = eye {
             let store = self.store.read(cx);
-            let paused = store
-                .legacy_focus()
+            let paused = self
+                .session_id
                 .as_deref()
                 .and_then(|id| store.thread_meta(id))
                 .is_some_and(|meta| meta.pull_request_watches_paused);
@@ -1393,12 +1403,9 @@ impl PullRequestsPanel {
         // write running over it.
         let (blocker, running) = {
             let store = self.store.read(cx);
-            let session = store.legacy_focus();
-            let links = session
-                .as_deref()
-                .map_or(&[][..], |id| store.pull_requests(id));
+            let session = self.session_id.as_deref();
+            let links = session.map_or(&[][..], |id| store.pull_requests(id));
             let operations = session
-                .as_deref()
                 .and_then(|id| store.thread_meta(id))
                 .map_or(&[][..], |meta| meta.pull_request_operations.as_slice());
             let running = pull_request::stack_operation(operations, links, &key)
@@ -1514,9 +1521,12 @@ impl PullRequestsPanel {
             .on_click({
                 let store = self.store.clone();
                 let window_state = self.window_state.clone();
+                let session = self.session_id.clone();
                 let key = key.clone();
                 move |_, window, cx| {
-                    open_pull_request(&store, &window_state, key.clone(), window, cx)
+                    if let Some(session) = session.clone() {
+                        open_pull_request(&store, &window_state, session, key.clone(), window, cx);
+                    }
                 }
             })
             .when(depth > 0, |row| {
@@ -1780,10 +1790,15 @@ pub(crate) fn agent_sees_body(
     }))
 }
 
-/// The active thread's [`agent_sees_body`] in a dialog, for a thread with no
-/// pull request panel to hold it.
-pub(crate) fn open_agent_sees(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut App) {
-    let view = cx.new(|cx| AgentSees::new(store, cx));
+/// `session_id`'s [`agent_sees_body`] in a dialog, for a thread with no pull
+/// request panel to hold it.
+pub(crate) fn open_agent_sees(
+    store: Entity<WorkspaceStore>,
+    session_id: Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let view = cx.new(|cx| AgentSees::new(store, session_id, cx));
     window.open_dialog(cx, move |dialog, _, _| {
         let view = view.clone();
         dialog
@@ -1794,14 +1809,20 @@ pub(crate) fn open_agent_sees(store: Entity<WorkspaceStore>, window: &mut Window
 
 struct AgentSees {
     store: Entity<WorkspaceStore>,
+    session_id: Option<String>,
     _subscription: gpui::Subscription,
 }
 
 impl AgentSees {
-    fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        store: Entity<WorkspaceStore>,
+        session_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscription = cx.observe(&store, |_, _, cx| cx.notify());
         Self {
             store,
+            session_id,
             _subscription: subscription,
         }
     }
@@ -1812,7 +1833,7 @@ impl Render for AgentSees {
         let tools = self
             .store
             .read(cx)
-            .session_status()
+            .session_status_for(self.session_id.as_deref())
             .and_then(|status| status.injected_tools.clone());
         div()
             .id("agent-sees-scroll")
@@ -1914,9 +1935,8 @@ impl Render for PullRequestsPanel {
         // the list and popped back off it. The phone's page is the shell's.
         let open = (!self.window_state.read(cx).compact)
             .then(|| {
-                let store = self.store.read(cx);
-                let session = store.legacy_focus()?;
-                let key = store.open_pull_request(&session).cloned()?;
+                let session = self.session_id.clone()?;
+                let key = self.store.read(cx).open_pull_request(&session).cloned()?;
                 Some((session, key))
             })
             .flatten();
@@ -1969,7 +1989,7 @@ impl Render for PullRequestsPanel {
 impl PullRequestsPanel {
     fn list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let store = self.store.read(cx);
-        let session = store.legacy_focus();
+        let session = self.session_id.clone();
         let links = session
             .as_deref()
             .map(|id| store.pull_requests(id).to_vec())
@@ -1980,7 +2000,7 @@ impl PullRequestsPanel {
             .map(|meta| meta.pull_request_operations.clone())
             .unwrap_or_default();
         let read_only = store
-            .session_status()
+            .session_status_for(session.as_deref())
             .is_none_or(|status| status.conversation_read_only);
         let watchable = session
             .as_deref()
@@ -1993,7 +2013,7 @@ impl PullRequestsPanel {
             .and_then(|id| store.thread_meta(id))
             .is_some_and(|meta| meta.pull_request_watches_paused);
         let agent_tools = store
-            .session_status()
+            .session_status_for(session.as_deref())
             .and_then(|status| status.injected_tools.clone());
         let compact = self.window_state.read(cx).compact;
         let mut entries: Vec<(SharedString, ListEntry)> = Vec::new();
@@ -2189,6 +2209,7 @@ impl PullRequestsPanel {
         .map(|kept| {
             let paused = kept.value;
             let store = self.store.clone();
+            let session = session.clone();
             let button = Button::new("pr-monitoring")
                 .debug_selector(|| "pr-monitoring".into())
                 .ghost()
@@ -2202,7 +2223,11 @@ impl PullRequestsPanel {
                 } else {
                     "pull_requests.pause_monitoring"
                 }))
-                .on_click(move |_, window, cx| set_watches_paused(&store, !paused, window, cx));
+                .on_click(move |_, window, cx| {
+                    if let Some(session) = session.clone() {
+                        set_watches_paused(&store, session, !paused, window, cx);
+                    }
+                });
             (kept, button)
         });
         let link_button = |id: &'static str| {

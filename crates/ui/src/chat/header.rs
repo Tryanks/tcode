@@ -478,7 +478,12 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        crate::pull_requests::open_agent_sees(self.workspace_store.clone(), window, cx);
+        crate::pull_requests::open_agent_sees(
+            self.workspace_store.clone(),
+            self.session_id.clone(),
+            window,
+            cx,
+        );
     }
 
     /// The header, laid out for the width it is given in this frame: whether

@@ -460,16 +460,33 @@ impl PullRequestView {
         cx.notify();
     }
 
+    fn split(&self, cx: &App) -> bool {
+        self.store
+            .read(cx)
+            .diff_split_for(self.session().as_deref())
+    }
+
+    fn wrap(&self, cx: &App) -> bool {
+        self.store
+            .read(cx)
+            .diff_word_wrap_for(self.session().as_deref())
+    }
+
     fn apply_option(&mut self, option: FilesOption, window: &mut Window, cx: &mut Context<Self>) {
         match option {
             FilesOption::Split => {
-                let split = self.store.read(cx).diff_split();
-                self.store
-                    .update(cx, |store, cx| store.set_diff_split(!split, cx));
+                let session = self.session();
+                self.store.update(cx, |store, cx| {
+                    let split = store.diff_split_for(session.as_deref());
+                    store.set_diff_split_for(session.as_deref(), !split, cx)
+                });
             }
-            FilesOption::Wrap => self
-                .store
-                .update(cx, |store, cx| store.toggle_diff_wrap(cx)),
+            FilesOption::Wrap => {
+                let session = self.session();
+                self.store.update(cx, |store, cx| {
+                    store.toggle_diff_wrap_for(session.as_deref(), cx)
+                })
+            }
             FilesOption::Whitespace => self.ignore_ws = !self.ignore_ws,
             FilesOption::Invisibles => self.show_invisibles = !self.show_invisibles,
             FilesOption::CollapseAll => self.set_all_collapsed(true, cx),
@@ -754,11 +771,7 @@ impl PullRequestView {
         let entry = self.files_of()?.get(file)?.clone();
         let compact = self.compact(cx);
         let state = self.viewed_state(&entry.path);
-        let read_only = self
-            .store
-            .read(cx)
-            .session_status()
-            .is_none_or(|status| status.conversation_read_only);
+        let read_only = self.read_only(cx);
         let path = entry.path.clone();
         if state == Viewed::Unknown {
             let unreadable = self.page().is_some_and(|page| page.viewed.error.is_some());
@@ -919,8 +932,8 @@ impl PullRequestView {
                 }))
                 .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
         });
-        let split = self.store.read(cx).diff_split();
-        let wrap = self.store.read(cx).diff_word_wrap();
+        let split = self.split(cx);
+        let wrap = self.wrap(cx);
         let all_collapsed = files.is_some_and(|files| {
             !files.files.is_empty() && files.files.iter().all(|file| self.collapsed(&file.path))
         });
@@ -1118,7 +1131,7 @@ impl PullRequestView {
         let top = self
             .page()
             .and_then(|page| page.files_view.list.as_ref())
-            .and_then(|list| list.top_file(self.store.read(cx).diff_split()));
+            .and_then(|list| list.top_file(self.split(cx)));
         let muted = cx.theme().muted_foreground;
         let (directory, name) = match file.path.rsplit_once('/') {
             Some((directory, name)) => (format!("{directory}/"), name.to_owned()),
@@ -1331,8 +1344,8 @@ impl PullRequestView {
             .into_any_element();
         }
         // The next page is read as the reader nears the end of what is drawn.
-        let split = self.store.read(cx).diff_split();
-        let wrap = self.store.read(cx).diff_word_wrap();
+        let split = self.split(cx);
+        let wrap = self.wrap(cx);
         let near_end = page
             .files_view
             .list

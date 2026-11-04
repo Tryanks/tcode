@@ -28,6 +28,7 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub struct PlanPanel {
     store: Entity<WorkspaceStore>,
+    session_id: Option<String>,
     vscroll: ScrollHandle,
     /// The explanation and steps last shown, drawn while an emptied plan
     /// fades out.
@@ -36,7 +37,11 @@ pub struct PlanPanel {
 }
 
 impl PlanPanel {
-    pub fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<WorkspaceStore>,
+        session_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![observe_store_topics(
             &store,
             &[
@@ -48,9 +53,17 @@ impl PlanPanel {
         )];
         Self {
             store,
+            session_id,
             vscroll: ScrollHandle::new(),
             last: (None, Vec::new()),
             _subscriptions: subscriptions,
+        }
+    }
+
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        if self.session_id != session_id {
+            self.session_id = session_id;
+            cx.notify();
         }
     }
 
@@ -70,7 +83,7 @@ impl Render for PlanPanel {
         let plan = self
             .store
             .read(cx)
-            .session_plan()
+            .session_plan_for(self.session_id.as_deref())
             .filter(|plan| !plan.steps.is_empty())
             .map(|plan| (explanation(plan), plan.steps.clone()));
         // The plan and the empty state cross-fade; a plan that empties
@@ -438,7 +451,8 @@ mod tests {
         plan(&[("Read", Completed), ("Plan", Pending), ("Build", Pending)]);
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (_, cx) = cx.add_window_view(|_, cx| PlanPanel::new(store.clone(), cx));
+        let (_, cx) = cx
+            .add_window_view(|_, cx| PlanPanel::new(store.clone(), Some("thread".to_owned()), cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(360.), px(600.)));
         draw_settled(cx);

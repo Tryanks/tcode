@@ -451,13 +451,15 @@ impl ChatView {
             let mut pull_requests = crate::pull_requests::PullRequestsPanel::new(
                 workspace_store.clone(),
                 window_state.clone(),
+                session_id.clone(),
                 cx,
             );
             pull_requests.share_scene(&scene, cx);
             pull_requests
         });
-        let agents =
-            cx.new(|cx| crate::agents_panel::AgentsPanel::for_sheet(workspace_store.clone(), cx));
+        let agents = cx.new(|cx| {
+            crate::agents_panel::AgentsPanel::new(workspace_store.clone(), session_id.clone(), cx)
+        });
         let terminal_was_open = workspace_store
             .read(cx)
             .panel_state_for(session_id.as_deref())
@@ -591,6 +593,10 @@ impl ChatView {
             self.terminal_drawer
                 .update(cx, |drawer, cx| drawer.set_session(session_id.clone(), cx));
         }
+        self.pull_requests
+            .update(cx, |panel, cx| panel.set_session(session_id.clone(), cx));
+        self.agents
+            .update(cx, |panel, cx| panel.set_session(session_id.clone(), cx));
         self.scene.show(session_id.as_deref());
         self.session_id = session_id;
         self.timeline_stale = true;

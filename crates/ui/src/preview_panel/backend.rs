@@ -19,9 +19,7 @@ use preview_mcp::{js, ports};
 use tcode_protocol::{PreviewRequest, PreviewResponse};
 
 use super::lifecycle::{Availability, BrowserLifecycle};
-use super::{
-    PreviewPanel, ReplyTx, preview_key_for_session, unavailable_message, visible_preview_key,
-};
+use super::{PreviewPanel, ReplyTx, unavailable_message, visible_preview_key};
 use crate::icon::IconName;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -248,14 +246,17 @@ impl PreviewPanel {
         self.backend.lifecycle.clone()
     }
 
+    fn preview_tab_showing(&self, cx: &App) -> bool {
+        let store = self.store.read(cx);
+        store.preview_panel_showing_for(store.panel_subject())
+    }
+
     fn routed_key(&mut self, session_id: &str, cx: &mut Context<Self>) -> String {
-        let active_key = self.active_key(cx);
-        let active_session_id = self.store.read(cx).legacy_focus();
-        preview_key_for_session(
-            session_id,
-            active_session_id.as_deref(),
-            active_key.as_deref(),
-        )
+        self.active_key(cx);
+        self.store
+            .read(cx)
+            .preview_key_for(session_id)
+            .unwrap_or_else(|| session_id.to_owned())
     }
 
     /// Hide native children that no longer belong to the visible Preview
@@ -280,7 +281,7 @@ impl PreviewPanel {
             active.as_deref(),
             window_state.route(),
             window_state.palette_mounted(),
-            self.store.read(cx).preview_panel_showing()
+            self.preview_tab_showing(cx)
                 && self.store.read(cx).preview_browser_settings().enabled
                 // gpui-fast-macos 0.1.10 hands a drag GPUI began to the native
                 // view under the pointer (`send_window_event` hit-tests
@@ -1285,8 +1286,8 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) {
         let state = self.window_state.read(cx);
-        if self.store.read(cx).legacy_focus().as_deref() != Some(session_id)
-            || !self.store.read(cx).preview_panel_showing()
+        if self.store.read(cx).panel_subject() != Some(session_id)
+            || !self.preview_tab_showing(cx)
             || state.palette_mounted()
             || state.route() != crate::window_state::Route::Chat
             || (state.compact
