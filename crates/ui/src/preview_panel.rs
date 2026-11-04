@@ -745,11 +745,10 @@ mod portable {
         }
 
         pub(super) fn prune_deleted_webviews(&mut self, cx: &mut Context<Self>) {
-            let live = self.store.read(cx).preview_live_keys();
             if self
                 .mirrored
                 .as_ref()
-                .is_some_and(|key| !live.contains(key))
+                .is_some_and(|key| !self.store.read(cx).preview_key_live(key))
             {
                 self.mirrored = None;
             }

@@ -2719,19 +2719,16 @@ impl WorkspaceStore {
             .map(|status| Self::destination(status).preference_key())
     }
 
-    pub(crate) fn preview_live_keys(&self) -> HashSet<String> {
-        let mut keys = self
-            .index_replica
-            .0
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<HashSet<_>>();
-        for thread in self.threads.values().filter(|thread| thread.open) {
-            if let Some(destination) = &thread.destination {
-                keys.insert(destination.preference_key());
-            }
-        }
-        keys
+    /// Whether a preview keyed `key` still has a thread to belong to.
+    pub(crate) fn preview_key_live(&self, key: &str) -> bool {
+        self.thread_meta(key).is_some()
+            || self.threads.values().any(|thread| {
+                thread.open
+                    && thread
+                        .destination
+                        .as_ref()
+                        .is_some_and(|destination| destination.preference_key() == key)
+            })
     }
 
     pub fn preview_browser_settings(&self) -> BrowserSettings {

@@ -545,11 +545,11 @@ impl BrowserLifecycle {
     }
 
     /// Tear down every browser whose session key is no longer live.
-    pub fn prune(&mut self, live_keys: &HashSet<String>, cx: &App) {
+    pub fn prune(&mut self, live: impl Fn(&str, &App) -> bool, cx: &App) {
         let deleted = self
             .slots
             .keys()
-            .filter(|key| !live_keys.contains(*key))
+            .filter(|key| !live(key, cx))
             .cloned()
             .collect::<Vec<_>>();
         for key in deleted {
@@ -814,7 +814,11 @@ fn leave(view: &Entity<WebView>, cx: &mut App) {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let _ = (view, cx);
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    view.update(cx, |view, _| set_webview_visible(view, false));
+    view.update(cx, |view, _| {
+        if view.visible() {
+            set_webview_visible(view, false);
+        }
+    });
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

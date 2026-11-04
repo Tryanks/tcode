@@ -438,16 +438,18 @@ impl PreviewPanel {
     }
 
     pub(super) fn prune_deleted_webviews(&mut self, cx: &mut Context<Self>) {
-        let live = self.store.read(cx).preview_live_keys();
+        let store = self.store.read(cx);
         if self
             .mirrored
             .as_ref()
-            .is_some_and(|key| !live.contains(key))
+            .is_some_and(|key| !store.preview_key_live(key))
         {
             self.mirrored = None;
         }
-        self.lifecycle_entity()
-            .update(cx, |lifecycle, cx| lifecycle.prune(&live, cx));
+        let store = self.store.clone();
+        self.lifecycle_entity().update(cx, |lifecycle, cx| {
+            lifecycle.prune(|key, cx| store.read(cx).preview_key_live(key), cx)
+        });
     }
 
     pub(super) fn navigate_backend(
