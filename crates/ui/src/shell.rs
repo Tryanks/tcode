@@ -392,40 +392,10 @@ impl PaneControls {
 
 /// This window's [`PaneControls`] for `pane`, or the pane a command acts on;
 /// `None` where there are no panes.
-pub(crate) fn pane_controls(
-    pane: Option<Entity<ThreadPanel>>,
-    window: &Window,
-    cx: &App,
-) -> Option<PaneControls> {
+pub(crate) fn pane_controls(window: &Window, cx: &App) -> Option<PaneControls> {
     let shell = current_shell(cx)?;
     let shell = shell.read(cx);
-    if shell.compact(cx) {
-        return None;
-    }
-    let attachment = shell.attachment.as_ref()?;
-    let panes = attachment.panes(cx);
-    let pane = pane.or_else(|| shell.acting_pane())?;
-    let pane = &pane;
-    let closable = pane
-        .read(cx)
-        .group()
-        .is_some_and(|group| group.read(cx).is_closable(cx));
-    let zoomed = attachment.zoom.is_zoomed();
-    let split = |placement| shell.split_allowed(pane, placement, window, cx);
-    // The panes beneath a zoomed one, or one on its way back to its slot,
-    // are covered, so it has no neighbours.
-    let covered = attachment.zoom.pane().is_some();
-    let neighbours = Side::ALL.map(|side| !covered && shell.neighbour_of(pane, side, cx).is_some());
-    Some(PaneControls {
-        split_right: split(gpui_base::Placement::Right),
-        split_down: split(gpui_base::Placement::Bottom),
-        close: panes.len() > 1 && (closable || zoomed),
-        close_others: panes.len() > 1,
-        zoom: panes.len() > 1,
-        zoomed,
-        neighbours,
-        moves: pane.read(cx).session_id().is_some(),
-    })
+    shell.pane_controls(&shell.acting_pane()?, window, cx)
 }
 
 /// Give the keyboard to the current pane, as a click in it does: its composer
@@ -1685,6 +1655,41 @@ impl AppShell {
     }
 
     /// The pane a window-level command acts on.
+    /// The pane commands `pane` offers now; none in the compact layout.
+    fn pane_controls(
+        &self,
+        pane: &Entity<ThreadPanel>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<PaneControls> {
+        if self.compact(cx) {
+            return None;
+        }
+        let attachment = self.attachment.as_ref()?;
+        let panes = attachment.panes(cx);
+        let closable = pane
+            .read(cx)
+            .group()
+            .is_some_and(|group| group.read(cx).is_closable(cx));
+        let zoomed = attachment.zoom.is_zoomed();
+        let split = |placement| self.split_allowed(pane, placement, window, cx);
+        // The panes beneath a zoomed one, or one on its way back to its slot,
+        // are covered, so it has no neighbours.
+        let covered = attachment.zoom.pane().is_some();
+        let neighbours =
+            Side::ALL.map(|side| !covered && self.neighbour_of(pane, side, cx).is_some());
+        Some(PaneControls {
+            split_right: split(gpui_base::Placement::Right),
+            split_down: split(gpui_base::Placement::Bottom),
+            close: panes.len() > 1 && (closable || zoomed),
+            close_others: panes.len() > 1,
+            zoom: panes.len() > 1,
+            zoomed,
+            neighbours,
+            moves: pane.read(cx).session_id().is_some(),
+        })
+    }
+
     fn acting_pane(&self) -> Option<Entity<ThreadPanel>> {
         Some(self.attachment.as_ref()?.current_pane.clone())
     }
@@ -2734,7 +2739,8 @@ impl AppShell {
             let chat = pane.read(cx).chat();
             ChatView::set_edges(&chat, edges, cx);
             ChatView::set_title_recedes(&chat, recedes, cx);
-            ChatView::set_pane(&chat, pane.downgrade(), close, cx);
+            let controls = self.pane_controls(&pane, window, cx);
+            ChatView::set_pane(&chat, close, controls, cx);
         }
         let shown = self.shown_threads(tree.as_ref(), cx);
         let hovered = attachment.sidebar.read(cx).hovered_thread();

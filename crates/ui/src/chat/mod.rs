@@ -156,8 +156,11 @@ pub struct ChatView {
     /// pane shares the column: the pane's focus handle, faded in and out by
     /// the shell, which samples it above the dock.
     pane_close: Option<crate::motion::Shown<gpui::WeakEntity<crate::panes::ThreadPanel>>>,
-    /// The pane drawing this conversation, for the header's pane commands.
-    pane: Option<gpui::WeakEntity<crate::panes::ThreadPanel>>,
+    /// The pane commands the header offers, as the shell last handed them.
+    /// Handed rather than read from the shell and the pane as the view
+    /// renders: both lay themselves out again whenever the view does, and
+    /// reading them would draw each again after the other, every frame.
+    pane_controls: Option<crate::shell::PaneControls>,
     /// The header's scroll, kept by the view rather than by the header's
     /// element: the dock draws a pane's chat under a new parent whenever the
     /// panes' layout changes (see `panes::ThreadPanes`), which would scroll
@@ -500,7 +503,7 @@ impl ChatView {
             session_id,
             edges: WindowEdges::BOTH,
             pane_close: None,
-            pane: None,
+            pane_controls: None,
             header_scroll: gpui::ScrollHandle::default(),
             motion: crate::motion::owned::Owned::in_scene(&scene),
             scene_shown: false,
@@ -662,27 +665,22 @@ impl ChatView {
         }
     }
 
+    /// What the pane drawing the view hands its header: the close button,
+    /// while the pane shares the column, and the pane commands.
     pub(crate) fn set_pane(
         this: &Entity<Self>,
-        pane: gpui::WeakEntity<crate::panes::ThreadPanel>,
         close: Option<crate::motion::Shown<gpui::WeakEntity<crate::panes::ThreadPanel>>>,
+        controls: Option<crate::shell::PaneControls>,
         cx: &mut App,
     ) {
         let chat = this.read(cx);
-        let (moved, closes) = (chat.pane.as_ref() != Some(&pane), chat.pane_close != close);
-        if moved || closes {
+        if chat.pane_close != close || chat.pane_controls != controls {
             this.update(cx, |chat, cx| {
-                chat.pane = Some(pane);
-                if closes {
-                    chat.pane_close = close;
-                    cx.notify();
-                }
+                chat.pane_close = close;
+                chat.pane_controls = controls;
+                cx.notify();
             });
         }
-    }
-
-    pub(super) fn pane(&self) -> Option<Entity<crate::panes::ThreadPanel>> {
-        self.pane.as_ref()?.upgrade()
     }
 
     /// Show `session_id`'s thread, or none; the next sync finds the thread
