@@ -501,8 +501,9 @@ pub(crate) fn format_elapsed(elapsed_ms: u64) -> String {
     }
 }
 
-/// [`format_elapsed`] for a clock that ticks each second, where tenths would
-/// only repeat from tick to tick: whole seconds, floored, under a minute.
+/// [`format_elapsed`] for a span counted in seconds, as a clock that ticks
+/// each second or a harness's goal reports it, where tenths would say nothing:
+/// whole seconds, floored, under a minute.
 pub(crate) fn format_elapsed_seconds(elapsed_ms: u64) -> String {
     let secs = elapsed_ms / 1000;
     if secs < MINUTE {
