@@ -57,7 +57,14 @@ pub trait SpeechSession {
 }
 
 pub trait SpeechRecognizer {
+    /// Answers from what the platform already knows: every render asks.
     fn is_available(&self, locale: &str) -> bool;
+    /// Work that re-reads a permission the user can change outside Tcode, as
+    /// in System Settings, for `is_available` to answer from afterwards. It
+    /// may block on a system service, so it runs off the main thread.
+    fn permission_refresh(&self) -> Option<fn()> {
+        None
+    }
     fn start(
         &self,
         locale: &str,
