@@ -6,8 +6,11 @@
 //! origin, [`Origins::mark`]) records where it was drawn, by key, and the
 //! surface opened from it ([`Morph`]) is drawn from that rectangle, with its
 //! corners, to its own place. Only the surface's frame moves: what it holds
-//! is laid out at the surface's place at rest throughout, clipped to the
-//! frame, so nothing in it is measured again while it moves.
+//! is laid out at a size of its own throughout, clipped to the frame, so
+//! nothing in it is measured again while it moves.
+//!
+//! GPUI's opacity multiplies down through an element's children, so the
+//! frame and what it holds are siblings: each fades on its own.
 
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
@@ -185,8 +188,13 @@ pub(crate) struct Morph {
     /// Where its frame rests instead of its place, and the radius of its
     /// corners there: what it holds is still laid out at its place.
     held: Option<(Bounds<Pixels>, Pixels)>,
-    /// Where the frame is recorded as drawn each frame, as an origin is.
-    mark: Option<(Origins, SharedString)>,
+    /// Where what it holds is laid out instead of its place.
+    laid: Option<Bounds<Pixels>>,
+    /// How far in the frame's fill, border and shadow are.
+    surface: f32,
+    /// The keys the frame and what it holds are recorded under each frame,
+    /// as an origin is.
+    mark: Option<(Origins, SharedString, SharedString)>,
     /// The surface's frame, drawn at the size it has now, its corners
     /// `radius` round at rest, inside a border `border` wide.
     frame: Option<Div>,
@@ -202,6 +210,8 @@ impl Morph {
             from: None,
             growth: 1.,
             held: None,
+            laid: None,
+            surface: 1.,
             mark: None,
             frame: Some(frame),
             radius,
@@ -224,10 +234,30 @@ impl Morph {
         self
     }
 
-    /// Where its frame is drawn each frame is recorded in `origins` as
-    /// `key`, so what it does next can start from there.
-    pub(crate) fn mark(mut self, origins: &Origins, key: impl Into<SharedString>) -> Self {
-        self.mark = Some((origins.clone(), key.into()));
+    /// What it holds stays laid out at `laid`, in window coordinates, rather
+    /// than at its place.
+    pub(crate) fn laid(mut self, laid: Option<Bounds<Pixels>>) -> Self {
+        self.laid = laid;
+        self
+    }
+
+    /// Its fill, border and shadow are `surface` of the way in; what it
+    /// holds is not.
+    pub(crate) fn surface(mut self, surface: f32) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    /// Where its frame and what it holds are drawn each frame are recorded
+    /// in `origins` as `frame` and `content`, so what it does next can start
+    /// from there.
+    pub(crate) fn mark(
+        mut self,
+        origins: &Origins,
+        frame: impl Into<SharedString>,
+        content: impl Into<SharedString>,
+    ) -> Self {
+        self.mark = Some((origins.clone(), frame.into(), content.into()));
         self
     }
 }
@@ -296,27 +326,37 @@ impl Element for Morph {
             ),
             None => (rest, rest_radius),
         };
-        if let Some((origins, key)) = &self.mark {
-            origins.record(key.clone(), now, radius, window);
+        let laid = self.laid.unwrap_or(place);
+        if let Some((origins, frame, content)) = &self.mark {
+            origins.record(frame.clone(), now, radius, window);
+            origins.record(content.clone(), laid, px(0.), window);
         }
         let border = self.border;
         let content = self.content.take()?;
-        let mut surface = self
-            .frame
-            .take()?
-            .w(now.size.width)
-            .h(now.size.height)
-            .rounded(radius)
+        let frame = self.frame.take()?.size_full().rounded(radius);
+        let held = div()
+            .absolute()
+            .left(border)
+            .top(border)
+            .w((now.size.width - border * 2.).max(px(0.)))
+            .h((now.size.height - border * 2.).max(px(0.)))
+            .rounded((radius - border).max(px(0.)))
             .overflow_hidden()
             .child(
                 div()
                     .absolute()
-                    .left(place.left() - now.left())
-                    .top(place.top() - now.top())
-                    .w((place.size.width - border * 2.).max(px(0.)))
-                    .h((place.size.height - border * 2.).max(px(0.)))
+                    .left(laid.left() - now.left())
+                    .top(laid.top() - now.top())
+                    .w((laid.size.width - border * 2.).max(px(0.)))
+                    .h((laid.size.height - border * 2.).max(px(0.)))
                     .child(content),
-            )
+            );
+        let mut surface = div()
+            .relative()
+            .w(now.size.width)
+            .h(now.size.height)
+            .child(frame.opacity(self.surface.clamp(0., 1.)))
+            .child(held)
             .into_any_element();
         surface.layout_as_root(
             size(

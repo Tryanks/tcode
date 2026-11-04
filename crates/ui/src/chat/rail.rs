@@ -452,7 +452,9 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let presence = self.body.presence;
-        if presence <= 0. || self.window_state.read(cx).compact {
+        // Laid out from the frame it starts to come in, unseen: an agent
+        // closing shrinks toward its row from the frame after.
+        if (presence <= 0. && !self.body.rail) || self.window_state.read(cx).compact {
             return None;
         }
         // A card that goes keeps its place while it folds away.
