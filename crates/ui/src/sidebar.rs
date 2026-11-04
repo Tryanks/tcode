@@ -5988,8 +5988,8 @@ mod tests {
         }
 
         assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
-            Some("middle".into())
+            store.read_with(cx, |store, _| store.open_threads()),
+            ["middle"]
         );
         let drawn = opacity.borrow()[since..].to_vec();
         assert!(
@@ -6464,7 +6464,7 @@ mod tests {
             .expect("long press opens menu");
         let outside = gpui::point(b.left() + px(12.), b.center().y);
         assert!(!menu.contains(&outside));
-        let selected = store.read_with(cx, |store, _| store.legacy_focus());
+        let selected = store.read_with(cx, |store, _| store.open_threads());
         let destination = navigation.read_with(cx, |state, _| state.destination());
         send(cx, 2, TouchPhase::Started, outside);
         send(cx, 2, TouchPhase::Ended, outside);
@@ -6474,7 +6474,7 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("tcode-popup-menu").is_none());
         assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
+            store.read_with(cx, |store, _| store.open_threads()),
             selected
         );
         assert_eq!(
@@ -6497,10 +6497,8 @@ mod tests {
         send(cx, 3, TouchPhase::Ended, b.center());
         draw_settled(cx);
         assert_eq!(
-            store
-                .read_with(cx, |store, _| store.legacy_focus())
-                .as_deref(),
-            Some("menu-10")
+            store.read_with(cx, |store, _| store.open_threads()),
+            ["menu-10"]
         );
         assert!(!selected_surface(cx, a));
         assert!(
@@ -6608,10 +6606,8 @@ mod tests {
         send(cx, 2, TouchPhase::Ended, tap);
         draw(cx);
         assert_eq!(
-            store
-                .read_with(cx, |store, _| store.legacy_focus())
-                .as_deref(),
-            Some("swipe-2"),
+            store.read_with(cx, |store, _| store.open_threads()),
+            ["swipe-2"],
             "the released swipe's fling does not swallow the next tap"
         );
         driver.shutdown(cx, &store, &host);
@@ -6866,7 +6862,7 @@ mod tests {
                     sidebar.flat_list_state.clone()
                 }
             });
-            let selected = store.read_with(cx, |store, _| store.legacy_focus());
+            let selected = store.read_with(cx, |store, _| store.open_threads());
             let viewport = list.viewport_bounds();
             let thumb = gpui::point(viewport.right() - px(5.), viewport.top() + px(8.));
             cx.simulate_mouse_move(thumb, None, gpui::Modifiers::default());
@@ -6902,7 +6898,7 @@ mod tests {
                 .expect("last thread is rendered after dragging to the bottom");
             assert!(last.bottom() <= viewport.bottom(), "last thread is clipped");
             assert_eq!(
-                store.read_with(cx, |store, _| store.legacy_focus()),
+                store.read_with(cx, |store, _| store.open_threads()),
                 selected,
                 "dragging must not activate a thread under the scrollbar"
             );
@@ -7727,8 +7723,8 @@ mod tests {
         assert!(listed(cx).contains(&"settled-20".to_string()));
         click(cx, "sidebar-thread-active-35");
         assert_eq!(
-            store.read_with(cx, |store, _| store.legacy_focus()),
-            Some("active-35".into())
+            store.read_with(cx, |store, _| store.open_threads()),
+            ["active-35"]
         );
         assert!(
             !listed(cx).contains(&"settled-20".to_string()),

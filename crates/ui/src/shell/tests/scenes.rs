@@ -112,13 +112,17 @@ fn the_composer_of_a_thread_come_back_to_starts_at_rest(cx: &mut TestAppContext)
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     serve_running(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| store.composer_state().turn_running);
+    await_restore_update(&shell, cx, |store| {
+        store.composer_state_for(Some("thread-1")).turn_running
+    });
     settle_frames(cx);
     let send = |cx: &mut VisualTestContext| cx.debug_bounds("send-message");
     assert_eq!(send(cx), None, "the running turn shows its stop button");
 
     serve_finished(&host, "thread-1");
-    await_restore_update(&shell, cx, |store| !store.composer_state().turn_running);
+    await_restore_update(&shell, cx, |store| {
+        !store.composer_state_for(Some("thread-1")).turn_running
+    });
     display_frame(cx);
     serve_finished(&host, "thread-2");
     switch(&shell, "secondary-2", "thread-2", cx);
@@ -158,7 +162,7 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
     let (shell, host, cx) = mount_panes(cx);
     serve_with_terminals(&host, "thread-1", &[1, 2]);
     await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
     });
     // Thread-1 was first shown with its drawer shut; the reader opens it.
     store_of(&shell, cx).update(cx, |store, cx| {
@@ -196,9 +200,11 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
     let (shell, host, cx) = mount_panes(cx);
     serve_finished(&host, "thread-1");
     await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
     });
-    store_of(&shell, cx).update(cx, |store, cx| store.toggle_diff_panel(cx));
+    store_of(&shell, cx).update(cx, |store, cx| {
+        store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+    });
     settle_frames(cx);
     let panel = |cx: &mut VisualTestContext| cx.debug_bounds("right-panel");
 
@@ -227,7 +233,9 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
     resize(cx, 2000.);
     settle_frames(cx);
     let open = cx.debug_bounds("right-panel").expect("thread-1's panel");
-    store_of(&shell, cx).update(cx, |store, cx| store.toggle_diff_panel(cx));
+    store_of(&shell, cx).update(cx, |store, cx| {
+        store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+    });
     draw(cx);
     display_frame(cx);
     display_frame(cx);
@@ -251,14 +259,18 @@ fn the_right_panel_of_a_thread_switched_to_shows_its_tab_at_once(cx: &mut TestAp
     let (shell, host, cx) = mount_panes(cx);
     serve_finished(&host, "thread-1");
     await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
     });
     let store = store_of(&shell, cx);
-    store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+    store.update(cx, |store, cx| {
+        store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+    });
     settle_frames(cx);
     serve_finished(&host, "thread-2");
     switch(&shell, "secondary-2", "thread-2", cx);
-    store.update(cx, |store, cx| store.toggle_pull_requests_panel(cx));
+    store.update(cx, |store, cx| {
+        store.toggle_tab_panel_for("thread-2", tcode_core::ui::RightTab::PullRequests, cx)
+    });
     settle_frames(cx);
     let diff = |cx: &mut VisualTestContext| cx.debug_bounds("diff-tab-body").is_some();
     assert!(!diff(cx), "thread-2 shows its pull requests");
@@ -390,7 +402,7 @@ fn mount_finished(
     let (shell, host, cx) = mount_panes(cx);
     serve_finished(&host, "thread-1");
     await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len()) == Some(1)
     });
     settle_frames(cx);
     let rest = bubble_fill("thread-1", cx).expect("thread-1's question");
@@ -690,8 +702,12 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
         settle_frames(cx);
         let opened = store.update(cx, |store, cx| {
             match holding {
-                Holding::RightPanel => store.toggle_diff_panel(cx),
-                Holding::AgentsPanel => store.toggle_agents_panel(cx),
+                Holding::RightPanel => {
+                    store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
+                }
+                Holding::AgentsPanel => {
+                    store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
+                }
                 Holding::Drawer => store.toggle_terminal_panel_for("thread-1".into(), cx),
                 _ => return false,
             }
@@ -728,7 +744,9 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
         }
         // thread-1 leaves its panel and drawer shut for the next case.
         store.update(cx, |store, cx| match holding {
-            Holding::RightPanel | Holding::AgentsPanel => store.close_diff_panel(cx),
+            Holding::RightPanel | Holding::AgentsPanel => {
+                store.close_right_panel_for(Some("thread-1"), cx)
+            }
             Holding::Drawer => store.toggle_terminal_panel_for("thread-1".into(), cx),
             _ => {}
         });
