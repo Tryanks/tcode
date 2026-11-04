@@ -13,7 +13,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use gpui::{App, SharedString, Window};
+use gpui::{App, EntityId, SharedString, Window};
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
 #[cfg(target_family = "wasm")]
@@ -50,6 +50,8 @@ struct Hover {
     fading: HashSet<SharedString>,
     fades: Owned,
     curve: Curve,
+    /// The views that drew the list's items since the hover last moved.
+    drawn_by: Vec<EntityId>,
 }
 
 impl Hover {
@@ -72,6 +74,14 @@ impl Hover {
     }
 
     /// Forgets the holds let go, the reveals only they kept in fading out.
+    /// Notes that `window`'s current view draws the list.
+    fn drawn_in(&mut self, window: &Window) {
+        let view = window.current_view();
+        if !self.drawn_by.contains(&view) {
+            self.drawn_by.push(view);
+        }
+    }
+
     fn release(&mut self, now: Instant) {
         let (live, released): (Vec<_>, Vec<_>) = std::mem::take(&mut self.held)
             .into_iter()
@@ -101,6 +111,7 @@ impl ListHover {
                 fading: HashSet::new(),
                 fades: Owned::default(),
                 curve: curve.into(),
+                drawn_by: Vec::new(),
             })),
             scene: Default::default(),
         }
@@ -180,7 +191,7 @@ impl ListHover {
         cx: &mut App,
     ) {
         let now = cx.background_executor().now();
-        {
+        let drawn_by = {
             let mut hover = self.hover();
             hover.release(now);
             for (item, from) in [(previous, 1f32), (next, 0.)] {
@@ -191,11 +202,17 @@ impl ListHover {
                     hover.fade(item, from, now);
                 }
             }
+            std::mem::take(&mut hover.drawn_by)
+        };
+        // Nothing an entity holds changed, so the views that drew the list
+        // are drawn again, each noting itself as it does. A window refresh
+        // would draw every view of the window from scratch.
+        if drawn_by.is_empty() {
+            window.refresh();
         }
-        // The pointer moved over the list, or the list under a still
-        // pointer: nothing the list holds changed, so it is redrawn rather
-        // than its view notified.
-        window.refresh();
+        for view in drawn_by {
+            cx.notify(view);
+        }
     }
 
     /// Keeps `item` hovered, wherever the pointer goes, until the hold is
@@ -215,6 +232,7 @@ impl ListHover {
     /// coming while it moves.
     pub(crate) fn reveal(&self, item: &str, window: &mut Window, cx: &App) -> f32 {
         let mut hover = self.hover();
+        hover.drawn_in(window);
         hover.release(cx.background_executor().now());
         let target = if hover.is_shown(item) { 1f32 } else { 0. };
         if !hover.fading.contains(item) {
