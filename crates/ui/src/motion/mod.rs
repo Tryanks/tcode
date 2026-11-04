@@ -510,13 +510,15 @@ pub(crate) fn cross_fade_part<T: Clone + PartialEq + 'static, C: BorrowMut<App>>
 
 /// A [`cross_fade`]'s frame: the `current` state, of its generation, coming
 /// in at `progress` over the `previous` one, which is shielded when
-/// `shield`.
+/// `shield`. `laid_out` is told the width the current state is laid out
+/// at, which the state keeps while it leaves.
 fn draw_change(
     id: ElementId,
     (current, generation): (AnyElement, u64),
-    previous: Option<(AnyElement, u64)>,
+    previous: Option<(AnyElement, u64, Option<Pixels>)>,
     progress: f32,
     shield: bool,
+    laid_out: impl Fn(Pixels) + 'static,
 ) -> AnyElement {
     let slot = |generation: u64| {
         ElementId::NamedChild(
@@ -526,16 +528,25 @@ fn draw_change(
     };
     div()
         .relative()
+        .on_children_prepainted(move |bounds, _, _| {
+            if let Some(current) = bounds.first() {
+                laid_out(current.size.width);
+            }
+        })
         .child(div().id(slot(generation)).opacity(progress).child(current))
-        .when_some(previous, |frame, (previous, generation)| {
+        .when_some(previous, |frame, (previous, generation, width)| {
             frame.child(
                 div()
                     .id(slot(generation))
                     .absolute()
                     .top_0()
                     .left_0()
-                    // As wide as the frame at least, so a state that fills its
-                    // row keeps filling it while it leaves.
+                    // Out of flow, a state is as wide as its content: one that
+                    // fills its row would shrink, and a line that fades its
+                    // end rather than wrap would widen to its whole text and
+                    // stop fading. It keeps the width it had while current,
+                    // and is as wide as the frame at least.
+                    .when_some(width, |previous, width| previous.w(width))
                     .min_w_full()
                     .opacity(1. - progress)
                     .child(previous)
@@ -1060,6 +1071,85 @@ mod tests {
         draw(cx);
         let leaving = cx.debug_bounds("bar").expect("drawn while it leaves");
         assert_eq!(leaving.size.width, px(300.));
+    }
+
+    /// Two parts that change: a line that fills a narrow column and fades
+    /// its end (an agent's activity), and a label as wide as what it says
+    /// (a status), which narrows to a shorter one.
+    struct Parts {
+        first: bool,
+    }
+
+    impl Render for Parts {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let line =
+                super::cross_fade_part("line", self.first, CHANGE, window, cx, |first, _, _| {
+                    let (selector, text) = if *first {
+                        (
+                            "line-first",
+                            "Running cargo nextest run --workspace --locked",
+                        )
+                    } else {
+                        ("line-second", "Reading crates/ui/src/widgets/fade_text.rs")
+                    };
+                    div()
+                        .debug_selector(move || selector.into())
+                        .w_full()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(text))
+                        .into_any_element()
+                });
+            let label =
+                super::cross_fade_part("label", self.first, CHANGE, window, cx, |first, _, _| {
+                    let (selector, text) = if *first {
+                        ("label-first", "Waiting for approval")
+                    } else {
+                        ("label-second", "Done")
+                    };
+                    div()
+                        .debug_selector(move || selector.into())
+                        .child(text)
+                        .into_any_element()
+                });
+            div()
+                .w(px(120.))
+                .flex()
+                .flex_col()
+                .child(line)
+                .child(div().flex().child(label))
+        }
+    }
+
+    /// A part that changes fades out laid out as it was while current: a
+    /// line that filled its column still fades its end within it rather
+    /// than widening to its whole text, and a label wider than the one
+    /// replacing it keeps its own width rather than wrapping into the new
+    /// one's.
+    #[gpui::test]
+    fn a_changing_part_fades_out_at_the_width_it_had(cx: &mut TestAppContext) {
+        use crate::test_frames::draw;
+        let (parts, cx) = cx.add_window_view(|_, _| Parts { first: true });
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        draw(cx);
+        let line = cx.debug_bounds("line-first").unwrap();
+        assert_eq!(line.size.width, px(120.));
+        let label = cx.debug_bounds("label-first").unwrap();
+        parts.update(cx, |parts, cx| {
+            parts.first = false;
+            cx.notify();
+        });
+        draw(cx);
+        cx.executor().advance_clock(CHANGE / 4);
+        draw(cx);
+        assert!(cx.debug_bounds("line-second").is_some());
+        let leaving = cx
+            .debug_bounds("line-first")
+            .expect("drawn while it leaves");
+        assert_eq!(leaving.size, line.size);
+        let leaving = cx
+            .debug_bounds("label-first")
+            .expect("drawn while it leaves");
+        assert_eq!(leaving.size, label.size);
     }
 
     /// A chip between two neighbours in a row with a gap.
