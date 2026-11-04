@@ -311,8 +311,6 @@ pub struct ChatView {
     /// window's turn indices under it. Marked until the thread changes, the
     /// keyboard is put to use elsewhere, or a press lands inside it.
     highlighted_turn: Option<usize>,
-    /// 1s ticker kept alive while an error card shows a scheduled resume.
-    _limit_tick: Option<Task<()>>,
     /// Keyed `plan`, `user:<id>`, `assistant:<id>` or `error:<id>`.
     copied: CopiedMark,
     /// The live commit dialog entity while it is open (kept alive across frames).
@@ -554,7 +552,6 @@ impl ChatView {
             list_scroll,
             session_key: None,
             highlighted_turn: None,
-            _limit_tick: None,
             copied: CopiedMark::default(),
             commit_dialog: None,
             capture: None,

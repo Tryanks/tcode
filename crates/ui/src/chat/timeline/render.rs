@@ -266,19 +266,18 @@ impl ChatView {
                                 ends_thread,
                                 queue_empty,
                             ) {
-                                LimitResumeAction::Scheduled {
-                                    queued_id: id,
-                                    remaining_secs,
-                                } => Some(components::error_card::LimitResume::Scheduled {
-                                    remaining_secs,
-                                    on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
-                                        let session_id =
-                                            this.session_id.clone().unwrap_or_default();
-                                        this.workspace_store.update(cx, |store, _| {
-                                            store.drop_queued_for(session_id, id)
-                                        });
-                                    })),
-                                }),
+                                LimitResumeAction::Scheduled { queued_id: id } => {
+                                    Some(components::error_card::LimitResume::Scheduled {
+                                        resets_at,
+                                        on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
+                                            let session_id =
+                                                this.session_id.clone().unwrap_or_default();
+                                            this.workspace_store.update(cx, |store, _| {
+                                                store.drop_queued_for(session_id, id)
+                                            });
+                                        })),
+                                    })
+                                }
                                 LimitResumeAction::Schedule => {
                                     Some(components::error_card::LimitResume::Offer {
                                         on_schedule: Box::new(cx.listener(
@@ -348,9 +347,7 @@ impl ChatView {
                         .map(|retry| {
                             let turn_id = retry.turn_id;
                             components::error_card::LimitResume::Retry {
-                                remaining_secs: retry
-                                    .retry_at
-                                    .map(|at| at.saturating_sub(now_secs())),
+                                retry_at: retry.retry_at,
                                 on_retry: Box::new(cx.listener(move |this, _, _, cx| {
                                     let session_id = this.session_id.clone().unwrap_or_default();
                                     this.workspace_store.update(cx, |store, _| {

@@ -112,8 +112,12 @@ fn row(
     };
     let elapsed = match (line.running_since, &line.elapsed) {
         (Some(since), _) => Some(
-            super::Elapsed::new(format!("rail-agent-elapsed-{}", line.key), since)
-                .into_any_element(),
+            crate::widgets::clock::Clock::since(
+                gpui::SharedString::from(format!("rail-agent-elapsed-{}", line.key)),
+                since,
+                |elapsed| crate::chat::model::format_elapsed_seconds(elapsed).into(),
+            )
+            .into_any_element(),
         ),
         (None, Some(elapsed)) => Some(elapsed.clone().into_any_element()),
         (None, None) => None,

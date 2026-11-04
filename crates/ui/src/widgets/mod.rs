@@ -5,6 +5,7 @@ pub mod breathing;
 pub mod button;
 pub mod checkbox;
 pub mod choice;
+pub(crate) mod clock;
 mod collapsible;
 pub(crate) mod copy;
 mod fade_text;

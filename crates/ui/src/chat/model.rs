@@ -66,7 +66,6 @@ pub(crate) enum LimitResumeAction {
     /// A resume is queued for the reset: countdown plus cancel.
     Scheduled {
         queued_id: u64,
-        remaining_secs: u64,
     },
     /// The reset is still ahead and nothing is queued for it.
     Schedule,
@@ -87,10 +86,7 @@ pub(crate) fn limit_resume_action(
     queue_empty: bool,
 ) -> LimitResumeAction {
     match queued_id {
-        Some(queued_id) => LimitResumeAction::Scheduled {
-            queued_id,
-            remaining_secs: resets_at.saturating_sub(now),
-        },
+        Some(queued_id) => LimitResumeAction::Scheduled { queued_id },
         None if resets_at > now => LimitResumeAction::Schedule,
         None if ends_thread && queue_empty => LimitResumeAction::ContinueNow,
         None => LimitResumeAction::None,
@@ -944,10 +940,7 @@ pub(in crate::chat) mod tests {
         );
         assert_eq!(
             limit_resume_action(now - 60, Some(7), now, true, true),
-            LimitResumeAction::Scheduled {
-                queued_id: 7,
-                remaining_secs: 0
-            }
+            LimitResumeAction::Scheduled { queued_id: 7 }
         );
     }
 
