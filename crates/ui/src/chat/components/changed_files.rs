@@ -291,6 +291,9 @@ fn rail_row(index: usize, cwd: &Path, key: &SharedString, row: &RailRow, cx: &Ap
         cx,
     )
     .debug_selector(move || format!("changed-file-row-{selector}"))
+    // The panel this opens replaces the rail, and the keyboard would go with
+    // the row.
+    .on_mouse_down(gpui::MouseButton::Left, crate::chat::header::stop_press)
     .relative()
     .w_full()
     .min_w_0()

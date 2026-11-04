@@ -647,9 +647,12 @@ pub(crate) fn open_agent(
     let host = host.filter(|_| !crate::shell::shown_in_pane(&id, cx));
     match host {
         Some(host) => {
-            // The host's right panel lies over the chat, where the agent
-            // would show beneath it.
-            if let Some(lead) = host.read(cx).session_id().map(str::to_owned) {
+            // A right panel covering the host's pane lies over the chat,
+            // where the agent would show beneath it. One docked beside the
+            // chat stays: the agent is in the chat's body.
+            if host.read(cx).panel_lies_over(cx)
+                && let Some(lead) = host.read(cx).session_id().map(str::to_owned)
+            {
                 store.update(cx, |store, cx| store.close_right_panel_for(Some(&lead), cx));
             }
             host.update(cx, |chat, cx| chat.open_side(id, origin, window, cx));

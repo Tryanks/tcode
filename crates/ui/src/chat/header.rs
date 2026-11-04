@@ -227,9 +227,9 @@ fn pane_items(menu: PopupMenu, panes: crate::shell::PaneControls) -> PopupMenu {
     })
 }
 
-/// A press on a header control ends here, for it not to arm the header's
-/// window drag.
-fn stop_press(_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut App) {
+/// A press on a control ends here: it does not arm the header's window drag,
+/// and neither the control nor what holds it takes the keyboard.
+pub(super) fn stop_press(_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut App) {
     cx.stop_propagation();
 }
 

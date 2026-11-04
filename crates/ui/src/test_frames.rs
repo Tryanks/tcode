@@ -57,6 +57,26 @@ pub(crate) fn draw_settled(cx: &mut VisualTestContext) {
     );
 }
 
+/// Every shadow the last frame drew, wherever [`painted_quads`] finds a quad.
+pub(crate) fn painted_shadows(window: &gpui::Window) -> Vec<gpui::Shadow> {
+    fn collect(scene: &gpui::Scene, shadows: &mut Vec<gpui::Shadow>) {
+        shadows.extend_from_slice(&scene.shadows);
+        for frame in scene
+            .layers
+            .frames
+            .iter()
+            .filter(|frame| frame.tile_size == 0)
+        {
+            if let Some(group) = frame.content.scene() {
+                collect(group, shadows);
+            }
+        }
+    }
+    let mut shadows = Vec::new();
+    collect(window.painted_scene(), &mut shadows);
+    shadows
+}
+
 /// Every quad the last frame drew, as the renderer draws them. gpui-fast's
 /// `Window::painted_quads` lists only the frame's top scene, but a rounded
 /// container that clips its content (`overflow_hidden` with corner radii)

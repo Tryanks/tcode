@@ -26,7 +26,7 @@ mod glide;
 mod layout_swap;
 mod zoom;
 
-pub(crate) use drawer::{CloseRightPanel, Drawer, RIGHT_PANEL_CONTEXT};
+pub(crate) use drawer::{CloseRightPanel, Drawer, RIGHT_PANEL_CONTEXT, panel_covers};
 pub(crate) use glide::{Before, Glides, Held, window_jumped};
 pub(crate) use layout_swap::LayoutSwap;
 pub(crate) use zoom::{PaneZoom, Zoom};
@@ -368,7 +368,7 @@ impl ThreadPanel {
         self.hold(session_id.as_deref(), cx);
         self.session_id = session_id;
         self.flight = from
-            .filter(|from| !cx.reduce_motion() && *from != self.bounds.get())
+            .filter(|from| !cx.reduce_motion() && *from != self.conversation_bounds())
             .map(|from| (from, cx.background_executor().now()));
         cx.notify();
         replaced
@@ -376,7 +376,7 @@ impl ThreadPanel {
 
     /// Where the pane's chat is drawn now: on its way in, or in the pane.
     pub(crate) fn chat_drawn(&self, cx: &App) -> Bounds<Pixels> {
-        let to = self.bounds.get();
+        let to = self.conversation_bounds();
         match self.flight {
             Some((from, at)) => from.interpolate(&to, flight_progress(at, cx)),
             None => to,
@@ -480,11 +480,11 @@ impl ThreadPanel {
     }
 
     /// The chat on its way in, drawn over the column where it is now, laid
-    /// out at the pane's size. The elements around it carry no id, so the
-    /// chat keeps its element path, and its keyed state, as it lands.
+    /// out at the size it lands at. The elements around it carry no id, so
+    /// the chat keeps its element path, and its keyed state, as it lands.
     fn flying_chat(&self, cx: &App) -> AnyElement {
         let at = self.chat_drawn(cx);
-        let size = self.bounds.get().size;
+        let size = self.conversation_bounds().size;
         let session = self.session_id.clone().unwrap_or_default();
         div()
             .size_full()
@@ -528,7 +528,6 @@ impl Render for ThreadPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         const WAITING: usize = 0;
         const CHAT: usize = 1;
-        let drawer = self.render_drawer(window, cx);
         let bounds = self.bounds.clone();
         let held = self.held;
         // A pane beside others waits for a thread rather than offering the
@@ -606,6 +605,8 @@ impl Render for ThreadPanel {
                 }
             });
         }
+        let pane = cx.entity();
+        let conversation = content.render(layers).size_full();
         // A slot gliding below the dock's slot floor runs past its split's
         // end, where the split's frame clips it: the pane's bounds are the
         // part that shows. Content held wider than the slot is clipped by
@@ -623,11 +624,7 @@ impl Render for ThreadPanel {
             })
             .when(waiting, |pane| pane.key_context(WAITING_CONTEXT))
             .on_prepaint(move |painted, window, _| {
-                let painted = painted.intersect(&window.content_mask().bounds);
-                // The drawer is laid out from the pane's width.
-                if bounds.replace(painted).size != painted.size {
-                    window.request_animation_frame();
-                }
+                bounds.set(painted.intersect(&window.content_mask().bounds));
             })
             .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
                 this.act(PaneCommand::Split(gpui_base::Placement::Right), cx)
@@ -647,8 +644,12 @@ impl Render for ThreadPanel {
                 this.act(PaneCommand::Move(to.0), cx)
             }))
             .child(
-                content
-                    .render(layers)
+                // Laid out at the width the dock gives it in this frame:
+                // the panel's room comes from it, before the conversation is
+                // laid out in what is left. Clipped, as the panel slides past
+                // the pane's edge.
+                div()
+                    .overflow_hidden()
                     .map(|content| match held.size.width {
                         Some(width) => content.w(width).flex_none(),
                         None => content.w_full(),
@@ -657,9 +658,13 @@ impl Render for ThreadPanel {
                         Some(height) => content.h(height).flex_none(),
                         None => content.h_full(),
                     })
-                    .opacity(held.opacity),
+                    .opacity(held.opacity)
+                    .child(gpui::container_query(move |size, window, cx| {
+                        pane.update(cx, |pane, cx| {
+                            pane.render_split(conversation, size.width, window, cx)
+                        })
+                    })),
             )
-            .children(drawer)
             .when(self.closing, |pane| pane.child(crate::motion::shield()))
     }
 }

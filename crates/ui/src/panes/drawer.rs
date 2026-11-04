@@ -1,69 +1,103 @@
-//! A pane's right panel: a drawer over the pane's chat, which keeps its whole
-//! column beneath. It slides in from the pane's right edge as it opens and
-//! back out as it closes, drawn as it was while it goes, and never leaves the
-//! pane: other panes each have their own.
+//! A pane's right panel. A pane is `[conversation | panel]`: the panel holds
+//! its width beside the conversation, which takes what is left, and the seam
+//! between them is the panel's left edge. Opening and closing glide the split
+//! within a thread. A pane too narrow for both has the panel cover it, sliding
+//! in from its right edge, and an expanded panel covers the pane with the
+//! conversation still laid out at its width beneath. The panel never leaves
+//! the pane: other panes each have their own.
 //!
 //! Whether it is open, its tab and whether it is expanded are the
-//! conversation's ([`ConversationUiState`]), so a pane shows the drawer exactly
-//! when its thread has it open, and the drawer stays with the thread when the
+//! conversation's ([`ConversationUiState`]), so a pane shows the panel exactly
+//! when its thread has it open, and the panel stays with the thread when the
 //! thread changes panes. Its width is one preference of the user's, which
 //! each pane clamps to itself. Another thread in the pane
-//! is a new scene: the drawer lands in that thread's state at once, open or
+//! is a new scene: the panel lands in that thread's state at once, open or
 //! shut, never as if the reader had opened or closed it.
 //!
 //! gpui-base's PopoverState and Sheet are modal: a popover registers a
 //! deferred popup, which suspends the text fields' context menus and the
-//! chat's scrolling capture window-wide, and a sheet traps focus. The drawer
-//! leaves the chat beside it working, so it takes and returns the keyboard
-//! itself.
+//! chat's scrolling capture window-wide, and a sheet traps focus. The panel
+//! leaves the chat beside it working, so it keeps to the pane's own layout,
+//! and where it covers the chat it takes and returns the keyboard itself.
 //!
 //! [`ConversationUiState`]: crate::conversation_ui::ConversationUiState
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, StatefulInteractiveElement as _, Styled as _, Window,
-    actions, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Axis, Bounds, Context, Entity, FocusHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    StatefulInteractiveElement as _, Styled as _, Window, actions, div,
+    prelude::FluentBuilder as _, px,
 };
-use gpui_base::{ResizableState, h_resizable, resizable_panel};
+use gpui_base::{ElementExt as _, ResizableState, h_resizable, resizable_panel};
 use tcode_core::ui::RightTab;
 
 use super::ThreadPanel;
 use crate::diff::DiffPanel;
+use crate::motion::resize_glide::{Panel, ResizeGlide};
 use crate::preview_panel::PreviewPanel;
 use crate::store::WorkspaceStore;
 use crate::window_state::WindowState;
 
 actions!(tcode_shell, [CloseRightPanel]);
 
-/// The key context of a drawer, where Escape closes it.
+/// The key context of a panel covering its pane, where Escape closes it: a
+/// docked one holds comment editors and web pages where Escape means
+/// something else.
 pub(crate) const RIGHT_PANEL_CONTEXT: &str = "RightPanel";
 
-/// How long the drawer takes to slide, and to grow when expanded.
+/// How long the panel takes to slide, to grow when expanded, and to go from
+/// beside the conversation to over it.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long one tab takes to fade into the other's layer.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// The drawer's width until the user drags its edge.
+/// The panel's width until the user drags its edge.
 const RIGHT_PANEL_WIDTH: f32 = 560.;
 
-/// The drawer's narrowest: the icon tabs and the panel's own controls fit in
+/// The panel's narrowest: the icon tabs and the panel's own controls fit in
 /// a panel's narrowest content, beside the window's caption buttons where the
 /// panel's strip holds them.
 const RIGHT_PANEL_MIN_WIDTH: f32 =
     crate::material::PANEL_CONTENT_MIN_WIDTH + crate::window_caption::RIGHT_PANEL_CAPTION_WIDTH;
 
-/// The narrowest strip of chat worth leaving beside the drawer.
-const MIN_CHAT_STRIP: f32 = 240.;
+/// The conversation's narrowest beside the panel: a pane's own, so the panel
+/// yields rather than asking the column for more room.
+const CONVERSATION_MIN_WIDTH: f32 = crate::shell::PANE_MIN_WIDTH;
 
-/// The width a drawer the user chose `chosen` for rests at in a pane `pane`
-/// wide: all of it where what would be left beside it is no use.
-fn rest_width(chosen: Pixels, pane: Pixels) -> Pixels {
-    let chosen = chosen.max(px(RIGHT_PANEL_MIN_WIDTH)).min(pane);
-    if pane - chosen < px(MIN_CHAT_STRIP) {
-        pane
+/// Where the panel rests in a pane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Rest {
+    /// Beside the conversation, this wide.
+    Beside(Pixels),
+    /// Over the whole pane: there is no room for both.
+    Cover,
+}
+
+/// Whether a pane `pane` wide has no room for a conversation and a panel
+/// side by side.
+pub(crate) fn panel_covers(pane: Pixels) -> bool {
+    pane < px(RIGHT_PANEL_MIN_WIDTH + CONVERSATION_MIN_WIDTH)
+}
+
+/// The width the user chose, `chosen`, as far as a pane `pane` wide holds it
+/// beside the conversation.
+fn beside_width(chosen: Pixels, pane: Pixels) -> Pixels {
+    chosen
+        .min(pane - px(CONVERSATION_MIN_WIDTH))
+        .max(px(RIGHT_PANEL_MIN_WIDTH))
+        .min(pane)
+}
+
+/// Where a panel the user chose `chosen` for rests in a pane `pane` wide.
+fn rest_width(chosen: Pixels, pane: Pixels) -> Rest {
+    if panel_covers(pane) {
+        Rest::Cover
     } else {
-        chosen
+        Rest::Beside(beside_width(chosen, pane))
     }
 }
 
@@ -82,26 +116,39 @@ pub(crate) struct Drawer {
     /// Kept here rather than in element state: the dock draws the pane under
     /// a new parent whenever the layout around it changes.
     motion: crate::motion::owned::Owned,
-    /// The drawer's group (room for the chat · the panel), whose handle is
-    /// the panel's left edge.
+    /// The pane's group (the conversation · the panel's room), whose handle
+    /// is the panel's left edge.
     split: Entity<ResizableState>,
-    /// Keep giving the panel its width until its group reports it, then stop
-    /// so the restore never fights a drag. Armed while the panel is not
-    /// drawn, while it is expanded, and whenever its width should change.
-    restore_pending: bool,
-    /// The thread the drawer showed last frame.
+    /// The panel's room growing out of nothing as it opens, and back.
+    glide: ResizeGlide,
+    /// The thread the panel showed last frame.
     subject: Option<String>,
-    /// The pane's width and the panel's rest width last frame.
-    laid_out: (Pixels, Pixels),
+    /// The panel's room in the group last frame, while it is drawn.
+    laid_out: Option<Pixels>,
+    /// Where the conversation was last painted.
+    conversation: Rc<Cell<Bounds<Pixels>>>,
     /// Where the panel's content holds the keyboard.
     focus: FocusHandle,
     /// What had the keyboard when the reader opened the panel, given back
     /// when they close it from inside.
     return_to: Option<FocusHandle>,
-    /// Whether the panel was open, and whether it was drawn (open or sliding
-    /// out), last frame.
+    /// Whether the panel was open, whether it was drawn (open or sliding
+    /// out), and whether it rested over the pane, last frame.
     open: bool,
     drawn: bool,
+    covering: bool,
+}
+
+/// How the panel is drawn this frame.
+struct PanelFrame {
+    tab: RightTab,
+    /// Whether it rests over the pane, where Escape closes it.
+    covers: bool,
+    /// How far it is from docked to floating over the pane.
+    lift: f32,
+    /// Whether it is on its way out.
+    leaving: bool,
+    subject: Option<String>,
 }
 
 impl Drawer {
@@ -121,15 +168,17 @@ impl Drawer {
             tabs: None,
             preview: None,
             motion: crate::motion::owned::Owned::in_scene(&scene),
+            glide: ResizeGlide::new("right-panel-split", Axis::Horizontal).in_scene(&scene),
             scene,
             split: cx.new(|_| ResizableState::default()),
-            restore_pending: true,
             subject: None,
-            laid_out: Default::default(),
+            laid_out: None,
+            conversation: Rc::default(),
             focus: cx.focus_handle(),
             return_to: None,
             open: false,
             drawn: false,
+            covering: false,
         }
     }
 }
@@ -141,9 +190,6 @@ impl ThreadPanel {
         self.chat.read(cx).drawer_subject().map(str::to_owned)
     }
 
-    /// The Diff, Plan, Agents and Pull Requests tabs of the pane's drawer,
-    /// made now if they never showed: the compact layout's panel page shows
-    /// the same entity, as a page.
     /// Whether the keyboard is in the pane's conversation: its composer, the
     /// card of the agent beside it, or its drawer.
     pub(crate) fn holds_input(&self, window: &Window, cx: &App) -> bool {
@@ -153,6 +199,9 @@ impl ThreadPanel {
             || self.drawer.focus.contains_focused(window, cx)
     }
 
+    /// The Diff, Plan, Agents and Pull Requests tabs of the pane's drawer,
+    /// made now if they never showed: the compact layout's panel page shows
+    /// the same entity, as a page.
     pub(crate) fn drawer_tabs(&mut self, cx: &mut Context<Self>) -> Entity<DiffPanel> {
         let subject = self.drawer_subject(cx);
         let lead = self
@@ -244,15 +293,26 @@ impl ThreadPanel {
         }
     }
 
-    /// This frame of the drawer: none while it is shut.
-    pub(super) fn render_drawer(
+    /// Where the pane's conversation is drawn: the pane less the panel's room.
+    pub(super) fn conversation_bounds(&self) -> Bounds<Pixels> {
+        self.drawer.conversation.get()
+    }
+
+    /// This frame of a pane `pane_width` wide: `conversation`, and the panel
+    /// while it is drawn. One group whether or not the panel is open, so the
+    /// conversation keeps its place in the tree as the panel comes and goes;
+    /// and the panel always in the group's last slot, whatever it is doing,
+    /// so what it holds keeps its place as it goes from docked to covering.
+    pub(super) fn render_split(
         &mut self,
+        conversation: impl IntoElement,
+        pane_width: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    ) -> AnyElement {
         let new_scene = self.drawer.scene.show(self.session_id.as_deref());
         let subject = self.drawer_subject(cx);
-        // An open drawer changing thread within the pane's own shows the new
+        // An open panel changing thread within the pane's own shows the new
         // one at once, content at rest; a shut one slides in on it.
         if std::mem::replace(&mut self.drawer.subject, subject.clone()) != subject
             && self.drawer.open
@@ -267,30 +327,35 @@ impl ThreadPanel {
         if self.drawer.preview.is_some() {
             self.drawer_preview(window, cx);
         }
+        self.chat
+            .update(cx, |chat, cx| chat.set_pane_width(pane_width, cx));
         let store = self.drawer.store.clone();
         let panel = store.read(cx).panel_state_for(subject.as_deref());
         let panel_open = panel.right_panel_open;
         let right_tab = panel.right_tab;
-        // "Expanded" (the whole pane) is a diff-only affordance; the preview
-        // tab keeps the panel's width so the webview keeps a stable size.
-        let expanded = panel.right_panel_expanded && right_tab != RightTab::Preview;
-        let pane_width = self.bounds.get().size.width;
-        // A pane is laid out after its first render; what it draws over
-        // needs that frame's width.
-        if panel_open && pane_width == px(0.) {
-            window.request_animation_frame();
-        }
+        let expanded = panel.right_panel_expanded;
 
+        let chosen = store
+            .read(cx)
+            .right_panel_width()
+            .map_or(px(RIGHT_PANEL_WIDTH), |width| px(width as f32));
+        let rest = rest_width(chosen, pane_width);
+        let covering = rest == Rest::Cover;
         let motion = self.drawer.motion.clone();
-        let drawer_in = motion.transition(
+        let slide = motion.transition(
             "right-panel-in",
             if panel_open { 1f32 } else { 0. },
             GLIDE,
             window,
             cx,
         );
-        let drawn = panel_open || drawer_in > 0.;
-        let leaving = !panel_open && drawn;
+        let cover = motion.transition(
+            "right-panel-cover",
+            if covering { 1f32 } else { 0. },
+            GLIDE,
+            window,
+            cx,
+        );
         let expand = motion.transition(
             "right-panel-expand",
             if expanded { 1f32 } else { 0. },
@@ -298,59 +363,66 @@ impl ThreadPanel {
             window,
             cx,
         );
-        let chosen = store
-            .read(cx)
-            .right_panel_width()
-            .map_or(px(RIGHT_PANEL_WIDTH), |width| px(width as f32));
-        let rest = rest_width(chosen, pane_width);
-        let whole_pane = rest == pane_width;
-        let drawer_width = rest + (pane_width - rest) * expand;
-        let moved =
-            std::mem::replace(&mut self.drawer.laid_out, (pane_width, rest)) != (pane_width, rest);
-        if !drawn || moved || expand > 0. {
-            self.drawer.restore_pending = true;
-        }
-        if drawn && expand == 0. && self.drawer.restore_pending {
-            let restored = self
-                .drawer
-                .split
-                .update(cx, |state, cx| match state.sizes().get(1) {
-                    Some(width) if (*width - rest).abs() > px(0.5) => {
-                        state.resize_panel(1, rest, window, cx);
-                        false
-                    }
-                    Some(_) => true,
-                    None => false,
-                });
-            // A match on the frame the width changed is the old layout, not
-            // a settled one.
-            if restored && !moved {
-                self.drawer.restore_pending = false;
-            }
-        }
-        // Held at the width it is being given until the group has it, so no
-        // frame draws it at the group's minimum or rescaled by the pane.
-        let pinned = self.drawer.restore_pending || whole_pane;
+        // The room the conversation gives up, and the panel's own width: both
+        // start from the panel's docked width, so a pane crossing into cover
+        // moves neither at once. Expanded, the panel outgrows its room and
+        // the conversation stays as it is beneath.
+        let docked = beside_width(chosen, pane_width);
+        let room = docked * (1. - cover);
+        let lift = cover.max(expand);
+        let panel_width = docked + (pane_width - docked) * lift;
 
-        // The reader opening the panel hands it the keyboard, and closing it
-        // from inside gives the keyboard back. Another thread in the pane
-        // shows its own panel as that thread left it, keyboard and all.
+        let glide = self.drawer.glide.sample(
+            &[Panel::flex(true), Panel::sized(room, panel_open)],
+            true,
+            &self.drawer.split,
+            window,
+            cx,
+        );
+        let drawn = panel_open || glide.mounted(1) || (cover > 0. && slide > 0.);
+        let leaving = !panel_open && drawn;
+
+        // The keyboard stays where it was as a docked panel opens. Over the
+        // pane the panel is what the reader sees, so it takes the keyboard,
+        // and either way closing it from inside gives the keyboard back.
+        // A pane narrowing into cover hands the panel the keyboard held in
+        // what it covers, so nothing is typed into what cannot be seen, and
+        // widening hands it back, unless the reader went on inside the panel.
+        // Another thread in the pane shows its own panel as that thread left
+        // it, keyboard and all.
         let was_open = std::mem::replace(&mut self.drawer.open, panel_open);
+        let was_covering = std::mem::replace(&mut self.drawer.covering, covering);
         if new_scene {
             self.drawer.return_to = None;
         } else if panel_open && !was_open {
             if !self.drawer.focus.contains_focused(window, cx) {
                 self.drawer.return_to = window.focused(cx);
             }
-            self.drawer.focus.focus(window, cx);
+            if covering {
+                self.drawer.focus.focus(window, cx);
+            }
         } else if !panel_open
             && was_open
             && let Some(previous) = self.drawer.return_to.take()
             && self.drawer.focus.contains_focused(window, cx)
         {
             previous.focus(window, cx);
+        } else if panel_open && covering && !was_covering {
+            if self.focus_handle.contains_focused(window, cx)
+                && !self.drawer.focus.contains_focused(window, cx)
+            {
+                self.drawer.return_to = window.focused(cx);
+                self.drawer.focus.focus(window, cx);
+            }
+        } else if panel_open
+            && !covering
+            && was_covering
+            && self.drawer.focus.is_focused(window)
+            && let Some(previous) = self.drawer.return_to.take()
+        {
+            previous.focus(window, cx);
         }
-        // Once the panel has slid out, its content is taken down and what it
+        // Once the panel has gone, its content is taken down and what it
         // built to draw is let go. Another thread in the pane keeps its own
         // panel as it left it, page included.
         let was_drawn = std::mem::replace(&mut self.drawer.drawn, drawn);
@@ -363,23 +435,140 @@ impl ThreadPanel {
             }
             if !new_scene {
                 self.drawer.scene.restart();
+                // A frame in the new scene, so the panel's next opening
+                // glides from where this one left it.
+                window.request_animation_frame();
                 if let Some(preview) = &self.drawer.preview {
                     preview.update(cx, |preview, cx| preview.release_page(cx));
                 }
             }
         }
+
+        // The state keeps the panel's size for a drag to start from. A panel
+        // new to the group has its size but not yet the conversation's; a
+        // room that changes is held at that size this frame, and the state
+        // takes it once the frame has laid both out.
+        let moved = drawn && self.drawer.laid_out.replace(room) != Some(room);
         if !drawn {
-            return None;
+            self.drawer.laid_out = None;
+        }
+        if moved && glide.size(1).is_none() {
+            let split = self.drawer.split.clone();
+            window.defer(cx, move |window, cx| {
+                split.update(cx, |state, cx| state.resize_panel(1, room, window, cx));
+            });
         }
 
+        let panel = drawn.then(|| {
+            // How far the panel is past the pane's right edge. Docked, its
+            // left edge is the seam, wherever the glide has it; over the
+            // pane it slides on its own.
+            let open_docked = match glide.size(1) {
+                Some(size) => size / docked.max(px(1.)),
+                None if panel_open => 1.,
+                None => 0.,
+            };
+            let docked_away = panel_width * (1. - open_docked);
+            let covering_away = panel_width * (1. - slide);
+            let away = docked_away + (covering_away - docked_away) * cover;
+            let panel = self.render_panel(
+                PanelFrame {
+                    tab: right_tab,
+                    covers: expanded || covering,
+                    lift,
+                    leaving,
+                    subject,
+                },
+                window,
+                cx,
+            );
+            div()
+                .absolute()
+                .top_0()
+                .right(px(0.) - away)
+                .h_full()
+                .w(panel_width)
+                .child(panel)
+        });
+        let slot = panel.map(|panel| {
+            let at_rest = if moved || cover > 0. {
+                room..room
+            } else {
+                let least = px(RIGHT_PANEL_MIN_WIDTH);
+                least..(pane_width - px(CONVERSATION_MIN_WIDTH)).max(least)
+            };
+            // `fixed`: the panel keeps its width as the pane's changes, the
+            // conversation taking the difference.
+            resizable_panel()
+                .flex_none()
+                .fixed()
+                .size(room)
+                .size_range(glide.range(1, at_rest))
+                .child(glide.hold(1, div()))
+                .child(panel)
+        });
+        // The panel's edge is its group's handle; expanded or covering, it
+        // has no room to be dragged in, and gpui-base has no API to disable
+        // one handle, so it is covered.
+        let edge_cover = (drawn && (expanded || expand > 0. || cover > 0.)).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left(pane_width - glide.size(1).unwrap_or(room) - px(5.))
+                .w(px(10.))
+                .h_full()
+                .occlude()
+        });
+        let conversation_bounds = self.drawer.conversation.clone();
+        let conversation = div()
+            .debug_selector(|| "pane-conversation".into())
+            .size_full()
+            .on_prepaint(move |painted, _, _| conversation_bounds.set(painted))
+            .child(conversation);
+        let chat_min = (pane_width - room).min(px(CONVERSATION_MIN_WIDTH));
+        let group = h_resizable("right-panel-split")
+            .with_state(&self.drawer.split)
+            .on_resize(move |state, _, cx| {
+                if !expanded
+                    && !covering
+                    && let Some(width) = state.read(cx).sizes().get(1)
+                {
+                    let width = f32::from(*width).round() as u32;
+                    store.update(cx, |store, cx| store.set_right_panel_width(width, cx));
+                }
+            })
+            .child(
+                resizable_panel()
+                    .size_range(glide.range(0, chat_min..Pixels::MAX))
+                    .child(glide.hold(0, conversation)),
+            )
+            // Not `children`: the group's replaces the panels added before.
+            .when_some(slot, |group, slot| group.child(slot));
+        div()
+            .relative()
+            .size_full()
+            .child(group)
+            .children(edge_cover)
+            .into_any_element()
+    }
+
+    /// The panel itself.
+    fn render_panel(
+        &mut self,
+        frame: PanelFrame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // Which entity fills the panel: the Preview tab shows the embedded
         // browser; the other tabs share the DiffPanel container. Each keeps
         // its own layer, so the one left fades out under the one chosen; a
         // page leaving the Preview fades natively as it is let go.
-        let fade = motion
+        let fade = self
+            .drawer
+            .motion
             .layers(
                 "right-panel-body",
-                usize::from(right_tab == RightTab::Preview),
+                usize::from(frame.tab == RightTab::Preview),
                 2,
                 CHANGE,
                 window,
@@ -399,92 +588,29 @@ impl ThreadPanel {
             .id(self.drawer.scene.id("right-panel-scene"))
             .size_full()
             .child(fade.render(layers).size_full());
-
-        let away = drawer_width * (1. - drawer_in);
-        // The panel's edge is its group's handle; spanning the pane, the
-        // panel has no room to be dragged in, and gpui-base has no API to
-        // disable one handle, so it is covered.
-        let edge_cover = (expanded || expand > 0. || whole_pane).then(|| {
-            div()
-                .absolute()
-                .top_0()
-                .left(pane_width - drawer_width - px(5.))
-                .w(px(10.))
-                .h_full()
-                .occlude()
-        });
-        let remembered = store.clone();
-        let closing = store.downgrade();
-        let closes = subject;
-        Some(
-            div()
-                .absolute()
-                .inset_0()
-                .overflow_hidden()
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .right(px(0.) - away)
-                        .h_full()
-                        .w(pane_width)
-                        .child(
-                            h_resizable("right-panel-drawer")
-                                .with_state(&self.drawer.split)
-                                .on_resize(move |state, _, cx| {
-                                    if !expanded
-                                        && !whole_pane
-                                        && let Some(width) = state.read(cx).sizes().get(1)
-                                    {
-                                        let width = f32::from(*width).round() as u32;
-                                        remembered.update(cx, |store, cx| {
-                                            store.set_right_panel_width(width, cx)
-                                        });
-                                    }
-                                })
-                                .child(resizable_panel().size_range(px(0.)..Pixels::MAX))
-                                .child(
-                                    resizable_panel()
-                                        .flex_none()
-                                        .size(rest)
-                                        .size_range(if pinned {
-                                            drawer_width..drawer_width
-                                        } else {
-                                            px(RIGHT_PANEL_MIN_WIDTH).min(pane_width)
-                                                ..(pane_width - px(MIN_CHAT_STRIP))
-                                        })
-                                        .child(
-                                            crate::material::floating_panel(
-                                                div().id("right-panel"),
-                                                crate::material::Side::Right,
-                                                cx,
-                                            )
-                                            .debug_selector(|| "right-panel".into())
-                                            .size_full()
-                                            .role(gpui::Role::Complementary)
-                                            .tab_group()
-                                            .track_focus(&self.drawer.focus)
-                                            .key_context(RIGHT_PANEL_CONTEXT)
-                                            .on_action(move |_: &CloseRightPanel, _, cx| {
-                                                _ = closing.update(cx, |store, cx| {
-                                                    store.close_right_panel_for(
-                                                        closes.as_deref(),
-                                                        cx,
-                                                    )
-                                                });
-                                            })
-                                            .occlude()
-                                            .child(content)
-                                            .when(leaving, |panel| {
-                                                panel.child(crate::motion::shield())
-                                            }),
-                                        ),
-                                ),
-                        )
-                        .children(edge_cover),
-                )
-                .into_any_element(),
+        let closing = self.drawer.store.downgrade();
+        let subject = frame.subject;
+        crate::material::lifting_panel(
+            div().id("right-panel"),
+            crate::material::Side::Right,
+            frame.lift,
+            cx,
         )
+        .debug_selector(|| "right-panel".into())
+        .size_full()
+        .role(gpui::Role::Complementary)
+        .tab_group()
+        .track_focus(&self.drawer.focus)
+        .when(frame.covers, |panel| panel.key_context(RIGHT_PANEL_CONTEXT))
+        .on_action(move |_: &CloseRightPanel, _, cx| {
+            _ = closing.update(cx, |store, cx| {
+                store.close_right_panel_for(subject.as_deref(), cx)
+            });
+        })
+        .occlude()
+        .child(content)
+        .when(frame.leaving, |panel| panel.child(crate::motion::shield()))
+        .into_any_element()
     }
 }
 
@@ -492,14 +618,30 @@ impl ThreadPanel {
 mod tests {
     use super::*;
 
-    /// The chosen width while the pane leaves the chat room beside it, all
-    /// of the pane once it would not.
+    /// The chosen width while the pane holds it beside the conversation,
+    /// yielding down to the panel's narrowest; below that the panel covers
+    /// the pane, the conversation never going under a pane's own narrowest.
     #[test]
-    fn the_drawer_takes_the_pane_when_no_usable_strip_is_left() {
-        assert_eq!(rest_width(px(560.), px(1200.)), px(560.));
-        assert_eq!(rest_width(px(560.), px(800.)), px(560.));
-        assert_eq!(rest_width(px(560.), px(799.)), px(799.));
-        assert_eq!(rest_width(px(560.), px(400.)), px(400.));
-        assert_eq!(rest_width(px(10_000.), px(1200.)), px(1200.));
+    fn a_panel_rests_beside_the_conversation_until_there_is_no_room_for_both() {
+        let least = px(RIGHT_PANEL_MIN_WIDTH + CONVERSATION_MIN_WIDTH);
+        assert_eq!(rest_width(px(560.), px(1200.)), Rest::Beside(px(560.)));
+        assert_eq!(
+            rest_width(px(560.), least + px(100.)),
+            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH) + px(100.))
+        );
+        assert_eq!(
+            rest_width(px(10_000.), px(1200.)),
+            Rest::Beside(px(1200.) - px(CONVERSATION_MIN_WIDTH))
+        );
+        assert_eq!(
+            rest_width(px(10.), px(1200.)),
+            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH))
+        );
+        assert_eq!(
+            rest_width(px(560.), least),
+            Rest::Beside(px(RIGHT_PANEL_MIN_WIDTH))
+        );
+        assert_eq!(rest_width(px(560.), least - px(1.)), Rest::Cover);
+        assert_eq!(rest_width(px(560.), px(400.)), Rest::Cover);
     }
 }

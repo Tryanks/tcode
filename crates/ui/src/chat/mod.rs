@@ -207,6 +207,12 @@ pub struct ChatView {
     side: side::Side,
     /// Set while the view is itself an agent's shown beside its lead.
     side_of: Option<side::SideOf>,
+    /// How wide the pane drawing this view is, its right panel's room
+    /// included: nothing for a view no pane draws.
+    pane_width: gpui::Pixels,
+    /// How far past the body's right edge the timeline's list runs, under
+    /// the panel: see [`Self::list_overhang`].
+    overhang: gpui::Pixels,
     /// The agent beside this thread whose diff the pane's drawer shows, in
     /// place of this thread's panel. Here because it stays with the thread
     /// when the thread changes panes.
@@ -496,6 +502,8 @@ impl ChatView {
             body: Default::default(),
             side: side::Side::new(),
             side_of: None,
+            pane_width: gpui::Pixels::ZERO,
+            overhang: gpui::Pixels::ZERO,
             drawer_agent: None,
             list_state,
             timeline_stale: false,
@@ -547,6 +555,38 @@ impl ChatView {
 
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// How wide the pane drawing this view is, its right panel's room
+    /// included.
+    pub(crate) fn set_pane_width(&mut self, width: gpui::Pixels, cx: &mut Context<Self>) {
+        if self.pane_width != width {
+            self.pane_width = width;
+            cx.notify();
+        }
+    }
+
+    /// Whether the pane's right panel lies over this view rather than beside
+    /// it: expanded, or in a pane too narrow for both.
+    pub(crate) fn panel_lies_over(&self, cx: &App) -> bool {
+        let panel = self
+            .workspace_store
+            .read(cx)
+            .panel_state_for(self.session_id.as_deref());
+        panel.right_panel_open
+            && (panel.right_panel_expanded || crate::panes::panel_covers(self.pane_width))
+    }
+
+    /// How far past the right edge of a body `width` wide the timeline's list
+    /// runs. A list drops every row's height when its width changes, so
+    /// while the body keeps the widest column the list keeps the pane's
+    /// width, running on under the panel, and only the column's centre moves.
+    fn list_overhang(&self, width: gpui::Pixels) -> gpui::Pixels {
+        if width >= px(CONTENT_MAX_WIDTH + 2. * CONTENT_MIN_PADDING) {
+            (self.pane_width - width).max(px(0.))
+        } else {
+            px(0.)
+        }
     }
 
     /// The thread the drawer of the view's pane shows.
@@ -999,6 +1039,8 @@ impl ChatView {
             cx,
         );
         self.body = layout.at(presence, side_presence);
+        self.overhang = self.list_overhang(width);
+        let overhang = self.overhang;
         let shift = self.body.shift();
         self.composer
             .update(cx, |composer, cx| composer.set_column_shift(shift, cx));
@@ -1044,6 +1086,7 @@ impl ChatView {
                 .flex_1()
                 .min_h_0()
                 .relative()
+                .when(overhang > px(0.), |timeline| timeline.w(width + overhang))
                 .pb(timeline_bottom_inset(cx))
                 .child(
                     self.motion
@@ -1079,7 +1122,7 @@ impl ChatView {
                             .absolute()
                             .top_0()
                             .bottom(timeline_bottom_inset(cx))
-                            .right(track_inset)
+                            .right(track_inset + overhang)
                             .w(TRACK)
                             .child(
                                 Scrollbar::vertical(&self.list_state)

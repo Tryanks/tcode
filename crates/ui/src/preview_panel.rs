@@ -43,8 +43,8 @@
 //! GPUI overlays are not reliably painted above the page after a window resize,
 //! so the palette and the compact menu still hide the page on every platform.
 //! Tab/conversation switch and route changes hide inactive pages without
-//! discarding their loaded documents; the desktop drawer sliding shut lets
-//! its conversation's page go ([`PreviewPanel::release_page`]).
+//! discarding their loaded documents; the desktop panel shutting lets its
+//! conversation's page go ([`PreviewPanel::release_page`]).
 
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
@@ -159,7 +159,7 @@ pub struct PreviewPanel {
     /// actual page URL or conversation changes.
     mirrored_url: Option<String>,
     compact_overflow_open: bool,
-    /// Pages the desktop drawer let go of while their thread's turn was
+    /// Pages the desktop panel let go of while their thread's turn was
     /// running, by key, with that thread: let go once the turn ends.
     idle_releases: std::collections::HashMap<String, String>,
     /// The panel's motion, kept here: the window draws the panel under
@@ -409,11 +409,11 @@ impl PreviewPanel {
         cx.notify();
     }
 
-    /// The desktop drawer has slid shut on its conversation: let its
-    /// page go, keeping its URL and canvas for the drawer to load again.
-    /// While the thread's turn runs, its agent may be driving the page
-    /// through the preview tools, which reach it with the drawer shut; the
-    /// page is let go once the turn ends, unless the drawer opens again.
+    /// The desktop panel has shut on its conversation: let its page go,
+    /// keeping its URL and canvas for the panel to load again. While the
+    /// thread's turn runs, its agent may be driving the page through the
+    /// preview tools, which reach it with the panel shut; the page is let
+    /// go once the turn ends, unless the panel opens again.
     pub(crate) fn release_page(&mut self, cx: &mut Context<Self>) {
         let Some((session_id, key)) = self.identity(cx) else {
             return;
@@ -456,6 +456,11 @@ impl PreviewPanel {
 
     /// The wide chrome's actions on the page, each its own button.
     fn render_inline_actions(&self, offer_ports: bool, cx: &mut Context<Self>) -> AnyElement {
+        let expanded = self
+            .store
+            .read(cx)
+            .panel_state_for(self.session_id.as_deref())
+            .right_panel_expanded;
         h_flex()
             .gap(cx.theme().tokens.spacing.xs)
             .items_center()
@@ -489,6 +494,29 @@ impl PreviewPanel {
                 .on_click(
                     cx.listener(|this, _, window, cx| this.open_in_system_browser(window, cx)),
                 ),
+            )
+            .child(
+                material::toolbar_icon_button(
+                    "preview-expand",
+                    if expanded {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    },
+                    if expanded {
+                        crate::tr!("diff.restore_width")
+                    } else {
+                        crate::tr!("diff.expand_width")
+                    },
+                    false,
+                )
+                .debug_selector(|| "preview-expand".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let session_id = this.session_id.clone();
+                    this.store.update(cx, |store, cx| {
+                        store.toggle_diff_expanded_for(session_id.as_deref(), cx)
+                    });
+                })),
             )
             .child(
                 material::toolbar_icon_button(

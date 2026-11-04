@@ -191,8 +191,8 @@ fn the_terminal_drawer_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppCo
 }
 
 /// The right panel shows a thread switched to as that thread left it: open
-/// or shut from the first frame, over a wide chat or a narrow one, rather
-/// than sliding shut as if the reader had closed it on leaving a thread that
+/// or shut from the first frame, docked beside a wide chat or covering a
+/// narrow one, the chat already at its width beside it, rather than sliding shut as if the reader had closed it on leaving a thread that
 /// had it open, or open on coming back; and so again switching back.
 #[gpui::test]
 fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContext) {
@@ -206,7 +206,10 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
         store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
     });
     settle_frames(cx);
-    let panel = |cx: &mut VisualTestContext| cx.debug_bounds("right-panel");
+    let panel = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("right-panel")
+            .zip(cx.debug_bounds("pane-conversation"))
+    };
 
     for width in [2000., 900.] {
         resize(cx, width);
@@ -233,6 +236,12 @@ fn the_right_panel_of_a_thread_switched_to_starts_at_rest(cx: &mut TestAppContex
     resize(cx, 2000.);
     settle_frames(cx);
     let open = cx.debug_bounds("right-panel").expect("thread-1's panel");
+    assert_eq!(
+        cx.debug_bounds("pane-conversation")
+            .map(|chat| chat.right()),
+        Some(open.left()),
+        "docked at 2000px"
+    );
     store_of(&shell, cx).update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
     });

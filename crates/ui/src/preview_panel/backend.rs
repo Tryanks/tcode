@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, CursorStyle, IntoElement, ParentElement as _,
-    Pixels, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, Context, CursorStyle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Styled as _, Window, div, px,
 };
 #[cfg(not(target_os = "android"))]
 use gpui::{Bounds, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, canvas};
@@ -743,6 +743,7 @@ impl PreviewPanel {
         let body = fade
             .fill()
             .render(layers)
+            .debug_selector(|| "preview-body".into())
             .flex_1()
             .min_h_0()
             .w_full()
