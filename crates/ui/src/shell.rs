@@ -28,7 +28,7 @@ use crate::widgets::tabs::{TabBar, TabItem};
 use crate::window_state::{NavigationPanel, NavigationSnapshot};
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Div,
-    ElementId, Entity, FocusHandle, Focusable as _, Global, HitboxBehavior,
+    ElementId, Entity, EntityId, FocusHandle, Focusable as _, Global, HitboxBehavior,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
     Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
     TouchPhase, WeakEntity, Window, actions, canvas, div, prelude::FluentBuilder as _, px,
@@ -153,7 +153,7 @@ pub(crate) fn window_drag_area<E: gpui::InteractiveElement>(
 /// window's navigation history. It owns nothing: it renders whichever shell
 /// destination it stands for, so every page stays mounted while a push or pop
 /// animates. One view per *entry*, not per destination — the same destination
-/// can appear twice (Hosts visited from an open thread).
+/// can appear twice (Hosts visited from an open thread, a lead under its agent).
 struct DestinationView {
     shell: WeakEntity<AppShell>,
     destination: Destination,
@@ -162,6 +162,7 @@ struct DestinationView {
 impl Render for DestinationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let destination = self.destination;
+        let page = cx.entity_id();
         self.shell
             .upgrade()
             .map(|shell| {
@@ -169,7 +170,7 @@ impl Render for DestinationView {
                     Destination::Hosts => shell.render_hosts_page(window, cx),
                     Destination::Pair => shell.render_pair_page(window, cx),
                     Destination::Threads => shell.render_threads_page(window, cx),
-                    Destination::Thread => shell.render_thread_page(window, cx),
+                    Destination::Thread => shell.render_thread_page(page, window, cx),
                     Destination::Panel => shell.render_panel_page(window, cx),
                     Destination::PullRequest => shell.render_pull_request_page(window, cx),
                     Destination::Settings => {
@@ -205,16 +206,15 @@ struct ShellAttachment {
     /// window changes route.
     routes: crate::motion::Scene<Route>,
     /// The compact thread page's body on screen: the skeleton while a
-    /// thread is restored, then a chat, named by the change that brought it
-    /// in place ([`Self::thread_generation`]).
+    /// thread is restored, then its chat.
     thread_body: crate::motion::Scene<ThreadBody>,
-    /// The body last made current: a chat brought in place stays drawn
-    /// unseen beneath it until it [appears](ChatView::appears).
+    /// The body last made current: a chat stays drawn unseen beneath it
+    /// until it [appears](ChatView::appears).
     thread_body_shown: Option<ThreadBody>,
-    thread_generation: u64,
-    /// A thread the compact page left in place (Back from an agent to its
-    /// lead), drawn beneath while the lead rises over it.
-    thread_left: Option<ThreadLeft>,
+    /// The threads under the compact page's agent, outermost first.
+    leads: Vec<ThreadPage>,
+    /// Agents Back left, on their pages until those have slid off.
+    leaving: Vec<ThreadPage>,
     /// Set by the panes' renderer in a frame that draws a split's handle
     /// held by the pointer: the handle's axis and where the pointer was.
     split_handle_held: crate::panes::HandleHeld,
@@ -364,21 +364,30 @@ impl ShellAttachment {
     fn chat(&self, cx: &App) -> Entity<ChatView> {
         self.focused_pane.read(cx).chat()
     }
+
+    /// What the page `page` draws in place of the focused pane's conversation.
+    fn thread_page(&self, page: EntityId) -> Option<&ThreadPage> {
+        self.leads
+            .iter()
+            .chain(&self.leaving)
+            .find(|kept| kept.page == page)
+    }
 }
 
 /// What the compact thread page's body shows.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum ThreadBody {
     Skeleton,
-    Chat(u64),
+    Chat,
 }
 
-/// A conversation the compact thread page swapped out in place, still bound
-/// to its thread, whose timeline it leases until it has faded.
-struct ThreadLeft {
-    generation: u64,
+/// A conversation drawn on a page of the compact stack instead of the
+/// focused pane's, whose timeline it leases for as long as it is kept.
+#[derive(Clone)]
+struct ThreadPage {
+    page: EntityId,
     chat: Entity<ChatView>,
-    session_id: Option<String>,
+    session_id: String,
 }
 
 /// Which pane commands the window offers now; none in the compact layout.
@@ -600,6 +609,23 @@ pub(crate) fn side_host_for(lead: &str, cx: &App) -> Option<Entity<ChatView>> {
     showing(ChatView::session_id).or_else(|| showing(ChatView::side_session_id))
 }
 
+/// Show the agent `session_id` on a page over its lead in a compact window;
+/// otherwise, and with no thread page to stand on, select it.
+pub(crate) fn open_agent_page(
+    store: &Entity<WorkspaceStore>,
+    session_id: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let selected = session_id.clone();
+    let opened = current_shell(cx).is_some_and(|shell| {
+        shell.update(cx, |shell, cx| shell.open_over_lead(session_id, window, cx))
+    });
+    if !opened {
+        store.update(cx, |store, cx| store.select_session(selected, cx));
+    }
+}
+
 /// Whether one of `panes` draws `session_id` beside its own thread, which
 /// keeps it open when a pane showing it as its own goes.
 fn drawn_beside(panes: &[Entity<ThreadPanel>], session_id: &str, cx: &App) -> bool {
@@ -669,6 +695,10 @@ pub struct AppShell {
     /// [`AppShell::sync_nav`] reconciles it with `window_state`'s history, which
     /// is the only authority for where the window is.
     mounted: Vec<Destination>,
+    /// Whether the compact stack is changing, which gpui-base's stack does
+    /// not say: set as it starts and by each frame that draws a page leaving.
+    /// What changes the pages themselves waits for it to end.
+    pages_changing: Rc<Cell<bool>>,
     /// Which surface the compact panel destination is showing.
     panel_shows_terminal: bool,
     navigation: Option<NavigationPersistence>,
@@ -875,6 +905,7 @@ impl AppShell {
             nav: cx.new(|_| NavStackState::new()),
             back_swipe: None,
             page_back: None,
+            pages_changing: Rc::default(),
             mounted: Vec::new(),
             panel_shows_terminal: false,
             navigation: setup.restore_navigation.then_some(NavigationPersistence {
@@ -1334,8 +1365,8 @@ impl AppShell {
             routes: Default::default(),
             thread_body: Default::default(),
             thread_body_shown: None,
-            thread_generation: 0,
-            thread_left: None,
+            leads: Vec::new(),
+            leaving: Vec::new(),
             split_handle_held,
             drop_landing,
             held_split: None,
@@ -1427,6 +1458,9 @@ impl AppShell {
     /// stay and show nothing until the store focuses something for them.
     fn reconcile_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
+        if compact {
+            self.reconcile_leads(cx);
+        }
         let Some(attachment) = &mut self.attachment else {
             return;
         };
@@ -2675,6 +2709,11 @@ impl AppShell {
             self.layout_flipped = true;
             self.move_edge_back(TouchPhase::Cancelled, window, cx);
             self.page_back = None;
+            // The wide layout has no pages: an agent stays in its pane alone.
+            if !compact {
+                self.drop_leads(0, cx);
+                self.release_leaving(cx);
+            }
             // The visit survives the resize; only a thread selected in the wide
             // split — which is not a page there — has to become one here.
             if compact
@@ -2715,6 +2754,7 @@ impl AppShell {
         let history = self.window_state.read(cx).history().to_vec();
         if self.mounted != history {
             self.page_back = None;
+            self.pages_changing.set(motion == NavMotion::Animated);
         }
         if self.mounted != history
             && let Some(swipe) = &mut self.back_swipe
@@ -2828,19 +2868,23 @@ impl AppShell {
             return true;
         }
         // An agent is reached from its lead, so Back returns there first.
-        if self.window_state.read(cx).compact
-            && self.destination(cx) == Destination::Thread
-            && let Some((store, parent)) = self.agent_lead(cx)
-        {
-            // A pane of the lead's own, opened beside the agent while the
-            // window was wide, would show the lead a second time once the
-            // agent's pane does.
-            let lead_pane = self.pane_showing(&parent, cx);
-            self.swap_thread_in_place(&store, parent, window, cx);
-            if let Some(pane) = lead_pane {
-                self.close_pane_into(&pane, |_, _| None, window, cx);
+        if self.window_state.read(cx).compact && self.destination(cx) == Destination::Thread {
+            self.keep_lead_beneath(window, cx);
+            let lead = self
+                .attachment
+                .as_ref()
+                .and_then(|attachment| attachment.leads.last());
+            if let Some(lead) = lead {
+                // A pane of the lead's own, opened beside the agent while the
+                // window was wide, would show the lead a second time once the
+                // agent's pane does.
+                let lead_pane = self.pane_showing(&lead.session_id, cx);
+                self.pop_lead(cx);
+                if let Some(pane) = lead_pane {
+                    self.close_pane_into(&pane, |_, _| None, window, cx);
+                }
+                return true;
             }
-            return true;
         }
         // Everything below is one history: settings detail, settings root, a
         // Hosts visit, Pair, and the workspace pages all pop the same way.
@@ -3519,65 +3563,250 @@ fn compact_label(key: &str) -> String {
 }
 
 impl AppShell {
-    /// Show `session_id` on the compact thread page in place of the thread
-    /// it shows: a new conversation for it rises over the one it replaces,
-    /// which keeps drawing its thread, and the thread's timeline, until it
-    /// is covered. The thread left closes, as selecting another would.
-    fn swap_thread_in_place(
+    /// The compact stack's topmost thread page, unless a restore is yet to
+    /// say which thread it shows.
+    fn top_thread_page(&self, cx: &App) -> Option<EntityId> {
+        if !self.compact(cx)
+            || self.departing.is_some()
+            || self.pending_navigation_restore.is_some()
+        {
+            return None;
+        }
+        let at = self
+            .mounted
+            .iter()
+            .rposition(|destination| *destination == Destination::Thread)?;
+        let page = self.nav.read(cx).views().nth(at)?.entity_id();
+        Some(page)
+    }
+
+    /// Open the agent `session_id` over the thread on the compact stack's
+    /// thread page, or the panels page standing on it, which goes: the thread
+    /// stays as it is on its page, open and held. False where no thread
+    /// page can take it, for the caller to select it.
+    fn open_over_lead(
         &mut self,
-        store: &Entity<WorkspaceStore>,
         session_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        let Some(page) = self.top_thread_page(cx) else {
+            return false;
+        };
+        if !matches!(
+            self.destination(cx),
+            Destination::Thread | Destination::Panel
+        ) || self.pane_showing(&session_id, cx).is_some()
+        {
+            return false;
+        }
+        let window_state = self.window_state.clone();
+        let Some(attachment) = &mut self.attachment else {
+            return false;
+        };
+        let store = attachment.link.store.clone();
+        let pane = attachment.focused_pane.clone();
+        let Some(lead) = pane.read(cx).session_id().map(str::to_owned) else {
+            return false;
+        };
+        if store.read(cx).legacy_focus().as_ref() != Some(&lead)
+            || attachment
+                .leads
+                .iter()
+                .any(|kept| kept.session_id == session_id)
+        {
+            return false;
+        }
+        store.update(cx, |store, _| {
+            store.lease_timeline(&lead);
+            if !store.is_thread_open(&session_id) {
+                store.open_thread(&session_id);
+            }
+        });
+        let state = window_state.clone();
+        let chat =
+            cx.new(|cx| ChatView::new(store.clone(), state, Some(session_id.clone()), window, cx));
+        let lead_chat = pane.update(cx, |pane, cx| pane.replace_chat(chat, None, cx));
+        attachment.leads.push(ThreadPage {
+            page,
+            chat: lead_chat,
+            session_id: lead,
+        });
+        store.update(cx, |store, cx| store.select_session(session_id, cx));
+        window_state.update(cx, |state, cx| state.stack_thread(cx));
+        true
+    }
+
+    /// An agent on the compact stack's top page reached other than from its
+    /// lead has the lead put beneath it, for Back and the edge swipe to
+    /// uncover.
+    fn keep_lead_beneath(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.top_thread_page(cx) else {
+            return;
+        };
+        if self.destination(cx) != Destination::Thread
+            || self.mounted.last() != Some(&Destination::Thread)
+            || self
+                .attachment
+                .as_ref()
+                .is_none_or(|attachment| !attachment.leads.is_empty())
+        {
+            return;
+        }
+        let Some((store, lead)) = self.agent_lead(cx) else {
+            return;
+        };
+        store.update(cx, |store, _| {
+            store.lease_timeline(&lead);
+            if !store.is_thread_open(&lead) {
+                store.open_thread(&lead);
+            }
+        });
+        let window_state = self.window_state.clone();
+        let state = window_state.clone();
+        let chat = cx.new(|cx| ChatView::new(store, state, Some(lead.clone()), window, cx));
+        if let Some(attachment) = &mut self.attachment {
+            attachment.leads.push(ThreadPage {
+                page,
+                chat,
+                session_id: lead,
+            });
+        }
+        window_state.update(cx, |state, cx| state.stack_thread(cx));
+        self.sync_nav(NavMotion::Immediate, cx);
+    }
+
+    /// Back to the thread under the compact page's agent, whose page comes
+    /// back to the focused pane, as it was left. The agent closes, as
+    /// selecting another thread would, and stays drawn, leased, on its page
+    /// until that has slid off.
+    fn pop_lead(&mut self, cx: &mut Context<Self>) {
+        let top = self.nav.read(cx).current().map(AnyView::entity_id);
         let window_state = self.window_state.clone();
         let Some(attachment) = &mut self.attachment else {
             return;
         };
-        let chat = cx.new(|cx| {
-            ChatView::new(
-                store.clone(),
-                window_state,
-                Some(session_id.clone()),
-                window,
-                cx,
-            )
-        });
+        let Some(lead) = attachment.leads.pop() else {
+            return;
+        };
+        let store = attachment.link.store.clone();
         let pane = attachment.focused_pane.clone();
-        let left = pane.update(cx, |pane, cx| pane.replace_chat(chat, None, cx));
-        let left_session = left.read(cx).session_id().map(str::to_owned);
-        if let Some(left_session) = &left_session {
-            store.update(cx, |store, _| store.lease_timeline(left_session));
+        let agent = pane.read(cx).session_id().map(str::to_owned);
+        if let Some(agent) = &agent {
+            store.update(cx, |store, _| store.lease_timeline(agent));
         }
-        if let Some(earlier) = attachment.thread_left.replace(ThreadLeft {
-            generation: attachment.thread_generation,
-            chat: left,
-            session_id: left_session.clone(),
-        }) {
-            Self::release_left(store, earlier, cx);
-        }
-        attachment.thread_generation += 1;
+        let chat = pane.update(cx, |pane, cx| pane.replace_chat(lead.chat, None, cx));
         store.update(cx, |store, cx| {
-            store.select_session(session_id, cx);
-            if let Some(left_session) = &left_session
-                && store.is_thread_open(left_session)
+            store.select_session(lead.session_id.clone(), cx);
+            store.release_timeline(&lead.session_id, cx);
+            if let Some(agent) = &agent
+                && store.is_thread_open(agent)
             {
-                store.close_thread(left_session, cx);
+                store.close_thread(agent, cx);
             }
         });
-        cx.notify();
+        if let (Some(page), Some(session_id)) = (top, agent) {
+            attachment.leaving.push(ThreadPage {
+                page,
+                chat,
+                session_id,
+            });
+        }
+        window_state.update(cx, |state, cx| state.unstack_threads(1, cx));
     }
 
-    fn release_left(store: &Entity<WorkspaceStore>, left: ThreadLeft, cx: &mut App) {
-        if let Some(session_id) = &left.session_id {
-            store.update(cx, |store, cx| store.release_timeline(session_id, cx));
+    /// Let go of the leads from the `at`th on, each closing unless it is
+    /// still shown. The page of the `at`th takes the focused pane's
+    /// conversation again and the thread pages above it go, at once: the
+    /// conversation is what it was, whichever page it is on.
+    fn drop_leads(&mut self, at: usize, cx: &mut Context<Self>) {
+        let Some(attachment) = &mut self.attachment else {
+            return;
+        };
+        let store = attachment.link.store.clone();
+        let dropped = attachment.leads.split_off(at.min(attachment.leads.len()));
+        if dropped.is_empty() {
+            return;
+        }
+        for lead in &dropped {
+            let shown = self.pane_showing(&lead.session_id, cx).is_some();
+            store.update(cx, |store, cx| {
+                if !shown
+                    && store.is_thread_open(&lead.session_id)
+                    && store.legacy_focus().as_ref() != Some(&lead.session_id)
+                {
+                    store.close_thread(&lead.session_id, cx);
+                }
+                store.release_timeline(&lead.session_id, cx);
+            });
+        }
+        self.window_state
+            .update(cx, |state, cx| state.unstack_threads(dropped.len(), cx));
+        self.sync_nav(NavMotion::Immediate, cx);
+    }
+
+    /// Follow the store when what is under the compact page's agent stops
+    /// being what the page is over: a lead that closed goes, with the pages
+    /// above it; the focus coming to a lead is Back to it (an agent archived
+    /// falls back to its lead); the focus going anywhere else leaves them
+    /// all.
+    fn reconcile_leads(&mut self, cx: &mut Context<Self>) {
+        let Some(attachment) = &self.attachment else {
+            return;
+        };
+        if attachment.leads.is_empty() {
+            return;
+        }
+        let store = attachment.link.store.read(cx);
+        let focused = store.legacy_focus();
+        let shown = focused.as_deref() == attachment.focused_pane.read(cx).session_id();
+        let closed = attachment
+            .leads
+            .iter()
+            .position(|lead| !store.is_thread_open(&lead.session_id));
+        let focused_lead = attachment
+            .leads
+            .iter()
+            .rposition(|lead| Some(&lead.session_id) == focused.as_ref());
+        match (shown, closed, focused_lead) {
+            (true, None, _) => {}
+            (true, Some(closed), _) => self.drop_leads(closed, cx),
+            (false, _, Some(at)) => {
+                self.drop_leads(at + 1, cx);
+                self.pop_lead(cx);
+            }
+            (false, _, None) => self.drop_leads(0, cx),
         }
     }
 
-    /// The compact thread page's body: the skeleton while the thread is
-    /// restored, then its chat rising over it; a thread swapped in place
-    /// rises over the one it replaced.
-    fn compact_thread_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// Let go of the agents that have left.
+    fn release_leaving(&mut self, cx: &mut Context<Self>) {
+        let Some(attachment) = &mut self.attachment else {
+            return;
+        };
+        let store = attachment.link.store.clone();
+        for left in attachment.leaving.drain(..) {
+            store.update(cx, |store, cx| store.release_timeline(&left.session_id, cx));
+        }
+    }
+
+    /// The compact thread page's body, `kept` on a page that keeps its
+    /// conversation: otherwise the skeleton while the thread is restored,
+    /// then its chat rising over it.
+    fn compact_thread_body(
+        &mut self,
+        kept: Option<Entity<ChatView>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Under the id and layer of a body at rest, so what the chat keeps by
+        // element is the same on either side of the page keeping it.
+        if let Some(chat) = kept {
+            return crate::motion::Scene::default()
+                .sample("compact-thread-body", ThreadBody::Chat, window, cx)
+                .render([chat.into_any_element()])
+                .into_any_element();
+        }
         let pending = self.pending_navigation_restore.is_some();
         let Some(attachment) = &mut self.attachment else {
             return div().into_any_element();
@@ -3585,7 +3814,7 @@ impl AppShell {
         let wanted = if pending {
             ThreadBody::Skeleton
         } else {
-            ThreadBody::Chat(attachment.thread_generation)
+            ThreadBody::Chat
         };
         // A chat comes in over what the page shows once it appears; until
         // then it readies itself unseen beneath, and the page holds still.
@@ -3603,30 +3832,11 @@ impl AppShell {
         let frame = attachment
             .thread_body
             .sample("compact-thread-body", current, window, cx);
-        let keys: Vec<ThreadBody> = frame.scenes().copied().collect();
-        if attachment
-            .thread_left
-            .as_ref()
-            .is_some_and(|left| !keys.contains(&ThreadBody::Chat(left.generation)))
-            && let Some(left) = attachment.thread_left.take()
-        {
-            Self::release_left(&attachment.link.store.clone(), left, cx);
-        }
-        let layers: Vec<AnyElement> = keys
-            .into_iter()
+        let layers: Vec<AnyElement> = frame
+            .scenes()
             .map(|key| match key {
                 ThreadBody::Skeleton => crate::material::loading_skeleton(cx),
-                ThreadBody::Chat(generation) if generation == attachment.thread_generation => {
-                    attachment.chat(cx).into_any_element()
-                }
-                ThreadBody::Chat(generation) => attachment
-                    .thread_left
-                    .as_ref()
-                    .filter(|left| left.generation == generation)
-                    .map_or_else(
-                        || gpui::Empty.into_any_element(),
-                        |left| left.chat.clone().into_any_element(),
-                    ),
+                ThreadBody::Chat => chat.clone().into_any_element(),
             })
             .collect();
         frame
@@ -3667,20 +3877,17 @@ impl AppShell {
     /// Back to whatever is under this page, labelled with that destination's
     /// short fixed label. `None` at the root, where the platform owns Back.
     fn back_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let label = if self.destination(cx) == Destination::Thread && self.agent_lead(cx).is_some()
-        {
-            crate::tr!("mobile.thread").into_owned().into()
-        } else {
-            self.window_state.read(cx).parent()?.back_label()
-        };
-        Some(
-            back_button("compact-back", label)
-                .debug_selector(|| "compact-back".into())
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.back(window, cx);
-                }))
-                .into_any_element(),
-        )
+        let label = self.window_state.read(cx).parent()?.back_label();
+        Some(self.back_action(label, cx))
+    }
+
+    fn back_action(&mut self, label: SharedString, cx: &mut Context<Self>) -> AnyElement {
+        back_button("compact-back", label)
+            .debug_selector(|| "compact-back".into())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.back(window, cx);
+            }))
+            .into_any_element()
     }
 
     fn palette_action(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -3905,14 +4112,37 @@ impl AppShell {
         self.open_thread(window, cx);
     }
 
-    fn render_thread_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let back = self.back_control(cx);
-        let body = self.compact_thread_body(window, cx);
+    fn render_thread_page(
+        &mut self,
+        page: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let kept = self
+            .attachment
+            .as_ref()
+            .and_then(|attachment| attachment.thread_page(page))
+            .cloned();
+        // By the page's own place: a lead's page keeps the label it lands
+        // with, and one sliding off, which has no place, was over a thread.
+        let beneath = self
+            .nav
+            .read(cx)
+            .views()
+            .position(|view| view.entity_id() == page)
+            .and_then(|at| self.mounted.get(at.checked_sub(1)?))
+            .copied();
+        let back = self.back_action(beneath.unwrap_or(Destination::Thread).back_label(), cx);
+        let body =
+            self.compact_thread_body(kept.as_ref().map(|kept| kept.chat.clone()), window, cx);
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };
         let store = attachment.link.store.read(cx);
-        let active = store.chat_active_session();
+        let active = match &kept {
+            Some(kept) => store.chat_active_session_for(Some(&kept.session_id)),
+            None => store.chat_active_session(),
+        };
         let project = active
             .as_ref()
             .and_then(|(_, cwd, _)| {
@@ -3955,7 +4185,7 @@ impl AppShell {
             .size_full()
             .bg(crate::material::content_surface(cx))
             .child(nav_bar(
-                back,
+                Some(back),
                 title.into(),
                 subtitle.map(|subtitle| nav_subtitle(subtitle, cx)),
                 vec![
@@ -4257,7 +4487,6 @@ impl AppShell {
         let sheet = crate::overlay::active_sheet(window, cx);
         self.page_back = if sheet.is_none()
             && self.compact(cx)
-            && !(self.destination(cx) == Destination::Thread && self.agent_lead(cx).is_some())
             && !crate::window_seam::keyboard_covers_window(window)
         {
             let mut views = self.nav.read(cx).views().cloned().collect::<Vec<_>>();
@@ -4426,6 +4655,12 @@ impl AppShell {
         if self.nav.read(cx).is_empty() {
             self.sync_nav(NavMotion::Immediate, cx);
         }
+        if self.pages_changing.take() {
+            window.request_animation_frame();
+        } else {
+            self.keep_lead_beneath(window, cx);
+            self.release_leaving(cx);
+        }
         let width = window.viewport_size().width;
         // gpui-base exposes NavPage::progress read-only and mounts the
         // previous entry only after pop. Bind interactive progress here, at the
@@ -4501,11 +4736,15 @@ impl AppShell {
                 .child(div().absolute().inset_0().occlude())
                 .into_any_element()
         } else {
+            let pages_changing = self.pages_changing.clone();
             NavStack::new(&self.nav)
                 .size_full()
                 .overflow_hidden()
                 .transition(Transition::new(NAV_TRANSITION))
                 .item(move |page, _, _| {
+                    if page.phase() == PresencePhase::Exiting {
+                        pages_changing.set(true);
+                    }
                     let rest = 1. - page.progress();
                     let (offset, opacity) = match (page.phase(), page.operation()) {
                         (PresencePhase::Entering, Some(NavOperation::Pop)) => {
@@ -5527,6 +5766,7 @@ mod tests {
 
     use super::*;
 
+    mod compact_agent;
     mod scenes;
 
     /// One shell over a transport the test holds both ends of, so what the

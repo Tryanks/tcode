@@ -254,6 +254,33 @@ impl WindowState {
         cx.notify();
     }
 
+    /// Stand a thread's page on the topmost thread page, in place of what
+    /// stood on it: the thread beneath stays a page to come back to.
+    /// [`Self::go`] does nothing on a thread page, where this is the point.
+    pub(crate) fn stack_thread(&mut self, cx: &mut Context<Self>) {
+        if let Some(at) = self.thread_page_at() {
+            self.history.truncate(at + 1);
+            self.history.push(Destination::Thread);
+            cx.notify();
+        }
+    }
+
+    /// Take out the `count` topmost thread pages; what stands on them stays.
+    pub(crate) fn unstack_threads(&mut self, count: usize, cx: &mut Context<Self>) {
+        for _ in 0..count {
+            if let Some(at) = self.thread_page_at() {
+                self.history.remove(at);
+                cx.notify();
+            }
+        }
+    }
+
+    fn thread_page_at(&self) -> Option<usize> {
+        self.history
+            .iter()
+            .rposition(|destination| *destination == Destination::Thread)
+    }
+
     /// Leave the pairing page for the Machines page it was opened over. Wide,
     /// [`Self::back`] leaves the whole Hosts route, Pair included.
     pub fn close_pair(&mut self, cx: &mut Context<Self>) {

@@ -509,8 +509,8 @@ fn compact(text: &str) -> String {
 }
 
 /// Open a thread reached from its lead: on the desktop, beside the thread
-/// `host` shows, in `host` itself, that thread's right panel shut; in the
-/// lead's place in the compact layout, which has no host, no room beside
+/// `host` shows, in `host` itself, that thread's right panel shut; as a page
+/// over the lead in the compact layout, which has no host, no room beside
 /// it, and goes back with its navigation. A thread a pane already shows
 /// takes the keyboard there instead. An archived agent is reached the way
 /// Settings → Archived Threads reaches every archived thread: unarchived.
@@ -548,7 +548,7 @@ pub(crate) fn open_agent(
             }
             host.update(cx, |chat, cx| chat.open_side(id, origin, window, cx));
         }
-        None => store.update(cx, |store, cx| store.select_session(id, cx)),
+        None => crate::shell::open_agent_page(store, id, window, cx),
     }
 }
 

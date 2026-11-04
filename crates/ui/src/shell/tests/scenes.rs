@@ -6,7 +6,7 @@
 use super::*;
 
 /// `id`'s status and its log, as the host answers the thread's subscriptions.
-fn serve_log(
+pub(super) fn serve_log(
     host: &MountedShell,
     status: tcode_protocol::SessionStatus,
     events: Vec<agent::AgentEvent>,
@@ -38,7 +38,7 @@ fn serve_log(
     );
 }
 
-fn asked(id: &str) -> agent::AgentEvent {
+pub(super) fn asked(id: &str) -> agent::AgentEvent {
     agent::AgentEvent::ItemCompleted(agent::ThreadItem {
         id: format!("{id}-ask"),
         parent_item_id: None,
@@ -56,13 +56,13 @@ fn asked(id: &str) -> agent::AgentEvent {
     })
 }
 
-fn started() -> agent::AgentEvent {
+pub(super) fn started() -> agent::AgentEvent {
     agent::AgentEvent::TurnStarted {
         turn_id: "turn".into(),
     }
 }
 
-fn completed() -> agent::AgentEvent {
+pub(super) fn completed() -> agent::AgentEvent {
     agent::AgentEvent::TurnCompleted {
         turn_id: "turn".into(),
         status: agent::TurnStatus::Completed,
@@ -303,7 +303,13 @@ fn within(
 /// How opaque `id`'s question's bubble is painted, by its fill's alpha;
 /// nothing while it is not drawn.
 fn bubble_fill(id: &str, cx: &mut VisualTestContext) -> Option<f32> {
-    let bounds = cx.debug_bounds(bubble(id))?;
+    fill_of(bubble(id), cx)
+}
+
+/// How far in what `selector` names is drawn: the fullest colour painted
+/// within its bounds.
+pub(super) fn fill_of(selector: &'static str, cx: &mut VisualTestContext) -> Option<f32> {
+    let bounds = cx.debug_bounds(selector)?;
     cx.update(|window, _| {
         let bounds = bounds.scale(window.scale_factor());
         Some(
@@ -490,105 +496,6 @@ fn a_thread_switched_to_with_motion_reduced_is_there_once_drawn(cx: &mut TestApp
         seen[started..]
             .iter()
             .all(|frame| (frame.shown() - 1.).abs() < 0.01),
-        "{seen:?}"
-    );
-}
-
-/// How many surfaces are painted over the compact page's body, whose
-/// bounds are `body`, and how far in thread-2's question is.
-fn compact_body(
-    body: gpui::Bounds<gpui::ScaledPixels>,
-    rest: f32,
-    cx: &mut VisualTestContext,
-) -> (usize, f32) {
-    let surfaces = cx.update(|window, cx| {
-        let surface = crate::material::content_surface(cx);
-        window
-            .painted_quads()
-            .iter()
-            .filter(|quad| quad.bounds == body)
-            .filter_map(|quad| quad.background.as_solid())
-            .filter(|colour| colour.a > 0. && colour.h == surface.h && colour.l == surface.l)
-            .count()
-    });
-    let shown = bubble_fill("thread-2", cx).map_or(0., |fill| fill / rest);
-    (surfaces, shown)
-}
-
-/// Back from an agent's thread to its lead on the compact page: the lead's
-/// chat rises over the agent's once its rows are drawn, rather than rising
-/// at once, covering the agent's thread with an empty surface while the
-/// lead, not opened before, loads.
-#[gpui::test]
-fn the_compact_page_raises_a_lead_once_it_is_drawn(cx: &mut TestAppContext) {
-    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx, _) = mount_finished(cx);
-    let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
-        unreachable!("panes_index sends a snapshot");
-    };
-    let mut mirror = index.sessions[1].clone();
-    mirror.id = "mirror".into();
-    mirror.title = "mirror".into();
-    mirror.parent_session_id = Some("thread-2".into());
-    index.sessions.push(mirror);
-    send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-    as_mobile(cx);
-    cx.simulate_resize(size(px(393.), px(852.)));
-    serve_finished(&host, "mirror");
-    store_of(&shell, cx).update(cx, |store, cx| store.select_session("mirror".into(), cx));
-    await_restore_update(&shell, cx, |store| {
-        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(1)
-            && store.thread_meta("mirror").is_some()
-    });
-    settle_frames(cx);
-    assert!(cx.debug_bounds("compact-thread-page").is_some());
-    let rest = bubble_fill("mirror", cx).expect("the agent's question");
-    // The body: the agent's chat's surface, the nearest beneath its question.
-    let question = cx.debug_bounds(bubble("mirror")).expect("drawn");
-    let body = cx.update(|window, cx| {
-        let surface = crate::material::content_surface(cx);
-        let question = question.scale(window.scale_factor());
-        window
-            .painted_quads()
-            .iter()
-            .filter(|quad| within(&question, &quad.bounds))
-            .filter(|quad| {
-                quad.background
-                    .as_solid()
-                    .is_some_and(|colour| colour.h == surface.h && colour.l == surface.l)
-            })
-            .map(|quad| quad.bounds)
-            .min_by(|a, b| {
-                (a.size.width.0 * a.size.height.0).total_cmp(&(b.size.width.0 * b.size.height.0))
-            })
-            .expect("the chat's surface")
-    });
-    assert!(rest > 0.);
-
-    let (beneath, _) = compact_body(body, rest, cx);
-    shell.update_in(cx, |shell, window, cx| assert!(shell.back(window, cx)));
-    draw(cx);
-    let mut seen = Vec::new();
-    for frame in 0..55 {
-        if frame == 15 {
-            serve_finished(&host, "thread-2");
-            arrive(&shell, cx);
-        }
-        display_frame(cx);
-        seen.push(compact_body(body, rest, cx));
-    }
-    assert!(
-        seen.iter()
-            .all(|(surfaces, shown)| *surfaces <= beneath || *shown > 0.),
-        "the lead rose before it was drawn: {seen:?}"
-    );
-    assert!(
-        seen.iter().any(|(_, shown)| *shown > 0.05 && *shown < 0.95),
-        "the lead rose at once: {seen:?}"
-    );
-    assert!(
-        seen.last()
-            .is_some_and(|(_, shown)| (*shown - 1.).abs() < 0.01),
         "{seen:?}"
     );
 }
