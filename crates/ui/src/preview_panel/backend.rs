@@ -317,7 +317,7 @@ impl PreviewPanel {
             self.preview_tab_showing(cx)
                 && !self.covered
                 && self.store.read(cx).preview_browser_settings().enabled
-                // gpui-fast-macos 0.1.10 hands a drag GPUI began to the native
+                // gpui-fast-macos hands a drag GPUI began to the native
                 // view under the pointer (`send_window_event` hit-tests
                 // whenever no native view owns the press) and GPUI's own view
                 // then drops the event, so a resize handle stops following
@@ -663,7 +663,7 @@ impl PreviewPanel {
                     let margin = page_margin(cx);
                     #[cfg(target_os = "android")]
                     let margin = px(0.);
-                    // gpui-webview 0.8 has no corner radius or layer clip for
+                    // gpui-webview has no corner radius or layer clip for
                     // the native view, so the page stays square inside the
                     // rounded frame and its corners cover the frame's.
                     let frame = div()

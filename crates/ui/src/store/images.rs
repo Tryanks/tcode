@@ -1,7 +1,7 @@
 //! Every image Tcode draws: what it reads from the host (previews, icons, pull request media)
 //! and by URL, decoded here, and the pictures it makes itself ([`Owned`]), held within a budget.
 //!
-//! gpui-base 0.8.1 has no bounded image cache. GPUI's asset memo keeps every read until it is
+//! gpui-base has no bounded image cache. GPUI's asset memo keeps every read until it is
 //! removed and each window's atlas keeps every tile until it is dropped, and its `ImageCache`
 //! reaches neither an `ImageSource::Custom` source nor, under its `image_cache` element,
 //! gpui-fast's rebuild of a nested view on its own (`Window::rebuild_here`). So Tcode reads,

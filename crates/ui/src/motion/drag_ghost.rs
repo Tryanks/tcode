@@ -169,11 +169,10 @@ fn host(window: &Window, cx: &App) -> Option<Entity<Layer>> {
 }
 
 /// Each window's ghosts, found without reading gpui-base's `Root` or the
-/// plugin that draws them. Root (gpui-base 0.8.1, `root.rs:154-164`) updates
-/// every plugin each time it renders, and is updated itself whenever one of
-/// them notifies; gpui-fast counts either as a change to what a view read, so
-/// a row that read them to find its slot would be drawn again with every
-/// frame of a tooltip or a toast.
+/// plugin that draws them. Root updates every plugin each time it renders,
+/// and is updated itself whenever one of them notifies; gpui-fast counts
+/// either as a change to what a view read, so a row that read them to find
+/// its slot would be drawn again with every frame of a tooltip or a toast.
 #[derive(Default)]
 struct Layers(HashMap<WindowId, WeakEntity<Layer>>);
 

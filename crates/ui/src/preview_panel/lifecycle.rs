@@ -336,7 +336,7 @@ impl BrowserLifecycle {
     ///
     /// On macOS and iOS a page fades in and out (`PreviewPanel::native_fade`).
     /// Gap: on Windows, Linux and Android it shows and hides at once.
-    /// gpui-webview 0.8.1 has no opacity, and their child surfaces (a
+    /// gpui-webview has no opacity, and their child surfaces (a
     /// WebView2 controller, an X11 child window, an Android view) are not
     /// faded here; a snapshot drawn by GPUI in the page's place is the open
     /// alternative.
@@ -957,7 +957,7 @@ mod platform {
     }
 }
 
-/// gpui-webview 0.8 releases a webview by destroying its X11 composition
+/// gpui-webview releases a webview by destroying its X11 composition
 /// surface through GPUI's xcb connection while GDK's Xlib connection still
 /// holds unsent requests for the WebKit windows inside it. Those requests then
 /// fail with `BadWindow`, which GDK's default handler turns into `exit(1)` —
