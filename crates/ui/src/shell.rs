@@ -16915,6 +16915,34 @@ pub(crate) mod tests {
         assert_eq!(left(cx), None);
     }
 
+    /// The window growing wider leaves the terminal drawer's height as the
+    /// thread holds it: the host is told a height only when it changes.
+    #[gpui::test]
+    fn a_wider_window_sends_the_host_no_terminal_height(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_thread_with(cx, Vec::new());
+        let store = store_of(&shell, cx);
+        resize(cx, 1600.);
+        store.update(cx, |store, cx| {
+            store.toggle_terminal_panel_for("thread-1".to_owned(), cx)
+        });
+        crate::test_frames::draw_settled(cx);
+        let _ = sent(&host);
+
+        resize(cx, 1800.);
+        crate::test_frames::draw_settled(cx);
+        let heights: Vec<_> = sent(&host)
+            .into_iter()
+            .filter(|payload| {
+                matches!(
+                    payload,
+                    ClientPayload::Command(Command::SetTerminalHeight { .. })
+                )
+            })
+            .collect();
+        assert!(heights.is_empty(), "{heights:?}");
+    }
+
     /// The terminal drawer glides up under the conversation as it opens, to
     /// the height it was given, and back down as it closes.
     #[gpui::test]
