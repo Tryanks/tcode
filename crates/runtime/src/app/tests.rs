@@ -10322,6 +10322,59 @@ fn store_writer_survives_sigkill() {
     assert!(checkpointed_runs > 0, "no run crossed an auto-checkpoint");
 }
 
+/// A streamed delta that waits for company still reaches the database with
+/// nothing written after it, and one still waiting when the host closes the
+/// queue is committed before the writer stops.
+#[test]
+fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
+    let store = TestStore::new("tcode-delta-window");
+    let (failures, _failures) = smol::channel::unbounded();
+    let writer = StoreWriter::new(
+        (*store).clone(),
+        SettingsStore::new(store.root().clone()),
+        failures,
+    );
+    let (writes, queue) = smol::channel::unbounded();
+    let writer = std::thread::spawn(move || writer.run(queue));
+    let delta = |text: &str| StoreWrite::AppendEvent {
+        id: "streaming".into(),
+        ts: 1,
+        author: None,
+        origin: None,
+        event: Box::new(AgentEvent::Delta {
+            item_id: "answer".into(),
+            kind: agent::DeltaKind::AssistantText,
+            text: text.into(),
+        }),
+    };
+    let texts = || -> Vec<String> {
+        store
+            .read_events("streaming")
+            .unwrap()
+            .into_iter()
+            .map(|stored| match stored.event {
+                AgentEvent::Delta { text, .. } => text,
+                other => panic!("unexpected record {other:?}"),
+            })
+            .collect()
+    };
+
+    writes.send_blocking(delta("first")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while texts().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "a lone delta was never committed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    writes.send_blocking(delta(" second")).unwrap();
+    drop(writes);
+    writer.join().unwrap();
+    assert_eq!(texts(), ["first", " second"]);
+}
+
 /// A log as a read of densely numbered rows would load it.
 fn session_log(records: impl IntoIterator<Item = SessionEventRecord>) -> SessionLog {
     let records: Vec<_> = records.into_iter().collect();
