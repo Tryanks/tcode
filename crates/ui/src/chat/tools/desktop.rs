@@ -670,7 +670,7 @@ impl ToolView for Desktop<'_> {
             }
             Tool::Act(act) => {
                 let steps = self.steps(call, act, ctx);
-                let after = report(&text).map_or(text.as_str(), |(_, rest)| rest);
+                let after = report(&text).map_or(&*text, |(_, rest)| rest);
                 let nodes = outline::nodes(after);
                 let label = super::counted("tools.elements", nodes.len());
                 let tree = tree(&nodes, label, ctx);
@@ -681,7 +681,7 @@ impl ToolView for Desktop<'_> {
                     .collect()
             }
             Tool::Wait(_) => {
-                let after = report(&text).map_or(text.as_str(), |(_, rest)| rest);
+                let after = report(&text).map_or(&*text, |(_, rest)| rest);
                 let nodes = outline::nodes(after);
                 let label = super::counted("tools.elements", nodes.len());
                 let tree = tree(&nodes, label, ctx);
@@ -689,9 +689,7 @@ impl ToolView for Desktop<'_> {
                 tree.into_iter().chain(raw(structured, ctx)).collect()
             }
             Tool::ReadText(_) => {
-                let page = text
-                    .split_once("\n---\n")
-                    .map_or(text.as_str(), |(_, page)| page);
+                let page = text.split_once("\n---\n").map_or(&*text, |(_, page)| page);
                 let body = bounded_text(call.entry, "output", page, true, Bound::HEAD, ctx);
                 vec![section(&crate::tr!("tools.output"), body, ctx.app()).into_any_element()]
             }

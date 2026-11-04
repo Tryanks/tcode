@@ -3,12 +3,12 @@ use std::{cell::RefCell, sync::Arc};
 use super::{
     inline::{Inline, InlineState},
     math_layout::{self, FormulaSelection},
-    render::RecentCache,
     selection::RunOrigin,
     state::{MarkdownState, PendingContextTarget},
 };
 use crate::{
     icon::IconName,
+    recent_cache::RecentCache,
     scroll::ScrollableElement as _,
     theme::ActiveTheme as _,
     typography::TextRole as _,

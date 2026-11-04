@@ -53,6 +53,7 @@ mod provider_login_dialog;
 mod provider_model_picker;
 pub(crate) mod provider_models;
 pub(crate) mod provider_status;
+mod recent_cache;
 pub mod remote;
 mod run;
 pub(crate) mod runtime_event;

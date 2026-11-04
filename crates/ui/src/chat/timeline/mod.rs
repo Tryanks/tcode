@@ -304,6 +304,7 @@ impl ChatView {
             self.pending_md_builds.clear();
             self.command_panels.borrow_mut().clear();
             self.inline_diffs.clear();
+            self.tool_texts.clear();
             self.full_outputs.clear();
             self.highlighted_turn = None;
             self.session_key = session_key;

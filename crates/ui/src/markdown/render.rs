@@ -1,16 +1,10 @@
 //! Block renderer adapted from gpui-component's Apache-2.0 `text/node.rs` and
 //! `text/document.rs`, with rushdown IR and syntect highlighting.
 
-use std::{
-    cell::RefCell,
-    collections::{HashMap, VecDeque},
-    hash::Hash,
-    ops::Range,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc};
 
 use crate::highlight::HighlightTheme;
+use crate::recent_cache::RecentCache;
 use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::copy::copy_button;
@@ -51,81 +45,6 @@ type LinkRuns = Vec<(Range<usize>, super::nodes::LinkMark)>;
 type FontOverrides = Vec<(Range<usize>, SharedString)>;
 type ParagraphTextStyle = (String, LinkRuns, HighlightRuns, FontOverrides);
 type MarkRuns = (LinkRuns, HighlightRuns, FontOverrides);
-
-#[derive(Clone, Hash, PartialEq, Eq)]
-struct CodeCacheKey {
-    code: SharedString,
-    lang: SharedString,
-    theme: HighlightTheme,
-}
-
-thread_local! {
-    static CODE_HIGHLIGHTS: RefCell<RecentCache<CodeCacheKey, SharedHighlightRuns>> =
-        RefCell::new(RecentCache::with_weight_limit(64, 32 * 1024 * 1024, |key, value| {
-            key.code.len() + key.lang.len()
-                + value.runs.capacity() * std::mem::size_of::<(Range<usize>, HighlightStyle)>()
-        }));
-}
-
-/// The most recent results of a render step keyed by its inputs, so a repaint
-/// reuses the work and a long conversation does not keep every result.
-pub(super) struct RecentCache<K, V> {
-    capacity: usize,
-    entries: HashMap<K, V>,
-    order: VecDeque<K>,
-    weight: usize,
-    weight_limit: usize,
-    weigh: fn(&K, &V) -> usize,
-}
-
-impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
-    pub(super) fn new(capacity: usize) -> Self {
-        Self::with_weight_limit(capacity, capacity, |_, _| 1)
-    }
-
-    fn with_weight_limit(capacity: usize, weight_limit: usize, weigh: fn(&K, &V) -> usize) -> Self {
-        Self {
-            capacity,
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            weight: 0,
-            weight_limit,
-            weigh,
-        }
-    }
-
-    fn remove(&mut self, key: &K) {
-        if let Some(value) = self.entries.remove(key) {
-            self.weight -= (self.weigh)(key, &value);
-            self.order.retain(|entry| entry != key);
-        }
-    }
-
-    pub(super) fn get_or_insert_with(&mut self, key: K, compute: impl FnOnce() -> V) -> V {
-        if let Some(value) = self.entries.get(&key) {
-            return value.clone();
-        }
-        let value = compute();
-        let weight = (self.weigh)(&key, &value);
-        // Keep the newest result even when it alone exceeds the budget: a single
-        // large block's visible slices must share one highlighting pass.
-        while !self.entries.is_empty()
-            && (self.entries.len() >= self.capacity
-                || self.weight.saturating_add(weight) > self.weight_limit)
-        {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(value) = self.entries.remove(&oldest) {
-                self.weight -= (self.weigh)(&oldest, &value);
-            }
-        }
-        self.weight = self.weight.saturating_add(weight);
-        self.order.push_back(key.clone());
-        self.entries.insert(key, value.clone());
-        value
-    }
-}
 
 // These are input-size weights, not a claim about GPUI's allocation size.
 const CODE_MEASUREMENT_WEIGHT_LIMIT: usize = 8 * 1024 * 1024;
@@ -1391,25 +1310,17 @@ fn render_list_item(
 fn cached_highlights(code: &CodeBlock, theme: &HighlightTheme) -> SharedHighlightRuns {
     let prepared = code.prepared();
     let compute = || {
-        let key = CodeCacheKey {
-            code: prepared.text.clone(),
-            lang: code.lang.clone().unwrap_or_else(|| "text".into()),
-            theme: theme.clone(),
-        };
-        CODE_HIGHLIGHTS.with(|cache| {
-            cache.borrow_mut().get_or_insert_with(key, || {
-                let previous = prepared
+        highlight::highlighted(
+            prepared.text.clone(),
+            code.lang.clone().unwrap_or_else(|| "text".into()),
+            theme,
+            || {
+                prepared
                     .previous_highlights
                     .get()
-                    .and_then(std::sync::Weak::upgrade);
-                Arc::new(highlight::HighlightedSource::new(
-                    prepared.text.clone(),
-                    code.lang.clone().unwrap_or_else(|| "text".into()),
-                    theme,
-                    previous.as_deref(),
-                ))
-            })
-        })
+                    .and_then(std::sync::Weak::upgrade)
+            },
+        )
     };
     let Ok(mut cache) = prepared.highlights.lock() else {
         return compute();

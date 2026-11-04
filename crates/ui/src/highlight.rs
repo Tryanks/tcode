@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     collections::HashSet,
     ops::Range,
@@ -7,7 +8,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex, PoisonError},
 };
 
-use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla, Rgba};
+use gpui::{FontStyle, FontWeight, HighlightStyle, Hsla, Rgba, SharedString};
 use syntect::{
     easy::ScopeRangeIterator,
     parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet},
@@ -352,7 +353,58 @@ struct HighlightCheckpoint {
     last_run_end: usize,
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct HighlightKey {
+    source: SharedString,
+    language: SharedString,
+    theme: HighlightTheme,
+}
+
+thread_local! {
+    static HIGHLIGHTS: RefCell<crate::recent_cache::RecentCache<HighlightKey, Arc<HighlightedSource>>> =
+        RefCell::new(crate::recent_cache::RecentCache::with_weight_limit(
+            64,
+            32 * 1024 * 1024,
+            |key, value| {
+                key.source.len()
+                    + key.language.len()
+                    + value.runs.capacity() * std::mem::size_of::<(Range<usize>, HighlightStyle)>()
+            },
+        ));
+}
+
+/// `source` highlighted as `language`, shared by every view that draws the
+/// same text in the same theme while it is among the most recent. On a miss,
+/// `previous` may give the highlighting of a text this one extends, which is
+/// resumed rather than started over.
+pub(crate) fn highlighted(
+    source: SharedString,
+    language: SharedString,
+    theme: &HighlightTheme,
+    previous: impl FnOnce() -> Option<Arc<HighlightedSource>>,
+) -> Arc<HighlightedSource> {
+    let key = HighlightKey {
+        source,
+        language,
+        theme: theme.clone(),
+    };
+    HIGHLIGHTS.with(|cache| {
+        cache.borrow_mut().get_or_insert_with(key.clone(), || {
+            Arc::new(HighlightedSource::new(
+                key.source,
+                key.language,
+                theme,
+                previous().as_deref(),
+            ))
+        })
+    })
+}
+
 impl HighlightedSource {
+    pub(crate) fn source(&self) -> &SharedString {
+        &self.source
+    }
+
     pub(crate) fn new(
         source: gpui::SharedString,
         language: gpui::SharedString,
