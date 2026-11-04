@@ -19,9 +19,9 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_base::{PopoverState, h_flex, v_flex};
 
@@ -62,7 +62,8 @@ pub(crate) struct ProviderModelPicker {
     /// The active tab: a profile id (built-in or user-created).
     selected_profile: String,
     selected: Option<(ProviderKind, String, Option<String>)>,
-    excluded: Vec<(ProviderKind, String)>,
+    /// Rows already taken: a model under one account leaves it on offer under another.
+    excluded: Vec<(ProviderKind, String, Option<String>)>,
     _store_subscription: Subscription,
 }
 
@@ -129,7 +130,11 @@ impl ProviderModelPicker {
         }
     }
 
-    pub fn set_excluded(&mut self, excluded: Vec<(ProviderKind, String)>, cx: &mut Context<Self>) {
+    pub fn set_excluded(
+        &mut self,
+        excluded: Vec<(ProviderKind, String, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
         if self.excluded != excluded {
             self.excluded = excluded;
             cx.notify();
@@ -183,6 +188,7 @@ impl ProviderModelPicker {
     fn trigger(&self, cx: &Context<Self>) -> Button {
         match &self.trigger_kind {
             TriggerKind::Add(label_key) => Button::new(self.trigger_id)
+                .debug_selector(|| self.trigger_id.to_owned())
                 .outline()
                 .small()
                 .icon(IconName::Plus)
@@ -351,7 +357,7 @@ impl Render for ProviderModelPicker {
 fn option_list(
     tab: usize,
     options: Rc<[ModelOption]>,
-    excluded: &[(ProviderKind, String)],
+    excluded: &[(ProviderKind, String, Option<String>)],
     selected: &Option<(ProviderKind, String, Option<String>)>,
     picker: &Entity<ProviderModelPicker>,
     store: &Entity<WorkspaceStore>,
@@ -361,9 +367,11 @@ fn option_list(
     let available: Rc<[ModelOption]> = options
         .iter()
         .filter(|option| {
-            !excluded
-                .iter()
-                .any(|(provider, model)| *provider == option.provider && model == &option.id)
+            !excluded.iter().any(|(provider, model, profile_id)| {
+                *provider == option.provider
+                    && model == &option.id
+                    && profile_id == &option.profile_id
+            })
         })
         .cloned()
         .collect();
@@ -454,6 +462,7 @@ fn option_row(
         option.name.clone(),
         cx,
     )
+    .debug_selector(|| format!("settings-model-option-{index}"))
     .aria_selected(is_selected)
     .flex_none()
     .w_full()

@@ -171,7 +171,13 @@ fn migrate_role(
 ) -> Vec<OrchestrateChildModel> {
     let listed: Vec<_> = rows
         .iter()
-        .map(|row| (row.entry.provider, row.entry.model.clone()))
+        .map(|row| {
+            (
+                row.entry.provider,
+                row.entry.model.clone(),
+                row.entry.profile_id.clone(),
+            )
+        })
         .collect();
     rows.into_iter()
         .filter_map(|row| {
@@ -180,7 +186,11 @@ fn migrate_role(
             // An untouched row whose successor the user already listed merges into it.
             let superseded = entry.model != model
                 && entry.bundled.is_some()
-                && listed.contains(&(entry.provider, entry.model.clone()));
+                && listed.contains(&(
+                    entry.provider,
+                    entry.model.clone(),
+                    entry.profile_id.clone(),
+                ));
             (!superseded).then_some(entry)
         })
         .collect()

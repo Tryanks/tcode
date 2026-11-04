@@ -311,21 +311,29 @@ impl AppState {
         // timeline records so it can show the prefix as a disclosure and the
         // bubble only the user's words. The provider still receives all of `text`.
         let user_len = text.len();
-        let caller_model = active
-            .meta
-            .model
-            .as_deref()
-            .or(active.live_model.as_deref())
-            .or_else(|| {
-                self.models_for(active.meta.provider)
-                    .iter()
-                    .find(|model| model.is_default)
-                    .map(|model| model.id.as_str())
-            });
+        let caller = OrchestrateCaller {
+            provider: active.meta.provider,
+            profile_id: active
+                .meta
+                .profile_id
+                .as_deref()
+                .filter(|id| !Settings::is_builtin_profile_id(id)),
+            model: active
+                .meta
+                .model
+                .as_deref()
+                .or(active.live_model.as_deref())
+                .or_else(|| {
+                    self.models_for(active.meta.provider)
+                        .iter()
+                        .find(|model| model.is_default)
+                        .map(|model| model.id.as_str())
+                }),
+        };
         let text = compose_orchestrate_text(
-            &self.settings.orchestrate,
+            &self.settings,
             &text,
-            Some((active.meta.provider, caller_model)),
+            Some(caller),
             &self.providers.model_catalogs,
         );
         let context_len = text.len().saturating_sub(user_len);
@@ -923,10 +931,20 @@ impl AppState {
 pub(super) const ORCHESTRATE_GUIDANCE: &str =
     include_str!("../../../../assets/orchestrate/workflow.md");
 
+/// The thread an Orchestrate turn runs in: one row of a role's list, which it
+/// does not see as a peer of itself. `profile_id` is `None` on the built-in
+/// profile, and `model` before discovery names it.
+#[derive(Clone, Copy)]
+pub(super) struct OrchestrateCaller<'a> {
+    pub provider: ProviderKind,
+    pub profile_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+}
+
 pub(super) fn compose_orchestrate_text(
-    settings: &OrchestrateSettings,
+    settings: &Settings,
     user_text: &str,
-    caller: Option<(ProviderKind, Option<&str>)>,
+    caller: Option<OrchestrateCaller>,
     catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
 ) -> String {
     let configuration = render_orchestrate_configuration(settings, caller, catalogs);
@@ -940,11 +958,11 @@ pub(super) fn compose_orchestrate_text(
 }
 
 pub(super) fn render_orchestrate_configuration(
-    settings: &OrchestrateSettings,
-    caller: Option<(ProviderKind, Option<&str>)>,
+    settings: &Settings,
+    caller: Option<OrchestrateCaller>,
     catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
 ) -> String {
-    let approvals = match settings.child_approval {
+    let approvals = match settings.orchestrate.child_approval {
         ChildApprovalMode::Manual => "the user answers its approval requests in the child thread",
         ChildApprovalMode::Orchestrator
         | ChildApprovalMode::Auto
@@ -953,11 +971,19 @@ pub(super) fn render_orchestrate_configuration(
         }
     };
     let mut text = format!(
-        "## Current orchestrator configuration\n\nStart every child with tcode_control start_thread and subagent: true. Compare enabled profiles across all providers by their task fit, strengths, limitations, and cost; provider family is not a routing preference. Each entry gives the start_thread arguments that select it: pass provider and model as shown, profile only where the entry names one (it selects an endpoint configuration, not a model), and the options shown, which turn on fast mode where the configuration asks for it; change fast mode only when the user explicitly asks. Choose reasoningEffort per call from the values the entry lists, by its description and the task's difficulty, and pass it in options; omitted, the provider's default applies. A subagent runs with the permission Settings → Orchestrate child approval chooses, which options cannot change, and {approvals}.\n"
+        "## Current orchestrator configuration\n\nStart every child with tcode_control start_thread and subagent: true. Compare enabled profiles across all providers by their task fit, strengths, limitations, and cost; provider family is not a routing preference. Each entry gives the start_thread arguments that select it: pass provider and model as shown, profile only where the entry names one (it selects an account or endpoint configuration, not a model), and the options shown, which turn on fast mode where the configuration asks for it; change fast mode only when the user explicitly asks. Choose reasoningEffort per call from the values the entry lists, by its description and the task's difficulty, and pass it in options; omitted, the provider's default applies. A subagent runs with the permission Settings → Orchestrate child approval chooses, which options cannot change, and {approvals}.\n"
     );
     for (heading, profiles, collaboration) in [
-        ("Collaboration models", &settings.decision_models, true),
-        ("Execution models", &settings.child_models, false),
+        (
+            "Collaboration models",
+            &settings.orchestrate.decision_models,
+            true,
+        ),
+        (
+            "Execution models",
+            &settings.orchestrate.child_models,
+            false,
+        ),
     ] {
         text.push_str(&format!("\n### {heading}\n\n"));
         text.push_str(if collaboration {
@@ -970,11 +996,12 @@ pub(super) fn render_orchestrate_configuration(
             .filter(|entry| {
                 entry.enabled
                     && !(collaboration
-                        && caller.is_some_and(|(provider, model)| {
+                        && caller.is_some_and(|caller| {
                             // Before discovery identifies the lead, withhold that
-                            // provider's peer identities rather than guessing its model.
-                            provider == entry.provider
-                                && model.is_none_or(|model| model == entry.model)
+                            // account's peer identities rather than guessing its model.
+                            caller.provider == entry.provider
+                                && caller.profile_id == entry.profile_id.as_deref()
+                                && caller.model.is_none_or(|model| model == entry.model)
                         }))
             })
             .collect();
@@ -990,8 +1017,18 @@ pub(super) fn render_orchestrate_configuration(
                 "provider": provider_name(entry.provider),
                 "model": entry.model,
             });
+            // The built-in profile goes unnamed unless the list holds this model
+            // under another account too: then each row says which it is.
+            let shared = profiles.iter().any(|other| {
+                other.provider == entry.provider
+                    && other.model == entry.model
+                    && other.profile_id != entry.profile_id
+            });
             if let Some(id) = &entry.profile_id {
                 arguments["profile"] = serde_json::json!(id);
+            } else if shared {
+                arguments["profile"] =
+                    serde_json::json!(Settings::builtin_profile_id(entry.provider));
             }
             if entry.fast
                 && let Some((id, value)) = fast_option(entry.provider)
@@ -999,11 +1036,25 @@ pub(super) fn render_orchestrate_configuration(
                 arguments["options"] = serde_json::json!({ id: value });
             }
             let arguments = escape_markdown_inline(&arguments.to_string());
-            if model_missing_from_loaded_catalog(catalog, &entry.model) {
+            let mut title = format!(
+                "`{}` / `{}`",
+                provider_name(entry.provider),
+                escape_markdown_inline(&entry.model)
+            );
+            if let Some(id) = &entry.profile_id {
+                title.push_str(&format!(" / `{}`", escape_markdown_inline(id)));
+                if settings.resolved_profile(id).is_none() {
+                    text.push_str(&format!(
+                        "\n#### {title} — unavailable\n\nUnavailable: profile `{}` no longer exists.\n\n{}\n",
+                        escape_markdown_inline(id),
+                        entry.guidance(collaboration).trim()
+                    ));
+                    continue;
+                }
+            }
+            if settings.orchestrate_model_missing(entry, catalog) {
                 text.push_str(&format!(
-                    "\n#### `{}` / `{}` — unavailable\n\nUnavailable: model `{}` is not present in the loaded `{}` catalog.\n\n{}\n",
-                    provider_name(entry.provider),
-                    escape_markdown_inline(&entry.model),
+                    "\n#### {title} — unavailable\n\nUnavailable: model `{}` is not present in the loaded `{}` catalog.\n\n{}\n",
                     escape_markdown_inline(&entry.model),
                     provider_name(entry.provider),
                     entry.guidance(collaboration).trim()
@@ -1021,9 +1072,7 @@ pub(super) fn render_orchestrate_configuration(
                     .join(", ")
             };
             text.push_str(&format!(
-                "\n#### `{}` / `{}`\n\nstart_thread: `{arguments}`; reasoningEffort: {efforts}.\n\n{}\n",
-                provider_name(entry.provider),
-                escape_markdown_inline(&entry.model),
+                "\n#### {title}\n\nstart_thread: `{arguments}`; reasoningEffort: {efforts}.\n\n{}\n",
                 entry.guidance(collaboration).trim()
             ));
         }
@@ -1056,10 +1105,6 @@ pub(super) fn native_provider_named(name: &str) -> Option<ProviderKind> {
         "grok" => Some(ProviderKind::Grok),
         _ => None,
     }
-}
-
-fn model_missing_from_loaded_catalog(catalog: &[agent::ModelSpec], model: &str) -> bool {
-    !catalog.is_empty() && !catalog.iter().any(|spec| spec.id == model)
 }
 
 /// The permission value a subagent starts with: what Settings → Orchestrate child approval
