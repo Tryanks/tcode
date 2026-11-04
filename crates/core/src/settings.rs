@@ -585,8 +585,9 @@ impl OrchestrateSettings {
         self == &Self::default()
     }
 
-    /// A model occurs once per role; loading combines distinct notes within
-    /// each list, patches keep the first row without mutating it. Rows store
+    /// A model occurs once per role and account; loading combines distinct
+    /// notes within each list, patches keep the first row without mutating it.
+    /// `profile_id` is `None` on the built-in profile. Rows store
     /// bundled guidance as an empty description, and an untouched row on the
     /// built-in endpoint tracks its bundled profile, whose model it takes on load.
     fn normalize_models(&mut self, loading: bool) {
@@ -598,6 +599,10 @@ impl OrchestrateSettings {
             let mut unique: Vec<OrchestrateChildModel> = Vec::new();
             for mut entry in std::mem::take(models) {
                 entry.model = entry.model.trim().to_string();
+                entry.profile_id = entry
+                    .profile_id
+                    .take()
+                    .filter(|id| !Settings::is_builtin_profile_id(id));
                 let tracked = entry.bundled.take();
                 let description = entry.description.trim();
                 if description.is_empty()
@@ -618,7 +623,9 @@ impl OrchestrateSettings {
                     entry.model = profile.model.clone();
                 }
                 if let Some(existing) = unique.iter_mut().find(|existing| {
-                    existing.provider == entry.provider && existing.model == entry.model
+                    existing.provider == entry.provider
+                        && existing.model == entry.model
+                        && existing.profile_id == entry.profile_id
                 }) {
                     if loading
                         && !entry.description.is_empty()
@@ -1532,6 +1539,24 @@ impl Settings {
         }
     }
 
+    /// Whether a loaded catalog leaves out a row's model: a slug added to the
+    /// row's own profile is that profile's whatever the provider's catalog says.
+    pub fn orchestrate_model_missing(
+        &self,
+        entry: &OrchestrateChildModel,
+        catalog: &[ModelSpec],
+    ) -> bool {
+        let profile_id = entry
+            .profile_id
+            .as_deref()
+            .unwrap_or_else(|| Self::builtin_profile_id(entry.provider));
+        !catalog.is_empty()
+            && !catalog.iter().any(|spec| spec.id == entry.model)
+            && !self
+                .resolved_profile(profile_id)
+                .is_some_and(|profile| profile.settings.custom_models.contains(&entry.model))
+    }
+
     /// Whether `id` names a built-in provider profile.
     pub fn is_builtin_profile_id(id: &str) -> bool {
         Self::builtin_kind_from_id(id).is_some()
@@ -2239,10 +2264,27 @@ mod tests {
             ]
         }"#;
         let migrated: OrchestrateSettings = serde_json::from_str(old_json).unwrap();
+        let rows: Vec<_> = migrated
+            .child_models
+            .iter()
+            .map(|row| (row.model.as_str(), row.profile_id.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("claude-opus-5", Some("corp")), ("claude-opus-5", None)],
+            "each account's model is its own row"
+        );
+        assert_eq!(migrated.child_models[1].description, "Reviewer only.");
+
+        let same_account = old_json.replace(
+            r#""description": "Reviewer only.""#,
+            r#""profile_id": "corp", "description": "Reviewer only.""#,
+        );
+        let migrated: OrchestrateSettings = serde_json::from_str(&same_account).unwrap();
         assert_eq!(
             migrated.child_models.len(),
             1,
-            "same model merges into one row"
+            "same model on one account merges into one row"
         );
         let opus = &migrated.child_models[0];
         assert_eq!(opus.model, "claude-opus-5");
@@ -2326,22 +2368,43 @@ mod tests {
                 "child_models": [{
                     "provider": "codex", "model": model, "description": text
                 }, {
+                    "provider": "codex", "model": "gpt-6.1-sol",
+                    "enabled": false, "fast": true, "description": "User execution guidance"
+                }]
+            }));
+            let destination = OrchestrateChildModel {
+                provider: ProviderKind::Codex,
+                model: "gpt-6.1-sol".into(),
+                profile_id: None,
+                enabled: false,
+                fast: true,
+                description: "User execution guidance".into(),
+                bundled: None,
+            };
+            assert_eq!(
+                migrated.child_models,
+                std::slice::from_ref(&destination),
+                "{model}: existing destination stays unchanged"
+            );
+            let migrated = orchestrate(serde_json::json!({
+                "decision_models": [],
+                "child_models": [{
+                    "provider": "codex", "model": model, "description": text
+                }, {
                     "provider": "codex", "model": "gpt-6.1-sol", "profile_id": "custom-codex",
                     "enabled": false, "fast": true, "description": "User execution guidance"
                 }]
             }));
             assert_eq!(
                 migrated.child_models,
-                [OrchestrateChildModel {
-                    provider: ProviderKind::Codex,
-                    model: "gpt-6.1-sol".into(),
-                    profile_id: Some("custom-codex".into()),
-                    enabled: false,
-                    fast: true,
-                    description: "User execution guidance".into(),
-                    bundled: None,
-                }],
-                "{model}: existing destination stays unchanged"
+                [
+                    sol.clone(),
+                    OrchestrateChildModel {
+                        profile_id: Some("custom-codex".into()),
+                        ..destination
+                    }
+                ],
+                "{model}: the same model on another account is not its destination"
             );
         }
     }
@@ -2352,20 +2415,26 @@ mod tests {
             "child_models": [
                 {"provider":"codex", "model":"gpt-5.6-sol", "default_effort":"medium", "description":"Routine work", "enabled":false, "profile_id":"custom", "fast":true},
                 {"provider":"codex", "model":"gpt-5.6-sol", "effort":"max", "description":"Difficult bugs"},
+                {"provider":"codex", "model":"gpt-5.6-sol", "effort":"low", "description":"Quick fixes", "profile_id":"custom"},
                 {"provider":"claude_code", "model":"claude-sonnet-5", "effort":"high", "description":persisted("tier_sonnet")},
                 {"provider":"claude_code", "model":"claude-opus-4-8", "effort":"high", "description":persisted("tier_opus")},
                 {"provider":"claude_code", "model":"claude-fable-5", "effort":"high", "description":persisted("tier_fable")}
             ]
         }));
         let defaults = OrchestrateSettings::default();
-        assert_eq!(settings.child_models.len(), 2);
+        assert_eq!(settings.child_models.len(), 3);
         let sol = &settings.child_models[0];
         assert!(sol.description.contains("medium effort: Routine work"));
-        assert!(sol.description.contains("max effort: Difficult bugs"));
+        assert!(sol.description.contains("low effort: Quick fixes"));
         assert!(!sol.enabled);
         assert!(sol.fast);
         assert_eq!(sol.profile_id.as_deref(), Some("custom"));
-        assert_eq!(settings.child_models[1], defaults.child_models[1]);
+        let builtin = &settings.child_models[1];
+        assert_eq!(builtin.model, "gpt-5.6-sol");
+        assert!(builtin.description.contains("max effort: Difficult bugs"));
+        assert!(!builtin.description.contains("Routine work"));
+        assert_eq!(builtin.profile_id, None);
+        assert_eq!(settings.child_models[2], defaults.child_models[1]);
         assert_eq!(settings.decision_models, defaults.decision_models);
         let serialized = serde_json::to_string(&settings).unwrap();
         assert!(!serialized.contains("\"effort\""));
@@ -2420,27 +2489,68 @@ mod tests {
         settings.orchestrate.child_models[0] = executor.clone();
 
         let mut duplicate = executor.clone();
-        duplicate.profile_id = Some("another-endpoint".into());
         duplicate.description = "must not overwrite".into();
+        let another_account = OrchestrateChildModel {
+            profile_id: Some("another-endpoint".into()),
+            description: "Another account".into(),
+            ..executor.clone()
+        };
         let mut children = settings.orchestrate.child_models.clone();
         children.push(duplicate);
+        children.push(another_account.clone());
         settings
             .apply(SettingsPatch::OrchestrateChildModels(children))
             .unwrap();
-        assert_eq!(settings.orchestrate.child_models.len(), 2);
+        assert_eq!(settings.orchestrate.child_models.len(), 3);
         assert_eq!(settings.orchestrate.child_models[0], executor);
+        assert_eq!(settings.orchestrate.child_models[2], another_account);
 
         let mut duplicate = peer.clone();
-        duplicate.profile_id = Some("another-endpoint".into());
         duplicate.description = "must not overwrite".into();
+        let another_account = OrchestrateChildModel {
+            profile_id: Some("another-endpoint".into()),
+            description: "Another account".into(),
+            bundled: None,
+            ..peer.clone()
+        };
         let mut decisions = settings.orchestrate.decision_models.clone();
         decisions.push(duplicate);
+        decisions.push(another_account.clone());
         settings
             .apply(SettingsPatch::OrchestrateDecisionModels(decisions))
             .unwrap();
-        assert_eq!(settings.orchestrate.decision_models.len(), 2);
+        assert_eq!(settings.orchestrate.decision_models.len(), 3);
         assert_eq!(settings.orchestrate.decision_models[0], peer);
+        assert_eq!(settings.orchestrate.decision_models[2], another_account);
         assert_eq!(settings.orchestrate.child_models[0], executor);
+    }
+
+    /// A settings file from before rows were per account, with one model under
+    /// two accounts: the built-in id is the built-in profile's own row.
+    #[test]
+    fn orchestrate_keeps_one_row_per_account_of_a_model() {
+        let settings = orchestrate(serde_json::json!({
+            "decision_models": [],
+            "child_models": [
+                {"provider":"codex", "model":"gpt-6.1-sol", "description":"Built-in"},
+                {"provider":"codex", "model":"gpt-6.1-sol", "profile_id":"codex", "description":"Same"},
+                {"provider":"codex", "model":"gpt-6.1-sol", "profile_id":"second", "description":"Second"},
+                {"provider":"codex", "model":"gpt-6.1-sol", "profile_id":"third", "description":"Third"}
+            ]
+        }));
+        let rows: Vec<_> = settings
+            .child_models
+            .iter()
+            .map(|row| (row.profile_id.as_deref(), row.description.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (None, "Built-in\n\nSame"),
+                (Some("second"), "Second"),
+                (Some("third"), "Third")
+            ]
+        );
     }
 
     /// `favorite_models` as settings stored it before stars named an account:

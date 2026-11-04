@@ -2485,8 +2485,8 @@ fn marketplace_items_are_runtime_owned_views() {
 
 #[test]
 fn orchestrate_guidance_and_current_configuration_are_composed() {
-    let mut settings = OrchestrateSettings::default();
-    settings.child_models[0].fast = true;
+    let mut settings = Settings::default();
+    settings.orchestrate.child_models[0].fast = true;
     let first = compose_orchestrate_text(&settings, "Ship it", None, &HashMap::new());
     assert!(first.starts_with(ORCHESTRATE_GUIDANCE.trim()));
     assert!(first.contains("### Collaboration models"));
@@ -2500,8 +2500,8 @@ fn orchestrate_guidance_and_current_configuration_are_composed() {
         "#### `codex` / `gpt-6.1-sol`\n\nstart_thread: `{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"options\":{\"serviceTier\":\"fast\"}}`; reasoningEffort: `low`, `medium`, `high`, `xhigh`, `max`"
     ));
     assert!(first.ends_with("\n\nShip it"));
-    settings.decision_models[0].enabled = false;
-    settings.child_models.clear();
+    settings.orchestrate.decision_models[0].enabled = false;
+    settings.orchestrate.child_models.clear();
     let follow_up = compose_orchestrate_text(&settings, "Follow up", None, &HashMap::new());
     assert!(follow_up.starts_with(ORCHESTRATE_GUIDANCE.trim()));
     assert!(follow_up.contains("## Current orchestrator configuration"));
@@ -2512,13 +2512,17 @@ fn orchestrate_guidance_and_current_configuration_are_composed() {
 
 #[test]
 fn lead_sees_only_other_peers() {
-    let settings = OrchestrateSettings::default();
+    let settings = Settings::default();
     for (index, name, other_name) in [(0, "Astra", "Fable 5.1"), (1, "Fable 5.1", "Astra")] {
-        let peer = &settings.decision_models[index];
+        let peer = &settings.orchestrate.decision_models[index];
         let composed = compose_orchestrate_text(
             &settings,
             "Discuss the design",
-            Some((peer.provider, Some(peer.model.as_str()))),
+            Some(OrchestrateCaller {
+                provider: peer.provider,
+                profile_id: None,
+                model: Some(peer.model.as_str()),
+            }),
             &HashMap::new(),
         );
         assert!(!composed.contains(&format!("You are {name},")));
@@ -2527,7 +2531,11 @@ fn lead_sees_only_other_peers() {
     let unknown = compose_orchestrate_text(
         &settings,
         "Discuss",
-        Some((ProviderKind::Codex, None)),
+        Some(OrchestrateCaller {
+            provider: ProviderKind::Codex,
+            profile_id: None,
+            model: None,
+        }),
         &HashMap::new(),
     );
     assert!(!unknown.contains("You are Astra,"));
@@ -2536,7 +2544,7 @@ fn lead_sees_only_other_peers() {
 
 #[test]
 fn configuration_lists_live_efforts_instead_of_bundled_fallback() {
-    let settings = OrchestrateSettings::default();
+    let settings = Settings::default();
     let catalogs = HashMap::from([(
         ProviderKind::Codex,
         vec![ModelSpec {
@@ -2569,7 +2577,7 @@ fn configuration_lists_live_efforts_instead_of_bundled_fallback() {
 
 #[test]
 fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
-    let settings = OrchestrateSettings::default();
+    let settings = Settings::default();
     let catalogs = HashMap::from([(
         ProviderKind::Codex,
         vec![ModelSpec {
@@ -2627,6 +2635,68 @@ fn deleting_a_profile_takes_its_stars_with_it() {
             ]
         );
     });
+}
+
+/// One model under two accounts is two rows the lead can tell apart, each
+/// with the arguments that start it on its own account, and the lead's own
+/// row is the only one it does not see as a peer.
+#[test]
+fn configuration_names_each_account_of_a_model() {
+    let spec = |id: &str| ModelSpec {
+        id: id.into(),
+        display_name: id.into(),
+        is_default: false,
+        options: Vec::new(),
+    };
+    let settings: Settings = serde_json::from_value(serde_json::json!({
+        "profiles": {
+            "second-account": {"kind": "codex"},
+            "kimi": {"kind": "codex", "custom_models": ["kimi-k2"]}
+        },
+        "orchestrate": {
+            "decision_models": [
+                {"provider": "codex", "model": "shared-model"},
+                {"provider": "codex", "model": "shared-model", "profile_id": "second-account"},
+            ],
+            "child_models": [
+                {"provider": "codex", "model": "shared-model", "description": "Built-in"},
+                {"provider": "codex", "model": "shared-model", "profile_id": "second-account",
+                 "description": "Second account"},
+                {"provider": "codex", "model": "kimi-k2", "profile_id": "kimi", "description": "Kimi"},
+                {"provider": "codex", "model": "shared-model", "profile_id": "deleted",
+                 "description": "Gone"},
+            ]
+        }
+    }))
+    .unwrap();
+    let catalogs = HashMap::from([(ProviderKind::Codex, vec![spec("shared-model")])]);
+
+    let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
+    let (peers, executors) = configuration.split_once("### Execution models").unwrap();
+    for section in [peers, executors] {
+        assert!(section.contains(
+            "#### `codex` / `shared-model`\n\nstart_thread: `{\"provider\":\"codex\",\"model\":\"shared-model\",\"profile\":\"codex\"}`"
+        ));
+        assert!(section.contains(
+            "#### `codex` / `shared-model` / `second-account`\n\nstart_thread: `{\"provider\":\"codex\",\"model\":\"shared-model\",\"profile\":\"second-account\"}`"
+        ));
+    }
+    assert!(executors.contains(
+        "#### `codex` / `kimi-k2` / `kimi`\n\nstart_thread: `{\"provider\":\"codex\",\"model\":\"kimi-k2\",\"profile\":\"kimi\"}`"
+    ));
+    assert!(executors.contains(
+        "#### `codex` / `shared-model` / `deleted` — unavailable\n\nUnavailable: profile `deleted` no longer exists."
+    ));
+
+    let lead = OrchestrateCaller {
+        provider: ProviderKind::Codex,
+        profile_id: Some("second-account"),
+        model: Some("shared-model"),
+    };
+    let configuration = render_orchestrate_configuration(&settings, Some(lead), &catalogs);
+    let (peers, _) = configuration.split_once("### Execution models").unwrap();
+    assert!(peers.contains("#### `codex` / `shared-model`\n"));
+    assert!(!peers.contains("`second-account`"));
 }
 
 #[test]

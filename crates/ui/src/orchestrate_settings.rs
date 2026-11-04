@@ -190,16 +190,20 @@ impl OrchestrateSettingsPanel {
         self.input_subscriptions.clear();
         self.child_rows.clear();
         let orchestrate = self.store.read(cx).settings().orchestrate;
-        let decision_excluded: Vec<_> = orchestrate
-            .decision_models
-            .iter()
-            .map(|entry| (entry.provider, entry.model.clone()))
-            .collect();
-        let child_excluded: Vec<_> = orchestrate
-            .child_models
-            .iter()
-            .map(|entry| (entry.provider, entry.model.clone()))
-            .collect();
+        let excluded = |models: &[OrchestrateChildModel]| {
+            models
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.provider,
+                        entry.model.clone(),
+                        entry.profile_id.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let decision_excluded = excluded(&orchestrate.decision_models);
+        let child_excluded = excluded(&orchestrate.child_models);
         self.decision_model_picker
             .update(cx, |picker, cx| picker.set_excluded(decision_excluded, cx));
         self.child_model_picker
@@ -271,10 +275,11 @@ impl OrchestrateSettingsPanel {
         } else {
             &settings.child_models
         };
-        if models
-            .iter()
-            .any(|entry| entry.provider == option.provider && entry.model == option.id)
-        {
+        if models.iter().any(|entry| {
+            entry.provider == option.provider
+                && entry.model == option.id
+                && entry.profile_id == option.profile_id
+        }) {
             return;
         }
         let profile = OrchestrateChildModel {
@@ -286,18 +291,7 @@ impl OrchestrateSettingsPanel {
             description: String::new(),
             bundled: None,
         };
-        self.update_models(
-            decision,
-            move |models| {
-                if !models
-                    .iter()
-                    .any(|entry| entry.provider == profile.provider && entry.model == profile.model)
-                {
-                    models.push(profile);
-                }
-            },
-            cx,
-        );
+        self.update_models(decision, move |models| models.push(profile), cx);
     }
 
     fn remove_child(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -774,7 +768,12 @@ impl OrchestrateSettingsPanel {
             .take(count)
             .filter_map(|(index, row)| {
                 let profile = models.get(index)?;
-                let key = format!("{}-{}", provider_label(row.provider), row.model);
+                let key = format!(
+                    "{}-{}-{}",
+                    provider_label(row.provider),
+                    row.model,
+                    row.profile_id.as_deref().unwrap_or_default()
+                );
                 Some((
                     gpui::SharedString::from(key),
                     (index, row.clone(), profile.clone()),
@@ -815,6 +814,7 @@ impl OrchestrateSettingsPanel {
                     }),
                 );
                 crate::material::group_row_stacked(cx)
+                    .debug_selector(|| format!("orchestrate-row-{key}"))
                     .items_stretch()
                     .child(
                         h_flex()
@@ -895,8 +895,11 @@ impl OrchestrateSettingsPanel {
                     )
                     .child({
                         let catalog = self.store.read(cx).provider_model_catalog(provider);
-                        let unavailable =
-                            !catalog.is_empty() && !catalog.iter().any(|spec| spec.id == row.model);
+                        let unavailable = self
+                            .store
+                            .read(cx)
+                            .settings()
+                            .orchestrate_model_missing(profile, &catalog);
                         let choices = orchestrate_efforts(provider, &row.model, &catalog);
                         let efforts = if unavailable {
                             crate::tr!("orchestrate.children.model_unavailable").into_owned()
@@ -1022,10 +1025,11 @@ impl Render for OrchestrateSettingsPanel {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
+    use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
 
     use super::OrchestrateSettingsPanel;
     use crate::store::{WorkspaceAttachment, WorkspaceStore};
+    use crate::test_frames::draw_settled;
 
     fn mount(
         cx: &mut TestAppContext,
@@ -1071,6 +1075,125 @@ mod tests {
             "the description keeps most of the row at 393pt, got {:?}",
             description.size.width
         );
+    }
+
+    /// Each account's model is a row of its own: adding it under a second
+    /// account lists both, and adding it there again changes nothing.
+    #[gpui::test]
+    fn a_model_is_added_once_per_account(cx: &mut TestAppContext) {
+        use agent::ProviderKind;
+        use tcode_core::settings::OrchestrateChildModel;
+
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root("orchestrate-accounts");
+        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+        let host =
+            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
+                .unwrap();
+        let builtin = tcode_core::settings::OrchestrateSettings::default().child_models[0].clone();
+        let catalog = vec![agent::ModelSpec {
+            id: builtin.model.clone(),
+            display_name: builtin.model.clone(),
+            is_default: false,
+            options: Vec::new(),
+        }];
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state
+                .providers
+                .model_catalogs
+                .insert(ProviderKind::Codex, catalog);
+            state.settings.profiles.insert(
+                "second-account".to_owned(),
+                tcode_core::settings::ProviderProfile {
+                    kind: ProviderKind::Codex,
+                    settings: Default::default(),
+                },
+            );
+        }))
+        .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        let mut panel = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
+            panel = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let panel = panel.unwrap();
+        cx.simulate_resize(size(px(1200.), px(2000.)));
+
+        let accounts = |cx: &VisualTestContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .settings()
+                    .orchestrate
+                    .child_models
+                    .into_iter()
+                    .filter(|entry: &OrchestrateChildModel| entry.model == builtin.model)
+                    .map(|entry| entry.profile_id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let open_picker = |cx: &mut VisualTestContext| {
+            let trigger = cx
+                .debug_bounds("orchestrate-add-child")
+                .expect("the add button");
+            cx.simulate_click(trigger.center(), Modifiers::default());
+            draw_settled(cx);
+        };
+        let picker = panel.read_with(cx, |panel, _| panel.child_model_picker.clone());
+        picker.update(cx, |picker, cx| {
+            picker.set_selected(
+                builtin.provider,
+                builtin.model.clone(),
+                Some("second-account".into()),
+                cx,
+            )
+        });
+        draw_settled(cx);
+
+        open_picker(cx);
+        let option = cx
+            .debug_bounds("settings-model-option-0")
+            .expect("the second account still offers the model");
+        cx.simulate_click(option.center(), Modifiers::default());
+        driver.wait_until(cx, &store, "the second account's row", |cx| {
+            store.read_with(cx, |store, _| {
+                store.settings().orchestrate.child_models.len() == 3
+            })
+        });
+        draw_settled(cx);
+        assert_eq!(accounts(cx), [None, Some("second-account".to_owned())]);
+
+        open_picker(cx);
+        assert!(
+            cx.debug_bounds("settings-model-option-0").is_none(),
+            "the row's own account no longer offers it"
+        );
+
+        let row = |profile: &str| {
+            format!(
+                "orchestrate-row-{}-{}-{profile}",
+                crate::settings::provider_label(builtin.provider),
+                builtin.model
+            )
+        };
+        assert!(cx.debug_bounds(row("").leak()).is_some());
+        assert!(cx.debug_bounds(row("second-account").leak()).is_some());
+        driver.shutdown(cx, &store, &host);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui::test]
