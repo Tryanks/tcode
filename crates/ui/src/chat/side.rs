@@ -420,6 +420,16 @@ impl ChatView {
         self.side_of.is_some()
     }
 
+    /// The thread the panes and the right panel know this view by: its own,
+    /// or for an agent beside its lead, the lead's, which stays the focused
+    /// thread while the agent shows.
+    pub(super) fn pane_session(&self) -> Option<String> {
+        match &self.side_of {
+            Some(of) => Some(of.lead_session.clone()),
+            None => self.session_id.clone(),
+        }
+    }
+
     /// The chat an agent opened from what this view draws shows beside its
     /// thread: this view, or for an agent beside its lead, the lead's,
     /// where the agent opened takes its place. None in the compact layout,

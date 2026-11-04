@@ -643,9 +643,12 @@ impl ChatView {
         path: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let Some(session_id) = self.pane_session() else {
+            return;
+        };
         self.workspace_store.update(cx, |store, cx| match path {
-            Some(path) => store.open_diff_for_file(turn, path, cx),
-            None => store.open_diff_for_turn(turn, cx),
+            Some(path) => store.open_diff_for_file(&session_id, turn, path, cx),
+            None => store.open_diff_for_turn(&session_id, turn, cx),
         });
         if self.window_state.read(cx).compact {
             self.window_state

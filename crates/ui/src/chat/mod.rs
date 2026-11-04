@@ -205,6 +205,9 @@ pub struct ChatView {
     side: side::Side,
     /// Set while the view is itself an agent's shown beside its lead.
     side_of: Option<side::SideOf>,
+    /// The press on a panel toggle being released brought this pane's thread
+    /// forward, so what the toggle shows was not on screen to close.
+    toggle_brought_forward: bool,
     /// The Agents sheet's content on phone.
     agents: Entity<crate::agents_panel::AgentsPanel>,
     terminal_was_open: bool,
@@ -480,6 +483,7 @@ impl ChatView {
             body: Default::default(),
             side: side::Side::new(),
             side_of: None,
+            toggle_brought_forward: false,
             list_state,
             timeline_stale: false,
             history_placeholder_height: px(0.),
