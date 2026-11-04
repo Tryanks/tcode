@@ -11,9 +11,9 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
-    HighlightStyle, Hitbox, InspectorElementId, InteractiveText, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout,
-    Window, point, px, quad,
+    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, InteractiveText, IntoElement,
+    LayoutId, MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
+    TextLayout, Window, point, px, quad,
 };
 
 use super::{
@@ -54,6 +54,16 @@ pub(super) struct Inline {
     origin: Option<RunOrigin>,
     /// The part of the text selected, as of prepaint.
     selected: Option<Range<usize>>,
+    /// Each row of each link, as of prepaint.
+    link_rows: Rc<Vec<LinkRow>>,
+}
+
+/// A row of a link: which link, its hitbox over the characters of the link
+/// on the row, and where the link's tooltip is placed beside.
+struct LinkRow {
+    link: usize,
+    hitbox: Hitbox,
+    placement: Bounds<Pixels>,
 }
 
 impl Inline {
@@ -84,6 +94,7 @@ impl Inline {
             text_layout,
             origin: None,
             selected: None,
+            link_rows: Rc::default(),
         }
     }
 
@@ -105,24 +116,45 @@ impl Inline {
         Self::link_and_range_for_position(layout, links, position).map(|(_, link)| link)
     }
 
-    /// Where a link's tooltip is placed: the part of `range` on the line
-    /// holding the character at `at`.
-    fn line_bounds(layout: &TextLayout, range: &Range<usize>, at: usize) -> Bounds<Pixels> {
+    /// The rows `range` is laid out on: on each, where
+    /// [`TextLayout::index_for_position`] finds a character of the range, and
+    /// where its tooltip is placed, which runs on to the text's edge on a row
+    /// the range continues past.
+    fn rows(layout: &TextLayout, range: &Range<usize>) -> Vec<(Bounds<Pixels>, Bounds<Pixels>)> {
         let text = layout.bounds();
-        let Some(here) = layout.position_for_index(at) else {
-            return text;
+        let line_height = layout.line_height();
+        let (Some(start), Some(end)) = (
+            layout.position_for_index(range.start),
+            layout.position_for_index(range.end),
+        ) else {
+            return Vec::new();
         };
-        let on_line = |index| {
-            layout
-                .position_for_index(index)
-                .filter(|position| position.y == here.y)
-        };
-        let left = on_line(range.start).map_or(text.left(), |position| position.x);
-        let right = on_line(range.end).map_or(text.right(), |position| position.x);
-        Bounds::from_corners(
-            point(left, here.y),
-            point(right.max(left), here.y + layout.line_height()),
-        )
+        let last = ((end.y - start.y) / line_height).round().max(0.) as usize;
+        (0..=last)
+            .filter_map(|row| {
+                let top = start.y + line_height * row as f32;
+                let left = if row == 0 { start.x } else { text.left() };
+                let (right, edge) = if row == last {
+                    (end.x, end.x)
+                } else {
+                    // Past a row's end, `index_for_position` finds the index
+                    // the row ends at, which `position_for_index` puts at the
+                    // end of that row.
+                    let ends_at = layout
+                        .index_for_position(point(Pixels::MAX, top + line_height / 2.))
+                        .unwrap_or_else(|ix| ix);
+                    let right = layout
+                        .position_for_index(ends_at)
+                        .map_or(text.right(), |position| position.x);
+                    (right, text.right())
+                };
+                let rect =
+                    |right| Bounds::from_corners(point(left, top), point(right, top + line_height));
+                // A range that starts where a row wraps is placed at the end
+                // of the row above, which holds none of it.
+                (right > left).then(|| (rect(right), rect(edge.max(left))))
+            })
+            .collect()
     }
 
     fn link_and_range_for_position(
@@ -289,6 +321,22 @@ impl Element for Inline {
         let hitbox = self
             .interactive_text
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
+        self.link_rows = Rc::new(
+            self.links
+                .iter()
+                .enumerate()
+                .flat_map(|(link, (range, _))| {
+                    Self::rows(&self.text_layout, range)
+                        .into_iter()
+                        .map(move |row| (link, row))
+                })
+                .map(|(link, (row, placement))| LinkRow {
+                    link,
+                    hitbox: window.insert_hitbox(row, HitboxBehavior::Normal),
+                    placement,
+                })
+                .collect(),
+        );
         let view = self.view.read(cx);
         if let (Some(origin), Some(membership)) = (&self.origin, &view.selection) {
             self.selected = view.selected_range(origin, self.text.len(), cx);
@@ -352,24 +400,22 @@ impl Element for Inline {
         crate::widgets::tooltip::track_parts(
             owner,
             {
-                let hitbox = hitbox.clone();
-                let layout = text_layout.clone();
+                // Asked as the text paints too: through the rows' hover, a
+                // pointer move redraws the text only when it enters or
+                // leaves a link.
+                let rows = self.link_rows.clone();
                 let links = self.links.clone();
                 let view = self.view.clone();
                 move |window, cx| {
-                    if cx.has_active_drag() || !hitbox.is_hovered(window) {
+                    if cx.has_active_drag() {
                         return None;
                     }
-                    let at = layout.index_for_position(window.mouse_position()).ok()?;
-                    let (index, (range, link)) = links
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (range, _))| range.contains(&at))?;
-                    let (view, url) = (view.clone(), link.url.clone());
+                    let row = rows.iter().find(|row| row.hitbox.is_hovered(window))?;
+                    let (view, url) = (view.clone(), links.get(row.link)?.1.url.clone());
                     let build: crate::overlay::TooltipBuilder = Rc::new(move |_, cx| {
                         Tooltip::new(view.read(cx).resolve_link(&url).tooltip_text())
                     });
-                    Some((index, Self::line_bounds(&layout, range, at), build))
+                    Some((row.link, row.placement, build))
                 }
             },
             window,
