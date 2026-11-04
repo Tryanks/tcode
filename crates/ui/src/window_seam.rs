@@ -60,6 +60,57 @@ pub(crate) fn content_insets_gliding(
     cx: &mut App,
 ) -> Edges<Pixels> {
     let target = content_insets(window);
+    glide_insets(id, owner, target, window, cx)
+}
+
+/// [`content_insets_gliding`] for a surface that runs along the window's
+/// `sides`, and is inset from none of the others. A side it starts or stops
+/// running along, as a sidebar beside it collapses or comes back, glides in
+/// or out with the rest.
+pub(crate) fn insets_along(
+    id: &'static str,
+    sides: Edges<bool>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Edges<Pixels> {
+    let seam = content_insets(window);
+    let along = |runs: bool, inset: Pixels| if runs { inset } else { Pixels::ZERO };
+    let target = Edges {
+        top: along(sides.top, seam.top),
+        right: along(sides.right, seam.right),
+        bottom: along(sides.bottom, seam.bottom),
+        left: along(sides.left, seam.left),
+    };
+    glide_insets(id, None, target, window, cx)
+}
+
+/// `surface`, which runs along the window's `sides`, with its content inset
+/// from the seam there: its own background still reaches the window's edges,
+/// under a status bar, a home indicator, a side cutout or a keyboard, so what
+/// the system covers shows the surface it covers, never a band of another
+/// colour.
+pub(crate) fn inset_from_seam<E: gpui::Styled>(
+    surface: E,
+    id: &'static str,
+    sides: Edges<bool>,
+    window: &mut Window,
+    cx: &mut App,
+) -> E {
+    let inset = insets_along(id, sides, window, cx);
+    surface
+        .pt(inset.top)
+        .pb(inset.bottom)
+        .pl(inset.left)
+        .pr(inset.right)
+}
+
+fn glide_insets(
+    id: &'static str,
+    owner: Option<&crate::motion::owned::Owned>,
+    target: Edges<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Edges<Pixels> {
     let clock = crate::motion::Clock::from(owner);
     let mut edge = |name: &'static str, value: Pixels| {
         clock.transition(

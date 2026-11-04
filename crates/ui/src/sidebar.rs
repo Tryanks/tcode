@@ -5517,61 +5517,70 @@ impl Render for SessionsSidebar {
             .min_h_0()
             .into_any_element();
 
-        v_flex()
-            .size_full()
-            .bg(cx.theme().sidebar)
-            .text_color(cx.theme().sidebar_foreground)
-            .on_action(cx.listener(Self::on_link_pull_request))
-            .on_action(cx.listener(Self::on_rename))
-            .on_action(cx.listener(Self::on_regenerate_title))
-            .on_action(cx.listener(Self::on_fork))
-            .on_action(cx.listener(Self::on_merge_worktree))
-            .on_action(cx.listener(Self::on_move_to_project))
-            .on_action(cx.listener(Self::on_mark_unread))
-            .on_action(cx.listener(Self::on_copy_path))
-            .on_action(cx.listener(Self::on_copy_id))
-            .on_action(cx.listener(Self::on_export_jsonl))
-            .on_action(cx.listener(Self::on_export_markdown))
-            .on_action(cx.listener(Self::on_settle))
-            .on_action(cx.listener(Self::on_auto_settle))
-            .on_action(cx.listener(Self::on_follow_up))
-            .on_action(cx.listener(Self::on_park))
-            .on_action(cx.listener(Self::on_make_active))
-            .on_action(cx.listener(Self::on_pin))
-            .on_action(cx.listener(Self::on_unpin))
-            .on_action(cx.listener(Self::on_move))
-            .on_action(cx.listener(Self::on_arrange))
-            .on_action(cx.listener(Self::on_archive))
-            .on_action(cx.listener(Self::on_delete))
-            .on_action(cx.listener(Self::on_project_archive_all))
-            .on_action(cx.listener(Self::on_project_thread_rules))
-            .on_action(cx.listener(Self::on_project_delete))
-            .on_action(cx.listener(Self::on_change_project_icon))
-            .on_action(cx.listener(Self::on_change_project_root))
-            .on_action(cx.listener(Self::on_project_reveal))
-            .on_action(cx.listener(Self::on_filter_project))
-            .on_action(cx.listener(Self::on_start_draft_for_project))
-            .on_action(cx.listener(Self::on_quick_chat))
-            .on_action(cx.listener(Self::on_toggle_share))
-            .on_action(cx.listener(Self::on_new_space_and_share))
-            .child(self.render_app_row(window, cx))
-            .child(self.render_search_row(cx))
-            .child(self.render_machine_control(window, cx))
-            .child(header)
-            .child(self.loading_body(
-                |this, window, cx| {
-                    v_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .child(this.pending_thread_rows(window, cx))
-                        .child(thread_list)
-                        .into_any_element()
-                },
-                window,
-                cx,
-            ))
-            .child(self.render_footer(cx))
-            .into_any_element()
+        // Wide, the sidebar is the window's left column, docked or laid over
+        // the chat, from the window's top to its bottom.
+        crate::window_seam::inset_from_seam(
+            v_flex().size_full().bg(cx.theme().sidebar),
+            "sidebar-seam",
+            gpui::Edges {
+                right: false,
+                ..gpui::Edges::all(true)
+            },
+            window,
+            cx,
+        )
+        .text_color(cx.theme().sidebar_foreground)
+        .on_action(cx.listener(Self::on_link_pull_request))
+        .on_action(cx.listener(Self::on_rename))
+        .on_action(cx.listener(Self::on_regenerate_title))
+        .on_action(cx.listener(Self::on_fork))
+        .on_action(cx.listener(Self::on_merge_worktree))
+        .on_action(cx.listener(Self::on_move_to_project))
+        .on_action(cx.listener(Self::on_mark_unread))
+        .on_action(cx.listener(Self::on_copy_path))
+        .on_action(cx.listener(Self::on_copy_id))
+        .on_action(cx.listener(Self::on_export_jsonl))
+        .on_action(cx.listener(Self::on_export_markdown))
+        .on_action(cx.listener(Self::on_settle))
+        .on_action(cx.listener(Self::on_auto_settle))
+        .on_action(cx.listener(Self::on_follow_up))
+        .on_action(cx.listener(Self::on_park))
+        .on_action(cx.listener(Self::on_make_active))
+        .on_action(cx.listener(Self::on_pin))
+        .on_action(cx.listener(Self::on_unpin))
+        .on_action(cx.listener(Self::on_move))
+        .on_action(cx.listener(Self::on_arrange))
+        .on_action(cx.listener(Self::on_archive))
+        .on_action(cx.listener(Self::on_delete))
+        .on_action(cx.listener(Self::on_project_archive_all))
+        .on_action(cx.listener(Self::on_project_thread_rules))
+        .on_action(cx.listener(Self::on_project_delete))
+        .on_action(cx.listener(Self::on_change_project_icon))
+        .on_action(cx.listener(Self::on_change_project_root))
+        .on_action(cx.listener(Self::on_project_reveal))
+        .on_action(cx.listener(Self::on_filter_project))
+        .on_action(cx.listener(Self::on_start_draft_for_project))
+        .on_action(cx.listener(Self::on_quick_chat))
+        .on_action(cx.listener(Self::on_toggle_share))
+        .on_action(cx.listener(Self::on_new_space_and_share))
+        .child(self.render_app_row(window, cx))
+        .child(self.render_search_row(cx))
+        .child(self.render_machine_control(window, cx))
+        .child(header)
+        .child(self.loading_body(
+            |this, window, cx| {
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(this.pending_thread_rows(window, cx))
+                    .child(thread_list)
+                    .into_any_element()
+            },
+            window,
+            cx,
+        ))
+        .child(self.render_footer(cx))
+        .into_any_element()
     }
 }
 

@@ -1211,15 +1211,28 @@ impl SettingsPage {
                 );
             }
         }
+        // Settings replaces the whole window, so this rail is the window's
+        // left column: it carries the wordmark and clears the platform's
+        // own window controls, exactly as the workspace sidebar does, and
+        // keeps its width beside a side cutout.
+        let seam = crate::window_seam::insets_along(
+            "settings-rail-seam",
+            gpui::Edges {
+                right: false,
+                ..gpui::Edges::all(true)
+            },
+            window,
+            cx,
+        );
         v_flex()
             .flex_none()
-            .w(px(NAV_WIDTH))
+            .w(px(NAV_WIDTH) + seam.left)
             .h_full()
+            .pt(seam.top)
+            .pb(seam.bottom)
+            .pl(seam.left)
             .opacity(self.rail_opacity)
             .bg(cx.theme().sidebar)
-            // Settings replaces the whole window, so this rail is the window's
-            // left column: it carries the wordmark and clears the platform's
-            // own window controls, exactly as the workspace sidebar does.
             .child(
                 window_drag_area(
                     "settings-nav-drag",
@@ -3092,14 +3105,23 @@ impl Render for SettingsPage {
             .text_color(cx.theme().foreground)
             .child(self.render_nav(window, cx))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .bg(crate::material::content_surface(cx))
-                    .shadow_sm()
-                    .child(self.render_header(window, cx))
-                    .child(self.render_content(window, cx)),
+                crate::window_seam::inset_from_seam(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .bg(crate::material::content_surface(cx))
+                        .shadow_sm(),
+                    "settings-content-seam",
+                    gpui::Edges {
+                        left: false,
+                        ..gpui::Edges::all(true)
+                    },
+                    window,
+                    cx,
+                )
+                .child(self.render_header(window, cx))
+                .child(self.render_content(window, cx)),
             )
             .into_any_element()
     }
