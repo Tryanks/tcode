@@ -161,6 +161,15 @@ mod jni_exports {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeThermalStatus(
+        _env: EnvUnowned<'_>,
+        _activity: JObject<'_>,
+        status: jint,
+    ) {
+        gpui_android::jni_thermal_status(status);
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeFirstFrameRendered(
         _env: EnvUnowned,
         _activity: JObject,

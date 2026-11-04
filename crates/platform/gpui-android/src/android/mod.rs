@@ -22,6 +22,7 @@ pub use host::{
     input_state as jni_input_state, key_event as jni_key_event, on_back as jni_on_back,
     on_insets as jni_on_insets, refresh_rate as jni_refresh_rate,
     scroll_capture as jni_scroll_capture, set_composing_text as jni_set_composing_text,
+    thermal_status as jni_thermal_status,
 };
 
 /// Installs the observer for the system screenshot tool's scrolling capture.

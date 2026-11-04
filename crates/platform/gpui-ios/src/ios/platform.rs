@@ -11,7 +11,7 @@ use gpui::{
     PlatformWindow, Task, ThermalState, WindowAppearance, WindowParams,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ffi::OsString,
     path::{Path, PathBuf},
     rc::Rc,
@@ -23,6 +23,7 @@ pub(crate) struct IosPlatform {
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
+    thermal_state: Cell<ThermalState>,
     state: RefCell<IosPlatformState>,
 }
 
@@ -48,6 +49,7 @@ impl IosPlatform {
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system: Arc::new(IosTextSystem::new()),
+            thermal_state: Cell::new(ThermalState::Nominal),
             state: RefCell::new(IosPlatformState::default()),
         }
     }
@@ -85,6 +87,19 @@ impl IosPlatform {
         }
         if self.state.borrow().on_memory_warning.is_none() {
             self.state.borrow_mut().on_memory_warning = callback;
+        }
+    }
+
+    pub(crate) fn update_thermal_state(&self, thermal_state: ThermalState) {
+        if self.thermal_state.replace(thermal_state) == thermal_state {
+            return;
+        }
+        let mut callback = self.state.borrow_mut().on_thermal_state_change.take();
+        if let Some(callback) = callback.as_mut() {
+            callback();
+        }
+        if self.state.borrow().on_thermal_state_change.is_none() {
+            self.state.borrow_mut().on_thermal_state_change = callback;
         }
     }
 
@@ -285,7 +300,7 @@ impl Platform for IosPlatform {
     fn on_validate_app_menu_command(&self, _callback: Box<dyn FnMut(&dyn Action) -> bool>) {}
 
     fn thermal_state(&self) -> ThermalState {
-        ThermalState::Nominal
+        self.thermal_state.get()
     }
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {

@@ -58,10 +58,26 @@ final class GPUIHostViewController: UIViewController {
 
         started = true
         gpui_ios_init()
+        Self.reportThermalState()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(thermalStateChanged),
+            name: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil
+        )
         tcode_ios_start()
 
         updateScreen()
         wakeFrames()
+    }
+
+    // Posted on an arbitrary thread; GPUI reads the state on the main thread.
+    @objc private func thermalStateChanged() {
+        DispatchQueue.main.async { Self.reportThermalState() }
+    }
+
+    private static func reportThermalState() {
+        gpui_ios_thermal_state_changed(UInt8(ProcessInfo.processInfo.thermalState.rawValue))
     }
 
     func updateScreen() {
