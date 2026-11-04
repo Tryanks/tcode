@@ -1,9 +1,10 @@
 //! Streamed text lights up in reading order: the rendered text an append
 //! adds is cut into words (CJK characters) in document order, across every
-//! paragraph, list item, cell and code line it touches, and each word starts
-//! fading in no earlier than the one before it, on one timeline that carries
-//! over from one append to the next. An append too large to have been
-//! written while the reader watched fades in as one document instead.
+//! paragraph, list item, cell and code line it touches, and the words start
+//! fading in one after another at the pace of what is still waiting: word by
+//! word for a few, faster the more wait. The word the reveal has reached is
+//! its frontier, which the chat timeline's tail follows, so the reveal and
+//! the scroll are one motion.
 //!
 //! gpui-base fades streamed text only inside its own `TextView`
 //! (`TextViewMotion::stream_fade`): its tracker is private to that view and
@@ -24,14 +25,17 @@ use gpui::HighlightStyle;
 
 use super::nodes::BlockNode;
 
-/// The step between consecutive words of one append.
+/// The step between consecutive words, while few wait.
 const STEP: Duration = Duration::from_millis(28);
 
-/// How far ahead of now the timeline may run. Past it the step shrinks, down
-/// to [`MIN_STEP`], so a burst sweeps in quickly instead of queueing
-/// invisible text, and still in order.
-const BUDGET: Duration = Duration::from_millis(320);
-const MIN_STEP: Duration = Duration::from_millis(4);
+/// Past the few that one [`STEP`] each suits, what waits drains by this time
+/// constant: a sustained stream runs this far behind what arrived, and a
+/// block slows into the word-by-word pace as it ends.
+const DRAIN: Duration = Duration::from_millis(160);
+
+/// The most words that may wait. Those before them start at once: no reader
+/// follows them, and this bounds any block's reveal at about a second.
+const MAX_BACKLOG: f32 = 1000.;
 
 /// A word reaches most of its opacity quickly and the rest slowly: legible
 /// at once, while a batch of words arriving together never flashes in.
@@ -40,72 +44,95 @@ const WORD_SETTLE: Duration = Duration::from_millis(560);
 const WORD_QUICK_SHARE: f32 = 0.7;
 
 /// An append adding more rendered characters than this was not written
-/// while the reader watched (a provider delivering whole blocks, a stall
-/// catching up): it fades in as one document, together with the height
-/// glide of the row that holds it, rather than sweeping in line by line.
+/// while the reader watched: a provider delivering whole blocks, a stall
+/// catching up.
 const ONE_SHOT_CHARS: usize = 512;
-const DOCUMENT: Duration = Duration::from_millis(320);
 
 /// A text leaf: the render path of a paragraph, heading or table cell, or of
 /// a code block with the line in it -- the place selection runs name.
 type LeafKey = (Vec<u32>, u32);
 
+/// A byte offset in a leaf.
+type LeafPlace = (LeafKey, usize);
+
 /// Byte ranges of a run with the [`HighlightStyle::fade_out`] each paints
 /// with this frame: `1.0` transparent, `0.0` at full colour.
 pub(super) type Fades = Vec<(Range<usize>, f32)>;
 
-#[derive(Clone, Copy, PartialEq)]
-enum Curve {
-    Word,
-    Document,
+/// How far into its fade a word that started `elapsed` ago is, 0 to 1.
+fn opacity(elapsed: Duration) -> f32 {
+    let progress = |over: Duration| (elapsed.as_secs_f32() / over.as_secs_f32()).min(1.);
+    let ease = gpui_base::animation::ease_out_cubic;
+    WORD_QUICK_SHARE * ease(progress(WORD_QUICK))
+        + (1. - WORD_QUICK_SHARE) * ease(progress(WORD_SETTLE))
 }
 
-impl Curve {
-    fn duration(self) -> Duration {
-        match self {
-            Curve::Word => WORD_SETTLE,
-            Curve::Document => DOCUMENT,
-        }
-    }
+/// The words at which draining by [`DRAIN`] has slowed to one [`STEP`] a word.
+const DRAIN_FLOOR: f32 = DRAIN.as_secs_f32() / STEP.as_secs_f32();
 
-    /// The opacity `elapsed` into the fade, 0 to 1.
-    fn opacity(self, elapsed: Duration) -> f32 {
-        let progress = |over: Duration| (elapsed.as_secs_f32() / over.as_secs_f32()).min(1.);
-        match self {
-            Curve::Word => {
-                let ease = gpui_base::animation::ease_out_cubic;
-                WORD_QUICK_SHARE * ease(progress(WORD_QUICK))
-                    + (1. - WORD_QUICK_SHARE) * ease(progress(WORD_SETTLE))
-            }
-            Curve::Document => gpui_base::animation::ease_in_out_cubic(progress(DOCUMENT)),
-        }
+/// How long `backlog` words take to start.
+fn time_to_drain(backlog: f32) -> f32 {
+    if backlog <= DRAIN_FLOOR {
+        backlog * STEP.as_secs_f32()
+    } else {
+        DRAIN.as_secs_f32() * (1. + (backlog / DRAIN_FLOOR).ln())
+    }
+}
+
+/// The words left with `time` to go: [`time_to_drain`]'s inverse.
+fn backlog_after(time: f32) -> f32 {
+    if time <= DRAIN.as_secs_f32() {
+        time.max(0.) / STEP.as_secs_f32()
+    } else {
+        DRAIN_FLOOR * (time / DRAIN.as_secs_f32() - 1.).exp()
     }
 }
 
 struct Segment {
     range: Range<usize>,
-    start: Instant,
-    curve: Curve,
+    /// Its place in reading order among every word ever scheduled.
+    order: u64,
+    start: Option<Instant>,
 }
 
 /// Which rendered text arrived recently, so its fade can be sampled.
 #[derive(Default)]
 pub(super) struct StreamFade {
     leaves: Vec<(LeafKey, Vec<Segment>)>,
-    /// When the word after the last one scheduled may start.
-    next_start: Option<Instant>,
+    /// The next word's place in reading order.
+    scheduled: u64,
+    /// The words yet to start, as of `paced_at`. A fraction is the part of
+    /// a step already waited.
+    backlog: f32,
+    paced_at: Option<Instant>,
 }
 
 impl StreamFade {
     /// Forget every fade: the text is shown as it is.
     pub(super) fn clear(&mut self) {
         self.leaves.clear();
-        self.next_start = None;
+        self.backlog = 0.;
+        self.paced_at = None;
+    }
+
+    /// When the last word waiting starts, while any waits.
+    pub(super) fn drains_at(&self) -> Option<Instant> {
+        let paced_at = self.paced_at.filter(|_| self.backlog > 0.)?;
+        Some(paced_at + Duration::from_secs_f32(time_to_drain(self.backlog)))
+    }
+
+    /// Bring the backlog up to `now`.
+    fn pace(&mut self, now: Instant) {
+        if let Some(paced_at) = self.paced_at {
+            let elapsed = now.saturating_duration_since(paced_at).as_secs_f32();
+            self.backlog = backlog_after(time_to_drain(self.backlog) - elapsed);
+        }
+        self.paced_at = Some(now);
     }
 
     /// Schedule what root blocks `new` render that `old` did not, both
-    /// starting at root block `first_block`. Whether the append was one
-    /// document, which fades in whole.
+    /// starting at root block `first_block`. Whether the append was too
+    /// large to have been written while the reader watched.
     ///
     /// Per leaf, the text up to the length it had before is already shown,
     /// even where a re-parse rewrote it (`**bo` becoming bold `bo`): only
@@ -161,81 +188,82 @@ impl StreamFade {
         if added == 0 {
             return false;
         }
-        let document = added > ONE_SHOT_CHARS;
         let units: Vec<(usize, Range<usize>)> = current
             .iter()
             .zip(&shown)
             .enumerate()
             .filter(|(_, ((_, text), shown))| **shown < text.len())
             .flat_map(|(ix, ((_, text), shown))| {
-                let units = if document {
-                    std::iter::once(*shown..text.len()).collect()
-                } else {
-                    fade_units(text, *shown, text.len())
-                };
-                units.into_iter().map(move |range| (ix, range))
+                fade_units(text, *shown, text.len())
+                    .into_iter()
+                    .map(move |range| (ix, range))
             })
             .collect();
 
-        let count = units.len() as u32;
-        let budget_end = now + BUDGET;
-        let first = self
-            .next_start
-            .map_or(now, |at| at.max(now))
-            .min(budget_end);
-        let step = if document || count < 2 {
-            Duration::ZERO
-        } else if first + STEP * (count - 1) > budget_end {
-            (budget_end.saturating_duration_since(first) / (count - 1)).max(MIN_STEP)
-        } else {
-            STEP
-        };
-        let curve = if document {
-            Curve::Document
-        } else {
-            Curve::Word
-        };
-        for (position, (ix, range)) in units.into_iter().enumerate() {
+        self.pace(now);
+        self.backlog = (self.backlog + units.len() as f32).min(MAX_BACKLOG);
+        for (ix, range) in units {
             let key = &current[ix].0;
             let segment = Segment {
                 range,
-                start: first + step * position as u32,
-                curve,
+                order: self.scheduled,
+                start: None,
             };
+            self.scheduled += 1;
             match self.leaves.iter_mut().find(|(leaf, _)| leaf == key) {
                 Some((_, segments)) => segments.push(segment),
                 None => self.leaves.push((key.clone(), vec![segment])),
             }
         }
-        self.next_start = Some(first + step * count);
-        document
+        added > ONE_SHOT_CHARS
     }
 
-    /// Sample every unfinished fade at `now`, dropping the finished ones.
-    /// `None` when nothing fades, so no frame needs to follow.
+    /// Sample every unfinished fade at `now`, starting the words the pace
+    /// has reached and dropping the finished ones. `None` when nothing
+    /// fades, so no frame needs to follow.
     pub(super) fn frame(&mut self, now: Instant, reduce_motion: bool) -> Option<Rc<FadeFrame>> {
-        if reduce_motion {
+        if reduce_motion || self.leaves.is_empty() {
             self.clear();
-        }
-        if self.leaves.is_empty() {
-            self.next_start = None;
             return None;
         }
+        self.pace(now);
+        let (scheduled, backlog) = (self.scheduled, self.backlog);
         let mut leaves = Vec::with_capacity(self.leaves.len());
+        let mut reached: Option<(u64, LeafPlace)> = None;
+        let mut waiting: Option<(u64, LeafPlace)> = None;
         self.leaves.retain_mut(|(key, segments)| {
             let mut fades = Vec::with_capacity(segments.len());
-            segments.retain(|segment| {
-                let Some(elapsed) = now.checked_duration_since(segment.start) else {
+            let mut leaf_reached = None;
+            let mut leaf_waiting = None;
+            segments.retain_mut(|segment| {
+                // A word starts once no more wait than itself and those after it.
+                if segment.start.is_none() && (scheduled - segment.order) as f32 >= backlog {
+                    segment.start = Some(now);
+                }
+                let place = (segment.order, segment.range.start);
+                let Some(start) = segment.start else {
+                    leaf_waiting = leaf_waiting.min(Some(place)).or(Some(place));
                     fades.push((segment.range.clone(), 1.));
                     return true;
                 };
-                if elapsed >= segment.curve.duration() {
+                leaf_reached = leaf_reached.max(Some(place));
+                let elapsed = now.saturating_duration_since(start);
+                if elapsed >= WORD_SETTLE {
                     return false;
                 }
-                let opacity = segment.curve.opacity(elapsed);
-                fades.push((segment.range.clone(), (1. - opacity).clamp(0., 1.)));
+                fades.push((segment.range.clone(), (1. - opacity(elapsed)).clamp(0., 1.)));
                 true
             });
+            if let Some((order, offset)) = leaf_reached
+                && reached.as_ref().is_none_or(|(last, _)| order > *last)
+            {
+                reached = Some((order, (key.clone(), offset)));
+            }
+            if let Some((order, offset)) = leaf_waiting
+                && waiting.as_ref().is_none_or(|(first, _)| order < *first)
+            {
+                waiting = Some((order, (key.clone(), offset)));
+            }
             if fades.is_empty() {
                 return false;
             }
@@ -243,16 +271,26 @@ impl StreamFade {
             leaves.push((key.clone(), fades));
             true
         });
-        (!leaves.is_empty()).then(|| Rc::new(FadeFrame { leaves }))
+        let frontier = waiting.map(|(_, first)| reached.map_or(first, |(_, last)| last));
+        (!leaves.is_empty()).then(|| Rc::new(FadeFrame { leaves, frontier }))
     }
 }
 
 /// One frame's fades, sampled once per render of the document.
 pub(super) struct FadeFrame {
     leaves: Vec<(LeafKey, Fades)>,
+    /// While words wait, the place of the last one that started.
+    frontier: Option<LeafPlace>,
 }
 
 impl FadeFrame {
+    /// While words wait, the render path, line and byte offset of the last
+    /// one that started.
+    pub(super) fn frontier(&self) -> Option<(&[u32], u32, usize)> {
+        let ((path, line), offset) = self.frontier.as_ref()?;
+        Some((path, *line, *offset))
+    }
+
     /// The fades of the run of `len` bytes at `base` in leaf `path`, `line`,
     /// in the run's own bytes.
     pub(super) fn run(&self, path: &[u32], line: u32, base: usize, len: usize) -> Fades {

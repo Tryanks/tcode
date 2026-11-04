@@ -561,8 +561,8 @@ pub(super) struct Env<'a> {
     /// Swaps snap: motion is reduced, or the document draws for the first
     /// time.
     pub(super) still: bool,
-    /// The latest append was not watched arriving word by word: it appears
-    /// at once, or fades in as one document.
+    /// The latest append was not watched arriving word by word: what it
+    /// completes appears at once.
     pub(super) burst: bool,
     /// The fences a reader switched to their source.
     pub(super) sources: &'a HashSet<String>,

@@ -322,6 +322,7 @@ impl Element for MarkdownView {
     ) -> Self::PrepaintState {
         request_layout.0.read(cx).begin_frame();
         request_layout.1.prepaint(window, cx);
+        request_layout.0.read(cx).measure_unrevealed();
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         if let Some(membership) = &request_layout.0.read(cx).selection {
             membership.document.read(cx).register_participant(
