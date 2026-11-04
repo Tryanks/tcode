@@ -702,7 +702,7 @@ pub extern "C" fn gpui_ios_select_text(range: TextRange) {
     };
     with_window(|window| {
         window.input_activity();
-        window.with_input_handler(|handler| text_input::select_text(handler, range));
+        window.with_input_handler(|handler| handler.set_selected_text_range(range));
     });
 }
 
@@ -772,7 +772,7 @@ pub extern "C" fn gpui_ios_move_caret_toward(x: f64, y: f64) {
             };
             let target = point(px(x as f32), px(y as f32));
             if let Some(offset) = text_input::caret_toward(handler, head, target) {
-                text_input::select_text(handler, offset..offset);
+                handler.set_selected_text_range(offset..offset);
             }
         });
     });
