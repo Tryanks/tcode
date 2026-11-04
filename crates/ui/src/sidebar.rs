@@ -91,9 +91,65 @@ fn thread_list_toggle_label(total: usize, expanded: bool) -> Option<Cow<'static,
 pub(crate) struct ShownThreads {
     pub(crate) current: Option<String>,
     pub(crate) shown: Vec<String>,
+    /// The column's panes, in the layout's order, with two or more on screen.
+    pub(crate) map: PaneMap,
+}
+
+pub(crate) type PaneMap = Rc<[MapCell]>;
+
+/// A pane of the column.
+#[derive(Clone, PartialEq)]
+pub(crate) struct MapCell {
+    pub(crate) pane: gpui::EntityId,
+    /// The row of its thread; a pane waiting for one has none.
+    pub(crate) row: Option<String>,
+    /// Where it lies, as a share of the column.
+    pub(crate) rect: gpui::Bounds<f32>,
+}
+
+impl MapCell {
+    /// Where the pane lies, in a reader's words.
+    fn place(&self) -> Cow<'static, str> {
+        use std::cmp::Ordering;
+        /// Whether `start..start + length` of the column lies toward its
+        /// start, toward its end, or neither; `None` when it runs its whole
+        /// length.
+        fn side(start: f32, length: f32) -> Option<Ordering> {
+            let centre = start + length / 2.;
+            (length < 0.8).then_some(match centre {
+                centre if centre < 0.4 => Ordering::Less,
+                centre if centre > 0.6 => Ordering::Greater,
+                _ => Ordering::Equal,
+            })
+        }
+        let across = side(self.rect.origin.x, self.rect.size.width);
+        let down = side(self.rect.origin.y, self.rect.size.height);
+        match (across, down) {
+            (Some(Ordering::Less), Some(Ordering::Less)) => crate::tr!("panes.place_top_left"),
+            (Some(Ordering::Greater), Some(Ordering::Less)) => crate::tr!("panes.place_top_right"),
+            (Some(Ordering::Less), Some(Ordering::Greater)) => {
+                crate::tr!("panes.place_bottom_left")
+            }
+            (Some(Ordering::Greater), Some(Ordering::Greater)) => {
+                crate::tr!("panes.place_bottom_right")
+            }
+            (Some(Ordering::Less), _) => crate::tr!("panes.place_left"),
+            (Some(Ordering::Greater), _) => crate::tr!("panes.place_right"),
+            (_, Some(Ordering::Less)) => crate::tr!("panes.place_top"),
+            (_, Some(Ordering::Greater)) => crate::tr!("panes.place_bottom"),
+            _ => crate::tr!("panes.place_middle"),
+        }
+    }
 }
 
 impl ShownThreads {
+    /// The panes showing `row`'s thread.
+    fn cells(&self, row: &str) -> impl Iterator<Item = &MapCell> {
+        self.map
+            .iter()
+            .filter(move |cell| cell.row.as_deref() == Some(row))
+    }
+
     fn light(&self, row: &str) -> RowLight {
         if self.current.as_deref() == Some(row) {
             RowLight::Current
@@ -118,6 +174,13 @@ const ROW_GAP: gpui::Pixels = px(6.);
 /// How far the selected fill comes in on a row shown but not current, as
 /// macOS unemphasizes a selection the keyboard is away from.
 const SHOWN_FILL: f32 = 0.5;
+/// The layout glyph: a row's map of the panes, as wide as tall as the column
+/// tends to be.
+const GLYPH_WIDTH: f32 = 14.;
+const GLYPH_HEIGHT: f32 = 12.;
+/// How far the glyph's slot reaches into the row's gaps around it: it stands
+/// empty on most rows, and takes that from the title.
+const GLYPH_OVERLAP: f32 = 2.;
 
 /// Each flat slot: the desktop two-line row and the 2pt gap reserved below it.
 const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(false) + 2.;
@@ -2799,6 +2862,74 @@ impl SessionsSidebar {
         }
     }
 
+    /// The thread whose row the pointer is over.
+    pub(crate) fn hovered_thread(&self) -> Option<SharedString> {
+        let row = self.hover.hovered()?;
+        let thread = row
+            .strip_prefix("flat-thread-")
+            .or_else(|| row.strip_prefix("thread-"))?;
+        Some(thread.to_owned().into())
+    }
+
+    /// The trailing slot of the map of the panes, on a row whose thread one
+    /// shows: the column's panes in a tiny grid, each laid out as it lies,
+    /// those showing this thread filled. The slot is always there, so the
+    /// glyph coming and going moves nothing on the row.
+    fn pane_glyph(&self, row: &str, window: &mut Window, cx: &mut App) -> gpui::Div {
+        let map = self.shown.cells(row).next().map(|_| self.shown.map.clone());
+        let id = SharedString::from(format!("pane-glyph-{row}"));
+        let glyph = crate::motion::shown(id.clone(), map, SHOW, window, cx).map(|shown| {
+            let theme = cx.theme();
+            let (filled, other) = (
+                theme.sidebar_foreground,
+                theme.muted_foreground.opacity(0.35),
+            );
+            let cells = shown.value.iter().map(|cell| {
+                let fill = transition(
+                    (id.clone(), format!("cell-{}", cell.pane.as_u64())),
+                    if cell.row.as_deref() == Some(row) {
+                        filled
+                    } else {
+                        other
+                    },
+                    gpui_base::motion::Transition::new(GLIDE),
+                    window,
+                    cx,
+                );
+                // Each edge on a half point, a half point in from the grid
+                // line, so neighbours stay apart at any share of the column.
+                let edge = |share: f32, length: f32| (share * length * 2.).round() / 2.;
+                let rect = cell.rect;
+                let left = edge(rect.origin.x, GLYPH_WIDTH) + 0.5;
+                let right = edge(rect.origin.x + rect.size.width, GLYPH_WIDTH) - 0.5;
+                let top = edge(rect.origin.y, GLYPH_HEIGHT) + 0.5;
+                let bottom = edge(rect.origin.y + rect.size.height, GLYPH_HEIGHT) - 0.5;
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px((right - left).max(0.)))
+                    .h(px((bottom - top).max(0.)))
+                    .rounded(px(1.))
+                    .bg(fill)
+            });
+            shown.fade(
+                div()
+                    .relative()
+                    .size_full()
+                    .children(cells.collect::<Vec<_>>()),
+            )
+        });
+        let row = row.to_owned();
+        div()
+            .flex_none()
+            .mx(px(-GLYPH_OVERLAP))
+            .w(px(GLYPH_WIDTH))
+            .h(px(GLYPH_HEIGHT))
+            .debug_selector(move || format!("pane-glyph-{row}"))
+            .children(glyph)
+    }
+
     /// The row of the current pane's thread.
     fn current_row(&self, cx: &App) -> Option<String> {
         let thread = crate::shell::current_thread(cx)?;
@@ -2831,34 +2962,43 @@ impl SessionsSidebar {
             window,
             cx,
         );
-        let row = crate::material::accessible_clickable(
-            base.bg(fill),
-            row_id,
-            Role::Button,
-            crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
-            cx,
-        )
-        .text_body(false, cx)
-        .aria_selected(light == RowLight::Current)
-        .debug_selector({
-            let id = meta.id.clone();
-            move || format!("sidebar-thread-{id}")
-        })
-        .cursor_pointer()
-        .on_click(
-            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                let session_id = session_id.clone();
-                if event.modifiers().alt && !this.compact(cx) {
-                    window.dispatch_action(Box::new(crate::panes::OpenInNewPane(session_id)), cx);
-                    return;
-                }
-                this.compact_model_dirty = true;
-                this.store.update(cx, |store, cx| {
-                    store.show_thread(session_id.clone(), cx);
-                });
-                cx.notify();
-            }),
-        );
+        let places: Vec<_> = self.shown.cells(&meta.id).map(MapCell::place).collect();
+        let label = if places.is_empty() {
+            crate::tr!("sidebar.thread", title = meta.title.clone())
+        } else {
+            crate::tr!(
+                "sidebar.thread_in_pane",
+                title = meta.title.clone(),
+                place = places.join(", ")
+            )
+        }
+        .into_owned();
+        let row =
+            crate::material::accessible_clickable(base.bg(fill), row_id, Role::Button, label, cx)
+                .text_body(false, cx)
+                .aria_selected(light == RowLight::Current)
+                .debug_selector({
+                    let id = meta.id.clone();
+                    move || format!("sidebar-thread-{id}")
+                })
+                .cursor_pointer()
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        let session_id = session_id.clone();
+                        if event.modifiers().alt && !this.compact(cx) {
+                            window.dispatch_action(
+                                Box::new(crate::panes::OpenInNewPane(session_id)),
+                                cx,
+                            );
+                            return;
+                        }
+                        this.compact_model_dirty = true;
+                        this.store.update(cx, |store, cx| {
+                            store.show_thread(session_id.clone(), cx);
+                        });
+                        cx.notify();
+                    }),
+                );
         let row = self.track_hover(row, &state.row_key);
         let row = match self
             .dragged_thread(meta, state, cx)
@@ -3419,6 +3559,7 @@ impl SessionsSidebar {
                     window,
                     cx,
                 ))
+                .child(self.pane_glyph(&meta.id, window, cx))
                 // The time narrows away while the thread works, giving the
                 // title its width gradually, and widens back after.
                 .when_some(
@@ -3616,6 +3757,7 @@ impl SessionsSidebar {
                 .when(!renaming, |line| {
                     line.children(Self::follow_up_glyph(meta, window, cx))
                         .children(self.pin_glyph(meta, &row_key, window, cx))
+                        .child(self.pane_glyph(&meta.id, window, cx))
                         .child(self.render_flat_thread_right_slot(
                             meta,
                             &row_key,
@@ -5402,6 +5544,34 @@ mod tests {
     use tcode_core::project::Project;
     use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
+
+    /// A row's label tells a screen reader where its pane lies. The test
+    /// window has no accessibility tree to read the label from.
+    #[test]
+    fn a_pane_reads_as_where_it_lies() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let place = |left, top, width, height| {
+            MapCell {
+                pane: gpui::EntityId::from(1),
+                row: None,
+                rect: gpui::bounds(gpui::point(left, top), gpui::size(width, height)),
+            }
+            .place()
+            .into_owned()
+        };
+        for (rect, words) in [
+            ((0., 0., 0.5, 1.), "left"),
+            ((0.5, 0., 0.5, 1.), "right"),
+            ((0., 0., 1., 0.5), "top"),
+            ((0., 0.5, 1., 0.5), "bottom"),
+            ((0.5, 0., 0.5, 0.5), "top right"),
+            ((0., 0.5, 0.5, 0.5), "bottom left"),
+            ((1. / 3., 0., 1. / 3., 1.), "middle"),
+            ((2. / 3., 0.5, 1. / 3., 0.5), "bottom right"),
+        ] {
+            assert_eq!(place(rect.0, rect.1, rect.2, rect.3), words, "{rect:?}");
+        }
+    }
 
     struct WorkingThreadRowProbe;
 

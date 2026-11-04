@@ -124,6 +124,18 @@ impl ListHover {
         hover
     }
 
+    /// The item kept hovered, or else the one the pointer is over.
+    pub(crate) fn hovered(&self) -> Option<SharedString> {
+        let hover = self.hover();
+        hover
+            .held
+            .iter()
+            .find(|(_, hold)| hold.strong_count() > 0)
+            .map(|(item, _)| item)
+            .or(hover.hovered.as_ref().map(|(item, _)| item))
+            .cloned()
+    }
+
     /// The handler for the `on_hover` of `item`, or of one of its parts: the
     /// item takes the list's hover as the pointer comes in, and gives it up
     /// once it has left the item and all its parts. Only one item holds the

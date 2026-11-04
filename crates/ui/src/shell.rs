@@ -1278,6 +1278,10 @@ impl AppShell {
                 {
                     this.drop_thread(session_id.to_owned(), *target, window, cx);
                 }
+                // The threads list draws a map of the panes.
+                if matches!(event, DockEvent::LayoutChanged) {
+                    cx.notify();
+                }
             },
         ));
         self.attachment = Some(ShellAttachment {
@@ -2694,6 +2698,15 @@ impl AppShell {
             });
         }
         let shown = self.shown_threads(cx);
+        let hovered = attachment.sidebar.read(cx).hovered_thread();
+        for pane in attachment.panes(cx) {
+            let hovered = shown.map.iter().any(|cell| {
+                cell.pane == pane.entity_id()
+                    && hovered.is_some()
+                    && cell.row.as_deref() == hovered.as_deref()
+            });
+            pane.update(cx, |pane, cx| pane.set_row_hovered(hovered, cx));
+        }
         attachment
             .sidebar
             .update(cx, |sidebar, cx| sidebar.set_shown(shown, cx));
@@ -2722,9 +2735,40 @@ impl AppShell {
             Some(zoomed) => vec![zoomed.clone()],
             None => attachment.panes(cx),
         };
+        let column = gpui::Bounds::new(gpui::Point::default(), {
+            attachment.thread_panes.read(cx).bounds().size
+        });
+        let mut rects = Vec::new();
+        if let Some(tree) = attachment.final_layout(cx).filter(|_| panes.len() > 1) {
+            crate::panes::pane_rects(tree.root(), column, &mut rects);
+        }
+        let share = |of: Pixels, whole: Pixels| of / whole.max(px(1.));
+        let map = rects
+            .into_iter()
+            .filter_map(|(panel, rect)| {
+                let pane = panes
+                    .iter()
+                    .find(|pane| PanelId::from(pane.entity_id()) == panel)?;
+                Some(crate::sidebar::MapCell {
+                    pane: pane.entity_id(),
+                    row: row(pane),
+                    rect: gpui::bounds(
+                        gpui::point(
+                            share(rect.left(), column.size.width),
+                            share(rect.top(), column.size.height),
+                        ),
+                        gpui::size(
+                            share(rect.size.width, column.size.width),
+                            share(rect.size.height, column.size.height),
+                        ),
+                    ),
+                })
+            })
+            .collect();
         crate::sidebar::ShownThreads {
             current: row(&attachment.current_pane),
             shown: panes.iter().filter_map(row).collect(),
+            map,
         }
     }
 }
@@ -8541,7 +8585,7 @@ pub(crate) mod tests {
                     let bounds = quad.bounds;
                     gpui::Bounds::new(
                         gpui::point(px(bounds.origin.x.0 / scale), px(bounds.origin.y.0 / scale)),
-                        size(
+                        gpui::size(
                             px(bounds.size.width.0 / scale),
                             px(bounds.size.height.0 / scale),
                         ),
@@ -12154,6 +12198,163 @@ pub(crate) mod tests {
             [Some("thread-1".into()), Some("thread-3".into())]
         );
         assert_eq!(pane_bounds(&shell, cx), shown);
+    }
+
+    /// Each quad of the row's layout glyph, where it lies in the glyph as a
+    /// share of it, and whether it is filled.
+    fn glyph_cells(row: &str, cx: &mut VisualTestContext) -> Vec<(gpui::Point<f32>, bool)> {
+        let selector: &'static str = format!("pane-glyph-{row}").leak();
+        let glyph = cx.debug_bounds(selector).expect("the row's glyph slot");
+        cx.update(|window, cx| {
+            let scale = window.scale_factor();
+            let filled = cx.theme().sidebar_foreground;
+            let bounds = glyph.scale(scale);
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| {
+                    bounds.contains(&quad.bounds.origin)
+                        && quad.bounds.size.width.0 < bounds.size.width.0
+                })
+                .map(|quad| {
+                    let centre = quad.bounds.center() - bounds.origin;
+                    (
+                        gpui::point(
+                            centre.x.0 / bounds.size.width.0,
+                            centre.y.0 / bounds.size.height.0,
+                        ),
+                        quad.background.as_solid() == Some(filled),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// `pane`'s centre, as a share of the column the `panes` make up.
+    fn share_of_column(
+        pane: gpui::Bounds<Pixels>,
+        panes: &[gpui::Bounds<Pixels>],
+    ) -> gpui::Point<f32> {
+        let column = panes
+            .iter()
+            .copied()
+            .reduce(|all, pane| all.union(&pane))
+            .expect("a pane");
+        let centre = pane.center() - column.origin;
+        gpui::point(centre.x / column.size.width, centre.y / column.size.height)
+    }
+
+    /// With two or more panes, a shown thread's row carries a map of them
+    /// with its own pane filled, wherever the layout puts that pane, and its
+    /// slot stands where it stood with one pane: nothing on the row moves.
+    #[gpui::test]
+    fn a_rows_glyph_maps_the_column_and_fills_its_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let slot = cx.debug_bounds("pane-glyph-thread-1").expect("the slot");
+        assert_eq!(glyph_cells("thread-1", cx), [], "a lone pane has no map");
+
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        settle_panes(cx);
+        assert_eq!(cx.debug_bounds("pane-glyph-thread-1"), Some(slot));
+        let filled_at = |row: &str, pane: usize, cx: &mut VisualTestContext| {
+            let panes = pane_bounds(&shell, cx);
+            let cells = glyph_cells(row, cx);
+            assert_eq!(cells.len(), panes.len(), "{row}: {cells:?}");
+            let filled: Vec<_> = cells.iter().filter(|(_, filled)| *filled).collect();
+            let [(cell, _)] = filled[..] else {
+                panic!("{row}: one cell filled: {cells:?}");
+            };
+            let wanted = share_of_column(panes[pane], &panes);
+            assert!(
+                (cell.x - wanted.x).abs() < 0.1 && (cell.y - wanted.y).abs() < 0.1,
+                "{row}: filled at {cell:?}, its pane at {wanted:?}"
+            );
+        };
+        filled_at("thread-1", 0, cx);
+        filled_at("thread-2", 1, cx);
+
+        // The threads trade panes, and the glyphs follow.
+        cx.simulate_keystrokes("secondary-alt-shift-left");
+        settle_panes(cx);
+        filled_at("thread-1", 1, cx);
+        filled_at("thread-2", 0, cx);
+
+        // A split under the right pane cuts its cell in two.
+        cx.simulate_keystrokes("secondary-shift-d");
+        settle_panes(cx);
+        answer_draft(&shell, &host, "draft-1", cx);
+        settle_panes(cx);
+        assert_eq!(pane_bounds(&shell, cx).len(), 3);
+        filled_at("thread-1", 1, cx);
+        filled_at("thread-2", 0, cx);
+
+        // A zoomed pane is the column alone.
+        cx.update(|window, cx| window.dispatch_action(Box::new(crate::panes::ZoomPane), cx));
+        settle_panes(cx);
+        assert_eq!(glyph_cells("thread-1", cx), []);
+    }
+
+    /// Hovering a row softly fills the pane showing its thread, fading in and
+    /// out; a row with no pane there, or one alone in the column, fills
+    /// nothing.
+    #[gpui::test]
+    fn hovering_a_row_softly_fills_its_pane(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let none = gpui::Modifiers::default();
+        let row = cx
+            .debug_bounds("sidebar-thread-thread-1")
+            .expect("the thread's row");
+        let hovered = |cx: &mut VisualTestContext| {
+            let fill = cx.debug_bounds("pane-row-hovered")?;
+            cx.update(|window, cx| {
+                let active = cx.theme().list_active;
+                let fill = fill.scale(window.scale_factor());
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|quad| quad.bounds == fill)
+                    .filter_map(|quad| quad.background.as_solid())
+                    .find(|colour| (colour.h, colour.s, colour.l) == (active.h, active.s, active.l))
+                    .map(|colour| colour.a)
+            })
+        };
+        cx.simulate_mouse_move(row.center(), None, none);
+        settle_panes(cx);
+        assert_eq!(hovered(cx), None, "a lone pane");
+        cx.simulate_mouse_move(gpui::point(px(1.), px(1.)), None, none);
+        settle_panes(cx);
+
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+        let panes = pane_bounds(&shell, cx);
+        let row = cx
+            .debug_bounds("sidebar-thread-thread-1")
+            .expect("the thread's row");
+        cx.simulate_mouse_move(gpui::point(px(1.), px(1.)), None, none);
+        settle_panes(cx);
+        assert_eq!(hovered(cx), None, "the pointer is on no row");
+
+        cx.simulate_mouse_move(row.center(), None, none);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let rest = cx.update(|_, cx| cx.theme().list_active.a * 0.6);
+        let coming = hovered(cx).expect("fading in");
+        assert!(0. < coming && coming < rest, "{coming} of {rest}");
+        let fill = cx.debug_bounds("pane-row-hovered").expect("the fill");
+        assert_eq!(fill, panes[0], "over the left pane alone");
+        settle_panes(cx);
+        assert_eq!(hovered(cx), Some(rest));
+
+        cx.simulate_mouse_move(gpui::point(px(1.), px(1.)), None, none);
+        draw(cx);
+        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
+        draw(cx);
+        let going = hovered(cx).expect("fading out");
+        assert!(0. < going && going < rest, "{going} of {rest}");
+        settle_panes(cx);
+        assert_eq!(hovered(cx), None);
     }
 
     /// Among several panes each pane's header ends with its close button,
