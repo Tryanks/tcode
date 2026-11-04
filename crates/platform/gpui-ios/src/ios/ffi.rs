@@ -800,9 +800,9 @@ pub extern "C" fn gpui_ios_open_url_received(bytes: *const u8, length: usize) {
 pub extern "C" fn gpui_ios_paste_text(bytes: *const u8, length: usize) {
     if let Some(text) = utf8(bytes, length) {
         with_window(|window| {
+            window.input_activity();
             window
                 .with_input_handler(|handler| handler.paste(gpui::ClipboardItem::new_string(text)));
-            window.schedule_forced_frame();
         });
     }
 }
