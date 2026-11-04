@@ -954,8 +954,10 @@ outbox until Ack, including across reconnects, attachment changes and client
 relaunch. Native clients atomically replace an `outbox-<encoded machine id>.json`
 file beside `hosts.json`, with private file permissions; browsers use the
 origin's `tcode.outbox.<machine id>` localStorage entry. Clearing client data
-clears these pending writes. An admission storage error is a real failure, not a
-successful send.
+clears these pending writes. A write goes on the wire only once it is saved, so a
+write that cannot be saved is a real failure, not a successful send. Terminal
+input and the terminal drawer's height are not retained: they are sent as they
+happen, held in memory across a reconnect, and never saved for a relaunch.
 
 After hello and subscription replay, every unacknowledged write is sent in queue
 order without waiting for the previous Ack; the stream and the host preserve that

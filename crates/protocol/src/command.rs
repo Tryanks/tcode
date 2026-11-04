@@ -731,10 +731,17 @@ impl Command {
     /// pull request action must not have it. All other variants are retained
     /// writes, including settings assignments: repeating an old assignment
     /// after a newer one would undo user intent.
+    ///
+    /// Terminal input (keys, pastes, mouse and focus reports) and the drawer
+    /// height are a live stream, not retained: bytes typed for whatever the
+    /// terminal showed then are wrong to replay into it after a relaunch, and
+    /// a burst of them would evict pending messages from the bounded outbox.
     pub fn requires_delivery_key(&self) -> bool {
         !matches!(
             self,
-            Self::ResizeTerminal { .. }
+            Self::TerminalInput { .. }
+                | Self::SetTerminalHeight { .. }
+                | Self::ResizeTerminal { .. }
                 | Self::PreviewReply { .. }
                 | Self::ShutdownAllAndFlush
                 | Self::OpenLatestSession
