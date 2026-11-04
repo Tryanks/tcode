@@ -8578,7 +8578,7 @@ pub(crate) mod tests {
         });
         driver.command(cx, &workspace, Command::ClearRelaunchMarker);
         update_host!(&host, |state, _cx| {
-            state.acp_registry = Some(
+            *state.acp_registry = Some(
                 serde_json::from_value(serde_json::json!({
                     "agents": [{
                         "id": "replicated-agent",

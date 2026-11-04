@@ -1052,20 +1052,13 @@ impl AppState {
             .insert(round, VersionCheckRound::default());
         for provider in ProviderKind::NATIVE {
             let binary = self.resolve_provider_binary(provider);
-            let status = self
-                .providers
-                .provider_versions
-                .entry(provider)
-                .or_default();
+            let providers = &mut *self.providers;
+            let status = providers.provider_versions.entry(provider).or_default();
             if status.checking || status.updating {
                 continue;
             }
             status.checking = true;
-            self.providers
-                .version_rounds
-                .get_mut(&round)
-                .unwrap()
-                .pending += 1;
+            providers.version_rounds.get_mut(&round).unwrap().pending += 1;
             let revision = status.revision;
             let program = binary
                 .as_ref()
@@ -1839,14 +1832,14 @@ mod provider_lifecycle_tests {
         let test_store = TestStore::new("tcode-usage-secret-race");
         let state = cx.new_entity(TestClientState::new((*test_store).clone()));
         state.update(cx, |state, cx| {
-            std::mem::swap(&mut state.providers, &mut catalog);
+            std::mem::swap(&mut *state.providers, &mut catalog);
             state.set_profile_secret(
                 "claude",
                 "CLAUDE_CODE_OAUTH_TOKEN",
                 Some("fixture-replacement"),
                 cx,
             );
-            std::mem::swap(&mut state.providers, &mut catalog);
+            std::mem::swap(&mut *state.providers, &mut catalog);
         });
         assert!(!catalog.provider_usage.contains_key("claude"));
         catalog.usage_checking.insert("claude".into());

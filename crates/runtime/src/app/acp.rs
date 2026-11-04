@@ -15,7 +15,7 @@ impl AppState {
             let cached_registry = host_cx.unblock(move || cached(&cache_dir)).await;
             host_cx.enqueue(move |state, _cx| {
                 if state.acp_registry_loading && state.acp_registry.is_none() {
-                    state.acp_registry = cached_registry;
+                    *state.acp_registry = cached_registry;
                 }
             });
             let result = host_cx.unblock(move || load(&data_dir)).await;
@@ -23,7 +23,7 @@ impl AppState {
                 state.acp_registry_loading = false;
                 match result {
                     Ok(registry) => {
-                        state.acp_registry = Some(registry);
+                        *state.acp_registry = Some(registry);
                         state.acp_registry_error = None;
                     }
                     Err(err) => {

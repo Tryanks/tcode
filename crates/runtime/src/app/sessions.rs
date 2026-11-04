@@ -20,8 +20,8 @@ pub struct SettleEffects {
 /// Sessions viewed by clients and sessions retained for in-flight work or re-adoption.
 #[derive(Default)]
 pub struct ResidentSessions {
-    pub live: Revisioned<HashMap<String, ActiveSession>>,
-    pub(super) parked: Revisioned<HashMap<String, ActiveSession>>,
+    pub live: RevisionedMap<ActiveSession>,
+    pub(super) parked: RevisionedMap<ActiveSession>,
 }
 impl ResidentSessions {
     pub(crate) fn resident(&self, id: &str) -> Option<&ActiveSession> {
@@ -44,6 +44,12 @@ impl ResidentSessions {
             .keys()
             .chain(self.parked.keys())
             .map(String::as_str)
+    }
+    /// Residents borrowed one at a time at or after `revision`.
+    pub(super) fn touched_since(&self, revision: u64) -> impl Iterator<Item = &str> {
+        self.live
+            .touched_since(revision)
+            .chain(self.parked.touched_since(revision))
     }
 }
 
