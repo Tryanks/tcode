@@ -20,7 +20,6 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
@@ -227,9 +226,6 @@ pub struct Composer {
     image_load_generation: u64,
     /// Reserved strip slots for image jobs that have not completed yet.
     pending_image_loads: usize,
-    /// One cancellable one-second repaint loop, present only while the queue
-    /// strip contains at least one scheduled row.
-    scheduled_countdown_tick: Option<Task<()>>,
     queued_refill: Option<(String, u64, String)>,
     queue_drag: Option<components::queue_strip::QueueDrag>,
     queue_scroll: gpui::ScrollHandle,
@@ -491,7 +487,6 @@ impl Composer {
             images_session: None,
             image_load_generation: 0,
             pending_image_loads: 0,
-            scheduled_countdown_tick: None,
             queued_refill: None,
             queue_drag: None,
             queue_scroll: gpui::ScrollHandle::new(),
@@ -2209,6 +2204,7 @@ fn column_fold<T>(shown: &crate::motion::Shown<T>, panel: impl IntoElement) -> A
 mod replica_tests {
     use super::*;
     use gpui::{Modifiers, TestAppContext};
+    use std::time::Duration;
     use tcode_protocol::{
         EventEnvelope, HostMessage, ServerEvent, SessionStatus, Topic, encode_line,
     };

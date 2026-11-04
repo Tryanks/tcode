@@ -11,10 +11,6 @@ use crate::motion::drag_ghost;
 use crate::scroll::ScrollableElement as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, SharedString, WeakEntity};
-#[cfg(not(target_family = "wasm"))]
-use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(target_family = "wasm")]
-use web_time::{SystemTime, UNIX_EPOCH};
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -228,23 +224,6 @@ impl Composer {
             Some((queue, queued)) => (queue.can_steer, queue.agent, queued),
             None => (false, "", Vec::new()),
         };
-        let has_scheduled = queued
-            .iter()
-            .any(|message| message.fire_at_unix_secs.is_some());
-        if has_scheduled && self.scheduled_countdown_tick.is_none() {
-            self.scheduled_countdown_tick = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            }));
-        } else if !has_scheduled {
-            // Dropping the task cancels its timer, so at most one repaint loop
-            // exists and it stops as soon as the last scheduled row disappears.
-            self.scheduled_countdown_tick = None;
-        }
         let shown = self.motion.shown(
             self.motion_key("queue-strip"),
             (!queued.is_empty()).then_some(()),
@@ -341,11 +320,11 @@ impl Composer {
                 crate::tr!("composer.steer_unsupported_tooltip", agent = agent).into_owned()
             };
             let countdown = message.fire_at_unix_secs.map(|fire_at| {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                crate::time::format_countdown(fire_at.saturating_sub(now))
+                crate::widgets::clock::Clock::until(
+                    ("queued-countdown", id as usize),
+                    fire_at,
+                    |left| crate::time::format_countdown(left / 1000).into(),
+                )
             });
             let row = h_flex()
                 .id(("queued-row", id as usize))
