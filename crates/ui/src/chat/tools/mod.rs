@@ -1041,7 +1041,6 @@ pub(in crate::chat) fn code_section(
                 source.to_owned().into(),
                 SharedString::new(language),
                 &theme,
-                || None,
             )
         });
         let cx = ctx.app();
@@ -1058,7 +1057,7 @@ pub(in crate::chat) fn code_section(
             .text_color(theme.foreground)
             .child(
                 gpui::StyledText::new(highlighted.source().clone())
-                    .with_highlights(highlighted.runs.iter().cloned()),
+                    .with_highlights(highlighted.runs().cloned()),
             )
     });
     v_flex()

@@ -23,7 +23,7 @@ use web_time::Instant;
 
 use gpui::HighlightStyle;
 
-use super::nodes::BlockNode;
+use super::nodes::{BlockNode, SegmentKind};
 
 /// The step between consecutive words, while few wait.
 const STEP: Duration = Duration::from_millis(28);
@@ -145,8 +145,12 @@ impl StreamFade {
         first_block: usize,
         now: Instant,
     ) -> bool {
-        let previous: HashMap<LeafKey, String> = leaf_texts(old, first_block).into_iter().collect();
-        let current = leaf_texts(new, first_block);
+        // A code line both hold as it was adds nothing and keeps its fades:
+        // a long block streaming in is compared, not copied, up to its end.
+        let same = same_code_lines(old, new, first_block);
+        let previous: HashMap<LeafKey, String> =
+            leaf_texts(old, first_block, &same).into_iter().collect();
+        let current = leaf_texts(new, first_block, &same);
         let shown: Vec<usize> = current
             .iter()
             .map(|(key, text)| {
@@ -166,7 +170,7 @@ impl StreamFade {
         // A leaf that is gone describes nothing on screen; one that changed
         // keeps its fades over the text it still has.
         self.leaves.retain_mut(|(key, segments)| {
-            if (key.0[0] as usize) < first_block {
+            if (key.0[0] as usize) < first_block || is_same(&same, key) {
                 return true;
             }
             let Some(text) = texts.get(key) else {
@@ -371,15 +375,90 @@ pub(super) fn surround_opacity(fades: &[(Range<usize>, f32)], len: usize) -> f32
 }
 
 /// The rendered text of every leaf of `blocks`, root blocks from
-/// `first_block`, in reading order.
-fn leaf_texts(blocks: &[BlockNode], first_block: usize) -> Vec<(LeafKey, String)> {
+/// `first_block`, in reading order, but for the code lines in `same`.
+fn leaf_texts(
+    blocks: &[BlockNode],
+    first_block: usize,
+    same: &[(Vec<u32>, u32)],
+) -> Vec<(LeafKey, String)> {
     let mut texts = Vec::new();
     for (offset, block) in blocks.iter().enumerate() {
-        block.for_each_segment_at(first_block + offset, &mut |path, line, text, _| {
+        block.for_each_segment_at(first_block + offset, &mut |path, line, text, kind| {
+            if kind == SegmentKind::Code && is_same_line(same, path, line) {
+                return;
+            }
             texts.push(((path.to_vec(), line), text.to_string()));
         });
     }
     texts
+}
+
+/// For each code block `old` and `new` both hold at one render path, root
+/// blocks from `first_block`, its path and how many of its first lines they
+/// hold alike.
+fn same_code_lines(
+    old: &[BlockNode],
+    new: &[BlockNode],
+    first_block: usize,
+) -> Vec<(Vec<u32>, u32)> {
+    fn children(node: &BlockNode) -> Option<&[BlockNode]> {
+        match node {
+            BlockNode::Root { children }
+            | BlockNode::Blockquote { children }
+            | BlockNode::List { children, .. }
+            | BlockNode::ListItem { children, .. } => Some(children),
+            _ => None,
+        }
+    }
+    fn walk(
+        old: &BlockNode,
+        new: &BlockNode,
+        path: &mut Vec<u32>,
+        same: &mut Vec<(Vec<u32>, u32)>,
+    ) {
+        match (old, new) {
+            // A formula's leaf is its glyphs, not its lines.
+            (BlockNode::CodeBlock(old), BlockNode::CodeBlock(new))
+                if old.formula.text().is_none() && new.formula.text().is_none() =>
+            {
+                let (old, new) = (old.prepared(), new.prepared());
+                let lines = (0..old.lines.len().min(new.lines.len()))
+                    .take_while(|&ix| old.line(ix) == new.line(ix))
+                    .count();
+                if lines > 0 {
+                    same.push((path.clone(), lines as u32));
+                }
+            }
+            _ => {
+                if let (Some(old), Some(new)) = (children(old), children(new)) {
+                    for (ix, (old, new)) in old.iter().zip(new).enumerate() {
+                        path.push(ix as u32);
+                        walk(old, new, path, same);
+                        path.pop();
+                    }
+                }
+            }
+        }
+    }
+    let mut same = Vec::new();
+    for (offset, (old, new)) in old.iter().zip(new).enumerate() {
+        walk(
+            old,
+            new,
+            &mut vec![(first_block + offset) as u32],
+            &mut same,
+        );
+    }
+    same
+}
+
+fn is_same_line(same: &[(Vec<u32>, u32)], path: &[u32], line: u32) -> bool {
+    same.iter()
+        .any(|(at, lines)| line < *lines && at.as_slice() == path)
+}
+
+fn is_same(same: &[(Vec<u32>, u32)], (path, line): &LeafKey) -> bool {
+    is_same_line(same, path, *line)
 }
 
 /// `ix`, or the char boundary of `text` before it.

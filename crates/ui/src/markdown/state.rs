@@ -573,7 +573,10 @@ impl MarkdownState {
                 .min(old_block_count.saturating_sub(1));
             self.root_block_starts = parsed_document.root_starts;
             let old_suffix = old_blocks.split_off(unchanged);
-            (tail_children, unchanged, old_suffix)
+            // The blocks that parsed alike stay, with what they prepared.
+            let mut blocks = old_blocks;
+            blocks.extend(tail_children.into_iter().skip(unchanged));
+            (blocks, unchanged, old_suffix)
         } else {
             let old_prefix_count = old_blocks.len() - 1;
             let old_suffix = old_blocks.split_off(old_prefix_count);
@@ -1107,6 +1110,44 @@ mod tests {
         let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new(&text, cx));
         cx.update(|window, cx| _ = window.draw(cx));
         (view, cx)
+    }
+
+    /// A code block streaming in fades in what each append adds and
+    /// nothing it held already, however long the block: the rest of a line
+    /// being written, then the lines after it.
+    #[gpui::test]
+    fn a_streaming_code_block_fades_in_only_what_an_append_adds(cx: &mut TestAppContext) {
+        let (view, cx) = open("", cx);
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+        markdown.update(cx, |state, cx| state.set_streaming(true, cx));
+        let faded = |line: u32, cx: &mut VisualTestContext| {
+            let origin = RunOrigin::new(Rc::from([0u32])).line(line);
+            markdown.read_with(cx, |state, _| state.fades(&origin, 64))
+        };
+        let lines = (0..40)
+            .map(|ix| format!("let line_{ix} = {ix};\n"))
+            .collect::<String>();
+        markdown.update(cx, |state, cx| {
+            state.push_str(&format!("```rust\n{lines}let parti"), cx)
+        });
+        crate::test_frames::draw_settled(cx);
+
+        markdown.update(cx, |state, cx| {
+            state.push_str("al = 1;\nlet next = 2;\n", cx)
+        });
+        crate::test_frames::draw(cx);
+        for line in 0..40 {
+            assert_eq!(faded(line, cx), Vec::new(), "line {line} faded again");
+        }
+        let partial = faded(40, cx);
+        assert!(
+            partial
+                .iter()
+                .all(|(range, _)| range.start >= "let parti".len()),
+            "the part of the line shown before faded again: {partial:?}"
+        );
+        assert!(!partial.is_empty(), "the rest of the line fades in");
+        assert!(!faded(41, cx).is_empty(), "the line after it fades in");
     }
 
     #[gpui::test]

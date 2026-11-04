@@ -335,9 +335,19 @@ fn push_merged(
 static POISONED_SYNTAXES: LazyLock<Mutex<HashSet<&'static str>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+type Run = (Range<usize>, HighlightStyle);
+
+/// Runs a highlighting resumed from another copies at most; past this many,
+/// those before the last one, which never change again, are frozen into a
+/// chunk every later extension shares.
+const FROZEN_CHUNK: usize = 1024;
+
 #[derive(Debug)]
 pub(crate) struct HighlightedSource {
-    pub(crate) runs: Vec<(Range<usize>, HighlightStyle)>,
+    /// The runs in order: chunks shared with the highlightings this one was
+    /// resumed from, then its own.
+    frozen: Vec<Arc<[Run]>>,
+    tail: Vec<Run>,
     source: gpui::SharedString,
     language: gpui::SharedString,
     theme: HighlightTheme,
@@ -349,7 +359,9 @@ struct HighlightCheckpoint {
     offset: usize,
     parse: ParseState,
     scopes: ScopeStack,
-    runs_len: usize,
+    /// The runs of `tail` before `offset`; at least one whenever runs are
+    /// frozen, so the run a resume may shorten is never in a shared chunk.
+    tail_len: usize,
     last_run_end: usize,
 }
 
@@ -368,20 +380,17 @@ thread_local! {
             |key, value| {
                 key.source.len()
                     + key.language.len()
-                    + value.runs.capacity() * std::mem::size_of::<(Range<usize>, HighlightStyle)>()
+                    + value.run_count() * std::mem::size_of::<Run>()
             },
         ));
 }
 
 /// `source` highlighted as `language`, shared by every view that draws the
-/// same text in the same theme while it is among the most recent. On a miss,
-/// `previous` may give the highlighting of a text this one extends, which is
-/// resumed rather than started over.
+/// same text in the same theme while it is among the most recent.
 pub(crate) fn highlighted(
     source: SharedString,
     language: SharedString,
     theme: &HighlightTheme,
-    previous: impl FnOnce() -> Option<Arc<HighlightedSource>>,
 ) -> Arc<HighlightedSource> {
     let key = HighlightKey {
         source,
@@ -394,7 +403,7 @@ pub(crate) fn highlighted(
                 key.source,
                 key.language,
                 theme,
-                previous().as_deref(),
+                None,
             ))
         })
     })
@@ -403,6 +412,46 @@ pub(crate) fn highlighted(
 impl HighlightedSource {
     pub(crate) fn source(&self) -> &SharedString {
         &self.source
+    }
+
+    /// Every run, in order.
+    pub(crate) fn runs(&self) -> impl Iterator<Item = &Run> {
+        self.frozen
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .chain(&self.tail)
+    }
+
+    fn run_count(&self) -> usize {
+        self.frozen.iter().map(|chunk| chunk.len()).sum::<usize>() + self.tail.len()
+    }
+
+    /// The runs over bytes `start..end`, cut to them and counted from `start`.
+    pub(crate) fn runs_between(&self, start: usize, end: usize) -> Vec<Run> {
+        let mut runs = Vec::new();
+        for chunk in self
+            .frozen
+            .iter()
+            .map(|chunk| &chunk[..])
+            .chain([&self.tail[..]])
+        {
+            if chunk.last().is_none_or(|(range, _)| range.end <= start) {
+                continue;
+            }
+            if chunk[0].0.start >= end {
+                break;
+            }
+            // Runs are ordered and disjoint.
+            let first = chunk.partition_point(|(range, _)| range.end <= start);
+            let last = chunk.partition_point(|(range, _)| range.start < end);
+            runs.extend(chunk[first..last].iter().map(|(range, style)| {
+                (
+                    range.start.max(start) - start..range.end.min(end) - start,
+                    *style,
+                )
+            }));
+        }
+        runs
     }
 
     pub(crate) fn new(
@@ -422,9 +471,11 @@ impl HighlightedSource {
         let parsed = highlight_safely(&language, |syntax| {
             highlight_from(&source, syntax, theme, previous)
         });
-        let (runs, checkpoint) = parsed.unwrap_or_else(|| (plain_runs(&source), None));
+        let (frozen, tail, checkpoint) =
+            parsed.unwrap_or_else(|| (Vec::new(), plain_runs(&source), None));
         Self {
-            runs,
+            frozen,
+            tail,
             source,
             language,
             theme: theme.clone(),
@@ -483,7 +534,7 @@ fn highlight_with_syntect(
     syntax: &SyntaxReference,
     theme: &HighlightTheme,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    highlight_from(src, syntax, theme, None).0
+    highlight_from(src, syntax, theme, None).1
 }
 
 fn highlight_from(
@@ -491,26 +542,34 @@ fn highlight_from(
     syntax: &SyntaxReference,
     theme: &HighlightTheme,
     previous: Option<&HighlightedSource>,
-) -> (
-    Vec<(Range<usize>, HighlightStyle)>,
-    Option<HighlightCheckpoint>,
-) {
+) -> (Vec<Arc<[Run]>>, Vec<Run>, Option<HighlightCheckpoint>) {
     let saved = previous.and_then(|old| old.checkpoint.as_ref());
     let mut parse_state =
         saved.map_or_else(|| ParseState::new(syntax), |saved| saved.parse.clone());
     let mut scope_stack = saved.map_or_else(ScopeStack::new, |saved| saved.scopes.clone());
-    let mut runs = match (previous, saved) {
+    let (frozen, mut runs) = match (previous, saved) {
         (Some(old), Some(saved)) => {
-            let mut runs = old.runs[..saved.runs_len].to_vec();
+            let mut frozen = old.frozen.clone();
+            let mut runs = old.tail[..saved.tail_len].to_vec();
             if let Some((range, _)) = runs.last_mut() {
                 range.end = saved.last_run_end;
             }
-            runs
+            if runs.len() > FROZEN_CHUNK {
+                let last = runs.split_off(runs.len() - 1);
+                frozen.push(runs.into());
+                runs = last;
+            }
+            (frozen, runs)
         }
-        _ => Vec::new(),
+        _ => (Vec::new(), Vec::new()),
     };
     let mut line_start = saved.map_or(0, |saved| saved.offset);
-    let mut checkpoint = saved.cloned();
+    // A source that ends where the last one was saved has no line to save a
+    // checkpoint at; it keeps that one, over its own runs.
+    let mut checkpoint = saved.cloned().map(|saved| HighlightCheckpoint {
+        tail_len: runs.len(),
+        ..saved
+    });
 
     for line in LinesWithEndings::from(&src[line_start..]) {
         let parse_checkpoint = parse_state.clone();
@@ -522,7 +581,7 @@ fn highlight_from(
                 offset: line_start,
                 parse: parse_checkpoint.clone(),
                 scopes: stack_checkpoint.clone(),
-                runs_len: runs.len(),
+                tail_len: runs.len(),
                 last_run_end: runs.last().map_or(0, |(range, _)| range.end),
             });
         }
@@ -573,7 +632,7 @@ fn highlight_from(
         line_start += line.len();
     }
 
-    (runs, checkpoint)
+    (frozen, runs, checkpoint)
 }
 
 #[cfg(test)]
@@ -675,6 +734,41 @@ mod tests {
         let runs = highlight_with_syntect(src, syntax, &HighlightTheme::default_dark());
         assert!(!runs.is_empty());
         assert!(runs.iter().all(|(range, _)| range.end <= src.len()));
+    }
+
+    /// A code block streaming in is highlighted again on every append,
+    /// resumed from the highlighting before; it must end coloured exactly as
+    /// the block highlighted whole. A block also loses a line it was writing:
+    /// a closing fence's first backticks are code until the fence completes.
+    #[test]
+    fn a_source_highlighted_as_it_grows_ends_as_it_highlights_whole() {
+        let line = "    let 名称: Vec<u32> = vec![1, 2, 3]; // a \"comment\"\n";
+        let source = format!("fn main() {{\n{}}}\n", line.repeat(400));
+        let theme = HighlightTheme::default_dark();
+        // Before streaming: a panic resuming would turn Rust off for good.
+        let whole = highlight_source(&source, "rust", &theme);
+        let highlight = |end: usize, previous: Option<&HighlightedSource>| {
+            HighlightedSource::new(
+                source[..end].to_string().into(),
+                "rust".into(),
+                &theme,
+                previous,
+            )
+        };
+        let mut streamed = highlight(0, None);
+        let mut end = 0;
+        while end < source.len() {
+            end = (end + 37).min(source.len());
+            while !source.is_char_boundary(end) {
+                end += 1;
+            }
+            streamed = highlight(end, Some(&streamed));
+            let line_start = source[..end].rfind('\n').map_or(0, |ix| ix + 1);
+            if line_start < end {
+                streamed = highlight(line_start, Some(&streamed));
+            }
+        }
+        assert_eq!(streamed.runs().cloned().collect::<Vec<_>>(), whole);
     }
 
     #[test]
