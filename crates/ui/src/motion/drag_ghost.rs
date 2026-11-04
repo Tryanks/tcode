@@ -12,12 +12,16 @@
 //! measured into a [`FlipBounds`] each frame, and the ghost travels there on
 //! [`flip_offset`], so it follows a slot that is itself still moving.
 
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Pixels, Point, Render, SharedString, Styled, Window, deferred,
-    div, prelude::FluentBuilder as _,
+    IntoElement, ParentElement as _, Pixels, Point, Render, SharedString, Styled, Subscription,
+    WeakEntity, Window, WindowId, deferred, div, prelude::FluentBuilder as _,
 };
 use gpui_base::motion::{MotionStatus, Transition, transition, transition_with_status};
 
@@ -157,16 +161,32 @@ pub(crate) fn lifted<E: Styled>(el: E, lift: f32) -> E {
     el
 }
 
-fn host(window: &Window, cx: &App) -> Option<Entity<DragGhosts>> {
-    window
-        .root::<gpui_base::Root>()
-        .flatten()?
-        .read(cx)
-        .plugin::<DragGhosts>()
+fn host(window: &Window, cx: &App) -> Option<Entity<Layer>> {
+    cx.try_global::<Layers>()?
+        .0
+        .get(&window.window_handle().window_id())?
+        .upgrade()
+}
+
+/// Each window's ghosts, found without reading gpui-base's `Root` or the
+/// plugin that draws them. Root (gpui-base 0.8.1, `root.rs:154-164`) updates
+/// every plugin each time it renders, and is updated itself whenever one of
+/// them notifies; gpui-fast counts either as a change to what a view read, so
+/// a row that read them to find its slot would be drawn again with every
+/// frame of a tooltip or a toast.
+#[derive(Default)]
+struct Layers(HashMap<WindowId, WeakEntity<Layer>>);
+
+impl gpui::Global for Layers {}
+
+/// The overlay drawing a window's ghosts, over the window's other layers.
+pub(crate) struct DragGhosts {
+    layer: Entity<Layer>,
+    _layer_changed: Subscription,
 }
 
 /// The window's ghosts: the one being carried, and any still settling.
-pub(crate) struct DragGhosts {
+struct Layer {
     ghosts: Vec<Ghost>,
     next: u64,
     /// Every slot drawn last frame, in window coordinates.
@@ -230,12 +250,19 @@ impl Ghost {
 }
 
 impl DragGhosts {
-    fn new(_: &mut Window, _: &mut Context<Self>) -> Self {
-        Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let layer = cx.new(|_| Layer {
             ghosts: Vec::new(),
             next: 0,
             slots: FlipBounds::default(),
             seen: Rc::default(),
+        });
+        let layers = &mut cx.default_global::<Layers>().0;
+        layers.retain(|_, layer| layer.upgrade().is_some());
+        layers.insert(window.window_handle().window_id(), layer.downgrade());
+        Self {
+            _layer_changed: cx.observe(&layer, |_, _, cx| cx.notify()),
+            layer,
         }
     }
 }
@@ -244,8 +271,25 @@ impl gpui_base::RootPlugin for DragGhosts {}
 
 impl Render for DragGhosts {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let seen = std::mem::take(&mut *self.seen.borrow_mut());
-        self.slots.retain(|key| seen.contains(key));
+        let layer = self.layer.read(cx);
+        let seen = std::mem::take(&mut *layer.seen.borrow_mut());
+        layer.slots.retain(|key| seen.contains(key));
+        // Updated only while it holds a ghost: the rows read it for their
+        // slots, and an update while the window draws draws them again.
+        if layer.ghosts.is_empty() {
+            return div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_0()
+                .into_any_element();
+        }
+        self.layer.update(cx, |layer, cx| layer.render(window, cx))
+    }
+}
+
+impl Layer {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if !cx.has_active_drag() {
             for ghost in &mut self.ghosts {
                 ghost.release();
@@ -340,7 +384,13 @@ impl Render for DragGhosts {
             );
             true
         });
-        div().absolute().top_0().left_0().size_0().children(drawn)
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_0()
+            .children(drawn)
+            .into_any_element()
     }
 }
 
