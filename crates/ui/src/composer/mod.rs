@@ -157,6 +157,14 @@ pub struct Composer {
     /// [`Self::composer_state`].
     frame_state: Option<Rc<ComposerState>>,
     input: Entity<TextareaState>,
+    /// What the composer's render needs of `input`, kept here so that the
+    /// render never reads it: its focus handle, and whether the draft has
+    /// text. gpui-base's input notifies its whole state each time the caret
+    /// blinks, which would draw again whatever read it.
+    input_focus: gpui::FocusHandle,
+    draft_has_text: bool,
+    /// The view drawing `input`.
+    field: Entity<ComposerField>,
     /// Dedicated free-form answer field shown inside an agent question card.
     /// Keeping it separate from the turn composer makes the pending question
     /// and the destination of typed text unambiguous.
@@ -170,6 +178,7 @@ pub struct Composer {
     input_destination: Option<ComposerDestination>,
     input_cache: std::collections::HashMap<ComposerDestination, Entity<TextareaState>>,
     input_subscription: Subscription,
+    input_observation: Subscription,
     model_search: Entity<InputState>,
     /// `None` = follow the active session's provider (set on first open).
     picker_rail: Option<PickerRail>,
@@ -291,7 +300,7 @@ impl Composer {
         if self.subagent(cx) {
             self.focus_handle.is_focused(window)
         } else {
-            self.input.read(cx).focus_handle(cx).is_focused(window)
+            self.input_focus.is_focused(window)
         }
     }
 
@@ -299,7 +308,7 @@ impl Composer {
     /// subagent's thread does not draw, which would leave it nowhere, and
     /// back into the field from the row when the thread takes text again.
     fn sync_keyboard(&self, subagent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let field = self.input.read(cx).focus_handle(cx);
+        let field = self.input_focus.clone();
         let target = if subagent && field.is_focused(window) {
             self.focus_handle.clone()
         } else if !subagent
@@ -420,6 +429,15 @@ impl Composer {
         let fallback_review_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6));
 
         let input_subscription = cx.subscribe_in(&input, window, Self::on_input_event);
+        let input_observation = cx.observe(&input, Self::on_input_notified);
+        let input_focus = input.read(cx).focus_handle(cx);
+        let draft_has_text = draft_has_text(&input, cx);
+        let field = cx.new(|_| ComposerField {
+            input: input.clone(),
+            glide: Default::default(),
+            placeholder: Default::default(),
+            disabled: false,
+        });
         let subscriptions = vec![
             // Re-render when app state changes (e.g. the provider's commands /
             // skills feed arrives after session start, feeding the `/`+`$` menus).
@@ -475,12 +493,16 @@ impl Composer {
             workspace_store,
             frame_state: None,
             input,
+            input_focus,
+            draft_has_text,
+            field,
             user_input_custom,
             fallback_review_input,
             fallback_review_seeded: None,
             input_destination: None,
             input_cache: Default::default(),
             input_subscription,
+            input_observation,
             model_search,
             picker_rail: None,
             approval_expanded: true,
@@ -546,6 +568,17 @@ impl Composer {
         }
     }
 
+    /// The draft gaining its first character or losing its last, which
+    /// enables or disables sending, draws the composer again; anything else
+    /// the input notifies (its caret's blink) leaves it alone.
+    fn on_input_notified(&mut self, input: Entity<TextareaState>, cx: &mut Context<Self>) {
+        let has_text = draft_has_text(&input, cx);
+        if self.draft_has_text != has_text {
+            self.draft_has_text = has_text;
+            cx.notify();
+        }
+    }
+
     fn sync_text_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let destination = self
             .workspace_store
@@ -579,6 +612,9 @@ impl Composer {
             });
         self.input_destination = destination;
         self.input_subscription = cx.subscribe_in(&self.input, window, Self::on_input_event);
+        self.input_observation = cx.observe(&self.input, Self::on_input_notified);
+        self.input_focus = self.input.read(cx).focus_handle(cx);
+        self.draft_has_text = draft_has_text(&self.input, cx);
         self.input.update(cx, |state, cx| {
             state.set_auto_grow(min_rows, max_rows, cx);
             if focused {
@@ -1007,7 +1043,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let interactive = self.interactive(cx);
-        let has_text = interactive && !self.input.read(cx).value().trim().is_empty();
+        let has_text = interactive && self.draft_has_text;
         let composer_state = self.composer_state(cx);
         let stopping = turn_running && !has_text;
         let stop_pending = composer_state.stopping;
@@ -1179,7 +1215,7 @@ impl Composer {
             return self.render_compact_primary_action(turn_running, window, cx);
         }
         let composer_state = self.composer_state(cx);
-        let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
+        let has_text = self.interactive(cx) && self.draft_has_text;
         let parts: &[DesktopAction] = if turn_running {
             // Providers with native mid-turn steering keep a send button
             // active beside Stop while a turn runs.
@@ -1845,16 +1881,14 @@ impl Composer {
 
         let composer = cx.entity();
         let chip_rows = self.render_chip_rows(window, cx);
-        // The field grows and shrinks a line at a time as the draft does, and
-        // clears to one line on send; its height glides there, carrying the
-        // card and everything above it.
-        let draft_key = {
-            use std::hash::{Hash as _, Hasher as _};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            self.input.read(cx).value().hash(&mut hasher);
-            hasher.finish()
-        };
+        let input = self.input.clone();
         let draft_glide = self.motion.glide_state(self.motion_key("draft-glide"));
+        self.field.update(cx, |field, _| {
+            field.input = input;
+            field.glide = draft_glide;
+            field.placeholder = desired_placeholder.into();
+            field.disabled = subagent;
+        });
 
         // The keyboard turns the hairline primary, gliding there and back.
         // Geometry stays fixed: focus never changes border width, radius, or
@@ -1896,16 +1930,7 @@ impl Composer {
                         .w_full()
                         .pb_1p5()
                         .child(chip_rows)
-                        .child(
-                            crate::motion::SizeGlide::new(
-                                &draft_glide,
-                                Textarea::new(&self.input)
-                                    .placeholder(desired_placeholder)
-                                    .disabled(subagent)
-                                    .appearance(false),
-                            )
-                            .on_change(draft_key),
-                        )
+                        .child(self.field.clone())
                         .child(self.render_image_strip(window, cx)),
                 )
             });
@@ -2196,6 +2221,42 @@ impl Composer {
             )
             .child(extent)
             .into_any_element()
+    }
+}
+
+/// Whether `input`'s draft has anything to send but whitespace.
+fn draft_has_text(input: &Entity<TextareaState>, cx: &App) -> bool {
+    !input.read(cx).value().trim().is_empty()
+}
+
+/// The composer's field, drawn by a view of its own: the caret's blink
+/// draws this view again, not the composer around it.
+struct ComposerField {
+    input: Entity<TextareaState>,
+    glide: crate::motion::GlideState,
+    placeholder: gpui::SharedString,
+    disabled: bool,
+}
+
+impl Render for ComposerField {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The field grows and shrinks a line at a time as the draft does, and
+        // clears to one line on send; its height glides there, carrying the
+        // card and everything above it.
+        let draft_key = {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.input.read(cx).value().hash(&mut hasher);
+            hasher.finish()
+        };
+        crate::motion::SizeGlide::new(
+            &self.glide,
+            Textarea::new(&self.input)
+                .placeholder(self.placeholder.clone())
+                .disabled(self.disabled)
+                .appearance(false),
+        )
+        .on_change(draft_key)
     }
 }
 
