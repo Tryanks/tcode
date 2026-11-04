@@ -1790,7 +1790,7 @@ mod tests {
         let row = cx.debug_bounds("timeline-row-89").unwrap_or_else(|| {
             panic!(
                 "last assistant row: selected={:?}, list_items={}",
-                store.read_with(cx, |store, _| store.active_session_id()),
+                store.read_with(cx, |store, _| store.legacy_focus()),
                 list.item_count()
             )
         });

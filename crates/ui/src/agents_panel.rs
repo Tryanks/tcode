@@ -741,7 +741,7 @@ impl AgentsPanel {
         let host = self
             .store
             .read(cx)
-            .active_session_id()
+            .legacy_focus()
             .and_then(|lead| crate::shell::side_host_for(&lead, cx));
         open_agent(
             &self.store,
@@ -1127,7 +1127,7 @@ impl AgentsPanel {
         let origins = self
             .store
             .read(cx)
-            .active_session_id()
+            .legacy_focus()
             .and_then(|lead| crate::shell::side_host_for(&lead, cx))
             .map(|chat| chat.read(cx).side_origins().clone());
         let origin = open.clone().map(panel_origin);
@@ -1171,7 +1171,7 @@ impl Render for AgentsPanel {
         let agents = {
             let store = self.store.read(cx);
             store
-                .active_session_id()
+                .legacy_focus()
                 .map(|id| Agents::of(store, &id).with_results(store, &id))
                 .unwrap_or_default()
         };
@@ -1272,7 +1272,7 @@ impl AgentsPanel {
                 entries.extend(agents.done.iter().map(row));
             }
         }
-        let parent_id = self.store.read(cx).active_session_id();
+        let parent_id = self.store.read(cx).legacy_focus();
         let this = &*self;
         let column = crate::motion::keyed(
             "agents-list",

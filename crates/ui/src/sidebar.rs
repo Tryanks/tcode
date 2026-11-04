@@ -1425,7 +1425,7 @@ impl SessionsSidebar {
     ) {
         let reopen = match commands.first() {
             Some(Command::ArchiveSession { session_id })
-                if self.store.read(cx).active_session_id().as_ref() == Some(session_id) =>
+                if self.store.read(cx).legacy_focus().as_ref() == Some(session_id) =>
             {
                 Some(session_id.clone())
             }
@@ -4662,7 +4662,7 @@ impl SessionsSidebar {
                     return;
                 }
                 if this.store.read(cx).session_loading()
-                    && this.store.read(cx).active_session_id().as_deref() == Some(click_id.as_str())
+                    && this.store.read(cx).legacy_focus().as_deref() == Some(click_id.as_str())
                 {
                     return;
                 }
@@ -6006,7 +6006,7 @@ mod tests {
         }
 
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             Some("middle".into())
         );
         let drawn = opacity.borrow()[since..].to_vec();
@@ -6495,7 +6495,7 @@ mod tests {
             .expect("long press opens menu");
         let outside = gpui::point(b.left() + px(12.), b.center().y);
         assert!(!menu.contains(&outside));
-        let selected = store.read_with(cx, |store, _| store.active_session_id());
+        let selected = store.read_with(cx, |store, _| store.legacy_focus());
         let destination = navigation.read_with(cx, |state, _| state.destination());
         send(cx, 2, TouchPhase::Started, outside);
         send(cx, 2, TouchPhase::Ended, outside);
@@ -6505,7 +6505,7 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("tcode-popup-menu").is_none());
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             selected
         );
         assert_eq!(
@@ -6529,7 +6529,7 @@ mod tests {
         draw_settled(cx);
         assert_eq!(
             store
-                .read_with(cx, |store, _| store.active_session_id())
+                .read_with(cx, |store, _| store.legacy_focus())
                 .as_deref(),
             Some("menu-10")
         );
@@ -6636,7 +6636,7 @@ mod tests {
         draw(cx);
         assert_eq!(
             store
-                .read_with(cx, |store, _| store.active_session_id())
+                .read_with(cx, |store, _| store.legacy_focus())
                 .as_deref(),
             Some("swipe-2"),
             "the released swipe's fling does not swallow the next tap"
@@ -6893,7 +6893,7 @@ mod tests {
                     sidebar.flat_list_state.clone()
                 }
             });
-            let selected = store.read_with(cx, |store, _| store.active_session_id());
+            let selected = store.read_with(cx, |store, _| store.legacy_focus());
             let viewport = list.viewport_bounds();
             let thumb = gpui::point(viewport.right() - px(5.), viewport.top() + px(8.));
             cx.simulate_mouse_move(thumb, None, gpui::Modifiers::default());
@@ -6929,7 +6929,7 @@ mod tests {
                 .expect("last thread is rendered after dragging to the bottom");
             assert!(last.bottom() <= viewport.bottom(), "last thread is clipped");
             assert_eq!(
-                store.read_with(cx, |store, _| store.active_session_id()),
+                store.read_with(cx, |store, _| store.legacy_focus()),
                 selected,
                 "dragging must not activate a thread under the scrollbar"
             );
@@ -7766,7 +7766,7 @@ mod tests {
         assert!(listed(cx).contains(&"settled-20".to_string()));
         click(cx, "sidebar-thread-active-35");
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             Some("active-35".into())
         );
         assert!(

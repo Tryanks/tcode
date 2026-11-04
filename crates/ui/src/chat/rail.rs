@@ -429,7 +429,7 @@ impl ChatView {
         let store = self.workspace_store.read(cx);
         // The right panel shows the focused thread's tab, whatever another
         // pane's thread has recorded as its own.
-        let panel = (store.active_session_id() == self.session_id)
+        let panel = (store.legacy_focus() == self.session_id)
             .then(|| store.panel_state_for(self.session_id.as_deref()))
             .filter(|panel| panel.right_panel_open);
         RailCard::ALL

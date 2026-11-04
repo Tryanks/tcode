@@ -200,7 +200,7 @@ impl WorkspaceStore {
     /// Record the project the user navigated into. Called only from user
     /// navigation (opening a thread, starting a draft), because the empty
     /// workspace returns here: background activity must not move it.
-    fn remember_project(&mut self, project_id: Option<String>) {
+    pub(super) fn remember_project(&mut self, project_id: Option<String>) {
         let Some(project_id) = project_id else {
             return;
         };
@@ -301,9 +301,9 @@ impl WorkspaceStore {
     pub fn reset_settings(&mut self) {
         self.dispatch(Command::ResetSettings);
     }
-    pub fn write_relaunch_marker(&mut self, reopen_settings: String) {
+    pub fn write_relaunch_marker_for(&mut self, session_id: String, reopen_settings: String) {
         self.dispatch(Command::WriteRelaunchMarker {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             reopen_settings,
         });
     }
@@ -452,38 +452,6 @@ impl WorkspaceStore {
         self.dispatch(Command::MarkSessionUnread { session_id });
         self.local_settings_changed(cx);
     }
-    /// Leave the focused thread: nothing is focused, and the thread closes.
-    pub(crate) fn leave_session(&mut self, cx: &mut Context<Self>) {
-        self.selection_generation = self.selection_generation.wrapping_add(1);
-        self.draft_fallback_pending = false;
-        if let Some(session_id) = self.focused_session_id.take() {
-            self.close_thread(&session_id, cx);
-        }
-        cx.notify();
-    }
-
-    /// Focus nothing while every thread stays open, for a surface about to
-    /// show a thread that does not exist yet.
-    pub(crate) fn release_focus(&mut self, cx: &mut Context<Self>) {
-        self.selection_generation = self.selection_generation.wrapping_add(1);
-        if self.focused_session_id.take().is_some() {
-            cx.notify();
-        }
-    }
-
-    /// Act on an open thread, which another surface shows, leaving every
-    /// other thread as it is. A thread that is not open is not focused.
-    pub(crate) fn focus_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.focused_session_id.as_deref() == Some(session_id)
-            || !self.is_thread_open(session_id)
-        {
-            return;
-        }
-        self.selection_generation = self.selection_generation.wrapping_add(1);
-        self.focused_session_id = Some(session_id.to_owned());
-        cx.notify();
-    }
-
     /// The agent shown beside `lead` in the lead's chat.
     pub(crate) fn side_thread_for(&self, lead: &str) -> Option<String> {
         self.conversation_ui
@@ -534,9 +502,7 @@ impl WorkspaceStore {
     /// fetches only what it missed. Closing the focused thread leaves
     /// nothing focused.
     pub(crate) fn close_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        if self.focused_session_id.as_deref() == Some(session_id) {
-            self.focused_session_id = None;
-        }
+        self.unfocus(session_id);
         cx.notify();
         self.clear_command_outputs(session_id);
         if let Some(thread) = self.threads.get_mut(session_id) {
@@ -688,43 +654,6 @@ impl WorkspaceStore {
         }
         self.sync_terminal_topics();
         self.sync_conversation_ui(session_id);
-    }
-
-    /// Act on a thread: one another surface shows only takes the focus,
-    /// any other replaces the focused thread.
-    pub fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        let shown = self.is_thread_open(&session_id);
-        self.select(session_id, shown, cx);
-    }
-
-    /// Select the focused thread afresh once a new baseline dropped its
-    /// subscriptions.
-    pub(super) fn reselect_focused(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.focused_session_id.take() {
-            self.select(session_id, false, cx);
-        }
-    }
-
-    fn select(&mut self, session_id: String, shown: bool, cx: &mut Context<Self>) {
-        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
-        self.draft_fallback_pending = false;
-        if self.focused_session_id.as_ref() == Some(&session_id) {
-            return;
-        }
-        let project_id = self
-            .index_replica
-            .0
-            .iter()
-            .find(|meta| meta.id == session_id)
-            .and_then(|meta| meta.project_id.clone());
-        self.remember_project(project_id);
-        if shown {
-            self.focus_thread(&session_id, cx);
-            return;
-        }
-        self.leave_session(cx);
-        self.focused_session_id = Some(session_id.clone());
-        self.open_thread(&session_id);
     }
     pub fn select_session_at_turn(
         &mut self,
@@ -911,9 +840,9 @@ impl WorkspaceStore {
             mode,
         });
     }
-    pub fn add_review_comment(&mut self, comment: ReviewComment) {
+    pub fn add_review_comment_for(&mut self, session_id: String, comment: ReviewComment) {
         self.dispatch(Command::AddReviewComment {
-            session_id: self.active_session_id().unwrap_or_default(),
+            session_id,
             comment,
         });
     }
@@ -1058,9 +987,6 @@ impl WorkspaceStore {
 }
 
 impl WorkspaceStore {
-    pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
-        self.toggle_terminal_panel_for(self.active_session_id().unwrap_or_default(), cx);
-    }
     pub fn toggle_terminal_panel_for(&mut self, session_id: String, cx: &mut Context<Self>) {
         let opening = !self
             .thread_conversation_ui(Some(&session_id))
@@ -1329,11 +1255,8 @@ impl WorkspaceStore {
     pub fn update_acp_agent(&mut self, id: String, patch: AcpAgentPatch) {
         self.dispatch(Command::UpdateAcpAgent { id, patch });
     }
-    pub fn set_active_acp_agent(&mut self, id: String) {
-        self.dispatch(Command::SetActiveAcpAgent {
-            session_id: self.active_session_id().unwrap_or_default(),
-            id,
-        });
+    pub fn set_active_acp_agent_for(&mut self, session_id: String, id: String) {
+        self.dispatch(Command::SetActiveAcpAgent { session_id, id });
     }
 }
 

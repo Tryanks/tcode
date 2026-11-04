@@ -563,7 +563,7 @@ pub(crate) fn shows_selection(window: &Window, cx: &App) -> bool {
     if shell.compact(cx) || attachment.zoom.is_zoomed() || panes.len() < 2 {
         return true;
     }
-    let focused = attachment.link.store.read(cx).active_session_id();
+    let focused = attachment.link.store.read(cx).legacy_focus();
     panes.iter().any(|pane| {
         let pane = pane.read(cx);
         pane.session_id().is_some()
@@ -969,7 +969,7 @@ impl AppShell {
             .and_then(|store| store.read(cx).remote_host_id().map(str::to_owned));
         let session_id = store
             .as_ref()
-            .and_then(|store| store.read(cx).active_session_id());
+            .and_then(|store| store.read(cx).legacy_focus());
         let panel = self
             .pending_navigation_restore
             .as_ref()
@@ -1038,7 +1038,7 @@ impl AppShell {
             return;
         };
         if !store.read(cx).index_hydrated() {
-            if store.read(cx).active_session_id().as_deref() != Some(&pending.session_id) {
+            if store.read(cx).legacy_focus().as_deref() != Some(&pending.session_id) {
                 self.pending_navigation_restore = None;
             }
             return;
@@ -1054,7 +1054,7 @@ impl AppShell {
                 .take()
                 .expect("checked above");
             store.update(cx, |store, cx| {
-                if store.active_session_id().as_deref() == Some(&pending.session_id) {
+                if store.legacy_focus().as_deref() == Some(&pending.session_id) {
                     store.leave_session(cx);
                 }
             });
@@ -1062,7 +1062,7 @@ impl AppShell {
                 .update(cx, |state, cx| state.discard_restored_thread(cx));
             return;
         }
-        if store.read(cx).active_session_id().as_deref() != Some(&pending.session_id) {
+        if store.read(cx).legacy_focus().as_deref() != Some(&pending.session_id) {
             // A user selection made while syncing supersedes restoration.
             self.pending_navigation_restore = None;
             return;
@@ -1220,7 +1220,7 @@ impl AppShell {
             cx.observe_in(&store, window, move |this, store, window, cx| {
                 this.reconcile_panes(window, cx);
                 this.stamp_connected(cx);
-                let selected = store.read(cx).active_session_id();
+                let selected = store.read(cx).legacy_focus();
                 if let Some(attachment) = &mut this.attachment
                     && attachment.observed_session_id != selected
                 {
@@ -1290,7 +1290,7 @@ impl AppShell {
             })
         };
 
-        let observed_session_id = store.read(cx).active_session_id();
+        let observed_session_id = store.read(cx).legacy_focus();
         let panel_scene = crate::motion::Epoch::default();
         panel_scene.show(observed_session_id.as_deref());
         preview.update(cx, |preview, _| preview.share_scene(&panel_scene));
@@ -1428,7 +1428,7 @@ impl AppShell {
             attachment.focused_pane = first.clone();
         }
         let store = attachment.link.store.clone();
-        let focused = store.read(cx).active_session_id();
+        let focused = store.read(cx).legacy_focus();
         if let Some(session_id) = focused {
             let showing = panes
                 .iter()
@@ -1502,7 +1502,7 @@ impl AppShell {
             .store
             .update(cx, |store, cx| match session_id {
                 Some(session_id) => store.focus_thread(&session_id, cx),
-                None if store.active_session_id().is_some() => store.release_focus(cx),
+                None if store.legacy_focus().is_some() => store.release_focus(cx),
                 None => {}
             });
         cx.notify();
@@ -2675,7 +2675,7 @@ impl AppShell {
                 && self
                     .attachment
                     .as_ref()
-                    .is_some_and(|a| a.link.store.read(cx).active_session_id().is_some())
+                    .is_some_and(|a| a.link.store.read(cx).legacy_focus().is_some())
             {
                 self.window_state
                     .update(cx, |state, cx| state.go(Destination::Thread, cx));
@@ -2774,9 +2774,7 @@ impl AppShell {
 
     /// "Show me this thread." Compact pushes; wide switches the content route.
     fn open_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self
-            .store()
-            .and_then(|store| store.read(cx).active_session_id());
+        let selected = self.store().and_then(|store| store.read(cx).legacy_focus());
         if self
             .pending_navigation_restore
             .as_ref()
@@ -3237,8 +3235,7 @@ impl AppShell {
             return;
         };
         // The open thread's transcript already shows the message.
-        if window.is_window_active()
-            && store.read(cx).active_session_id().as_deref() == Some(session_id)
+        if window.is_window_active() && store.read(cx).legacy_focus().as_deref() == Some(session_id)
         {
             return;
         }
@@ -3640,7 +3637,7 @@ impl AppShell {
         let store = self.attachment.as_ref()?.link.store.clone();
         let parent = {
             let store = store.read(cx);
-            let active = store.active_session_id()?;
+            let active = store.legacy_focus()?;
             let sessions = store.sidebar_sessions();
             let parent = sessions
                 .iter()
@@ -3988,7 +3985,7 @@ impl AppShell {
             .as_ref()
             .map(|pending| pending.panel.id());
         let terminal = selected_panel.map_or(self.panel_shows_terminal, |id| id == "terminal");
-        let show_agents = store.active_session_id().is_some_and(|id| {
+        let show_agents = store.legacy_focus().is_some_and(|id| {
             !crate::agents_panel::Agents::of(store, &id).is_empty()
                 || panel.right_tab == RightTab::Agents
                 || selected_panel == Some("agents")
@@ -4134,7 +4131,7 @@ impl AppShell {
             return div().into_any_element();
         };
         let view = attachment.chat(cx).read(cx).pull_request_view(cx);
-        let session = attachment.link.store.read(cx).active_session_id();
+        let session = attachment.link.store.read(cx).legacy_focus();
         let key = session.as_deref().and_then(|session| {
             attachment
                 .link
@@ -5017,14 +5014,7 @@ impl AppShell {
         // keeps a stable size.
         let expanded = panel.right_panel_expanded && right_tab != RightTab::Preview;
         let scene = attachment.panel_scene.clone();
-        let new_scene = scene.show(
-            attachment
-                .link
-                .store
-                .read(cx)
-                .active_session_id()
-                .as_deref(),
-        );
+        let new_scene = scene.show(attachment.link.store.read(cx).legacy_focus().as_deref());
         let sidebar_layout_width = if collapsed {
             px(0.)
         } else {
@@ -5862,7 +5852,7 @@ mod tests {
         let store = store_of(&shell, cx);
         store.read_with(cx, |store, _| {
             assert_eq!(store.remote_host_name(), Some("Pending host"));
-            assert_eq!(store.active_session_id().as_deref(), Some("pending-thread"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("pending-thread"));
             assert!(!store.chat_loading());
             assert_eq!(store.delivery_messages()[0].1, "survives relaunch");
             assert!(store.sidebar_sessions().is_empty());
@@ -5901,7 +5891,7 @@ mod tests {
         serve_thread(&host, "thread-2");
         cx.simulate_keystrokes("secondary-2");
         await_restore_update(&shell, cx, |store| {
-            store.active_session_id().as_deref() == Some("thread-2") && !store.chat_loading()
+            store.legacy_focus().as_deref() == Some("thread-2") && !store.chat_loading()
         });
         assert_eq!(
             pane_threads(&shell, cx),
@@ -5928,7 +5918,7 @@ mod tests {
         for (key, focused) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
             cx.simulate_keystrokes(key);
             await_restore_update(&shell, cx, |store| {
-                store.active_session_id().as_deref() == Some(focused)
+                store.legacy_focus().as_deref() == Some(focused)
             });
             crate::test_frames::draw_settled(cx);
             assert_eq!(
@@ -6198,12 +6188,7 @@ mod tests {
                     ]
                 );
                 assert_eq!(
-                    shell
-                        .store()
-                        .unwrap()
-                        .read(cx)
-                        .active_session_id()
-                        .as_deref(),
+                    shell.store().unwrap().read(cx).legacy_focus().as_deref(),
                     Some("thread-a")
                 );
             });
@@ -6358,7 +6343,7 @@ mod tests {
                     shell.window_state.read(cx).history(),
                     [Destination::Hosts, Destination::Threads]
                 );
-                assert_eq!(shell.store().unwrap().read(cx).active_session_id(), None);
+                assert_eq!(shell.store().unwrap().read(cx).legacy_focus(), None);
             });
             cx.executor().advance_clock(Duration::from_millis(151));
             draw(cx);
@@ -7597,7 +7582,7 @@ mod tests {
             )
             .unwrap();
         await_restore_update(shell, cx, |store| {
-            store.active_session_id().as_deref() == Some(draft)
+            store.legacy_focus().as_deref() == Some(draft)
         });
         serve_thread(host, draft);
         await_restore_update(shell, cx, |store| !store.chat_loading());
@@ -7700,7 +7685,7 @@ mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
             assert!(store.is_thread_open("thread-1"));
         });
     }
@@ -7820,7 +7805,7 @@ mod tests {
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
             assert!(!store.is_thread_open("thread-1"));
         });
     }
@@ -7962,7 +7947,7 @@ mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         assert!(!lead_typing(cx), "the keyboard is with the agent");
         store.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
             assert!(store.is_thread_open("mirror"));
         });
         // The agent's composer is its settings row, which has no field: a
@@ -8364,7 +8349,7 @@ mod tests {
             assert!(lead.right() < card.left(), "{lead:?} clear of {card:?}");
             assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
             store.read_with(cx, |store, _| {
-                assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+                assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
                 assert!(store.is_thread_open("agent-1"), "round {round}");
             });
 
@@ -8387,7 +8372,7 @@ mod tests {
             assert_eq!(cx.debug_bounds("right-panel"), None, "round {round}");
             assert_eq!(keyboard_pane(&shell, cx), Some(0), "round {round}");
             store.read_with(cx, |store, _| {
-                assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+                assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
                 assert!(!store.is_thread_open("agent-1"), "round {round}");
             });
         }
@@ -9263,7 +9248,7 @@ mod tests {
         assert!(shell.read_with(cx, |shell, cx| shell.compact(cx)));
         assert!(cx.debug_bounds("chat-side-header").is_none());
         store.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
             assert!(!store.is_thread_open("agent-1"));
         });
         resize(cx, 2000.);
@@ -9292,7 +9277,7 @@ mod tests {
         });
         settle_panes(cx);
         store.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("agent-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("agent-1"));
         });
         assert!(cx.debug_bounds("chat-side-header").is_none());
 
@@ -9300,7 +9285,7 @@ mod tests {
         cx.simulate_click(back.center(), gpui::Modifiers::default());
         settle_panes(cx);
         store.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
             assert!(!store.is_thread_open("agent-1"));
         });
         assert!(cx.debug_bounds("compact-thread-page").is_some());
@@ -9390,7 +9375,7 @@ mod tests {
         settle(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
             assert!(!store.is_thread_open("thread-1"));
         });
 
@@ -9800,7 +9785,7 @@ mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         store.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("draft-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("draft-1"));
             assert!(store.is_thread_open("thread-1"));
         });
 
@@ -9808,7 +9793,7 @@ mod tests {
         draw(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             Some("thread-1".into())
         );
     }
@@ -9856,7 +9841,7 @@ mod tests {
             [Some("thread-1".into()), Some("thread-2".into())]
         );
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
             assert!(store.is_thread_open("thread-1"));
         });
     }
@@ -9948,7 +9933,7 @@ mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
             assert!(!store.is_thread_open("thread-1"));
             assert!(!store.is_thread_open("draft-1"));
         });
@@ -10001,7 +9986,7 @@ mod tests {
         click(right.center(), Default::default(), cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             Some("thread-1".into())
         );
 
@@ -10057,7 +10042,7 @@ mod tests {
         settle_panes(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             Some("thread-2".into())
         );
 
@@ -10152,8 +10137,7 @@ mod tests {
             || serve_spawning(&host, "thread-2", &["spawn-1"]),
             cx,
         );
-        let focused =
-            |cx: &VisualTestContext| store.read_with(cx, |store, _| store.active_session_id());
+        let focused = |cx: &VisualTestContext| store.read_with(cx, |store, _| store.legacy_focus());
         let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
             cx.debug_bounds(selector)
                 .unwrap_or_else(|| panic!("no {selector}"))
@@ -10326,7 +10310,7 @@ mod tests {
             window.dispatch_event(gpui::PlatformInput::MouseUp(release), cx);
         });
         store.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
             assert_eq!(store.diff_selected_turn(), Some(0));
         });
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
@@ -10353,7 +10337,7 @@ mod tests {
         }));
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             Some("thread-2".into())
         );
     }
@@ -10436,7 +10420,7 @@ mod tests {
             "half a thought"
         );
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
             assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
@@ -10508,7 +10492,7 @@ mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
             assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
@@ -10889,7 +10873,7 @@ mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-2"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
         });
     }
 
@@ -11268,7 +11252,7 @@ mod tests {
         assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("draft-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("draft-1"));
             assert!(!store.is_thread_open("thread-1"));
         });
         assert!(cx.debug_bounds("sidebar-thread-thread-1").is_some());
@@ -11635,7 +11619,7 @@ mod tests {
         wait(settle, cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
             assert!(!store.is_thread_open("draft-1"));
         });
     }
@@ -11736,7 +11720,7 @@ mod tests {
         cx.simulate_keystrokes("secondary-1");
         draw(cx);
         store_of(&shell, cx).read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("thread-1"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
         assert_eq!(
@@ -11938,7 +11922,7 @@ mod tests {
                     });
                 }
             }
-            let selected = store.read_with(cx, |store, _| store.active_session_id());
+            let selected = store.read_with(cx, |store, _| store.legacy_focus());
             assert!(selected.is_some());
             if reopen {
                 assert_eq!(
@@ -13114,7 +13098,7 @@ mod tests {
         draw(cx);
         assert_eq!(
             store
-                .read_with(cx, |store, _| store.active_session_id())
+                .read_with(cx, |store, _| store.legacy_focus())
                 .as_deref(),
             Some("first"),
             "model picker must keep number keys"
@@ -13138,7 +13122,7 @@ mod tests {
             });
             assert_eq!(
                 store
-                    .read_with(cx, |store, _| store.active_session_id())
+                    .read_with(cx, |store, _| store.legacy_focus())
                     .as_deref(),
                 Some(expected),
                 "{keys}"
@@ -13149,7 +13133,7 @@ mod tests {
         cx.simulate_keystrokes(second_key);
         assert_eq!(
             store
-                .read_with(cx, |store, _| store.active_session_id())
+                .read_with(cx, |store, _| store.legacy_focus())
                 .as_deref(),
             Some("second"),
             "shortcuts work without a focused input"
@@ -13170,7 +13154,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-tab");
         assert_eq!(
             store
-                .read_with(cx, |store, _| store.active_session_id())
+                .read_with(cx, |store, _| store.legacy_focus())
                 .as_deref(),
             Some("second"),
             "compact navigation uses the same shortcuts"
@@ -13349,7 +13333,7 @@ mod tests {
 
         // The thread, the draft and the composer itself all survive.
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             Some("thread-1".into())
         );
         composer.read_with(cx, |composer, cx| {
@@ -14347,7 +14331,7 @@ mod tests {
             );
         });
         assert_eq!(
-            store.read_with(cx, |store, _| store.active_session_id()),
+            store.read_with(cx, |store, _| store.legacy_focus()),
             Some("thread-1".into())
         );
     }

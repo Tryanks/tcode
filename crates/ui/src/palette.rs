@@ -529,7 +529,7 @@ impl CommandPalette {
                 Action::CheckUpdates,
             );
         }
-        if let Some(session_id) = store.active_session_id()
+        if let Some(session_id) = store.legacy_focus()
             && let Some(meta) = store
                 .sidebar_sessions()
                 .into_iter()

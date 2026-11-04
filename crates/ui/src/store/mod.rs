@@ -40,6 +40,7 @@ mod history;
 pub(crate) use history::HISTORY_WINDOW_SCREENS;
 pub(crate) mod images;
 mod intents;
+mod legacy_focus;
 mod thread;
 pub(crate) use images::{
     MAX_PREVIEW_PIXELS, MediaState, image_preview, item_image_preview, pull_request_media,
@@ -828,10 +829,6 @@ impl WorkspaceStore {
         sessions
     }
 
-    pub(crate) fn delivery_messages(&self) -> Vec<(String, String, Option<String>, bool)> {
-        self.delivery_messages_for(self.active_session_id().as_deref())
-    }
-
     /// The messages sent to `session_id`'s thread that its timeline does
     /// not hold yet: key, text, failure, and whether the host has it.
     pub(crate) fn delivery_messages_for(
@@ -940,10 +937,16 @@ impl WorkspaceStore {
         }
     }
 
-    pub(crate) fn approval_delivery_pending(&self, request: &str) -> bool {
-        self.host.pending_commands().iter().any(|(_, command)| matches!(command,
+    pub(crate) fn approval_delivery_pending_for(
+        &self,
+        session: Option<&str>,
+        request: &str,
+    ) -> bool {
+        self.host.pending_commands().iter().any(|(_, command)| {
+            matches!(command,
             Command::RespondApproval { request_id, session_id, .. }
-            if request_id == request && Some(session_id.as_str()) == self.active_session_id().as_deref()))
+            if request_id == request && Some(session_id.as_str()) == session)
+        })
     }
 
     pub(crate) fn retry_delivery(&self, key: &str) {
@@ -958,10 +961,6 @@ impl WorkspaceStore {
 
     pub fn queued_outgoing(&self) -> usize {
         self.host.queued_outgoing()
-    }
-
-    pub fn baseline_ready(&self) -> bool {
-        self.baseline_ready_for(self.focused_session_id.as_deref())
     }
 
     /// The workspace's baselines have arrived, and those of `session_id`'s
@@ -988,10 +987,6 @@ impl WorkspaceStore {
             || (!self.connection_state().is_connected()
                 && self.index_replica.0.is_empty()
                 && self.index_replica.1.is_empty())
-    }
-
-    pub fn chat_loading(&self) -> bool {
-        self.chat_loading_for(self.focused_session_id.as_deref())
     }
 
     /// Whether a conversation showing `session_id`, or no thread, is still
@@ -1066,14 +1061,6 @@ impl WorkspaceStore {
         if let Some(thread) = self.threads.get_mut(session_id) {
             thread.destination = destination;
         }
-    }
-
-    fn focused_thread(&self) -> Option<&ThreadReplica> {
-        self.thread(self.focused_session_id.as_deref())
-    }
-
-    fn focused_status(&self) -> Option<&SessionStatus> {
-        self.thread_status(self.focused_session_id.as_deref())
     }
 
     fn thread(&self, session_id: Option<&str>) -> Option<&ThreadReplica> {
@@ -1650,67 +1637,6 @@ impl WorkspaceStore {
         }
     }
 
-    /// Decide what the workspace shows after the index changed.
-    ///
-    /// Every open thread that left the visible index — archived (alone or
-    /// with its lead), deleted — closes, so no surface keeps showing it. Only
-    /// the conversation on screen picks what comes next, so archiving a
-    /// background thread (an Orchestrate sibling completing, a sweep) never
-    /// steals navigation: the workspace follows the focused thread's
-    /// still-visible parent; with no such parent it falls back to the last
-    /// interacted project's draft, which is also what an empty workspace
-    /// opens.
-    fn reconcile_destination(&mut self, cx: &mut Context<Self>) {
-        // A deletion can arrive before the rejected Ack. Keep the authored
-        // write on screen so its failure still has Retry and Discard controls.
-        if !self.delivery_messages().is_empty() {
-            return;
-        }
-        let left: Vec<String> = self
-            .threads
-            .iter()
-            .filter(|(id, thread)| {
-                thread.open
-                    && self.focused_session_id.as_ref() != Some(*id)
-                    && thread
-                        .status
-                        .as_ref()
-                        .is_some_and(|status| self.left_index(status))
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for session_id in left {
-            self.close_thread(&session_id, cx);
-        }
-        match self.focused_status() {
-            Some(status) if !self.left_index(status) => return,
-            // A draft has no index entry of its own; its project leaving
-            // the index leaves nothing to draft into.
-            Some(status) if status.draft => self.leave_session(cx),
-            Some(status) => {
-                let session_id = status.session_id.clone();
-                let parent = self
-                    .index_replica
-                    .0
-                    .iter()
-                    .chain(&self.removed_session)
-                    .find(|meta| meta.id == session_id)
-                    .and_then(|meta| meta.parent_session_id.clone())
-                    .filter(|parent| self.session_visible(parent));
-                if let Some(parent) = parent {
-                    self.select_session(parent, cx);
-                    return;
-                }
-                self.leave_session(cx);
-            }
-            // Focused, but its first status has not arrived: nothing to
-            // decide yet. Without a focus this is the empty workspace.
-            None if self.focused_session_id.is_some() => return,
-            None => {}
-        }
-        self.open_last_project_draft(cx);
-    }
-
     /// Whether a thread is gone from the visible index. A draft has no index
     /// entry of its own and stays until the user navigates away, unless its
     /// project leaves the index.
@@ -1875,28 +1801,6 @@ impl WorkspaceStore {
             .count()
     }
 
-    fn active_conversation_ui(&self) -> Option<&ConversationUiState> {
-        self.thread_conversation_ui(self.focused_session_id.as_deref())
-    }
-
-    fn active_conversation_ui_mut(&mut self) -> Option<&mut ConversationUiState> {
-        let session_id = self.focused_session_id.clone();
-        self.thread_conversation_ui_mut(session_id.as_deref())
-    }
-
-    fn suppress_task_auto_open_if_running(&mut self) {
-        let running = self
-            .focused_thread()
-            .is_some_and(ThreadReplica::turn_running);
-        if running && let Some(ui) = self.active_conversation_ui_mut() {
-            ui.auto_open_task_suppressed = true;
-        }
-    }
-
-    pub fn toggle_diff_panel(&mut self, cx: &mut Context<Self>) {
-        self.toggle_tab_panel(RightTab::Diff, cx);
-    }
-
     /// Open the diff of `session_id`'s `turn`, with that thread focused: the
     /// right panel shows the focused thread.
     pub fn open_diff_for_turn(&mut self, session_id: &str, turn: usize, cx: &mut Context<Self>) {
@@ -1935,8 +1839,13 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn select_diff_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn select_diff_turn_for(
+        &mut self,
+        session_id: Option<&str>,
+        turn: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ui) = self.thread_conversation_ui_mut(session_id) {
             ui.pending_diff_focus = None;
             ui.diff_selected_turn = Some(turn);
             ui.refresh_diff();
@@ -1944,16 +1853,11 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn discard_diff_focus(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn discard_diff_focus_for(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(ui) = self.thread_conversation_ui_mut(session_id) {
             ui.discard_diff_focus();
             cx.notify();
         }
-    }
-
-    pub fn close_diff_panel(&mut self, cx: &mut Context<Self>) {
-        let session_id = self.focused_session_id.clone();
-        self.close_right_panel_for(session_id.as_deref(), cx);
     }
 
     /// Close `session_id`'s right panel, whichever tab it shows.
@@ -1971,29 +1875,28 @@ impl WorkspaceStore {
         cx.notify();
     }
 
-    pub fn toggle_diff_expanded(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn toggle_diff_expanded_for(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(ui) = self.thread_conversation_ui_mut(session_id) {
             ui.right_panel_expanded = !ui.right_panel_expanded;
             cx.notify();
         }
     }
 
-    pub fn set_right_tab(&mut self, tab: RightTab, cx: &mut Context<Self>) {
+    pub fn set_right_tab_for(
+        &mut self,
+        session_id: Option<&str>,
+        tab: RightTab,
+        cx: &mut Context<Self>,
+    ) {
         if tab == RightTab::Preview && !self.offers_preview() {
             return;
         }
-        if let Some(ui) = self.active_conversation_ui_mut() {
+        if let Some(ui) = self.thread_conversation_ui_mut(session_id) {
             if tab == RightTab::Diff && ui.right_tab != RightTab::Diff {
                 ui.refresh_diff();
             }
             ui.right_tab = tab;
             cx.notify();
-        }
-    }
-
-    fn toggle_tab_panel(&mut self, tab: RightTab, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.focused_session_id.clone() {
-            self.toggle_tab_panel_for(&session_id, tab, cx);
         }
     }
 
@@ -2017,40 +1920,27 @@ impl WorkspaceStore {
             self.open_tab_for(session_id, tab, cx);
         }
     }
-
-    pub fn toggle_pull_requests_panel(&mut self, cx: &mut Context<Self>) {
-        self.toggle_tab_panel(RightTab::PullRequests, cx);
-    }
-    pub fn toggle_plan_panel(&mut self, cx: &mut Context<Self>) {
-        self.toggle_tab_panel(RightTab::Plan, cx);
-    }
-
-    pub fn toggle_agents_panel(&mut self, cx: &mut Context<Self>) {
-        self.toggle_tab_panel(RightTab::Agents, cx);
-    }
-
-    pub fn toggle_preview_panel(&mut self, cx: &mut Context<Self>) {
-        self.toggle_tab_panel(RightTab::Preview, cx);
-    }
-
-    pub fn close_preview_panel(&mut self, cx: &mut Context<Self>) {
-        let showing = self
-            .active_conversation_ui()
-            .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview);
-        if showing && let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn close_preview_panel_for(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
+        let running = self
+            .thread(session_id)
+            .is_some_and(ThreadReplica::turn_running);
+        if let Some(ui) = self
+            .thread_conversation_ui_mut(session_id)
+            .filter(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview)
+        {
             ui.right_panel_open = false;
-        }
-        if showing {
-            self.suppress_task_auto_open_if_running();
+            if running {
+                ui.auto_open_task_suppressed = true;
+            }
             cx.notify();
         }
     }
 
-    pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
+    pub fn open_preview_panel_for(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
         if !self.offers_preview() {
             return;
         }
-        if let Some(ui) = self.active_conversation_ui_mut()
+        if let Some(ui) = self.thread_conversation_ui_mut(session_id)
             && !(ui.right_panel_open && ui.right_tab == RightTab::Preview)
         {
             ui.right_panel_open = true;
@@ -2274,30 +2164,6 @@ impl WorkspaceStore {
                 .ok()
             })
             .flatten()
-    }
-
-    fn restore_index_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.focused_session_id.clone() {
-            let visible = self.index_replica.0.iter().any(|meta| meta.id == id)
-                || self.focused_status().is_some_and(|status| {
-                    status.draft
-                        && status.project_id.as_ref().is_some_and(|project| {
-                            self.index_replica.1.iter().any(|p| &p.id == project)
-                        })
-                });
-            if visible
-                && !self
-                    .host
-                    .subscribed_topics()
-                    .contains(&Topic::SessionStatus {
-                        session_id: id.clone(),
-                    })
-            {
-                self.reselect_focused(cx);
-            } else if !visible && !self.scope.is_full() {
-                self.leave_session(cx);
-            }
-        }
     }
 
     fn apply_index_summary(&mut self, summary: &IndexSummary, cx: &mut Context<Self>) {
@@ -2567,14 +2433,10 @@ impl WorkspaceStore {
             .any(|id| id == project_id)
     }
 
-    pub fn active_session_id(&self) -> Option<String> {
-        self.focused_session_id.clone()
-    }
-
-    /// The threads-list row of the focused thread: the thread itself, or
-    /// for an agent, the lead it was reached from.
-    pub fn roster_session_id(&self) -> Option<String> {
-        let mut id = self.focused_session_id.clone()?;
+    /// The threads-list row of `session_id`: the thread itself, or for an
+    /// agent, the lead it was reached from.
+    pub fn roster_row(&self, session_id: &str) -> String {
+        let mut id = session_id.to_owned();
         for _ in 0..self.index_replica.0.len() {
             match self
                 .index_replica
@@ -2587,7 +2449,7 @@ impl WorkspaceStore {
                 None => break,
             }
         }
-        Some(id)
+        id
     }
 
     pub fn turn_running_for(&self, session_id: &str) -> bool {
@@ -2697,30 +2559,31 @@ impl WorkspaceStore {
         self.providers_replica.usage_checking.contains(profile_id)
     }
 
-    pub fn window_caption_state(&self) -> (bool, tcode_core::ui::RightTab) {
-        self.active_conversation_ui()
+    pub fn window_caption_state_for(
+        &self,
+        session_id: Option<&str>,
+    ) -> (bool, tcode_core::ui::RightTab) {
+        self.thread_conversation_ui(session_id)
             .map(|ui| (ui.right_panel_open, ui.right_tab))
             .unwrap_or((false, RightTab::default()))
     }
 
-    pub fn shell_window_title(&self) -> String {
+    pub fn shell_window_title_for(&self, session_id: Option<&str>) -> String {
         if !self.scope.is_full() {
             return self.machine_label();
         }
-        match self.focused_status() {
+        match self.thread_status(session_id) {
             Some(status) if status.draft => crate::tr!("chat.new_thread").into_owned(),
             Some(status) => status.title.clone(),
             None => crate::tr!("app.name").into_owned(),
         }
     }
 
-    pub fn preview_active_identity(&self) -> Option<(String, String)> {
-        self.focused_status().map(|status| {
-            (
-                status.session_id.clone(),
-                Self::destination(status).preference_key(),
-            )
-        })
+    /// The stable key of `session_id`'s preview: a project draft's belongs
+    /// to its project, whichever draft thread stands for it.
+    pub(crate) fn preview_key_for(&self, session_id: &str) -> Option<String> {
+        self.thread_status(Some(session_id))
+            .map(|status| Self::destination(status).preference_key())
     }
 
     pub(crate) fn preview_live_keys(&self) -> HashSet<String> {
@@ -2738,8 +2601,8 @@ impl WorkspaceStore {
         keys
     }
 
-    pub fn preview_panel_showing(&self) -> bool {
-        self.active_conversation_ui()
+    pub fn preview_panel_showing_for(&self, session_id: Option<&str>) -> bool {
+        self.thread_conversation_ui(session_id)
             .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview)
     }
 
@@ -2899,9 +2762,9 @@ impl WorkspaceStore {
             .find(|catalog| catalog.profile_id == profile_id)
     }
 
-    /// The working directory of the thread or draft the window has open.
-    pub fn active_session_cwd(&self) -> Option<PathBuf> {
-        self.focused_status().map(|status| status.cwd.clone())
+    pub fn session_cwd_for(&self, session_id: Option<&str>) -> Option<PathBuf> {
+        self.thread_status(session_id)
+            .map(|status| status.cwd.clone())
     }
 
     pub fn acp_registry_loading(&self) -> bool {
@@ -3060,16 +2923,20 @@ impl WorkspaceStore {
         }
     }
 
-    pub(crate) fn diff_active_state(&self) -> Option<DiffActiveState> {
-        self.focused_status().map(|status| DiffActiveState {
-            session: status.session_id.clone(),
-            cwd: status.cwd.clone(),
-            branches: status.branches.clone(),
-        })
+    pub(crate) fn diff_active_state_for(
+        &self,
+        session_id: Option<&str>,
+    ) -> Option<DiffActiveState> {
+        self.thread_status(session_id)
+            .map(|status| DiffActiveState {
+                session: status.session_id.clone(),
+                cwd: status.cwd.clone(),
+                branches: status.branches.clone(),
+            })
     }
 
-    pub fn diff_turns(&self) -> Vec<usize> {
-        self.with_active_timeline(|timeline| {
+    pub fn diff_turns_for(&self, session_id: Option<&str>) -> Vec<usize> {
+        self.with_timeline_for(session_id, |timeline| {
             timeline
                 .turns
                 .iter()
@@ -3085,10 +2952,10 @@ impl WorkspaceStore {
         .unwrap_or_default()
     }
 
-    pub fn diff_selected_turn(&self) -> Option<usize> {
-        let turns = self.diff_turns();
+    pub fn diff_selected_turn_for(&self, session_id: Option<&str>) -> Option<usize> {
+        let turns = self.diff_turns_for(session_id);
         let explicit = self
-            .active_conversation_ui()
+            .thread_conversation_ui(session_id)
             .and_then(|ui| ui.diff_selected_turn);
         match explicit {
             Some(turn) if turns.contains(&turn) => Some(turn),
@@ -3096,63 +2963,70 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn with_diff_turn_changes<R>(
+    pub fn with_diff_turn_changes_for<R>(
         &self,
+        session_id: Option<&str>,
         turn: usize,
         read: impl FnOnce(&[agent::FileChange], agent::ChangeCompleteness) -> R,
     ) -> Option<R> {
-        self.with_active_timeline(|timeline| {
+        self.with_timeline_for(session_id, |timeline| {
             let changes = timeline.turns.get(turn)?.changes.as_ref()?;
             Some(read(&changes.changes, changes.completeness))
         })
         .flatten()
     }
 
-    pub(crate) fn pending_diff_focus(&self) -> Option<DiffFocus> {
-        self.active_conversation_ui()
+    pub(crate) fn pending_diff_focus_for(&self, session_id: Option<&str>) -> Option<DiffFocus> {
+        self.thread_conversation_ui(session_id)
             .and_then(|ui| ui.pending_diff_focus.clone())
     }
 
     /// UI-only consuming selector. The underlying diff focus is replica state;
     /// this does not cross the host boundary.
-    pub(crate) fn take_diff_focus(&mut self, session: &str, turn: usize) -> Option<DiffFocus> {
-        self.active_conversation_ui_mut()?
+    pub(crate) fn take_diff_focus_for(
+        &mut self,
+        session_id: Option<&str>,
+        session: &str,
+        turn: usize,
+    ) -> Option<DiffFocus> {
+        self.thread_conversation_ui_mut(session_id)?
             .take_diff_focus(session, turn)
     }
 
-    pub fn diff_refresh_generation(&self) -> u64 {
-        self.active_conversation_ui()
+    pub fn diff_refresh_generation_for(&self, session_id: Option<&str>) -> u64 {
+        self.thread_conversation_ui(session_id)
             .map(|ui| ui.diff_refresh_generation)
             .unwrap_or(0)
     }
 
-    pub fn diff_word_wrap(&self) -> bool {
-        self.active_conversation_ui()
+    pub fn diff_word_wrap_for(&self, session_id: Option<&str>) -> bool {
+        self.thread_conversation_ui(session_id)
             .map(|ui| ui.diff_wrap)
             .unwrap_or(self.settings_replica.word_wrap_diffs)
     }
 
-    pub fn diff_split(&self) -> bool {
-        self.active_conversation_ui()
+    pub fn diff_split_for(&self, session_id: Option<&str>) -> bool {
+        self.thread_conversation_ui(session_id)
             .is_some_and(|ui| ui.diff_split)
     }
 
-    pub fn set_diff_split(&mut self, split: bool, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn set_diff_split_for(
+        &mut self,
+        session_id: Option<&str>,
+        split: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ui) = self.thread_conversation_ui_mut(session_id) {
             ui.diff_split = split;
             cx.notify();
         }
     }
 
-    pub fn toggle_diff_wrap(&mut self, cx: &mut Context<Self>) {
-        if let Some(ui) = self.active_conversation_ui_mut() {
+    pub fn toggle_diff_wrap_for(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
+        if let Some(ui) = self.thread_conversation_ui_mut(session_id) {
             ui.diff_wrap = !ui.diff_wrap;
             cx.notify();
         }
-    }
-
-    pub(crate) fn panel_state(&self) -> PanelState {
-        self.panel_state_for(self.focused_session_id.as_deref())
     }
 
     /// The panels of `session_id`'s conversation, or of no thread.
@@ -3161,10 +3035,6 @@ impl WorkspaceStore {
             self.thread_conversation_ui(session_id),
             self.thread_timeline(session_id),
         )
-    }
-
-    pub fn review_comments(&self) -> Vec<ReviewComment> {
-        self.review_comments_for(self.focused_session_id.as_deref())
     }
 
     pub fn review_comments_for(&self, session_id: Option<&str>) -> Vec<ReviewComment> {
@@ -3376,10 +3246,6 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn with_active_timeline<R>(&self, read: impl FnOnce(&Timeline) -> R) -> Option<R> {
-        self.with_timeline_for(self.focused_session_id.as_deref(), read)
-    }
-
     pub fn with_timeline_for<R>(
         &self,
         session_id: Option<&str>,
@@ -3420,7 +3286,7 @@ impl WorkspaceStore {
         timeline: Timeline,
         cx: &mut Context<Self>,
     ) {
-        if self.focused_session_id.as_ref() != Some(&session_id) {
+        if self.legacy_focus().as_ref() != Some(&session_id) {
             self.select_session(session_id.clone(), cx);
         }
         self.threads
@@ -3449,10 +3315,6 @@ impl WorkspaceStore {
     pub(crate) fn native_subagent_readonly_for(&self, session_id: Option<&str>) -> bool {
         self.thread_status(session_id)
             .is_some_and(|status| status.conversation_read_only)
-    }
-
-    pub fn composer_state(&self) -> ComposerState {
-        self.composer_state_for(self.focused_session_id.as_deref())
     }
 
     /// The composer of `session_id`'s thread, or of no thread.
@@ -3652,12 +3514,6 @@ impl WorkspaceStore {
         )
     }
 
-    pub(crate) fn session_loading(&self) -> bool {
-        self.focused_session_id
-            .as_deref()
-            .is_some_and(|id| self.session_loading_for(id))
-    }
-
     /// Whether `session_id`'s timeline is held whole: its log and status
     /// are here and it is not catching up on records it missed, so what
     /// draws it now draws what it will go on drawing.
@@ -3671,10 +3527,6 @@ impl WorkspaceStore {
         self.threads
             .get(session_id)
             .is_none_or(|thread| thread.timeline.is_none() || thread.status.is_none())
-    }
-
-    pub fn chat_active_session(&self) -> Option<(String, PathBuf, bool)> {
-        self.chat_active_session_for(self.focused_session_id.as_deref())
     }
 
     /// The title, working directory and draft flag a conversation showing
@@ -3796,16 +3648,8 @@ impl WorkspaceStore {
                 .map_or(0, |thread| thread.turn_offset)
     }
 
-    pub fn session_plan(&self) -> Option<&SessionPlan> {
-        self.focused_thread()?.plan.as_ref()
-    }
-
     pub fn session_plan_for(&self, session_id: Option<&str>) -> Option<&SessionPlan> {
         self.thread(session_id)?.plan.as_ref()
-    }
-
-    pub fn session_status(&self) -> Option<&SessionStatus> {
-        self.focused_status()
     }
 
     pub fn session_status_for(&self, session_id: Option<&str>) -> Option<&SessionStatus> {
@@ -4665,7 +4509,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.select_session("scripted".into(), cx);
             store.send_turn_for(
-                store.active_session_id().unwrap_or_default(),
+                store.legacy_focus().unwrap_or_default(),
                 "hello".into(),
                 Vec::new(),
             );
@@ -4791,7 +4635,7 @@ pub(crate) mod tests {
         });
         store.update(cx, |store, _| {
             store.send_turn_for(
-                store.active_session_id().unwrap_or_default(),
+                store.legacy_focus().unwrap_or_default(),
                 "hello".into(),
                 Vec::new(),
             )
@@ -4830,7 +4674,7 @@ pub(crate) mod tests {
         );
         store.update(cx, |store, _| {
             store.send_turn_for(
-                store.active_session_id().unwrap_or_default(),
+                store.legacy_focus().unwrap_or_default(),
                 "discard me".into(),
                 Vec::new(),
             )
@@ -5113,7 +4957,7 @@ pub(crate) mod tests {
         });
         workspace.update(cx, |store, _| {
             store.send_turn_for(
-                store.active_session_id().unwrap_or_default(),
+                store.legacy_focus().unwrap_or_default(),
                 "keep my failed send".into(),
                 Vec::new(),
             )
@@ -5135,7 +4979,7 @@ pub(crate) mod tests {
             )
         });
         assert_eq!(
-            workspace.read_with(cx, |store, _| store.active_session_id()),
+            workspace.read_with(cx, |store, _| store.legacy_focus()),
             Some("deleted".into())
         );
         link.set_connection_state(tcode_client::ConnectionState::Connected { path: None });
@@ -5148,7 +4992,7 @@ pub(crate) mod tests {
             })
         });
         workspace.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id().as_deref(), Some("deleted"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("deleted"));
             assert_eq!(store.delivery_messages()[0].1, "keep my failed send");
             assert!(!store.chat_loading());
         });
@@ -5219,7 +5063,7 @@ pub(crate) mod tests {
             for index in 0..20 {
                 let id = if index % 2 == 0 { "one" } else { "two" };
                 store.select_session(id.into(), cx);
-                assert_eq!(store.active_session_id().as_deref(), Some(id));
+                assert_eq!(store.legacy_focus().as_deref(), Some(id));
                 assert!(store.session_loading());
                 let messages = outgoing.len();
                 store.select_session(id.into(), cx);
@@ -5406,7 +5250,7 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 store
-                    .focused_thread()
+                    .thread(store.legacy_focus().as_deref())
                     .map_or(0, |thread| thread.turn_offset),
                 450
             );
@@ -5420,7 +5264,7 @@ pub(crate) mod tests {
             );
             while outgoing.try_recv().is_ok() {}
             store.rewind_turn_for(
-                store.active_session_id().unwrap_or_default(),
+                store.legacy_focus().unwrap_or_default(),
                 2,
                 agent::RewindMode::Conversation,
             );
@@ -5630,7 +5474,7 @@ pub(crate) mod tests {
             store.select_session("shared".into(), cx);
             store.apply_domain_event(&snapshot(vec![message("owner", None)]), cx);
             assert_eq!(
-                store.message_byline_for(store.active_session_id().as_deref(), "owner"),
+                store.message_byline_for(store.legacy_focus().as_deref(), "owner"),
                 None
             );
 
@@ -5641,7 +5485,7 @@ pub(crate) mod tests {
             store.apply_domain_event(&snapshot(vec![message("member", Some(member))]), cx);
             assert_eq!(
                 store
-                    .message_byline_for(store.active_session_id().as_deref(), "member")
+                    .message_byline_for(store.legacy_focus().as_deref(), "member")
                     .as_deref(),
                 Some("Alex's laptop")
             );
@@ -5657,13 +5501,13 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 store
-                    .message_byline_for(store.active_session_id().as_deref(), "owner")
+                    .message_byline_for(store.legacy_focus().as_deref(), "owner")
                     .as_deref(),
                 Some(crate::tr!("member.owner").as_ref())
             );
             assert_eq!(
                 store
-                    .message_byline_for(store.active_session_id().as_deref(), "member")
+                    .message_byline_for(store.legacy_focus().as_deref(), "member")
                     .as_deref(),
                 Some("Alex's laptop")
             );
@@ -5683,7 +5527,7 @@ pub(crate) mod tests {
             );
             assert_eq!(
                 store
-                    .message_byline_for(store.active_session_id().as_deref(), "lead")
+                    .message_byline_for(store.legacy_focus().as_deref(), "lead")
                     .as_deref(),
                 Some(crate::tr!("chat.from_orchestrator").as_ref())
             );
@@ -5824,7 +5668,7 @@ pub(crate) mod tests {
         });
         while outgoing.try_recv().is_ok() {}
         workspace.update(cx, |store, cx| {
-            store.update_history_window_for(store.active_session_id().as_deref(), 1., true, cx)
+            store.update_history_window_for(store.legacy_focus().as_deref(), 1., true, cx)
         });
         cx.run_until_parked();
         let mut request =
@@ -5838,8 +5682,8 @@ pub(crate) mod tests {
             })
         ));
         workspace.update(cx, |store, cx| {
-            assert!(store.history_loading_for(store.active_session_id().as_deref()));
-            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx);
+            assert!(store.history_loading_for(store.legacy_focus().as_deref()));
+            store.update_history_window_for(store.legacy_focus().as_deref(), 1., false, cx);
         });
         cx.run_until_parked();
         assert!(
@@ -5859,15 +5703,15 @@ pub(crate) mod tests {
         cx.run_until_parked();
         workspace.update(cx, |store, cx| {
             assert!(
-                !store.history_loading_for(store.active_session_id().as_deref()),
+                !store.history_loading_for(store.legacy_focus().as_deref()),
                 "failed pages hide activity"
             );
-            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx);
+            store.update_history_window_for(store.legacy_focus().as_deref(), 1., false, cx);
         });
         cx.executor()
             .advance_clock(std::time::Duration::from_secs(4));
         workspace.update(cx, |store, cx| {
-            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx)
+            store.update_history_window_for(store.legacy_focus().as_deref(), 1., false, cx)
         });
         cx.run_until_parked();
         assert!(
@@ -5878,7 +5722,7 @@ pub(crate) mod tests {
             .advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
         workspace.update(cx, |store, cx| {
-            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx)
+            store.update_history_window_for(store.legacy_focus().as_deref(), 1., false, cx)
         });
         cx.run_until_parked();
         let retry = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
@@ -5888,8 +5732,8 @@ pub(crate) mod tests {
         );
         request = retry;
         workspace.update(cx, |store, cx| {
-            assert!(store.history_loading_for(store.active_session_id().as_deref()));
-            store.update_history_window_for(store.active_session_id().as_deref(), 1., false, cx);
+            assert!(store.history_loading_for(store.legacy_focus().as_deref()));
+            store.update_history_window_for(store.legacy_focus().as_deref(), 1., false, cx);
         });
         cx.run_until_parked();
         assert!(
@@ -5952,7 +5796,7 @@ pub(crate) mod tests {
             cx.run_until_parked();
             workspace.update(cx, |store, cx| {
                 store.update_history_window_for(
-                    store.active_session_id().as_deref(),
+                    store.legacy_focus().as_deref(),
                     if page < 3 { 2. + page as f32 } else { 6. },
                     true,
                     cx,
@@ -5974,7 +5818,7 @@ pub(crate) mod tests {
         workspace.read_with(cx, |store, _| {
             assert_eq!(held_history(store, "large").from, 1000);
             assert_eq!(held_history(store, "large").records.len(), 1000);
-            assert!(!store.history_loading_for(store.active_session_id().as_deref()));
+            assert!(!store.history_loading_for(store.legacy_focus().as_deref()));
         });
     }
 
@@ -6234,7 +6078,7 @@ pub(crate) mod tests {
         let a_shows = (None, Some(vec!["reply-1".to_string()]));
         let b_shows = (Some("ask".to_string()), Some(vec!["reply-2".to_string()]));
         workspace.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id(), Some(a.session_id.clone()));
+            assert_eq!(store.legacy_focus(), Some(a.session_id.clone()));
             assert_eq!(shown(store, &a.session_id), a_shows);
             assert_eq!(shown(store, &b.session_id), b_shows);
         });
@@ -6246,7 +6090,7 @@ pub(crate) mod tests {
             store.apply_domain_event(&status(&with_running_turn(&a, None, Some(question()))), cx);
         });
         workspace.read_with(cx, |store, _| {
-            assert_eq!(store.active_session_id(), Some(b.session_id.clone()));
+            assert_eq!(store.legacy_focus(), Some(b.session_id.clone()));
             assert_eq!(shown(store, &a.session_id), (b_shows.0.clone(), a_shows.1));
             assert_eq!(shown(store, &b.session_id), b_shows);
         });
@@ -6668,7 +6512,7 @@ pub(crate) mod tests {
             store.apply_connection_state(state);
             assert!(!store.threads_loading(), "cached list remains visible");
             assert!(!store.chat_loading(), "cached thread remains visible");
-            assert_eq!(store.active_session_id().as_deref(), Some("one"));
+            assert_eq!(store.legacy_focus().as_deref(), Some("one"));
         });
         driver.wait_until(cx, &workspace, "correlated reconnect baselines", |cx| {
             workspace.read_with(cx, |store, _| store.connection_state().is_connected())
@@ -6829,7 +6673,7 @@ pub(crate) mod tests {
                     store.baseline_ready()
                         && !store.session_loading()
                         && !store
-                            .focused_thread()
+                            .thread(store.legacy_focus().as_deref())
                             .is_some_and(|thread| thread.catching_up)
                 })
             });
@@ -6933,7 +6777,7 @@ pub(crate) mod tests {
             (
                 store.thread_timeline(Some(released)).cloned(),
                 store
-                    .focused_thread()
+                    .thread(store.legacy_focus().as_deref())
                     .map_or(0, |thread| thread.turn_offset),
             )
         });
@@ -6942,7 +6786,7 @@ pub(crate) mod tests {
                 (
                     store.thread_timeline(Some(released)).cloned(),
                     store
-                        .focused_thread()
+                        .thread(store.legacy_focus().as_deref())
                         .map_or(0, |thread| thread.turn_offset)
                 ),
                 fresh
@@ -7472,7 +7316,7 @@ pub(crate) mod tests {
         // Let the launch fallback settle on the first project before the user
         // navigates into "p" themselves.
         driver.wait_until(cx, &workspace, "launch draft", |cx| {
-            workspace.read_with(cx, |store, _| store.focused_session_id.is_some())
+            workspace.read_with(cx, |store, _| store.legacy_focus().is_some())
         });
         workspace.update(cx, |store, cx| {
             store.start_draft("p".into(), root.clone(), cx)
@@ -7485,7 +7329,7 @@ pub(crate) mod tests {
             })
         });
         let draft_id = workspace
-            .read_with(cx, |store, _| store.focused_session_id.clone())
+            .read_with(cx, |store, _| store.legacy_focus())
             .expect("draft selected");
         workspace.update(cx, |store, _| {
             store
@@ -7509,7 +7353,7 @@ pub(crate) mod tests {
         );
         driver.wait_until(cx, &workspace, "the standing draft reopened", |cx| {
             workspace.read_with(cx, |store, _| {
-                store.focused_session_id.as_deref() == Some(draft_id.as_str())
+                store.legacy_focus().as_deref() == Some(draft_id.as_str())
             })
         });
         workspace.read_with(cx, |store, _| {
@@ -7552,7 +7396,7 @@ pub(crate) mod tests {
             )
         });
         driver.wait_until(cx, &workspace, "launch draft", |cx| {
-            workspace.read_with(cx, |store, _| store.focused_session_id.is_some())
+            workspace.read_with(cx, |store, _| store.legacy_focus().is_some())
         });
         workspace.update(cx, |store, cx| store.select_session("first".into(), cx));
         driver.wait_until(cx, &workspace, "first selected", |cx| {
@@ -7647,7 +7491,8 @@ pub(crate) mod tests {
         empty.read_with(cx, |store, _| {
             assert!(store.projects().is_empty());
             assert_eq!(
-                store.focused_session_id, None,
+                store.legacy_focus(),
+                None,
                 "a workspace with no project must stay on its add-project state"
             );
         });
@@ -7767,7 +7612,7 @@ pub(crate) mod tests {
         workspace.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
         driver.wait_until(cx, &workspace, "initial session timeline replica", |cx| {
             workspace.read_with(cx, |store, _| {
-                store.focused_session_id.as_ref() == Some(&session_id)
+                store.legacy_focus().as_ref() == Some(&session_id)
                     && store
                         .thread_timeline(Some(&session_id))
                         .is_some_and(|timeline| timeline.turns.len() == 1)
@@ -7868,7 +7713,7 @@ pub(crate) mod tests {
             let timeline = store
                 .thread_timeline(Some(&session_id))
                 .expect("session replica");
-            assert_eq!(store.focused_session_id.as_ref(), Some(&session_id));
+            assert_eq!(store.legacy_focus().as_ref(), Some(&session_id));
             (
                 timeline
                     .entries
@@ -8177,7 +8022,7 @@ pub(crate) mod tests {
 
         assert_eq!(
             workspace.update(cx, |store, _cx| store
-                .take_native_rewind_prefill_for(store.active_session_id().as_deref())),
+                .take_native_rewind_prefill_for(store.legacy_focus().as_deref())),
             Some("first parked prefill".into())
         );
         workspace.update(cx, |store, cx| store.select_session(second.id.clone(), cx));
@@ -8190,7 +8035,7 @@ pub(crate) mod tests {
         });
         assert_eq!(
             workspace.update(cx, |store, _cx| store
-                .take_native_rewind_prefill_for(store.active_session_id().as_deref())),
+                .take_native_rewind_prefill_for(store.legacy_focus().as_deref())),
             Some("second parked prefill".into())
         );
 
@@ -8234,7 +8079,7 @@ pub(crate) mod tests {
         driver.wait_until(cx, &workspace, "classifier block", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
-                    .fallback_block_for(store.active_session_id().as_deref())
+                    .fallback_block_for(store.legacy_focus().as_deref())
                     .is_some()
             })
         });
@@ -8256,19 +8101,19 @@ pub(crate) mod tests {
         driver.wait_until(cx, &workspace, "review ready", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
-                    .fallback_review_for(store.active_session_id().as_deref())
+                    .fallback_review_for(store.legacy_focus().as_deref())
                     .is_some()
             })
         });
         workspace.read_with(cx, |store, _| {
             let block = store
-                .fallback_block_for(store.active_session_id().as_deref())
+                .fallback_block_for(store.legacy_focus().as_deref())
                 .unwrap();
             assert_eq!(block.category, Some(agent::ClassifierCategory::Cyber));
             assert_eq!(block.model.as_deref(), Some("claude-sonnet-4-5"));
             assert_eq!(block.detail, "request blocked by classifier");
             let review = store
-                .fallback_review_for(store.active_session_id().as_deref())
+                .fallback_review_for(store.legacy_focus().as_deref())
                 .unwrap();
             assert_eq!(review.assessment, "looks like a false positive");
             assert_eq!(review.draft, "I am auditing my own service.");
@@ -8292,10 +8137,10 @@ pub(crate) mod tests {
             |cx| {
                 workspace.read_with(cx, |store, _| {
                     store
-                        .fallback_block_for(store.active_session_id().as_deref())
+                        .fallback_block_for(store.legacy_focus().as_deref())
                         .is_none()
                         && store
-                            .fallback_review_for(store.active_session_id().as_deref())
+                            .fallback_review_for(store.legacy_focus().as_deref())
                             .is_none()
                 })
             },
@@ -8506,7 +8351,7 @@ pub(crate) mod tests {
             })
         });
         let draft_id = workspace
-            .read_with(cx, |store, _| store.focused_session_id.clone())
+            .read_with(cx, |store, _| store.legacy_focus())
             .expect("draft selected");
         workspace.update(cx, |store, _| {
             store
