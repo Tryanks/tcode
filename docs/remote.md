@@ -843,10 +843,12 @@ does not. A network change reported by the device ends the current wait
 early and tries again at once.
 
 A connection attempt has 20 seconds to find a path and complete the handshake.
-Once connected, both ends send QUIC keep-alives every 10 seconds and drop a
-connection with no packets for 30 seconds. On top of that the device sends an
-application ping after 10 seconds without a message from the machine and
-reconnects if nothing arrives within another 20 seconds. Browsers send the
+Once connected, both ends keep every path alive with QUIC keep-alives (iroh
+sends one on each path every 5 seconds) and drop a connection with no packets
+for 30 seconds; that is what notices a dead link. On top of that the device
+sends an application ping after 60 seconds without a message from the machine,
+which proves the machine's host still answers, and reconnects if nothing
+arrives within another 20 seconds. Browsers send the
 application ping after 15 seconds of silence with the same 20-second reply
 budget; browser timers may be delayed in background tabs, and making the page
 visible or coming online wakes reconnection.
@@ -978,7 +980,7 @@ supplies, so one device's cache cannot be shared with or spoofed by another.
 If a connected retained command has no Ack for 30 seconds, the client logs a
 stalled acknowledgement and forces reconnect. The pending command remains in the
 outbox. The request deadlines and liveness constants live together in
-`crates/client/src/heartbeat.rs`: native idle probe at 10 seconds, browser idle
+`crates/client/src/heartbeat.rs`: native idle probe at 60 seconds, browser idle
 probe at 15 seconds, a 20-second liveness reply budget, a 15-second query
 timeout and the 30-second command timeout.
 
