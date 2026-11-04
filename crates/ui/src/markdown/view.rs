@@ -1498,6 +1498,64 @@ mod tests {
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
     }
 
+    /// A view around a message, which the test renders again.
+    struct Around(Entity<Message>);
+
+    impl Render for Around {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    /// A message in a view of its own, narrower than the window.
+    struct Message(Entity<MarkdownState>);
+
+    impl Render for Message {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(240.))
+                .child(MarkdownView::new(&self.0).selectable(true))
+        }
+    }
+
+    #[gpui::test]
+    fn the_pointer_moving_off_links_leaves_the_message_drawn_from_last_frame(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (around, cx) = cx.add_window_view(|_, cx| {
+            let markdown = cx.new(|cx| {
+                MarkdownState::new(
+                    "Plain words.\n\nWords, then [a link](https://example.com).",
+                    cx,
+                )
+            });
+            Around(cx.new(|_| Message(markdown)))
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(gpui::size(px(1_024.), px(600.)));
+        cx.simulate_mouse_move(point(px(600.), px(300.)), None, Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+
+        let plain = cx.debug_bounds("markdown-block-0").expect("drawn");
+        for at in [
+            point(px(600.), px(20.)),
+            point(px(600.), plain.center().y),
+            point(px(600.), px(500.)),
+        ] {
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            cx.update(|window, _| window.reset_layout_stats());
+            around.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            assert_eq!(
+                cx.update(|window, _| window.layout_stats().views_built),
+                1,
+                "the pointer at {at:?} built the message again"
+            );
+        }
+    }
+
     /// The view under the window `Root`, which owns Copy for the window
     /// selection, as the shell mounts it.
     fn right_click_window(
