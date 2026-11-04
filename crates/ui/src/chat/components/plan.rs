@@ -33,6 +33,9 @@ pub(crate) struct PlanDecision<'a> {
 pub(crate) struct PlanData<'a> {
     pub(crate) id: &'a str,
     pub(crate) text: &'a str,
+    /// What Copy puts on the clipboard: the text, shared rather than copied
+    /// on every render.
+    pub(crate) copy_text: Arc<str>,
     pub(crate) cwd: &'a Path,
     pub(crate) markdown: Option<Entity<MarkdownState>>,
     pub(crate) compact: bool,
@@ -54,6 +57,7 @@ pub(crate) fn plan_block(
     let PlanData {
         id,
         text,
+        copy_text,
         cwd,
         markdown,
         compact,
@@ -63,7 +67,7 @@ pub(crate) fn plan_block(
     } = data;
     let theme = cx.theme();
     let radius = crate::material::radius_card(cx);
-    let menu_items = copy_message_items(Arc::from(text));
+    let menu_items = copy_message_items(copy_text);
     let body = markdown.map_or_else(
         || div().child(text.to_string()).into_any_element(),
         |markdown| {

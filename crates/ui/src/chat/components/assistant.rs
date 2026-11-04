@@ -1,6 +1,7 @@
+use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -15,6 +16,7 @@ use gpui_base::{h_flex, v_flex};
 
 use crate::markdown::parse::ParsedDocument;
 use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
+use tcode_core::session::TimelineEntry;
 
 use super::super::model::{MdSync, md_sync};
 
@@ -25,6 +27,12 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 pub(crate) struct MdState {
     pub(crate) state: Entity<MarkdownState>,
     pub(crate) synced: Arc<str>,
+    /// The entry `synced` was last taken from. An entry is never changed
+    /// in place while a weak reference to it is held (the fold's
+    /// `Arc::make_mut` moves it to a new allocation instead), so the same
+    /// allocation means the same text.
+    synced_from: Weak<TimelineEntry>,
+    streaming: Cell<bool>,
 }
 
 impl MdState {
@@ -32,6 +40,8 @@ impl MdState {
         Self {
             state: cx.new(|cx| MarkdownState::new(text, cx)),
             synced: Arc::from(text),
+            synced_from: Weak::new(),
+            streaming: Cell::new(false),
         }
     }
 
@@ -39,13 +49,30 @@ impl MdState {
         Self {
             state: cx.new(|cx| MarkdownState::from_parsed(text, parsed, cx)),
             synced: Arc::from(text),
+            synced_from: Weak::new(),
+            streaming: Cell::new(false),
         }
     }
 
     /// Whether the entry's text is still arriving.
     pub(crate) fn set_streaming(&self, streaming: bool, cx: &mut App) {
-        self.state
-            .update(cx, |state, cx| state.set_streaming(streaming, cx));
+        // Updating the state while the chat renders counts as writing it,
+        // which draws the message again; only a change is written.
+        if self.streaming.replace(streaming) != streaming {
+            self.state
+                .update(cx, |state, cx| state.set_streaming(streaming, cx));
+        }
+    }
+
+    /// Whether `entry` is the one the text was last taken from.
+    pub(crate) fn synced_from(&self, entry: &Arc<TimelineEntry>) -> bool {
+        std::ptr::eq(self.synced_from.as_ptr(), Arc::as_ptr(entry))
+    }
+
+    /// Take `entry`'s text, `text`.
+    pub(crate) fn sync_from(&mut self, entry: &Arc<TimelineEntry>, text: String, cx: &mut App) {
+        self.sync(text, cx);
+        self.synced_from = Arc::downgrade(entry);
     }
 
     pub(crate) fn sync(&mut self, text: String, cx: &mut App) {
@@ -67,6 +94,9 @@ impl MdState {
 pub(crate) struct AssistantData<'a> {
     pub(crate) id: &'a str,
     pub(crate) text: &'a str,
+    /// What Copy puts on the clipboard: the text, shared rather than copied
+    /// on every render.
+    pub(crate) copy_text: Arc<str>,
     /// The provider delivered a summary of the message, not its own words.
     pub(crate) summarized: bool,
     pub(crate) cwd: &'a Path,
@@ -176,6 +206,7 @@ pub(crate) fn assistant(
     let AssistantData {
         id,
         text,
+        copy_text,
         summarized,
         cwd,
         markdown,
@@ -186,7 +217,7 @@ pub(crate) fn assistant(
         hover,
         motion,
     } = data;
-    let menu_items = copy_message_items(Arc::from(text));
+    let menu_items = copy_message_items(copy_text);
     let content = markdown.map_or_else(
         || div().child(text.to_string()).into_any_element(),
         |markdown| {
