@@ -418,16 +418,13 @@ pub struct TerminalDrawer {
 impl TerminalDrawer {
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
+        session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let store_observer = observe_store_topics(
             &workspace_store,
-            &[
-                TopicKind::ActiveSession,
-                TopicKind::SessionStatus,
-                TopicKind::Terminal,
-            ],
+            &[TopicKind::SessionStatus, TopicKind::Terminal],
             cx,
         );
         // Bell and OSC 52 arrive with the grid delta rather than on a private
@@ -504,7 +501,6 @@ impl TerminalDrawer {
         // background-thread wakeup during window teardown.
         #[cfg(test)]
         let blink_task = None;
-        let session_id = workspace_store.read(cx).legacy_focus();
         let scene = crate::motion::Epoch::default();
         scene.show(session_id.as_deref());
         Self {
@@ -3377,9 +3373,10 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         let session_id = status.session_id.clone();
-        store.update(cx, |store, cx| store.select_session(session_id, cx));
-        let (drawer, cx) =
-            cx.add_window_view(|window, cx| TerminalDrawer::new(store.clone(), window, cx));
+        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        let (drawer, cx) = cx.add_window_view(|window, cx| {
+            TerminalDrawer::new(store.clone(), Some(session_id), window, cx)
+        });
         let mounted = MountedDrawer {
             drawer,
             store,

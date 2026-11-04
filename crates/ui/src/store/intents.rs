@@ -812,7 +812,7 @@ impl WorkspaceStore {
         request_id: String,
         decision: ApprovalDecision,
     ) {
-        if self.approval_delivery_pending(&request_id) {
+        if self.approval_delivery_pending_for(Some(&session_id), &request_id) {
             return;
         }
         self.dispatch(Command::RespondApproval {
@@ -1000,7 +1000,7 @@ impl WorkspaceStore {
             self.dispatch(Command::CloseTerminalPanel { session_id });
         }
         cx.emit(StoreChange {
-            topic: TopicKind::ActiveSession,
+            topic: TopicKind::Terminal,
         });
         cx.notify();
     }
@@ -1010,7 +1010,7 @@ impl WorkspaceStore {
         }
         self.dispatch(Command::CloseTerminalPanel { session_id });
         cx.emit(StoreChange {
-            topic: TopicKind::ActiveSession,
+            topic: TopicKind::Terminal,
         });
         cx.notify();
     }
@@ -1025,7 +1025,7 @@ impl WorkspaceStore {
         }
         self.dispatch(Command::SetTerminalHeight { session_id, height });
         cx.emit(StoreChange {
-            topic: TopicKind::ActiveSession,
+            topic: TopicKind::Terminal,
         });
         cx.notify();
     }
@@ -1046,7 +1046,7 @@ impl WorkspaceStore {
             terminal_id,
         });
         cx.emit(StoreChange {
-            topic: TopicKind::ActiveSession,
+            topic: TopicKind::Terminal,
         });
         cx.notify();
     }

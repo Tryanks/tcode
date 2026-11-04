@@ -376,14 +376,16 @@ impl Composer {
 
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
+        session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_layout(workspace_store, false, window, cx)
+        Self::new_with_layout(workspace_store, session_id, false, window, cx)
     }
 
     pub fn new_with_layout(
         workspace_store: Entity<WorkspaceStore>,
+        session_id: Option<String>,
         compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -412,7 +414,6 @@ impl Composer {
             observe_store_topics(
                 &workspace_store,
                 &[
-                    TopicKind::ActiveSession,
                     TopicKind::Index,
                     TopicKind::SessionStatus,
                     TopicKind::SessionPlan,
@@ -452,7 +453,6 @@ impl Composer {
             (voice, subscriptions)
         };
 
-        let session_id = workspace_store.read(cx).legacy_focus();
         let scene = crate::motion::Epoch::default();
         scene.show(session_id.as_deref());
         Self {
@@ -872,7 +872,7 @@ impl Composer {
             if self
                 .workspace_store
                 .read(cx)
-                .approval_delivery_pending(&plan.id)
+                .approval_delivery_pending_for(self.session_id.as_deref(), &plan.id)
             {
                 return;
             }
@@ -2281,6 +2281,7 @@ mod replica_tests {
     fn composer_history_survives_submission_and_destination_switches(cx: &mut TestAppContext) {
         for is_draft in [false, true] {
             let (store, incoming, outgoing, mut status) = attach(cx);
+            let session_id = Some(status.session_id.clone());
             status.draft = is_draft;
             status.project_id = Some("project-a".into());
             let mut restored_status = status.clone();
@@ -2293,8 +2294,9 @@ mod replica_tests {
             );
             cx.run_until_parked();
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            let (composer, cx) =
-                cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+            let (composer, cx) = cx.add_window_view(|window, cx| {
+                Composer::new(store.clone(), session_id.clone(), window, cx)
+            });
             cx.update(|window, cx| {
                 window.draw(cx).clear(cx);
                 composer.update(cx, |composer, cx| composer.focus(window, cx));
@@ -2435,9 +2437,11 @@ mod replica_tests {
     /// in the frames that follow the resize.
     #[gpui::test]
     fn the_control_row_folds_with_the_width_it_is_laid_out_at(cx: &mut TestAppContext) {
-        let (store, _incoming, _outgoing, _status) = attach(cx);
-        let (_composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (store, _incoming, _outgoing, status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
+        let (_composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         let resize = |width: f32, cx: &mut gpui::VisualTestContext| {
             cx.simulate_resize(gpui::size(px(width), px(800.)));
             crate::test_frames::draw_settled(cx);
@@ -2454,6 +2458,7 @@ mod replica_tests {
     #[gpui::test]
     fn a_running_turn_keeps_stop_on_screen_at_every_width(cx: &mut TestAppContext) {
         let (store, incoming, _outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         status.activity.turn_running = true;
         status.steering_supported = true;
         status.requested_model = Some("an-unlisted-model-with-a-long-identifier".into());
@@ -2466,8 +2471,9 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (_composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (_composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         for width in (360..=1200).step_by(20) {
             let width = width as f32;
             cx.simulate_resize(gpui::size(px(width), px(800.)));
@@ -2500,8 +2506,10 @@ mod replica_tests {
     fn a_starting_turn_widens_send_into_stop(cx: &mut TestAppContext) {
         use crate::test_frames::{draw, draw_settled};
         let (store, incoming, _outgoing, mut status) = attach(cx);
-        let (_composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let session_id = Some(status.session_id.clone());
+        let (_composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(1024.), px(800.)));
         draw_settled(cx);
         assert!(cx.debug_bounds("send-message").is_some());
@@ -2540,6 +2548,7 @@ mod replica_tests {
     #[gpui::test]
     fn unavailable_permission_rows_cannot_be_chosen(cx: &mut TestAppContext) {
         let (store, incoming, outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         let mut descriptor = agent::permission_control(status.provider).unwrap();
         let OptionDescriptor::Select { id, options, .. } = &mut descriptor else {
             panic!("the draft's provider publishes a select permission control");
@@ -2560,8 +2569,9 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (_composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (_composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(1200.), px(800.)));
         cx.update(|window, cx| _ = window.draw(cx));
         while outgoing.try_recv().is_ok() {}
@@ -2603,6 +2613,7 @@ mod replica_tests {
     #[gpui::test]
     fn the_current_model_is_highlighted_with_an_even_inset(cx: &mut TestAppContext) {
         let (store, incoming, _outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         let models = ["first", "chosen", "last"].map(|id| agent::ModelSpec {
             id: id.into(),
             display_name: id.into(),
@@ -2627,8 +2638,9 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (_composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (_composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(1200.), px(800.)));
         crate::test_frames::draw_settled(cx);
         let picker = cx.debug_bounds("model-picker").expect("model picker");
@@ -2650,6 +2662,7 @@ mod replica_tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
         let (store, incoming, _outgoing, status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         replace(
             &incoming,
             Topic::SessionStatus {
@@ -2659,8 +2672,9 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(1200.), px(800.)));
         cx.update(|window, cx| _ = window.draw(cx));
         let picker = cx.debug_bounds("model-picker").expect("model picker");
@@ -2717,7 +2731,9 @@ mod replica_tests {
                 }),
             ),
             (
-                Topic::SessionEvents { session_id },
+                Topic::SessionEvents {
+                    session_id: session_id.clone(),
+                },
                 ServerEvent::SessionSnapshot {
                     from: 0,
                     end: 0,
@@ -2733,8 +2749,9 @@ mod replica_tests {
         }
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), Some(session_id.clone()), window, cx)
+        });
         composer.update(cx, |composer, cx| composer.set_compact(true, cx));
         cx.simulate_resize(gpui::size(px(393.), px(800.)));
         let touch = |cx: &mut gpui::VisualTestContext, phase, position| {
@@ -2952,6 +2969,7 @@ mod replica_tests {
         cx: &mut TestAppContext,
     ) {
         let (store, incoming, outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         status.queued_messages = vec![tcode_protocol::QueuedMessageStatus {
             id: 7,
             editable: false,
@@ -2969,8 +2987,9 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(1024.), px(768.)));
         // Each step is drawn once; with motion reduced it is drawn at rest.
         cx.update(|_, cx| cx.set_reduce_motion(true));
@@ -3089,6 +3108,7 @@ mod replica_tests {
     fn a_sent_queued_row_folds_away_and_the_strip_with_the_last(cx: &mut TestAppContext) {
         use crate::test_frames::{draw, draw_settled};
         let (store, incoming, _outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         let queued = |ids: &[u64]| {
             ids.iter()
                 .map(|&id| tcode_protocol::QueuedMessageStatus {
@@ -3111,8 +3131,9 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (_composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (_composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(1024.), px(768.)));
         draw_settled(cx);
         let top = |id: u64, cx: &mut gpui::VisualTestContext| {
@@ -3186,6 +3207,7 @@ mod replica_tests {
     #[gpui::test]
     fn dragging_a_queued_row_moves_it_in_the_host_queue(cx: &mut TestAppContext) {
         let (store, incoming, outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         status.queued_messages = (1..=3)
             .map(|id| tcode_protocol::QueuedMessageStatus {
                 id,
@@ -3204,8 +3226,9 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (_composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (_composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(1024.), px(768.)));
         let draw = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| _ = window.draw(cx));
         draw(cx);
@@ -3260,6 +3283,7 @@ mod replica_tests {
     fn a_dragged_queued_row_settles_back_into_its_slot(cx: &mut TestAppContext) {
         use crate::test_frames::{draw, draw_settled};
         let (store, incoming, _outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         status.queued_messages = (1..=3)
             .map(|id| tcode_protocol::QueuedMessageStatus {
                 id,
@@ -3279,7 +3303,8 @@ mod replica_tests {
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         let (_root, cx) = cx.add_window_view(|window, cx| {
-            let composer = cx.new(|cx| Composer::new(store.clone(), window, cx));
+            let composer =
+                cx.new(|cx| Composer::new(store.clone(), session_id.clone(), window, cx));
             gpui_base::Root::new(composer, window, cx)
         });
         cx.simulate_resize(gpui::size(px(1024.), px(768.)));
@@ -3343,6 +3368,7 @@ mod replica_tests {
     #[gpui::test]
     fn an_at_thread_is_referenced_rather_than_written_into_the_draft(cx: &mut TestAppContext) {
         let (store, incoming, outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
         status.draft = false;
         status.control = Some(tcode_protocol::ControlStatus {
             grant: tcode_core::control::ControlGrant::default_grant(),
@@ -3377,8 +3403,9 @@ mod replica_tests {
         );
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), session_id.clone(), window, cx)
+        });
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             composer.update(cx, |composer, cx| composer.focus(window, cx));

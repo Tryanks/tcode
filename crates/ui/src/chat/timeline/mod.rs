@@ -690,8 +690,15 @@ mod tests {
 
         let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
@@ -784,9 +791,10 @@ mod tests {
                 ),
             ),
         ];
-        let (store, window_state, _) = seed_chat(cx, timeline);
-        let (_view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let (store, window_state, session_id) = seed_chat(cx, timeline);
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store, window_state, Some(session_id), window, cx)
+        });
         for (mode, width) in [
             (crate::theme::ThemeMode::Light, 1_400.),
             (crate::theme::ThemeMode::Light, 393.),
@@ -927,8 +935,15 @@ mod tests {
             "the recorded events are the log's only rows: {page:?}"
         );
         let window_state = cx.new(|_| WindowState::new(false));
-        let (chat, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (chat, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         // The shell binds its pane to the thread the link opens.
@@ -1004,9 +1019,11 @@ mod tests {
         // no shell is mounted here.
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         for (width, height) in [(393., 852.), (1024., 768.)] {
-            let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
+            let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
             let (view, cx) = cx.add_window_view(|window, cx| {
-                ChatRoot(cx.new(|cx| ChatView::new(store, window_state.clone(), window, cx)))
+                ChatRoot(cx.new(|cx| {
+                    ChatView::new(store, window_state.clone(), Some(session_id), window, cx)
+                }))
             });
             cx.simulate_resize(gpui::size(px(width), px(height)));
             cx.update(|window, cx| {
@@ -1084,10 +1101,10 @@ mod tests {
                 self.0.clone()
             }
         }
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
+        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
         window_state.update(cx, |state, _| state.compact = true);
         let (root, cx) = cx.add_window_view(|window, cx| {
-            TouchChat(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+            TouchChat(cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)))
         });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         cx.run_until_parked();
@@ -1149,10 +1166,10 @@ mod tests {
                 self.0.clone()
             }
         }
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
+        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
         window_state.update(cx, |state, _| state.compact = true);
         let (root, cx) = cx.add_window_view(|window, cx| {
-            TouchChat(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+            TouchChat(cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)))
         });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         draw_settled(cx);
@@ -1227,9 +1244,10 @@ mod tests {
     #[gpui::test]
     fn a_drag_right_after_a_flick_scrolls_the_timeline(cx: &mut TestAppContext) {
         use gpui::{point, px};
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store, window_state, Some(session_id), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         draw_settled(cx);
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
@@ -1288,10 +1306,12 @@ mod tests {
                 let mut timeline = synthetic_markdown_timeline(30);
                 timeline.turn_running = running;
                 timeline.turns.last_mut().unwrap().running = running;
-                let (store, window_state, _) = seed_chat(cx, timeline);
+                let (store, window_state, session_id) = seed_chat(cx, timeline);
                 cx.update(|cx| cx.set_reduce_motion(true));
                 let (view, cx) = cx.add_window_view(|window, cx| {
-                    ChatRoot(cx.new(|cx| ChatView::new(store, window_state.clone(), window, cx)))
+                    ChatRoot(cx.new(|cx| {
+                        ChatView::new(store, window_state.clone(), Some(session_id), window, cx)
+                    }))
                 });
                 cx.simulate_resize(gpui::size(px(width), px(height)));
                 // The shell's layout rule, applied by hand since no shell is
@@ -1356,7 +1376,15 @@ mod tests {
         }
         let (store, window_state, session_id) = seed_chat(cx, tail);
         let (root, cx) = cx.add_window_view(|window, cx| {
-            TouchChat(cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)))
+            TouchChat(cx.new(|cx| {
+                ChatView::new(
+                    store.clone(),
+                    window_state,
+                    Some(session_id.clone()),
+                    window,
+                    cx,
+                )
+            }))
         });
         let view = root.read_with(cx, |root, _| root.0.clone());
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
@@ -1429,7 +1457,15 @@ mod tests {
             timeline.mark_idle();
             let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
             let (root, cx) = cx.add_window_view(|window, cx| {
-                TouchChat(cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)))
+                TouchChat(cx.new(|cx| {
+                    ChatView::new(
+                        store.clone(),
+                        window_state,
+                        Some(session_id.clone()),
+                        window,
+                        cx,
+                    )
+                }))
             });
             cx.simulate_resize(gpui::size(px(393.), px(852.)));
             draw_settled(cx);
@@ -1584,8 +1620,15 @@ mod tests {
             store.read_with(cx, |store, _| !store.chat_loading())
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
         draw_settled(cx);
@@ -1755,7 +1798,15 @@ mod tests {
             false,
         )];
         let (root, cx) = cx.add_window_view(|window, cx| {
-            let chat = cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx));
+            let chat = cx.new(|cx| {
+                ChatView::new(
+                    store.clone(),
+                    window_state,
+                    Some(session_id.clone()),
+                    window,
+                    cx,
+                )
+            });
             let surface = cx.new(|_| LoadedImageChat {
                 chat,
                 sources: image_sources,
@@ -1849,10 +1900,11 @@ mod tests {
     fn the_jump_to_latest_glides_there_and_the_reader_can_take_over(cx: &mut TestAppContext) {
         use gpui::{point, px};
         for reduce in [false, true] {
-            let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
+            let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(30));
             cx.update(|cx| cx.set_reduce_motion(reduce));
-            let (view, cx) =
-                cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                ChatView::new(store, window_state, Some(session_id), window, cx)
+            });
             cx.simulate_resize(gpui::size(px(800.), px(700.)));
             draw_settled(cx);
             let list = view.read_with(cx, |chat, _| chat.list_state.clone());
@@ -1961,7 +2013,15 @@ mod tests {
         assert_eq!(tail.entries.len(), 300);
         let (store, window_state, session_id) = seed_chat(cx, tail);
         let (root, cx) = cx.add_window_view(|window, cx| {
-            TouchChat(cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)))
+            TouchChat(cx.new(|cx| {
+                ChatView::new(
+                    store.clone(),
+                    window_state,
+                    Some(session_id.clone()),
+                    window,
+                    cx,
+                )
+            }))
         });
         let view = root.read_with(cx, |root, _| root.0.clone());
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
@@ -2108,9 +2168,10 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         use gpui::{FollowMode, ListOffset, px};
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(60));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(60));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store, window_state, Some(session_id), window, cx)
+        });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         let draw = |cx: &mut gpui::VisualTestContext| {
             cx.update(|window, cx| {
@@ -2219,8 +2280,15 @@ mod tests {
         tail.entries = vec![entry("assistant-1", assistant(&long_answer))];
         let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         cx.simulate_resize(gpui::size(px(1024.), px(700.)));
         for _ in 0..2 {
             view.update(cx, |_, cx| cx.notify());
@@ -2470,7 +2538,13 @@ mod tests {
             let (store, window_state, session_id, _driver) = seed_chat_with_history(cx, tail, true);
             cx.update(|cx| cx.set_reduce_motion(true));
             let (view, cx) = cx.add_window_view(|window, cx| {
-                ChatView::new(store.clone(), window_state, window, cx)
+                ChatView::new(
+                    store.clone(),
+                    window_state,
+                    Some(session_id.clone()),
+                    window,
+                    cx,
+                )
             });
             cx.simulate_resize(gpui::size(px(393.), px(852.)));
             draw_settled(cx);
@@ -2550,9 +2624,10 @@ mod tests {
                         .collect();
                 }
             }
-            let (store, window_state, _) = seed_chat(cx, timeline);
-            let (view, cx) =
-                cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+            let (store, window_state, session_id) = seed_chat(cx, timeline);
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                ChatView::new(store, window_state, Some(session_id), window, cx)
+            });
             cx.simulate_resize(size(px(width), px(700.)));
             draw_settled(cx);
             let list = view.read_with(cx, |chat, _| chat.list_state.clone());
@@ -2589,11 +2664,12 @@ mod tests {
     #[gpui::test]
     fn the_history_reservation_is_settled_by_the_first_frame(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px};
-        let (store, window_state, _, _driver) =
+        let (store, window_state, session_id, _driver) =
             seed_chat_with_history(cx, synthetic_markdown_timeline(1), true);
         // Opening the window draws its first frame.
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store, window_state, Some(session_id), window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         let first = list.max_offset_for_scrollbar().y;

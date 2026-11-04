@@ -413,7 +413,9 @@ mod tests {
         let store = threads.store.clone();
         let window_state = cx.new(|_| WindowState::new(false));
         let (panes, cx) = cx.add_window_view(|window, cx| Panes {
-            chat: cx.new(|cx| ChatView::new(store, window_state, window, cx)),
+            chat: cx.new(|cx| {
+                ChatView::new(store, window_state, Some(threads.first.clone()), window, cx)
+            }),
             other: cx.focus_handle(),
         });
         cx.simulate_resize(size(px(1_224.), px(900.)));

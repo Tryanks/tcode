@@ -405,13 +405,12 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut chat = Self::new(workspace_store, window_state, window, cx);
+        let mut chat = Self::new(workspace_store, window_state, Some(session_id), window, cx);
         chat.side_of = Some(SideOf {
             lead,
             lead_session,
             mode: SideMode::Slot,
         });
-        chat.set_session(Some(session_id), cx);
         chat
     }
 

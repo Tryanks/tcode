@@ -70,8 +70,15 @@ impl StoredThread {
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let (_, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         cx.simulate_resize(size(px(width), px(1_400.)));
         draw_settled(cx);
         (
@@ -524,9 +531,11 @@ fn a_long_edit_path_and_its_counts_stay_in_the_header_at_narrow_widths(cx: &mut 
             }),
         ),
     ];
-    let (store, window_state, _) = crate::chat::tests::seed_chat(cx, timeline);
+    let (store, window_state, session_id) = crate::chat::tests::seed_chat(cx, timeline);
     cx.update(|cx| cx.set_reduce_motion(true));
-    let (_, cx) = cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        ChatView::new(store, window_state, Some(session_id), window, cx)
+    });
     cx.simulate_resize(size(px(900.), px(700.)));
     draw_settled(cx);
     let (row, path, counts) = (

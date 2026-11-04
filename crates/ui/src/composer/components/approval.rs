@@ -162,7 +162,7 @@ impl Composer {
         let pending = self
             .workspace_store
             .read(cx)
-            .approval_delivery_pending(&request.id);
+            .approval_delivery_pending_for(self.session_id.as_deref(), &request.id);
         let expanded = self.approval_expanded;
         let cancel_id = request.id.clone();
 
@@ -426,10 +426,10 @@ mod tests {
             })
         });
         store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let (_composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new_with_layout(store.clone(), compact, window, cx)
+            Composer::new_with_layout(store.clone(), Some(session_id), compact, window, cx)
         });
         cx.simulate_resize(if compact {
             size(px(393.), px(852.))

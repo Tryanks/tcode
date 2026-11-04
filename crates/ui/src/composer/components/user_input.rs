@@ -841,10 +841,11 @@ mod tests {
             })
         });
         store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
-        let (composer, cx) =
-            cx.add_window_view(|window, cx| Composer::new(store.clone(), window, cx));
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), Some(session_id), window, cx)
+        });
         cx.simulate_resize(size(px(800.), px(600.)));
         // The turn the question arrived in runs throughout, so motion is
         // reduced and each click's outcome is drawn at rest.

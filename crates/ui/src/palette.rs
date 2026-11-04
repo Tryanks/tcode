@@ -173,10 +173,7 @@ impl CommandPalette {
 
         let subscriptions = vec![
             cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
-                if matches!(
-                    change.topic,
-                    TopicKind::Index | TopicKind::Settings | TopicKind::ActiveSession
-                ) {
+                if matches!(change.topic, TopicKind::Index | TopicKind::Settings) {
                     this.invalidate_results(false, cx);
                 }
             }),

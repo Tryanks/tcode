@@ -335,18 +335,24 @@ impl ChatView {
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
+        session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let compact = window_state.read(cx).compact;
-        let session_id = workspace_store.read(cx).legacy_focus();
         let scene = crate::motion::Epoch::default();
         scene.show(session_id.as_deref());
         let composer = cx.new(|cx| {
             if compact {
-                Composer::new_with_layout(workspace_store.clone(), true, window, cx)
+                Composer::new_with_layout(
+                    workspace_store.clone(),
+                    session_id.clone(),
+                    true,
+                    window,
+                    cx,
+                )
             } else {
-                Composer::new(workspace_store.clone(), window, cx)
+                Composer::new(workspace_store.clone(), session_id.clone(), window, cx)
             }
         });
         // Measure enough rows to establish the six-screen window even when
@@ -413,7 +419,8 @@ impl ChatView {
             }),
         ];
         let terminal_drawer = cx.new(|cx| {
-            let mut drawer = TerminalDrawer::new(workspace_store.clone(), window, cx);
+            let mut drawer =
+                TerminalDrawer::new(workspace_store.clone(), session_id.clone(), window, cx);
             drawer.share_scene(&scene);
             drawer
         });
@@ -1402,11 +1409,18 @@ pub(crate) mod tests {
             })
         });
         store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         for locale in ["en", "zh-CN"] {
             crate::set_locale(locale);
             view.update(cx, |_, cx| cx.notify());
@@ -1484,8 +1498,15 @@ pub(crate) mod tests {
         );
         let (store, window_state, session_id) = seed_chat(cx, plain.clone());
         window_state.update(cx, |state, _| state.compact = true);
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(
+                store.clone(),
+                window_state,
+                Some(session_id.clone()),
+                window,
+                cx,
+            )
+        });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
         let replace = |timeline: &Timeline, cx: &mut VisualTestContext| {
@@ -1581,11 +1602,11 @@ pub(crate) mod tests {
             assistant(&"A long running reply keeps its final status visible.\n\n".repeat(40));
         timeline.turn_running = true;
         timeline.turns.last_mut().unwrap().running = true;
-        let (store, window_state, _) = seed_chat(cx, timeline);
+        let (store, window_state, session_id) = seed_chat(cx, timeline);
         cx.update(|cx| cx.set_reduce_motion(true));
         window_state.update(cx, |state, _| state.compact = true);
         let (root, cx) = cx.add_window_view(|window, cx| OccludedChat {
-            chat: cx.new(|cx| ChatView::new(store, window_state, window, cx)),
+            chat: cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)),
             bottom: px(34.),
         });
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
@@ -1662,10 +1683,13 @@ pub(crate) mod tests {
                 div().size_full().child(self.0.clone())
             }
         }
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(6));
-        let (around, cx) = cx.add_window_view(|window, cx| {
-            Around(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
-        });
+        let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(6));
+        let (around, cx) =
+            cx.add_window_view(|window, cx| {
+                Around(cx.new(|cx| {
+                    ChatView::new(store, window_state, Some(session_id.clone()), window, cx)
+                }))
+            });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(900.)));
         draw_settled(cx);
@@ -2284,8 +2308,9 @@ pub(crate) mod tests {
         ) -> (Entity<ChatView>, &'a mut VisualTestContext) {
             let store = self.store.clone();
             let window_state = cx.new(|_| WindowState::new(false));
-            let (view, cx) =
-                cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                ChatView::new(store, window_state, Some(THREAD.to_owned()), window, cx)
+            });
             cx.simulate_resize(size);
             (view, cx)
         }

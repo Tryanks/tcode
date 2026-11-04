@@ -869,15 +869,7 @@ impl PullRequestsPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = [
-            observe_store_topics(
-                &store,
-                &[
-                    TopicKind::Index,
-                    TopicKind::SessionStatus,
-                    TopicKind::ActiveSession,
-                ],
-                cx,
-            ),
+            observe_store_topics(&store, &[TopicKind::Index, TopicKind::SessionStatus], cx),
             cx.observe(&window_state, |_, _, cx| cx.notify()),
             // Opening or leaving a pull request is client state, not a host topic.
             cx.observe(&store, |this: &mut Self, store, cx| {

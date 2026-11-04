@@ -671,15 +671,7 @@ impl AgentsPanel {
 
     fn unshown(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
         let subscriptions = vec![
-            observe_store_topics(
-                &store,
-                &[
-                    TopicKind::ActiveSession,
-                    TopicKind::SessionEvents,
-                    TopicKind::Index,
-                ],
-                cx,
-            ),
+            observe_store_topics(&store, &[TopicKind::SessionEvents, TopicKind::Index], cx),
             cx.on_release(|this, cx| {
                 if this.shown {
                     this.store

@@ -337,8 +337,9 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         let window_state = cx.new(|_| WindowState::new(false));
-        let (_, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            ChatView::new(store.clone(), window_state, None, window, cx)
+        });
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
