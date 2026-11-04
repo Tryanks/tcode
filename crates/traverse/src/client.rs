@@ -1264,9 +1264,9 @@ async fn relay_connected(
                 Ok(wake @ (Wake::Reconnect | Wake::Park)) => {
                     break Lost { failure: ConnectionFailure::Unreachable(None), healthy, wake: Some(wake) };
                 }
-                // Probe now: rewind the idle window so the next tick pings.
+                // Probe now: the next tick pings.
                 Ok(Wake::Probe) => {
-                    heartbeat = Heartbeat::with_idle(now_ms().saturating_sub(NATIVE_IDLE_MS), NATIVE_IDLE_MS);
+                    heartbeat.probe(now_ms());
                 }
                 Err(_) => break Lost { failure: ConnectionFailure::HostClosed, healthy, wake: None },
             },

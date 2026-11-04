@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tcode_client::heartbeat::NATIVE_IDLE_MS;
 use tcode_client::host::Transport;
 use tcode_client::pairing::{PairInvite, PairedHost};
 use tcode_client::recovery::Wake;
@@ -571,10 +570,10 @@ fn an_unreachable_self_hosted_instance_still_lets_the_lan_pair_and_connect() {
 }
 
 /// The heartbeat is the transport's own line, never charged to the outbox.
-/// Crediting it on send underflowed the outbox count after `NATIVE_IDLE_MS`
-/// of silence and killed the writer, so a connection that went quiet for ten
-/// seconds silently stopped carrying commands while still reporting
-/// `Connected`.
+/// Crediting it on send underflowed the outbox count at the first ping and
+/// killed the writer, so a connection that had been pinged silently stopped
+/// carrying commands while still reporting `Connected`. A network change
+/// probes the link, which pings at once rather than after the idle window.
 #[test]
 fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     let host_dir = TestDir::new("idle-host");
@@ -590,7 +589,8 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     recv_type(&client, "ack", Some(1));
     wait_state(&client, connected_directly);
 
-    std::thread::sleep(Duration::from_millis(NATIVE_IDLE_MS + 2_000));
+    phone.network_changed();
+    recv_type(&client, "query_result", Some(0));
     while let Ok(state) = client.state.try_recv() {
         assert!(
             connected_directly(&state),
