@@ -1,8 +1,6 @@
 //! Settings → Traverse: the relay and lookup services this machine publishes
 //! to, each with how it is doing while hosting.
 
-use std::time::Duration;
-
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
@@ -42,9 +40,6 @@ const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How often the sources' status is read again while hosting.
-const STATUS_REFRESH: Duration = Duration::from_secs(2);
-
 /// One Traverse source as the page edits it.
 struct TraverseRow {
     enabled: bool,
@@ -60,8 +55,8 @@ pub struct TraversePanel {
     rows: Vec<TraverseRow>,
     /// The URL of a self-hosted instance about to be added.
     add_input: Entity<InputState>,
-    /// Repaints the status while hosting.
-    ticker: Option<Task<()>>,
+    /// Repaints the status as it changes while hosting.
+    status_events: Option<Task<()>>,
     /// The panel's size-class motion: the window draws it under another
     /// parent when it turns compact or wide.
     motion: crate::motion::owned::Owned,
@@ -101,25 +96,35 @@ impl TraversePanel {
         Self {
             rows,
             add_input,
-            ticker: None,
+            status_events: None,
             motion: Default::default(),
             _subscription: subscription,
         }
     }
 
-    fn sync_ticker(&mut self, hosting: bool, cx: &mut Context<Self>) {
-        match (hosting, self.ticker.is_some()) {
+    fn follow_status(&mut self, hosting: bool, cx: &mut Context<Self>) {
+        match (hosting, self.status_events.is_some()) {
             (true, false) => {
-                self.ticker = Some(cx.spawn(async move |this, cx| {
-                    loop {
-                        cx.background_executor().timer(STATUS_REFRESH).await;
+                let Some(events) = cx
+                    .try_global::<RemoteController>()
+                    .and_then(RemoteController::traverse_events)
+                else {
+                    return;
+                };
+                self.status_events = Some(cx.spawn(async move |this, cx| {
+                    while events.recv().await.is_ok() {
                         if this.update(cx, |_, cx| cx.notify()).is_err() {
                             return;
                         }
                     }
+                    // Hosting stopped: a later start is followed afresh.
+                    let _ = this.update(cx, |this, cx| {
+                        this.status_events = None;
+                        cx.notify();
+                    });
                 }));
             }
-            (false, true) => self.ticker = None,
+            (false, true) => self.status_events = None,
             _ => {}
         }
     }
@@ -273,7 +278,7 @@ impl TraversePanel {
             .try_global::<RemoteController>()
             .map(|controller| (controller.is_hosting(), controller.traverse_status()))
             .unwrap_or_default();
-        self.sync_ticker(hosting, cx);
+        self.follow_status(hosting, cx);
         // A source keeps its key for as long as it is listed, whatever its
         // place: a removed one folds away and the ones below move up.
         let sources: Vec<_> = self
