@@ -230,8 +230,9 @@ pub(in crate::chat) fn family(entry: &TimelineEntry) -> Option<Family> {
 pub(in crate::chat) struct Activity {
     pub(in crate::chat) header: Header,
     pub(in crate::chat) status: ItemStatus,
-    /// The output a failure's line is taken from.
-    pub(in crate::chat) output: Option<String>,
+    /// The line its failure is told by, when it failed: taken from its
+    /// output here rather than the whole output kept for it.
+    failure: Option<String>,
     pub(in crate::chat) copy: Vec<(String, String)>,
     pub(in crate::chat) expandable: bool,
     /// A file the activity is about.
@@ -241,7 +242,7 @@ pub(in crate::chat) struct Activity {
 impl Activity {
     /// The line its failure is told by, when it failed.
     pub(in crate::chat) fn failure(&self) -> Option<String> {
-        window::failure_line(&self.header, self.status, self.output.as_deref())
+        self.failure.clone()
     }
 }
 
@@ -262,7 +263,7 @@ fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Act
     let settled = |header, copy| Activity {
         header,
         status: ItemStatus::Completed,
-        output: None,
+        failure: None,
         copy,
         expandable: false,
         path: None,
@@ -276,21 +277,25 @@ fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Act
             output,
             exit_code,
             status,
-        } => Activity {
-            header: shell::command_header(command, output, *exit_code, *status),
-            status: *status,
-            output: Some(output.clone()),
-            copy: shell::command_copy_items(command, output),
-            expandable: true,
-            path: None,
-        },
+        } => {
+            let header = shell::command_header(command, output, *exit_code, *status);
+            Activity {
+                failure: window::failure_line(&header, *status, Some(output)),
+                header,
+                status: *status,
+                copy: shell::command_copy_items(command, output),
+                expandable: true,
+                path: None,
+            }
+        }
         ItemContent::ToolCall { .. } => {
             let call = Call::of(entry).expect("a tool call");
             let view = view(&call);
+            let header = view.header(&call, cwd);
             Activity {
-                header: view.header(&call, cwd),
+                failure: window::failure_line(&header, call.status, call.output),
+                header,
                 status: call.status,
-                output: call.output.map(str::to_owned),
                 copy: view.copy_items(&call),
                 expandable: true,
                 path: view.path().map(str::to_owned),
@@ -306,7 +311,7 @@ fn kind_activity(entry: &TimelineEntry, live_reasoning: bool, cwd: &Path) -> Act
                 } else {
                     ItemStatus::Completed
                 },
-                output: None,
+                failure: None,
                 copy: items,
                 expandable: !live_reasoning,
                 path: None,

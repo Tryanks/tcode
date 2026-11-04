@@ -38,9 +38,9 @@ pub(in crate::chat) fn activity(
         super::copy(&mut copy, "tools.copy_summary", summary);
     }
     Activity {
+        failure: super::window::failure_line(&header, status, summary),
         header,
         status,
-        output: summary.map(str::to_owned),
         copy,
         expandable: false,
         path: None,

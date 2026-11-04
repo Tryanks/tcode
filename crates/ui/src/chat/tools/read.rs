@@ -55,8 +55,6 @@ struct Read<'a> {
 /// at; and a note after them.
 struct Content<'o> {
     lines: Vec<(Option<u64>, &'o str)>,
-    /// Whether the harness numbered the lines itself.
-    numbered: bool,
     /// A note after the lines: how much more the file holds.
     note: Option<&'o str>,
 }
@@ -98,7 +96,6 @@ impl Read<'_> {
                         None => (None, line),
                     })
                     .collect(),
-                numbered: true,
                 note,
             };
         }
@@ -109,7 +106,6 @@ impl Read<'_> {
                 .enumerate()
                 .map(|(index, line)| (Some(first + index as u64), line))
                 .collect(),
-            numbered: false,
             note,
         }
     }
@@ -120,17 +116,15 @@ impl Read<'_> {
         let range = |first: u64, last: u64| {
             crate::tr!("tools.line_range", first = first, last = last).into_owned()
         };
+        // Read from its ends, not its whole: the header is drawn with the
+        // window shut too.
         if let Some(output) = call
             .output
             .filter(|_| call.status != agent::ItemStatus::Failed)
+            && let Some((first, _)) = output.lines().next().and_then(numbered)
         {
-            let content = self.content(output);
-            let mut numbers = content.lines.iter().filter_map(|(number, _)| *number);
-            if content.numbered
-                && let Some(first) = numbers.next()
-            {
-                return Some(range(first, numbers.next_back().unwrap_or(first)));
-            }
+            let last = output.lines().rev().find_map(numbered);
+            return Some(range(first, last.map_or(first, |(last, _)| last)));
         }
         let first = self.input.offset?.max(1);
         Some(range(first, first + self.input.limit?.saturating_sub(1)))
