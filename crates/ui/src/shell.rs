@@ -545,9 +545,7 @@ pub(crate) fn selected_input(window: &Window, cx: &App) -> Option<String> {
 /// The thread of the pane last entered or placed into, for what acts on the
 /// whole window: it is the selected input's whenever there is one.
 pub(crate) fn last_input_thread(cx: &App) -> Option<String> {
-    let shell = current_shell(cx)?;
-    let pane = &shell.read(cx).attachment.as_ref()?.last_input;
-    pane.read(cx).session_id().map(str::to_owned)
+    current_shell(cx)?.read(cx).page_thread(cx)
 }
 
 /// Whether a pane of this window shows `session_id`, the compact page
@@ -959,9 +957,7 @@ impl AppShell {
         let host_id = store
             .as_ref()
             .and_then(|store| store.read(cx).remote_host_id().map(str::to_owned));
-        let session_id = store
-            .as_ref()
-            .and_then(|store| store.read(cx).legacy_focus());
+        let session_id = self.page_thread(cx);
         let panel = self
             .pending_navigation_restore
             .as_ref()
@@ -970,10 +966,12 @@ impl AppShell {
                 if self.panel_shows_terminal {
                     NavigationPanel::Terminal
                 } else {
-                    match store
-                        .as_ref()
-                        .map(|store| store.read(cx).panel_state().right_tab)
-                    {
+                    match store.as_ref().map(|store| {
+                        store
+                            .read(cx)
+                            .panel_state_for(session_id.as_deref())
+                            .right_tab
+                    }) {
                         Some(RightTab::Plan) => NavigationPanel::Plan,
                         Some(RightTab::Agents) => NavigationPanel::Agents,
                         Some(RightTab::PullRequests) => NavigationPanel::PullRequests,
@@ -1029,8 +1027,9 @@ impl AppShell {
             self.pending_navigation_restore = None;
             return;
         };
+        let shown = self.page_thread(cx);
         if !store.read(cx).index_hydrated() {
-            if store.read(cx).legacy_focus().as_deref() != Some(&pending.session_id) {
+            if shown.as_deref() != Some(&pending.session_id) {
                 self.pending_navigation_restore = None;
             }
             return;
@@ -1045,21 +1044,19 @@ impl AppShell {
                 .pending_navigation_restore
                 .take()
                 .expect("checked above");
-            store.update(cx, |store, cx| {
-                if store.legacy_focus().as_deref() == Some(&pending.session_id) {
-                    store.leave_session(cx);
-                }
-            });
+            if shown.as_deref() == Some(&pending.session_id) {
+                store.update(cx, |store, cx| store.close_thread(&pending.session_id, cx));
+            }
             self.window_state
                 .update(cx, |state, cx| state.discard_restored_thread(cx));
             return;
         }
-        if store.read(cx).legacy_focus().as_deref() != Some(&pending.session_id) {
+        if shown.as_deref() != Some(&pending.session_id) {
             // A user selection made while syncing supersedes restoration.
             self.pending_navigation_restore = None;
             return;
         }
-        if store.read(cx).chat_loading() {
+        if store.read(cx).chat_loading_for(shown.as_deref()) {
             return;
         }
         let pending = self
@@ -1076,7 +1073,9 @@ impl AppShell {
                 NavigationPanel::Preview => RightTab::Preview,
                 _ => RightTab::Diff,
             };
-            store.update(cx, |store, cx| store.set_right_tab(tab, cx));
+            store.update(cx, |store, cx| {
+                store.set_right_tab_for(Some(&pending.session_id), tab, cx)
+            });
         }
     }
 
@@ -1682,6 +1681,13 @@ impl AppShell {
             .into_iter()
             .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
             .or_else(|| Some(attachment.last_input.clone()))
+    }
+
+    /// The thread of the pane last in use: the compact page's, and what the
+    /// window as a whole is about.
+    fn page_thread(&self, cx: &App) -> Option<String> {
+        let page = self.attachment.as_ref()?.page();
+        page.read(cx).session_id().map(str::to_owned)
     }
 
     /// The pane showing `session_id`.
@@ -2761,10 +2767,7 @@ impl AppShell {
             // split — which is not a page there — has to become one here.
             if compact
                 && self.destination(cx) == Destination::Threads
-                && self
-                    .attachment
-                    .as_ref()
-                    .is_some_and(|a| a.link.store.read(cx).legacy_focus().is_some())
+                && self.page_thread(cx).is_some()
             {
                 self.window_state
                     .update(cx, |state, cx| state.go(Destination::Thread, cx));
@@ -2964,7 +2967,7 @@ impl AppShell {
                     .link
                     .store
                     .read(cx)
-                    .panel_state()
+                    .panel_state_for(self.page_thread(cx).as_deref())
                     .right_panel_open
         };
         (on_screen
@@ -3617,11 +3620,10 @@ impl AppShell {
         let Some(lead) = pane.read(cx).session_id().map(str::to_owned) else {
             return false;
         };
-        if store.read(cx).legacy_focus().as_ref() != Some(&lead)
-            || attachment
-                .leads
-                .iter()
-                .any(|kept| kept.session_id == session_id)
+        if attachment
+            .leads
+            .iter()
+            .any(|kept| kept.session_id == session_id)
         {
             return false;
         }
@@ -3868,9 +3870,9 @@ impl AppShell {
     /// The lead thread of the open agent, when one is open.
     fn agent_lead(&self, cx: &App) -> Option<(Entity<WorkspaceStore>, String)> {
         let store = self.attachment.as_ref()?.link.store.clone();
+        let active = self.page_thread(cx)?;
         let parent = {
             let store = store.read(cx);
-            let active = store.legacy_focus()?;
             let sessions = store.sidebar_sessions();
             let parent = sessions
                 .iter()
@@ -4151,7 +4153,7 @@ impl AppShell {
         let store = attachment.link.store.read(cx);
         let active = match &kept {
             Some(kept) => store.chat_active_session_for(Some(&kept.session_id)),
-            None => store.chat_active_session(),
+            None => store.chat_active_session_for(self.page_thread(cx).as_deref()),
         };
         let project = active
             .as_ref()
@@ -4231,13 +4233,14 @@ impl AppShell {
             return div().into_any_element();
         };
         let store = attachment.link.store.read(cx);
-        let panel = store.panel_state();
+        let session = self.page_thread(cx);
+        let panel = store.panel_state_for(session.as_deref());
         let selected_panel = self
             .pending_navigation_restore
             .as_ref()
             .map(|pending| pending.panel.id());
         let terminal = selected_panel.map_or(self.panel_shows_terminal, |id| id == "terminal");
-        let show_agents = store.legacy_focus().is_some_and(|id| {
+        let show_agents = session.is_some_and(|id| {
             !crate::agents_panel::Agents::of(store, &id).is_empty()
                 || panel.right_tab == RightTab::Agents
                 || selected_panel == Some("agents")
@@ -4389,7 +4392,7 @@ impl AppShell {
             return div().into_any_element();
         };
         let view = attachment.chat(cx).read(cx).pull_request_view(cx);
-        let session = attachment.link.store.read(cx).legacy_focus();
+        let session = self.page_thread(cx);
         let key = session.as_deref().and_then(|session| {
             attachment
                 .link
@@ -4419,7 +4422,12 @@ impl AppShell {
     /// Push the panel destination with something actually on it.
     fn open_panels(&mut self, cx: &mut Context<Self>) {
         let showing = self.attachment.as_ref().is_some_and(|attachment| {
-            let panel = attachment.link.store.read(cx).panel_state();
+            let session = self.page_thread(cx);
+            let panel = attachment
+                .link
+                .store
+                .read(cx)
+                .panel_state_for(session.as_deref());
             if self.panel_shows_terminal {
                 panel.terminal_open
             } else {
@@ -4455,12 +4463,13 @@ impl AppShell {
             return;
         };
         let store = attachment.link.store.clone();
-        let panel = store.read(cx).panel_state();
+        let session = self.page_thread(cx);
+        let panel = store.read(cx).panel_state_for(session.as_deref());
         self.panel_shows_terminal = id == "terminal";
         store.update(cx, |store, cx| match id {
             "terminal" => {
                 if !panel.terminal_open {
-                    store.toggle_terminal_panel(cx);
+                    store.toggle_terminal_panel_for(session.unwrap_or_default(), cx);
                 }
             }
             tab => {
@@ -4471,14 +4480,10 @@ impl AppShell {
                     "preview" => RightTab::Preview,
                     _ => RightTab::Diff,
                 };
-                if !(panel.right_panel_open && panel.right_tab == tab) {
-                    match tab {
-                        RightTab::Plan => store.toggle_plan_panel(cx),
-                        RightTab::Agents => store.toggle_agents_panel(cx),
-                        RightTab::PullRequests => store.toggle_pull_requests_panel(cx),
-                        RightTab::Preview => store.toggle_preview_panel(cx),
-                        _ => store.toggle_diff_panel(cx),
-                    }
+                if !(panel.right_panel_open && panel.right_tab == tab)
+                    && let Some(session) = &session
+                {
+                    store.toggle_tab_panel_for(session, tab, cx);
                 }
             }
         });
@@ -5494,7 +5499,11 @@ impl Render for AppShell {
         self.colour_panes(cx);
         self.sync_panes(window, cx);
         if let Some(attachment) = &self.attachment {
-            let title = attachment.link.store.read(cx).shell_window_title();
+            let title = attachment
+                .link
+                .store
+                .read(cx)
+                .shell_window_title_for(self.page_thread(cx).as_deref());
             if title != self.window_title {
                 window.set_window_title(&title);
                 self.window_title = title;
