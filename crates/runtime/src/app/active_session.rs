@@ -477,6 +477,13 @@ impl ActiveSession {
             || self.background_task_count > 0
     }
 
+    /// Whether the queue is all this thread has left: its start failed or its
+    /// provider died, so nothing is working on the unsent text, which waits for
+    /// the next start. A draft's scheduled send has yet to start at all.
+    pub(super) fn queue_stranded(&self) -> bool {
+        !self.draft && matches!(self.runtime, Runtime::Idle) && !self.queue.is_empty()
+    }
+
     /// Whether a parent still has to wait for this thread: it has work, or its
     /// provider is still starting up.
     pub(super) fn is_unfinished(&self) -> bool {

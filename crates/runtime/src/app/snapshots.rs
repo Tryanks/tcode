@@ -423,7 +423,7 @@ impl<'a> ActivityProjection<'a> {
         } else if resident.is_some_and(|session| {
             session.turn_in_flight
                 || session.delivery_in_flight.is_some()
-                || !session.queue.is_empty()
+                || (!session.queue.is_empty() && !session.queue_stranded())
                 || session.preparing_worktree
                 || matches!(session.runtime, Runtime::Starting { .. })
         }) {
@@ -464,10 +464,11 @@ impl<'a> ActivityProjection<'a> {
                 || session.turn_in_flight
                 || session.delivery_in_flight.is_some()
                 || (meta.native_subagent.is_some() && session.timeline.turn_running)
-                || session
-                    .queue
-                    .iter()
-                    .any(|message| message.origin == MessageOrigin::Human)
+                || (!session.queue_stranded()
+                    && session
+                        .queue
+                        .iter()
+                        .any(|message| message.origin == MessageOrigin::Human))
         });
         SessionActivity {
             working,
