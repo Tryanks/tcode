@@ -294,6 +294,7 @@ pub struct ChatView {
     auto_activity_expansions: AutoActivityExpansions,
     command_panels: RefCell<CommandPanelCache>,
     inline_diffs: InlineDiffCache,
+    tool_texts: tools::DerivedTexts,
     /// Whole tool outputs fetched for the open session, by item id.
     full_outputs: HashMap<String, FullOutput>,
     /// The output a Copy waits for, copied once it has loaded.
@@ -546,6 +547,7 @@ impl ChatView {
             auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
             inline_diffs: InlineDiffCache::new(),
+            tool_texts: tools::DerivedTexts::default(),
             full_outputs: HashMap::new(),
             copy_when_loaded: None,
             hover: crate::motion::ListHover::new(crate::material::HOVER).in_scene(&scene),
@@ -731,6 +733,7 @@ impl Render for ChatView {
             self.sync_markdown_states(cx);
         }
         self.inline_diffs.sweep();
+        self.tool_texts.sweep(&cx.theme().highlight_theme);
         let now = cx.background_executor().now();
         for key in self.rows_motion.settle(window, cx) {
             if let Some(row) = self.rows.iter().position(|row| row.identity == key) {

@@ -1,6 +1,8 @@
 //! The read window: the file and the lines read, numbered and highlighted
 //! as the file's language, or the image read.
 
+use std::sync::Arc;
+
 use gpui::{
     AnyElement, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledText, div, prelude::FluentBuilder as _, px,
@@ -163,8 +165,7 @@ impl ToolView for Read<'_> {
             return super::body(output.into_iter().chain(images));
         }
         let (text, control) = super::full_output(call, ctx);
-        let content = self.content(&text);
-        let lines = code(call, self.input.file_path, &content, ctx);
+        let lines = code(call, self, &text, ctx);
         super::body(std::iter::once(lines).chain(control).chain(images))
     }
 
@@ -189,49 +190,88 @@ impl ToolView for Read<'_> {
     }
 }
 
+/// The lines a read window shows, numbered and highlighted.
+struct ShownLines {
+    highlighted: Arc<crate::highlight::HighlightedSource>,
+    numbers: SharedString,
+    /// More lines than the first few, so the window folds them.
+    folds: bool,
+    /// The lines the window leaves out.
+    hidden: usize,
+    /// Opened, the lines past the most it shows.
+    beyond: Option<usize>,
+    note: Option<SharedString>,
+}
+
+impl ShownLines {
+    fn of(
+        content: &Content<'_>,
+        path: &str,
+        open: bool,
+        theme: &crate::highlight::HighlightTheme,
+    ) -> Self {
+        let total = content.lines.len();
+        let limit = Bound::HEAD.head;
+        // Hiding two lines behind a control saves nothing.
+        let folds = total > limit + 2;
+        let shown = if !folds {
+            &content.lines[..]
+        } else if open {
+            // Opened, a read lays out at most this many lines every frame.
+            &content.lines[..total.min(MAX_OPEN_LINES)]
+        } else {
+            &content.lines[..limit]
+        };
+        let source = shown
+            .iter()
+            .map(|(_, line)| *line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let numbers = shown
+            .iter()
+            .map(|(number, _)| number.map(|number| number.to_string()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            highlighted: crate::highlight::highlighted(
+                source.into(),
+                crate::highlight::language_name_for_path(path).into(),
+                theme,
+                || None,
+            ),
+            numbers: numbers.into(),
+            folds,
+            hidden: total - shown.len(),
+            beyond: open
+                .then(|| total.saturating_sub(MAX_OPEN_LINES))
+                .filter(|n| *n > 0),
+            note: content.note.map(|note| SharedString::from(note.to_owned())),
+        }
+    }
+}
+
 /// Lines of a file beside their numbers, highlighted as the file's language:
 /// the first lines, then all of them in a capped scroll once asked for.
-fn code(
-    call: &Call<'_>,
-    path: &str,
-    content: &Content<'_>,
-    ctx: &mut ToolCtx<'_, '_>,
-) -> AnyElement {
+fn code(call: &Call<'_>, read: &Read<'_>, output: &str, ctx: &mut ToolCtx<'_, '_>) -> AnyElement {
     let key = format!("tool-text-{}-content", call.id());
     let open = ctx.is_open(&key);
-    let total = content.lines.len();
-    let limit = Bound::HEAD.head;
-    // Hiding two lines behind a control saves nothing.
-    let folds = total > limit + 2;
-    let shown = if !folds {
-        &content.lines[..]
-    } else if open {
-        // Opened, a read lays out at most this many lines every frame.
-        &content.lines[..total.min(MAX_OPEN_LINES)]
-    } else {
-        &content.lines[..limit]
-    };
-    let hidden = total - shown.len();
-    let beyond = open
-        .then(|| total.saturating_sub(MAX_OPEN_LINES))
-        .filter(|n| *n > 0);
-    let source = shown
-        .iter()
-        .map(|(_, line)| *line)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let theme = ctx.highlight_theme();
+    let lines = ctx.derived(
+        format!("{key}-{open}-{:?}", read.input.offset),
+        output,
+        |output| ShownLines::of(&read.content(output), read.input.file_path, open, &theme),
+    );
+    let ShownLines {
+        highlighted,
+        numbers,
+        folds,
+        hidden,
+        beyond,
+        note,
+    } = &*lines;
+    let (folds, hidden, beyond) = (*folds, *hidden, *beyond);
     let cx = ctx.app();
     let theme = cx.theme();
-    let runs = crate::highlight::highlight_source(
-        &source,
-        crate::highlight::language_name_for_path(path),
-        &theme.highlight_theme,
-    );
-    let numbers = shown
-        .iter()
-        .map(|(number, _)| number.map(|number| number.to_string()).unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join("\n");
     let mono = theme.mono_font_family.clone();
     let block = h_flex()
         .id(SharedString::from(key.clone()))
@@ -248,7 +288,7 @@ fn code(
                 .text_right()
                 .text_color(theme.muted_foreground)
                 .whitespace_nowrap()
-                .child(numbers),
+                .child(numbers.clone()),
         )
         .child(
             div()
@@ -257,7 +297,10 @@ fn code(
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_color(theme.foreground)
-                .child(StyledText::new(source).with_highlights(runs)),
+                .child(
+                    StyledText::new(highlighted.source().clone())
+                        .with_highlights(highlighted.runs.iter().cloned()),
+                ),
         );
     let beyond = beyond.map(|count| {
         div()
@@ -265,10 +308,10 @@ fn code(
             .child(crate::tr!("tools.lines_not_shown", count = count).into_owned())
             .into_any_element()
     });
-    let note = content.note.map(|note| {
+    let note = note.clone().map(|note| {
         div()
             .text_secondary(false, cx)
-            .child(note.to_owned())
+            .child(note)
             .into_any_element()
     });
     let control = folds.then(|| {

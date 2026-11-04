@@ -29,7 +29,7 @@ pub(in crate::chat) mod todo;
 pub(in crate::chat) mod web;
 pub(in crate::chat) mod window;
 
-use std::path::Path;
+use std::{any::Any, collections::HashMap, ops::Deref, path::Path, rc::Rc, sync::Arc};
 
 use agent::{Attachment, ItemContent, ItemStatus, ToolName};
 use gpui::{
@@ -479,6 +479,85 @@ impl ToolCtx<'_, '_> {
     pub(in crate::chat) fn elided(&mut self, entry: &TimelineEntry) -> Option<ElidedOutput> {
         self.chat.elided_output(&entry.id, entry.turn, self.cx)
     }
+
+    /// What `derive` makes of `input`, derived again only once `input`
+    /// differs from the text it was last derived from under `key`.
+    pub(in crate::chat) fn derived<T: 'static>(
+        &mut self,
+        key: String,
+        input: &str,
+        derive: impl FnOnce(&str) -> T,
+    ) -> Rc<T> {
+        self.chat.tool_texts.get(key, input, derive)
+    }
+
+    /// The highlighting theme the windows draw in.
+    pub(in crate::chat) fn highlight_theme(&self) -> Arc<crate::highlight::HighlightTheme> {
+        self.cx.theme().highlight_theme.clone()
+    }
+}
+
+/// What the windows' bodies derive from their calls' text -- the lines they
+/// show, the highlighting, an output pretty-printed -- kept while a window
+/// is drawn, so a frame that draws it again does not derive it again. A
+/// finished call's text never changes; a running one's is compared, not
+/// trusted, so what changed is derived again.
+#[derive(Default)]
+pub(in crate::chat) struct DerivedTexts {
+    entries: HashMap<String, Derived>,
+    theme: Option<Arc<crate::highlight::HighlightTheme>>,
+}
+
+struct Derived {
+    input: Box<str>,
+    value: Rc<dyn Any>,
+    drawn: bool,
+}
+
+impl DerivedTexts {
+    pub(in crate::chat) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Call once per frame, before the rows render: what the last frame did
+    /// not draw goes, and everything once the highlighting theme changed.
+    pub(in crate::chat) fn sweep(&mut self, theme: &Arc<crate::highlight::HighlightTheme>) {
+        if !self
+            .theme
+            .as_ref()
+            .is_some_and(|drawn| Arc::ptr_eq(drawn, theme))
+        {
+            self.entries.clear();
+            self.theme = Some(theme.clone());
+        }
+        self.entries
+            .retain(|_, derived| std::mem::take(&mut derived.drawn));
+    }
+
+    fn get<T: 'static>(
+        &mut self,
+        key: String,
+        input: &str,
+        derive: impl FnOnce(&str) -> T,
+    ) -> Rc<T> {
+        if let Some(derived) = self.entries.get_mut(&key)
+            && *derived.input == *input
+            && let Ok(value) = derived.value.clone().downcast::<T>()
+        {
+            derived.drawn = true;
+            return value;
+        }
+        let value = Rc::new(derive(input));
+        self.entries.insert(
+            key,
+            Derived {
+                input: input.into(),
+                value: value.clone(),
+                drawn: true,
+            },
+        );
+        value
+    }
 }
 
 /// How much of a long text a body shows before the reader asks for more.
@@ -538,7 +617,11 @@ pub(in crate::chat) fn bounded_text(
 ) -> AnyElement {
     let key = format!("tool-text-{}-{key}", entry.id);
     let open = ctx.is_open(&key);
-    let lines = bound(text, limit);
+    let shown = ctx.derived(
+        format!("{key}-{open}-{}-{}", limit.head, limit.tail),
+        text,
+        |text| Shown::of(text, open, limit),
+    );
     let style = |el: gpui::Div, cx: &App| {
         el.w_full()
             .min_w_0()
@@ -559,10 +642,10 @@ pub(in crate::chat) fn bounded_text(
             .child(el)
             .into_any_element()
     };
-    if lines.hidden == 0 {
+    if let Shown::Whole(text) = &*shown {
         return tagged(
             style(div(), ctx.app())
-                .child(SharedString::from(text.trim_end().to_owned()))
+                .child(text.clone())
                 .into_any_element(),
         );
     }
@@ -580,16 +663,8 @@ pub(in crate::chat) fn bounded_text(
             ))
             .into_any_element()
     };
-    if open {
-        let shown: SharedString = if text.len() > MAX_SHOWN_CHARS {
-            let mut end = MAX_SHOWN_CHARS;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}…", &text[..end]).into()
-        } else {
-            text.trim_end().to_owned().into()
-        };
+    if let Shown::Open(shown) = &*shown {
+        let shown = shown.clone();
         let less = control(crate::tr!("tools.show_less").into_owned(), ctx);
         return tagged(
             v_flex()
@@ -606,8 +681,11 @@ pub(in crate::chat) fn bounded_text(
                 .into_any_element(),
         );
     }
+    let Shown::Folded { head, hidden, tail } = &*shown else {
+        unreachable!("a text is shown whole, open or folded")
+    };
     let more = control(
-        crate::tr!("tools.more_lines", count = lines.hidden).into_owned(),
+        crate::tr!("tools.more_lines", count = hidden).into_owned(),
         ctx,
     );
     let cx = ctx.app();
@@ -615,23 +693,62 @@ pub(in crate::chat) fn bounded_text(
         v_flex()
             .w_full()
             .min_w_0()
-            .child(style(div(), cx).child(SharedString::from(lines.head.join("\n"))))
+            .child(style(div(), cx).child(head.clone()))
             .child(more)
-            .when(!lines.tail.is_empty(), |text| {
-                text.child(style(div(), cx).child(SharedString::from(lines.tail.join("\n"))))
+            .when(!tail.is_empty(), |text| {
+                text.child(style(div(), cx).child(tail.clone()))
             })
             .into_any_element(),
     )
 }
 
+/// What a bounded text shows.
+enum Shown {
+    /// All of it: it is short.
+    Whole(SharedString),
+    /// All of it, up to [`MAX_SHOWN_CHARS`], once the reader opened it.
+    Open(SharedString),
+    /// Its first and last lines around a count of the rest.
+    Folded {
+        head: SharedString,
+        hidden: usize,
+        tail: SharedString,
+    },
+}
+
+impl Shown {
+    fn of(text: &str, open: bool, limit: Bound) -> Self {
+        let lines = bound(text, limit);
+        if lines.hidden == 0 {
+            return Self::Whole(text.trim_end().to_owned().into());
+        }
+        if open {
+            return Self::Open(if text.len() > MAX_SHOWN_CHARS {
+                let mut end = MAX_SHOWN_CHARS;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &text[..end]).into()
+            } else {
+                text.trim_end().to_owned().into()
+            });
+        }
+        Self::Folded {
+            head: lines.head.join("\n").into(),
+            hidden: lines.hidden,
+            tail: lines.tail.join("\n").into(),
+        }
+    }
+}
+
 /// The call's output as this client holds it — the whole one once the
 /// reader loaded it — and, while the record carried only a preview, the
 /// control that loads the rest.
-pub(in crate::chat) fn full_output(
-    call: &Call<'_>,
+pub(in crate::chat) fn full_output<'a>(
+    call: &Call<'a>,
     ctx: &mut ToolCtx<'_, '_>,
-) -> (String, Option<AnyElement>) {
-    full_text(call.entry, call.output.unwrap_or_default(), ctx)
+) -> (HeldOutput<'a>, Option<AnyElement>) {
+    held_output(call.entry, call.output.unwrap_or_default(), ctx)
 }
 
 /// [`full_output`] for any item's output text.
@@ -640,13 +757,40 @@ pub(in crate::chat) fn full_text(
     output: &str,
     ctx: &mut ToolCtx<'_, '_>,
 ) -> (String, Option<AnyElement>) {
+    let (text, control) = held_output(entry, output, ctx);
+    (text.to_string(), control)
+}
+
+fn held_output<'a>(
+    entry: &TimelineEntry,
+    output: &'a str,
+    ctx: &mut ToolCtx<'_, '_>,
+) -> (HeldOutput<'a>, Option<AnyElement>) {
     let elided = ctx.elided(entry);
     let text = match &elided {
-        Some(ElidedOutput::Loaded(full)) => full.to_string(),
-        _ => output.to_owned(),
+        Some(ElidedOutput::Loaded(full)) => HeldOutput::Loaded(full.clone()),
+        _ => HeldOutput::Record(output),
     };
     let control = elided.and_then(|elided| elided_control(elided, &entry.id, &ctx.chat.motion));
     (text, control)
+}
+
+/// An output as this client holds it: the record's, or the whole one the
+/// reader loaded.
+pub(in crate::chat) enum HeldOutput<'a> {
+    Record(&'a str),
+    Loaded(SharedString),
+}
+
+impl Deref for HeldOutput<'_> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Record(text) => text,
+            Self::Loaded(text) => text,
+        }
+    }
 }
 
 /// The call's output as text: the whole fetched one when the reader loaded
@@ -668,22 +812,20 @@ pub(in crate::chat) fn output_section_with(
     ctx: &mut ToolCtx<'_, '_>,
     part: impl FnOnce(&str) -> &str,
 ) -> Option<AnyElement> {
-    let elided = ctx.elided(call.entry);
-    let loaded = match &elided {
-        Some(ElidedOutput::Loaded(full)) => Some(full.clone()),
-        _ => None,
-    };
-    let text: String = match (&loaded, call.output) {
-        (Some(full), _) => full.to_string(),
-        (None, Some(output)) => output.to_owned(),
-        (None, None) => return None,
-    };
-    let text = part(&text).to_owned();
-    let text = if call.status != ItemStatus::InProgress {
-        pretty_json(&text).unwrap_or(text)
-    } else {
-        text
-    };
+    let (text, control) = held_output(call.entry, call.output.unwrap_or_default(), ctx);
+    if call.output.is_none() && matches!(text, HeldOutput::Record(_)) {
+        return None;
+    }
+    // A half result is not JSON.
+    let done = call.status != ItemStatus::InProgress;
+    let text = ctx.derived(
+        format!("tool-output-{}-{done}", call.id()),
+        part(&text),
+        |text| {
+            let pretty = done.then(|| pretty_json(text)).flatten();
+            SharedString::from(pretty.unwrap_or_else(|| text.to_owned()))
+        },
+    );
     let failed = call.status == ItemStatus::Failed;
     let label = if failed {
         crate::tr!("tools.error")
@@ -709,7 +851,6 @@ pub(in crate::chat) fn output_section_with(
                 .text_color(cx.theme().danger)
         })
         .child(body);
-    let control = elided.and_then(|elided| elided_control(elided, call.id(), &ctx.chat.motion));
     Some(
         window::section(
             &label,
@@ -874,8 +1015,6 @@ pub(in crate::chat) fn code_section(
     } else {
         crate::tr!("tools.code_lines", count = lines)
     };
-    let cx = ctx.app();
-    let theme = cx.theme();
     let toggle = format!("{key}-toggle");
     let control = h_flex().child(
         div()
@@ -887,7 +1026,7 @@ pub(in crate::chat) fn code_section(
                 SharedString::from(toggle),
                 label.into_owned().into(),
                 on_click,
-                cx,
+                ctx.app(),
             )),
     );
     let code_block = open.then(|| {
@@ -895,8 +1034,18 @@ pub(in crate::chat) fn code_section(
         while !code.is_char_boundary(end) {
             end -= 1;
         }
-        let source = code[..end].trim_end().to_owned();
-        let runs = crate::highlight::highlight_source(&source, language, &theme.highlight_theme);
+        let source = code[..end].trim_end();
+        let theme = ctx.highlight_theme();
+        let highlighted = ctx.derived(key.clone(), source, |source| {
+            crate::highlight::highlighted(
+                source.to_owned().into(),
+                SharedString::new(language),
+                &theme,
+                || None,
+            )
+        });
+        let cx = ctx.app();
+        let theme = cx.theme();
         div()
             .id(SharedString::from(key.clone()))
             .debug_selector(move || key.clone())
@@ -907,7 +1056,10 @@ pub(in crate::chat) fn code_section(
             .font_family(theme.mono_font_family.clone())
             .text_token(&theme.tokens.typography.xs)
             .text_color(theme.foreground)
-            .child(gpui::StyledText::new(source).with_highlights(runs))
+            .child(
+                gpui::StyledText::new(highlighted.source().clone())
+                    .with_highlights(highlighted.runs.iter().cloned()),
+            )
     });
     v_flex()
         .w_full()
