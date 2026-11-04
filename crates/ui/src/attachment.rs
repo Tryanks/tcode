@@ -50,8 +50,7 @@ impl AttachmentRuntime {
             finished: pump_finished,
             tasks: vec![
                 cx.background_spawn(async move {
-                    pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                        .await;
+                    pump.pump_with_timer(|delay| executor.timer(delay)).await;
                     let _ = finished.try_send(());
                 }),
                 // A local transport has no state channel behind it; the closed

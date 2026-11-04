@@ -2243,8 +2243,7 @@ mod replica_tests {
         let executor = cx.background_executor.clone();
         cx.background_executor
             .spawn(async move {
-                pump.pump_with_timer(|| executor.timer(Duration::from_millis(25)))
-                    .await;
+                pump.pump_with_timer(|delay| executor.timer(delay)).await;
             })
             .detach();
         let store = cx.new(|cx| {
