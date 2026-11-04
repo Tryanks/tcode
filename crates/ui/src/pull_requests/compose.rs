@@ -353,7 +353,7 @@ impl PullRequestView {
     pub(super) fn read_only(&self, cx: &App) -> bool {
         self.store
             .read(cx)
-            .session_status()
+            .session_status_for(self.session().as_deref())
             .is_none_or(|status| status.conversation_read_only)
     }
 

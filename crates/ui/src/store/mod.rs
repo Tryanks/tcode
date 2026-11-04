@@ -199,6 +199,10 @@ pub struct WorkspaceStore {
     /// The thread the user is acting on: the one the conversation shows,
     /// whose commands take no session id.
     focused_session_id: Option<String>,
+    /// The thread the right panel shows. Client state, one per attachment,
+    /// beside the conversation state it indexes because toggles, badges and
+    /// auto-open reach the store without a window.
+    panel_subject: Option<String>,
     /// The open threads' replicas, and those of the threads left most
     /// recently ([`KEPT_THREADS`]).
     threads: HashMap<String, ThreadReplica>,
@@ -385,6 +389,7 @@ impl WorkspaceStore {
             index_hydrated: false,
             conversation_on_screen: false,
             focused_session_id: None,
+            panel_subject: None,
             threads: HashMap::new(),
             timeline_leases: HashMap::new(),
             selection_generation: 0,
@@ -2558,11 +2563,18 @@ impl WorkspaceStore {
         self.providers_replica.usage_checking.contains(profile_id)
     }
 
-    pub fn window_caption_state_for(
-        &self,
-        session_id: Option<&str>,
-    ) -> (bool, tcode_core::ui::RightTab) {
-        self.thread_conversation_ui(session_id)
+    pub(crate) fn panel_subject(&self) -> Option<&str> {
+        self.panel_subject.as_deref()
+    }
+
+    pub(crate) fn set_panel_subject(&mut self, session_id: Option<String>) {
+        self.panel_subject = session_id;
+    }
+
+    /// Whether the right panel is open, and on which tab: what covers the
+    /// window's corner, whichever thread it shows.
+    pub fn window_caption_state(&self) -> (bool, tcode_core::ui::RightTab) {
+        self.thread_conversation_ui(self.panel_subject())
             .map(|ui| (ui.right_panel_open, ui.right_tab))
             .unwrap_or((false, RightTab::default()))
     }

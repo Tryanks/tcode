@@ -612,7 +612,7 @@ impl Target {
     fn takes_messages(&self, cx: &App) -> bool {
         let workspace = self.store.read(cx);
         workspace
-            .session_status()
+            .session_status_for(Some(&self.session))
             .is_some_and(|status| !status.conversation_read_only)
             && workspace
                 .thread_meta(&self.session)

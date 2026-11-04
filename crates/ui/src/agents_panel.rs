@@ -16,7 +16,6 @@ use serde::Deserialize;
 use tcode_core::notice::HostNotice;
 use tcode_core::session::EntryContent;
 use tcode_core::settlement::{AgentDelivery, AgentExecution, AgentReport};
-use tcode_core::ui::RightTab;
 
 use crate::chat::ChatView;
 use crate::icon::{Icon, IconName};
@@ -627,6 +626,7 @@ pub(crate) fn status_mark(
 
 pub struct AgentsPanel {
     store: Entity<WorkspaceStore>,
+    session_id: Option<String>,
     /// Whether the panel is on screen and so holds the store's archived
     /// threads, from which archived agents come.
     shown: bool,
@@ -644,32 +644,13 @@ pub struct AgentsPanel {
 }
 
 impl AgentsPanel {
-    /// The panel of the desktop right panel's Agents tab.
-    pub fn new(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
-        let mut panel = Self::unshown(store.clone(), cx);
-        panel
-            ._subscriptions
-            .push(cx.observe(&store, |this, store, cx| {
-                let panel = store.read(cx).panel_state();
-                this.set_shown(
-                    panel.right_panel_open && panel.right_tab == RightTab::Agents,
-                    cx,
-                );
-            }));
-        let state = store.read(cx).panel_state();
-        panel.set_shown(
-            state.right_panel_open && state.right_tab == RightTab::Agents,
-            cx,
-        );
-        panel
-    }
-
-    /// The panel of the phone's Agents sheet, shown through [`Self::set_shown`].
-    pub(crate) fn for_sheet(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
-        Self::unshown(store, cx)
-    }
-
-    fn unshown(store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
+    /// The agents of `session_id`'s thread, shown through [`Self::set_shown`]
+    /// by the host: the right panel's Agents tab, or the phone's sheet.
+    pub(crate) fn new(
+        store: Entity<WorkspaceStore>,
+        session_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subscriptions = vec![
             observe_store_topics(&store, &[TopicKind::SessionEvents, TopicKind::Index], cx),
             cx.on_release(|this, cx| {
@@ -681,6 +662,7 @@ impl AgentsPanel {
         ];
         Self {
             store,
+            session_id,
             shown: false,
             done_expanded: false,
             hover: crate::motion::ListHover::new(crate::material::HOVER),
@@ -689,6 +671,13 @@ impl AgentsPanel {
             live: false,
             tick: None,
             _subscriptions: subscriptions,
+        }
+    }
+
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        if self.session_id != session_id {
+            self.session_id = session_id;
+            cx.notify();
         }
     }
 
@@ -729,12 +718,10 @@ impl AgentsPanel {
         if let Some(sheet) = self.sheet.as_ref().and_then(WeakEntity::upgrade) {
             sheet.update(cx, |sheet, cx| sheet.dismiss(window, cx));
         }
-        // The panel shows the focused thread's agents.
         let host = self
-            .store
-            .read(cx)
-            .legacy_focus()
-            .and_then(|lead| crate::shell::side_host_for(&lead, cx));
+            .session_id
+            .as_deref()
+            .and_then(|lead| crate::shell::side_host_for(lead, cx));
         open_agent(
             &self.store,
             action.0.clone(),
@@ -1117,10 +1104,9 @@ impl AgentsPanel {
         // What the agent beside the lead grows out of: the lead's chat
         // records where the row is.
         let origins = self
-            .store
-            .read(cx)
-            .legacy_focus()
-            .and_then(|lead| crate::shell::side_host_for(&lead, cx))
+            .session_id
+            .as_deref()
+            .and_then(|lead| crate::shell::side_host_for(lead, cx))
             .map(|chat| chat.read(cx).side_origins().clone());
         let origin = open.clone().map(panel_origin);
         let row_el = base
@@ -1162,9 +1148,9 @@ impl Render for AgentsPanel {
         let compact = crate::window_seam::window_is_compact(window, cx);
         let agents = {
             let store = self.store.read(cx);
-            store
-                .legacy_focus()
-                .map(|id| Agents::of(store, &id).with_results(store, &id))
+            self.session_id
+                .as_deref()
+                .map(|id| Agents::of(store, id).with_results(store, id))
                 .unwrap_or_default()
         };
         self.live = agents.any_running();
@@ -1264,7 +1250,7 @@ impl AgentsPanel {
                 entries.extend(agents.done.iter().map(row));
             }
         }
-        let parent_id = self.store.read(cx).legacy_focus();
+        let parent_id = self.session_id.clone();
         let this = &*self;
         let column = crate::motion::keyed(
             "agents-list",
@@ -1609,7 +1595,8 @@ mod tests {
         });
         store.update(cx, |store, cx| store.select_session("lead".into(), cx));
         let (_, cx) = cx.add_window_view(|window, cx| {
-            let panel = cx.new(|cx| super::AgentsPanel::for_sheet(store.clone(), cx));
+            let panel =
+                cx.new(|cx| super::AgentsPanel::new(store.clone(), Some("lead".into()), cx));
             gpui_base::Root::new(panel, window, cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));

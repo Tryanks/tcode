@@ -9,10 +9,9 @@ use tcode_core::{
     session::{ReviewComment, Timeline},
     ui::RightTab,
 };
-use tcode_protocol::{SessionPlan, SessionStatus, Topic};
+use tcode_protocol::{SessionStatus, Topic};
 
-use super::{ComposerState, DiffActiveState, PanelState, WorkspaceStore};
-use crate::conversation_ui::DiffFocus;
+use super::{ComposerState, PanelState, WorkspaceStore};
 
 impl WorkspaceStore {
     pub fn legacy_focus(&self) -> Option<String> {
@@ -23,16 +22,18 @@ impl WorkspaceStore {
         self.focused_session_id.as_deref()
     }
 
+    /// The right panel shows what is focused until it has rules of its own.
+    fn set_focus(&mut self, session_id: Option<String>) {
+        self.set_panel_subject(session_id.clone());
+        self.focused_session_id = session_id;
+    }
+
     pub(super) fn focused_status(&self) -> Option<&SessionStatus> {
         self.thread_status(self.focus())
     }
 
     pub fn session_status(&self) -> Option<&SessionStatus> {
         self.focused_status()
-    }
-
-    pub fn session_plan(&self) -> Option<&SessionPlan> {
-        self.session_plan_for(self.focus())
     }
 
     pub(crate) fn session_loading(&self) -> bool {
@@ -71,10 +72,6 @@ impl WorkspaceStore {
         self.shell_window_title_for(self.focus())
     }
 
-    pub fn window_caption_state(&self) -> (bool, RightTab) {
-        self.window_caption_state_for(self.focus())
-    }
-
     pub fn active_session_cwd(&self) -> Option<PathBuf> {
         self.session_cwd_for(self.focus())
     }
@@ -84,20 +81,12 @@ impl WorkspaceStore {
         Some((session_id.to_owned(), self.preview_key_for(session_id)?))
     }
 
-    pub fn preview_panel_showing(&self) -> bool {
-        self.preview_panel_showing_for(self.focus())
-    }
-
     pub(crate) fn panel_state(&self) -> PanelState {
         self.panel_state_for(self.focus())
     }
 
     pub fn review_comments(&self) -> Vec<ReviewComment> {
         self.review_comments_for(self.focus())
-    }
-
-    pub fn add_review_comment(&mut self, comment: ReviewComment) {
-        self.add_review_comment_for(self.legacy_focus().unwrap_or_default(), comment);
     }
 
     pub fn write_relaunch_marker(&mut self, reopen_settings: String) {
@@ -139,11 +128,6 @@ impl WorkspaceStore {
         self.close_right_panel_for(session_id.as_deref(), cx);
     }
 
-    pub fn close_preview_panel(&mut self, cx: &mut Context<Self>) {
-        let session_id = self.legacy_focus();
-        self.close_preview_panel_for(session_id.as_deref(), cx);
-    }
-
     pub fn open_preview_panel(&mut self, cx: &mut Context<Self>) {
         let session_id = self.legacy_focus();
         self.open_preview_panel_for(session_id.as_deref(), cx);
@@ -159,71 +143,14 @@ impl WorkspaceStore {
         self.toggle_diff_expanded_for(session_id.as_deref(), cx);
     }
 
-    pub(crate) fn diff_active_state(&self) -> Option<DiffActiveState> {
-        self.diff_active_state_for(self.focus())
-    }
-
     pub fn diff_selected_turn(&self) -> Option<usize> {
         self.diff_selected_turn_for(self.focus())
-    }
-
-    pub fn diff_turns(&self) -> Vec<usize> {
-        self.diff_turns_for(self.focus())
-    }
-
-    pub fn with_diff_turn_changes<R>(
-        &self,
-        turn: usize,
-        read: impl FnOnce(&[agent::FileChange], agent::ChangeCompleteness) -> R,
-    ) -> Option<R> {
-        self.with_diff_turn_changes_for(self.focus(), turn, read)
-    }
-
-    pub(crate) fn pending_diff_focus(&self) -> Option<DiffFocus> {
-        self.pending_diff_focus_for(self.focus())
-    }
-
-    pub(crate) fn take_diff_focus(&mut self, session: &str, turn: usize) -> Option<DiffFocus> {
-        let session_id = self.legacy_focus();
-        self.take_diff_focus_for(session_id.as_deref(), session, turn)
-    }
-
-    pub fn discard_diff_focus(&mut self, cx: &mut Context<Self>) {
-        let session_id = self.legacy_focus();
-        self.discard_diff_focus_for(session_id.as_deref(), cx);
-    }
-
-    pub fn select_diff_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
-        let session_id = self.legacy_focus();
-        self.select_diff_turn_for(session_id.as_deref(), turn, cx);
-    }
-
-    pub fn diff_refresh_generation(&self) -> u64 {
-        self.diff_refresh_generation_for(self.focus())
-    }
-
-    pub fn diff_word_wrap(&self) -> bool {
-        self.diff_word_wrap_for(self.focus())
-    }
-
-    pub fn toggle_diff_wrap(&mut self, cx: &mut Context<Self>) {
-        let session_id = self.legacy_focus();
-        self.toggle_diff_wrap_for(session_id.as_deref(), cx);
-    }
-
-    pub fn diff_split(&self) -> bool {
-        self.diff_split_for(self.focus())
-    }
-
-    pub fn set_diff_split(&mut self, split: bool, cx: &mut Context<Self>) {
-        let session_id = self.legacy_focus();
-        self.set_diff_split_for(session_id.as_deref(), split, cx);
     }
 
     /// Closing the focused thread leaves nothing focused.
     pub(super) fn unfocus(&mut self, session_id: &str) {
         if self.focus() == Some(session_id) {
-            self.focused_session_id = None;
+            self.set_focus(None);
         }
     }
 
@@ -231,7 +158,8 @@ impl WorkspaceStore {
     pub(crate) fn leave_session(&mut self, cx: &mut Context<Self>) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
-        if let Some(session_id) = self.focused_session_id.take() {
+        if let Some(session_id) = self.legacy_focus() {
+            self.set_focus(None);
             self.close_thread(&session_id, cx);
         }
         cx.notify();
@@ -241,7 +169,8 @@ impl WorkspaceStore {
     /// show a thread that does not exist yet.
     pub(crate) fn release_focus(&mut self, cx: &mut Context<Self>) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
-        if self.focused_session_id.take().is_some() {
+        if self.focus().is_some() {
+            self.set_focus(None);
             cx.notify();
         }
     }
@@ -255,7 +184,7 @@ impl WorkspaceStore {
             return;
         }
         self.selection_generation = self.selection_generation.wrapping_add(1);
-        self.focused_session_id = Some(session_id.to_owned());
+        self.set_focus(Some(session_id.to_owned()));
         cx.notify();
     }
 
@@ -269,7 +198,8 @@ impl WorkspaceStore {
     /// Select the focused thread afresh once a new baseline dropped its
     /// subscriptions.
     pub(super) fn reselect_focused(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.focused_session_id.take() {
+        if let Some(session_id) = self.legacy_focus() {
+            self.set_focus(None);
             self.select(session_id, false, cx);
         }
     }
@@ -292,7 +222,7 @@ impl WorkspaceStore {
             return;
         }
         self.leave_session(cx);
-        self.focused_session_id = Some(session_id.clone());
+        self.set_focus(Some(session_id.clone()));
         self.open_thread(&session_id);
     }
 

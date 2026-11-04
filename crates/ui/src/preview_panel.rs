@@ -107,22 +107,6 @@ fn visible_preview_key(
         .flatten()
 }
 
-/// Resolve an MCP request's physical session id to the stable WebView key.
-/// Only the active surface can be an unsent project draft; every background
-/// request therefore keys directly by its stored session id.
-#[cfg_attr(not(preview_backend), allow(dead_code))]
-fn preview_key_for_session(
-    requested_session_id: &str,
-    active_session_id: Option<&str>,
-    active_key: Option<&str>,
-) -> String {
-    if active_session_id == Some(requested_session_id) {
-        active_key.unwrap_or(requested_session_id).to_string()
-    } else {
-        requested_session_id.to_string()
-    }
-}
-
 /// What an automation tool answers when the platform webview cannot be created:
 /// say so plainly, with the underlying error, rather than leaving the agent to
 /// guess why nothing happened.
@@ -243,15 +227,22 @@ impl PreviewPanel {
     }
 
     /// Keep the panel's motion in `scene`, the right panel's: the page and
-    /// its address follow the focused thread.
+    /// its address follow the thread it shows.
     pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch) {
         self.motion = crate::motion::owned::Owned::in_scene(scene);
     }
 
     /// The stable conversation key the chrome is currently addressing.
     fn active_key(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let current = self.store.read(cx).preview_active_identity();
+        let current = self.identity(cx);
         self.reconcile_active_key(current, cx)
+    }
+
+    /// The thread the right panel shows, and its preview's stable key.
+    fn identity(&self, cx: &gpui::App) -> Option<(String, String)> {
+        let store = self.store.read(cx);
+        let session_id = store.panel_subject()?;
+        Some((session_id.to_owned(), store.preview_key_for(session_id)?))
     }
 
     /// Mirror a URL into the store, then navigate whatever backend exists.
@@ -330,13 +321,13 @@ impl PreviewPanel {
         cx.notify();
     }
 
-    /// The desktop drawer has slid shut on the focused conversation: let its
+    /// The desktop drawer has slid shut on its conversation: let its
     /// page go, keeping its URL and canvas for the drawer to load again.
     /// While the thread's turn runs, its agent may be driving the page
     /// through the preview tools, which reach it with the drawer shut; the
     /// page is let go once the turn ends, unless the drawer opens again.
     pub(crate) fn release_page(&mut self, cx: &mut Context<Self>) {
-        let Some((session_id, key)) = self.store.read(cx).preview_active_identity() else {
+        let Some((session_id, key)) = self.identity(cx) else {
             return;
         };
         if self.store.read(cx).turn_running_for(&session_id) {
@@ -369,8 +360,10 @@ impl PreviewPanel {
 
     fn close_panel(&mut self, cx: &mut Context<Self>) {
         self.release_preview(cx);
-        self.store
-            .update(cx, |store, cx| store.close_preview_panel(cx));
+        self.store.update(cx, |store, cx| {
+            let subject = store.panel_subject().map(str::to_owned);
+            store.close_preview_panel_for(subject.as_deref(), cx)
+        });
         cx.notify();
     }
 
@@ -795,34 +788,6 @@ mod tests {
                 input.presentation().placeholder().to_string()
             })
         });
-    }
-
-    #[test]
-    fn routed_session_uses_active_draft_key_only_for_the_active_surface() {
-        assert_eq!(
-            preview_key_for_session(
-                "physical-draft",
-                Some("physical-draft"),
-                Some("draft:project-a")
-            ),
-            "draft:project-a"
-        );
-        assert_eq!(
-            preview_key_for_session(
-                "stored-background",
-                Some("physical-draft"),
-                Some("draft:project-a")
-            ),
-            "stored-background"
-        );
-        assert_eq!(
-            preview_key_for_session(
-                "stored-active",
-                Some("stored-active"),
-                Some("stored-active")
-            ),
-            "stored-active"
-        );
     }
 
     #[test]

@@ -323,6 +323,11 @@ impl PullRequestView {
         }
     }
 
+    /// The thread of the pull request shown.
+    pub(super) fn session(&self) -> Option<String> {
+        self.current.as_ref().map(|(session, _)| session.clone())
+    }
+
     pub(super) fn compact(&self, cx: &App) -> bool {
         self.window_state.read(cx).compact
     }
@@ -856,11 +861,11 @@ impl PullRequestView {
     }
 
     fn change_link(&mut self, action: &ChangeLink, window: &mut Window, cx: &mut Context<Self>) {
-        super::change_link(&self.store, action, window, cx);
+        super::change_link(&self.store, self.session(), action, window, cx);
     }
 
     fn change_watch(&mut self, action: &ChangeWatch, window: &mut Window, cx: &mut Context<Self>) {
-        super::change_watch(&self.store, action, window, cx);
+        super::change_watch(&self.store, self.session(), action, window, cx);
     }
 
     fn header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -3310,7 +3315,12 @@ mod tests {
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         store.update(cx, |store, cx| store.select_session("session".into(), cx));
         cx.replace_root_view(|_, cx| {
-            super::super::PullRequestsPanel::new(store.clone(), window_state.clone(), cx)
+            super::super::PullRequestsPanel::new(
+                store.clone(),
+                window_state.clone(),
+                Some("session".into()),
+                cx,
+            )
         });
         draw_settled(cx);
         let top = |number: u64, cx: &mut VisualTestContext| {
