@@ -70,6 +70,7 @@ pub enum TopicKind {
     CommandOutput,
     Preview,
     ExternalImport,
+    Hosting,
 }
 
 impl From<&Topic> for TopicKind {
@@ -89,6 +90,7 @@ impl From<&Topic> for TopicKind {
             Topic::CommandOutput { .. } => Self::CommandOutput,
             Topic::Preview => Self::Preview,
             Topic::ExternalImport { .. } => Self::ExternalImport,
+            Topic::Hosting => Self::Hosting,
         }
     }
 }
@@ -1171,6 +1173,7 @@ impl WorkspaceStore {
                     | Topic::RuntimeEvents
                     | Topic::Preview
                     | Topic::ExternalImport { .. }
+                    | Topic::Hosting
             )
         {
             return;
@@ -1403,6 +1406,7 @@ impl WorkspaceStore {
                 self.providers_replica = status.clone();
                 self.baseline_topics.insert(Topic::Providers);
             }
+            (Topic::Hosting, ServerEvent::HostingReplaced(state)) => cx.emit((**state).clone()),
             (Topic::GitStatus { session_id }, ServerEvent::GitStatusReplaced(status)) => {
                 if let Some(thread) = self.threads.get_mut(session_id) {
                     thread.git = Some(status.clone());
@@ -3297,6 +3301,21 @@ impl WorkspaceStore {
         )
     }
 
+    /// Follow, or stop following, the hosting state of the machine this
+    /// store shows: it arrives as [`tcode_protocol::HostingState`] events.
+    pub(crate) fn follow_hosting(&self, follow: bool) {
+        let subscription = Subscription {
+            known_index: None,
+            topic: Topic::Hosting,
+            after: None,
+        };
+        let _ = if follow {
+            self.host.subscribe(subscription)
+        } else {
+            self.host.unsubscribe(subscription)
+        };
+    }
+
     /// The latest `tcode_control` writes across every thread, newest first.
     pub fn control_activity(
         &self,
@@ -3913,6 +3932,7 @@ impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
 impl EventEmitter<StoreChange> for WorkspaceStore {}
 impl EventEmitter<ShowThread> for WorkspaceStore {}
 impl EventEmitter<ConnectionState> for WorkspaceStore {}
+impl EventEmitter<tcode_protocol::HostingState> for WorkspaceStore {}
 
 #[cfg(test)]
 pub(crate) mod tests {

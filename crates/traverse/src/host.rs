@@ -151,6 +151,11 @@ struct Shared {
     data_dir: PathBuf,
     /// Prompts the group sync loop to dial every member now.
     group_wake: Arc<tokio::sync::Notify>,
+    /// Told when anything the hosting state is made of may have changed;
+    /// with the endpoint's address watcher it prompts a hosting event.
+    hosting_changed: Arc<tokio::sync::Notify>,
+    /// See [`TraverseHost::hosting_events`].
+    hosting_listeners: Mutex<Vec<async_channel::Sender<HostingState>>>,
 }
 
 pub struct TraverseHost {
@@ -162,6 +167,8 @@ pub struct TraverseHost {
     refresh: Vec<tokio::task::AbortHandle>,
     /// The loop behind [`TraverseHost::traverse_events`].
     status: tokio::task::AbortHandle,
+    /// The loop behind [`TraverseHost::hosting_events`].
+    hosting: tokio::task::AbortHandle,
     /// This machine's DNS-SD record, withdrawn with the host.
     advertisement: Option<lan::Advertisement>,
 }
@@ -270,6 +277,8 @@ impl TraverseHost {
                 allow_pairing: config.pairing_enabled,
                 data_dir: config.data_dir.clone(),
                 group_wake: Arc::new(tokio::sync::Notify::new()),
+                hosting_changed: Arc::new(tokio::sync::Notify::new()),
+                hosting_listeners: Mutex::new(Vec::new()),
             });
             // A fetched manifest is applied to the running endpoint, whether
             // it refreshes the one in hand or is the first to arrive. The
@@ -295,6 +304,7 @@ impl TraverseHost {
                 })
                 .collect();
             let status = tokio::spawn(watch_status(Arc::downgrade(&shared))).abort_handle();
+            let hosting = tokio::spawn(watch_hosting(Arc::downgrade(&shared))).abort_handle();
             let router = Router::builder(endpoint)
                 .accept(wire::ALPN_PAIR, PairHandler(shared.clone()))
                 .accept(wire::ALPN_MAIN, MainHandler(shared.clone()))
@@ -312,6 +322,7 @@ impl TraverseHost {
                 group_sync,
                 refresh,
                 status,
+                hosting,
                 advertisement,
             })
         })
@@ -479,6 +490,14 @@ impl TraverseHost {
         self.shared.hosting(action)
     }
 
+    /// The hosting state after every change but to its invitation's
+    /// countdown and its Traverse status, at most once per
+    /// [`HOSTING_COALESCE`]. Each call gets its own stream of every later
+    /// change; read the state after taking it.
+    pub fn hosting_events(&self) -> async_channel::Receiver<HostingState> {
+        self.shared.hosting_events()
+    }
+
     /// A handle that answers hosting queries from any thread, for a caller
     /// that must not wait on the UI thread: joining a group dials another
     /// machine.
@@ -493,6 +512,9 @@ impl TraverseHost {
             refresh.abort();
         }
         self.status.abort();
+        self.hosting.abort();
+        // Ends every listener's stream, whatever still holds the host.
+        self.shared.hosting_listeners.lock().unwrap().clear();
         if let Some(expiry) = self.shared.expiry.lock().unwrap().take() {
             expiry.abort();
         }
@@ -598,6 +620,76 @@ async fn watch_status(shared: std::sync::Weak<Shared>) {
                 .retain(|listener| listener.try_send(status.clone()).is_ok());
             last = Some(status);
         }
+    }
+}
+
+/// The shortest gap between two [`TraverseHost::hosting_events`]: a pairing
+/// or a path change is a burst of changes, sent as one event.
+pub const HOSTING_COALESCE: Duration = Duration::from_millis(100);
+
+/// Whether two reads of the hosting state show the same thing. The
+/// invitation's countdown changes with every read, and the Traverse status
+/// with every network report; that has its own stream,
+/// [`TraverseHost::traverse_events`].
+pub(crate) fn same_hosting(a: &HostingState, b: &HostingState) -> bool {
+    let HostingState {
+        created_space_id: _,
+        enabled,
+        expires_in_secs: _,
+        host_id,
+        host_name,
+        invite,
+        devices,
+        spaces,
+        traverse: _,
+        group,
+    } = a;
+    *enabled == b.enabled
+        && *host_id == b.host_id
+        && *host_name == b.host_name
+        && *invite == b.invite
+        && *devices == b.devices
+        && *spaces == b.spaces
+        && *group == b.group
+}
+
+/// Tell the hosting listeners what changed: woken by a change to the allow
+/// list, the spaces, the group, the invitation, a device's connections or
+/// paths, or the endpoint's address, then coalesced, and only sent when it
+/// shows something new. Nothing is read while no one listens.
+async fn watch_hosting(shared: std::sync::Weak<Shared>) {
+    let Some((mut addr, changed)) = shared
+        .upgrade()
+        .map(|shared| (shared.endpoint.watch_addr(), shared.hosting_changed.clone()))
+    else {
+        return;
+    };
+    let mut last: Option<HostingState> = None;
+    loop {
+        tokio::select! {
+            updated = addr.updated() => if updated.is_err() { return },
+            () = changed.notified() => {}
+        }
+        tokio::time::sleep(HOSTING_COALESCE).await;
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        if shared.hosting_listeners.lock().unwrap().is_empty() {
+            last = None;
+            continue;
+        }
+        let Ok(state) = shared.hosting(HostingAction::State) else {
+            continue;
+        };
+        if last.as_ref().is_some_and(|last| same_hosting(last, &state)) {
+            continue;
+        }
+        shared
+            .hosting_listeners
+            .lock()
+            .unwrap()
+            .retain(|listener| listener.try_send(state.clone()).is_ok());
+        last = Some(state);
     }
 }
 
@@ -746,6 +838,20 @@ impl Shared {
             .lock()
             .unwrap()
             .retain(|listener| listener.try_send(invitation.clone()).is_ok());
+        self.hosting_changed.notify_one();
+    }
+
+    /// Record a change to the allow list, the spaces or the group: transports
+    /// re-read principals by its revision, and hosting listeners hear of it.
+    fn revise(&self, identity: &mut HostIdentity) {
+        identity.policy_revision += 1;
+        self.hosting_changed.notify_one();
+    }
+
+    fn hosting_events(&self) -> async_channel::Receiver<HostingState> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.hosting_listeners.lock().unwrap().push(sender);
+        receiver
     }
 
     /// The unexpired invitation with `addr` as its routing hints. The
@@ -789,7 +895,7 @@ impl Shared {
         let mut state = self.state.lock().unwrap();
         let previous = state.identity.clone();
         state.identity.pairing_enabled = enabled;
-        state.identity.policy_revision += 1;
+        self.revise(&mut state.identity);
         if let Err(error) = state.identity.save() {
             state.identity = previous;
             log::error!("could not persist the pairing switch: {error}");
@@ -991,7 +1097,7 @@ impl Shared {
                 }
             }
         }
-        state.identity.policy_revision += 1;
+        self.revise(&mut state.identity);
         if let Err(error) = state.identity.save() {
             state.identity = previous;
             return Err(error);
@@ -1054,7 +1160,7 @@ impl Shared {
         if !state.identity.remove(id) {
             return Ok(());
         }
-        state.identity.policy_revision += 1;
+        self.revise(&mut state.identity);
         if let Err(error) = state.identity.save() {
             log::error!("could not persist the revocation: {error}");
             state.identity = previous;
@@ -1161,7 +1267,7 @@ impl Shared {
             let previous = state.identity.clone();
             if !constant_time_eq(space.secret.as_bytes(), secret.as_bytes()) {
                 state.identity.spaces[index].link_failures += 1;
-                state.identity.policy_revision += 1;
+                self.revise(&mut state.identity);
                 if let Err(error) = state.identity.save() {
                     log::error!("could not record the space link failure: {error}");
                     state.identity = previous;
@@ -1183,7 +1289,7 @@ impl Shared {
                 .find(|device| device.id == remote.to_string())
                 .unwrap()
                 .access = DeviceGrant::Spaces(vec![space_id.into()]);
-            state.identity.policy_revision += 1;
+            self.revise(&mut state.identity);
             if let Err(error) = state.identity.save() {
                 log::error!("could not record the space member: {error}");
                 state.identity = previous;
@@ -1281,7 +1387,7 @@ impl Shared {
         let local = existing_device(&self.data_dir).map(|(id, _)| id.to_string());
         let accept = self.allow_pairing && state.identity.pairing_enabled;
         let removed = state.identity.apply_group(accept, local.as_deref());
-        state.identity.policy_revision += 1;
+        self.revise(&mut state.identity);
         let machines_before = member_machines(&previous);
         let group_before = previous.group.as_ref().map(|group| group.state.clone());
         if let Err(error) = state.identity.save() {
@@ -1347,6 +1453,7 @@ impl Shared {
             .entry(remote)
             .or_default()
             .push(connection.clone());
+        self.hosting_changed.notify_one();
         true
     }
 
@@ -1358,6 +1465,7 @@ impl Shared {
                 state.live.remove(&connection.remote_id());
             }
         }
+        self.hosting_changed.notify_one();
     }
 
     /// The hosting list shows what the device calls itself now. It is
@@ -1379,7 +1487,7 @@ impl Shared {
         }
         let previous = state.identity.clone();
         state.identity.admit(&remote, name, platform);
-        state.identity.policy_revision += 1;
+        self.revise(&mut state.identity);
         if let Err(error) = state.identity.save() {
             state.identity = previous;
             log::warn!("could not record the connecting device's details: {error}");
@@ -2369,9 +2477,15 @@ impl ProtocolHandler for MainHandler {
         let principal = Arc::new(Mutex::new(None));
         let open_streams = Arc::new(AtomicUsize::new(0));
         let tunnels = Arc::new(AtomicUsize::new(0));
+        // The hosting list shows how each device is carried.
+        let mut paths = connection.path_events();
         loop {
             let accepted = tokio::select! {
                 accepted = connection.accept_bi() => accepted,
+                Some(_) = futures_lite::StreamExt::next(&mut paths) => {
+                    shared.hosting_changed.notify_one();
+                    continue;
+                }
                 _ = connection.closed() => break,
             };
             let Ok((send, recv)) = accepted else {
@@ -2562,6 +2676,8 @@ impl StreamTask {
             }
         };
         let reader = async {
+            // Forwards hosting events while this device follows them.
+            let mut _following: Option<Following> = None;
             while let Some(line) = reader.read_line(wire::MAX_LINE).await? {
                 if line.trim().is_empty() {
                     continue;
@@ -2572,30 +2688,83 @@ impl StreamTask {
                         "client line is not JSON",
                     ));
                 };
-                if let Ok(tcode_protocol::ClientMessage {
-                    principal: _,
-                    id,
-                    payload:
-                        tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting { action }),
-                    ..
-                }) = serde_json::from_value(value.clone())
+                if let Ok(tcode_protocol::ClientMessage { id, payload, .. }) =
+                    serde_json::from_value(value.clone())
                 {
-                    let reply = tcode_protocol::HostMessage::QueryResult {
-                        id,
-                        result: if full {
-                            self.shared
-                                .hosting(action)
-                                .map(tcode_protocol::QueryResponse::Hosting)
-                        } else {
-                            Err(ProtocolError::out_of_scope(
-                                "hosting is available only to full devices",
+                    use tcode_protocol::{ClientPayload, HostMessage, Subscription, Topic};
+                    let only_full =
+                        || ProtocolError::out_of_scope("hosting is available only to full devices");
+                    let reply = match payload {
+                        ClientPayload::Query(tcode_protocol::Query::Hosting { action }) => {
+                            Some(HostMessage::QueryResult {
+                                id,
+                                result: if full {
+                                    self.shared
+                                        .hosting(action)
+                                        .map(tcode_protocol::QueryResponse::Hosting)
+                                } else {
+                                    Err(only_full())
+                                },
+                            })
+                        }
+                        ClientPayload::Subscribe(Subscription {
+                            topic: Topic::Hosting,
+                            ..
+                        }) if full => {
+                            let events = self.shared.hosting_events();
+                            let reply = tcode_protocol::encode_line(&hosting_reply(
+                                id,
+                                self.shared.hosting(HostingAction::State),
                             ))
-                        },
+                            .map_err(|error| io::Error::other(error.message))?;
+                            let outbound = outbound.clone();
+                            _following = Some(Following(
+                                tokio::spawn(async move {
+                                    // The state as it stands reaches the
+                                    // device before any change to it.
+                                    if outbound.send(reply).await.is_err() {
+                                        return;
+                                    }
+                                    while let Ok(state) = events.recv().await {
+                                        let Ok(line) = tcode_protocol::encode_line(&hosting_event(
+                                            None, state,
+                                        )) else {
+                                            continue;
+                                        };
+                                        if outbound.send(line).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                })
+                                .abort_handle(),
+                            ));
+                            continue;
+                        }
+                        ClientPayload::Subscribe(Subscription {
+                            topic: Topic::Hosting,
+                            ..
+                        }) => Some(HostMessage::Ack {
+                            id,
+                            result: Err(only_full()),
+                        }),
+                        ClientPayload::Unsubscribe(Subscription {
+                            topic: Topic::Hosting,
+                            ..
+                        }) => {
+                            _following = None;
+                            Some(HostMessage::Ack {
+                                id,
+                                result: Ok(tcode_protocol::CommandResponse::Unit),
+                            })
+                        }
+                        _ => None,
                     };
-                    let reply = tcode_protocol::encode_line(&reply)
-                        .map_err(|error| io::Error::other(error.message))?;
-                    let _ = outbound.send(reply).await;
-                    continue;
+                    if let Some(reply) = reply {
+                        let reply = tcode_protocol::encode_line(&reply)
+                            .map_err(|error| io::Error::other(error.message))?;
+                        let _ = outbound.send(reply).await;
+                        continue;
+                    }
                 }
                 if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
                     if !valid_key(key) {
@@ -2630,6 +2799,41 @@ impl StreamTask {
         }
         result
     }
+}
+
+/// A device's hosting subscription, ended with its stream.
+struct Following(tokio::task::AbortHandle);
+
+impl Drop for Following {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// The reply to a hosting subscription: the state as it stands, or why
+/// there is none.
+pub(crate) fn hosting_reply(
+    id: u64,
+    state: Result<HostingState, ProtocolError>,
+) -> tcode_protocol::HostMessage {
+    match state {
+        Ok(state) => hosting_event(Some(id), state),
+        Err(error) => tcode_protocol::HostMessage::Ack {
+            id,
+            result: Err(error),
+        },
+    }
+}
+
+pub(crate) fn hosting_event(
+    request_id: Option<u64>,
+    state: HostingState,
+) -> tcode_protocol::HostMessage {
+    tcode_protocol::HostMessage::Event(tcode_protocol::EventEnvelope {
+        request_id,
+        topic: tcode_protocol::Topic::Hosting,
+        event: tcode_protocol::ServerEvent::HostingReplaced(Box::new(state)),
+    })
 }
 
 async fn refuse(mut send: SendStream, reason: &str) -> io::Result<()> {

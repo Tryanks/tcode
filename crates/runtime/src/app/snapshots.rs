@@ -929,6 +929,8 @@ impl AppState {
             Topic::CommandOutput { .. } => return None,
             Topic::RuntimeEvents => return None,
             Topic::Preview => return None,
+            // The transport that owns hosting answers it.
+            Topic::Hosting => return None,
             // Retained latest-run status, so a client that subscribes after a
             // fast completion still recovers the outcome. `None` means no run
             // has ever started for this project.

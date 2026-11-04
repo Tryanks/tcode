@@ -1813,6 +1813,7 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
             },
             json!({"type":"space_index","content":{"space_id":"s"}}),
         ),
+        (Topic::Hosting, json!({"type":"hosting"})),
     ] {
         let wire = json!({"id":1,"principal":{"type":"full"},"payload":{"type":"subscribe","content":{"topic":wire,"after":null}}});
         let request = ClientMessage {

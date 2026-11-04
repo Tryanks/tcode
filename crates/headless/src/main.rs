@@ -208,6 +208,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         log_traverse_status(std::iter::from_fn(|| traverse_events.recv_blocking().ok()))
     });
     let hosting = traverse_host.clone();
+    let hosting_events = traverse_host.clone();
     let server = serve(
         mux.clone(),
         BrowserConfig {
@@ -216,6 +217,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             data_dir: remote_data_dir.clone(),
             static_bundle: STATIC_BUNDLE,
             hosting: Some(Arc::new(move |action| hosting.hosting(action))),
+            hosting_events: Some(Arc::new(move || hosting_events.hosting_events())),
         },
     )
     .map_err(|error| format!("could not listen for browsers: {error}"))?;

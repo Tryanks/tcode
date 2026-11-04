@@ -59,6 +59,11 @@ pub enum Topic {
     ExternalImport {
         project_id: String,
     },
+    /// The machine's hosting state, for a full device: answered on subscribe
+    /// and pushed after every change but its invitation's countdown and its
+    /// Traverse status. The transport that owns hosting answers it, not the
+    /// runtime.
+    Hosting,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -124,6 +129,7 @@ pub enum ServerEvent {
         project_id: String,
     },
     SettingsReplaced(Settings),
+    HostingReplaced(Box<crate::HostingState>),
     /// Visit times that changed while the rest of the settings did not.
     LastVisitedChanged(HashMap<String, u64>),
     Runtime(RuntimeNotification),
