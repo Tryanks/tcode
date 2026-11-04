@@ -7424,7 +7424,6 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        crate::store::tests::show_asked_threads(&workspace, cx);
         driver.wait_until(cx, &workspace, "launch draft", |cx| {
             workspace.read_with(cx, |store, _| store.legacy_focus().is_some())
         });
@@ -7433,14 +7432,25 @@ pub(crate) mod tests {
             selected_status(cx, &workspace, "first")
         });
 
+        let shown = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let _shown = cx.update(|cx| {
+            let shown = shown.clone();
+            cx.subscribe(&workspace, move |_, event: &super::ShowThread, _| {
+                *shown.borrow_mut() = Some(event.session_id.clone());
+            })
+        });
         workspace.update(cx, |store, cx| {
-            store.release_focus(cx);
             store.start_draft_beside(Some("first"), cx);
         });
+        driver.wait_until(cx, &workspace, "a draft to show", |_| {
+            shown.borrow().is_some()
+        });
+        let draft = shown.borrow().clone().expect("the draft");
+        workspace.update(cx, |store, _| store.open_thread(&draft));
         driver.wait_until(cx, &workspace, "a draft in the thread's project", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
-                    .focused_status()
+                    .session_status_for(Some(&draft))
                     .is_some_and(|status| status.draft && status.project_id.as_deref() == Some("p"))
             })
         });
