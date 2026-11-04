@@ -12268,14 +12268,15 @@ pub(crate) mod tests {
     }
 
     /// Each quad of the row's layout glyph, where it lies in the glyph as a
-    /// share of it, and whether it is filled.
+    /// share of it, and whether it is filled; none on a row with no glyph.
     fn glyph_cells(row: &str, cx: &mut VisualTestContext) -> Vec<(gpui::Point<f32>, bool)> {
         let selector: &'static str = format!("pane-glyph-{row}").leak();
-        let glyph = cx.debug_bounds(selector).expect("the row's glyph slot");
+        let Some(glyph) = cx.debug_bounds(selector) else {
+            return Vec::new();
+        };
         cx.update(|window, cx| {
-            let scale = window.scale_factor();
             let filled = cx.theme().sidebar_foreground;
-            let bounds = glyph.scale(scale);
+            let bounds = glyph.scale(window.scale_factor());
             window
                 .painted_quads()
                 .iter()
@@ -12312,18 +12313,15 @@ pub(crate) mod tests {
     }
 
     /// With two or more panes, a shown thread's row carries a map of them
-    /// with its own pane filled, wherever the layout puts that pane, and its
-    /// slot stands where it stood with one pane: nothing on the row moves.
+    /// with its own pane filled, wherever the layout puts that pane.
     #[gpui::test]
     fn a_rows_glyph_maps_the_column_and_fills_its_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
-        let slot = cx.debug_bounds("pane-glyph-thread-1").expect("the slot");
         assert_eq!(glyph_cells("thread-1", cx), [], "a lone pane has no map");
 
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         settle_panes(cx);
-        assert_eq!(cx.debug_bounds("pane-glyph-thread-1"), Some(slot));
         let filled_at = |row: &str, pane: usize, cx: &mut VisualTestContext| {
             let panes = pane_bounds(&shell, cx);
             let cells = glyph_cells(row, cx);
@@ -12360,6 +12358,44 @@ pub(crate) mod tests {
         cx.update(|window, cx| window.dispatch_action(Box::new(crate::panes::ZoomPane), cx));
         settle_panes(cx);
         assert_eq!(glyph_cells("thread-1", cx), []);
+    }
+
+    /// A row with no glyph gives up no width: the glyph comes with its own,
+    /// the title's room gliding narrower as it fades in and wider as it goes.
+    #[gpui::test]
+    fn a_rows_glyph_takes_its_width_as_it_comes_and_gives_it_back(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_panes(cx);
+        let row = "pane-glyph-thread-1";
+        assert_eq!(cx.debug_bounds(row), None, "a lone pane's row has none");
+        let part_way = crate::edge_back::SETTLE / 4;
+
+        // The split waits for its thread beside the first pane.
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        cx.executor().advance_clock(part_way);
+        draw(cx);
+        let coming = cx.debug_bounds(row).expect("the glyph, widening in");
+        settle_panes(cx);
+        let rest = cx.debug_bounds(row).expect("the glyph");
+        assert_eq!(rest.size.width, px(14.));
+        assert!(
+            rest.left() < coming.left() && coming.left() < rest.right(),
+            "the row makes room over the fade: {coming:?}, then {rest:?}"
+        );
+
+        cx.simulate_keystrokes("secondary-shift-w");
+        draw(cx);
+        cx.executor().advance_clock(part_way);
+        draw(cx);
+        let going = cx.debug_bounds(row).expect("the glyph, narrowing away");
+        assert!(
+            rest.left() < going.left() && going.left() < rest.right(),
+            "the row takes its room back over the fade: {going:?} from {rest:?}"
+        );
+        settle_panes(cx);
+        assert_eq!(pane_threads(&shell, cx).len(), 1);
+        assert_eq!(cx.debug_bounds(row), None, "the width is back");
     }
 
     /// Hovering a row softly fills the pane showing its thread, fading in and

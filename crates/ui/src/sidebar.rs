@@ -178,9 +178,6 @@ const SHOWN_FILL: f32 = 0.5;
 /// tends to be.
 const GLYPH_WIDTH: f32 = 14.;
 const GLYPH_HEIGHT: f32 = 12.;
-/// How far the glyph's slot reaches into the row's gaps around it: it stands
-/// empty on most rows, and takes that from the title.
-const GLYPH_OVERLAP: f32 = 2.;
 
 /// Each flat slot: the desktop two-line row and the 2pt gap reserved below it.
 const FLAT_ROW_HEIGHT: f32 = crate::material::selectable_row_two_line_height(false) + 2.;
@@ -2871,39 +2868,51 @@ impl SessionsSidebar {
         Some(thread.to_owned().into())
     }
 
-    /// The trailing slot of the map of the panes, on a row whose thread one
-    /// shows: the column's panes in a tiny grid, each laid out as it lies,
-    /// those showing this thread filled. The slot is always there, so the
-    /// glyph coming and going moves nothing on the row.
-    fn pane_glyph(&self, row: &str, window: &mut Window, cx: &mut App) -> gpui::Div {
+    /// The map of the panes, on a row whose thread one shows: the column's
+    /// panes in a tiny grid, each laid out as it lies, those showing this
+    /// thread filled. It widens into the row as it comes, the title giving it
+    /// room gradually, and narrows away as it goes.
+    fn pane_glyph(&self, row: &str, window: &mut Window, cx: &mut App) -> Option<gpui::AnyElement> {
         let map = self.shown.cells(row).next().map(|_| self.shown.map.clone());
         let id = SharedString::from(format!("pane-glyph-{row}"));
-        let glyph = crate::motion::shown(id.clone(), map, SHOW, window, cx).map(|shown| {
+        let shown = crate::motion::shown(id.clone(), map, SHOW, window, cx)?;
+        let (filled, other) = {
             let theme = cx.theme();
-            let (filled, other) = (
+            (
                 theme.sidebar_foreground,
                 theme.muted_foreground.opacity(0.35),
+            )
+        };
+        let mut glyph = div()
+            .relative()
+            .flex_none()
+            .w(px(GLYPH_WIDTH))
+            .h(px(GLYPH_HEIGHT))
+            .debug_selector({
+                let id = id.clone();
+                move || id.to_string()
+            });
+        for cell in shown.value.iter() {
+            let fill = transition(
+                (id.clone(), format!("cell-{}", cell.pane.as_u64())),
+                if cell.row.as_deref() == Some(row) {
+                    filled
+                } else {
+                    other
+                },
+                gpui_base::motion::Transition::new(GLIDE),
+                window,
+                cx,
             );
-            let cells = shown.value.iter().map(|cell| {
-                let fill = transition(
-                    (id.clone(), format!("cell-{}", cell.pane.as_u64())),
-                    if cell.row.as_deref() == Some(row) {
-                        filled
-                    } else {
-                        other
-                    },
-                    gpui_base::motion::Transition::new(GLIDE),
-                    window,
-                    cx,
-                );
-                // Each edge on a half point, a half point in from the grid
-                // line, so neighbours stay apart at any share of the column.
-                let edge = |share: f32, length: f32| (share * length * 2.).round() / 2.;
-                let rect = cell.rect;
-                let left = edge(rect.origin.x, GLYPH_WIDTH) + 0.5;
-                let right = edge(rect.origin.x + rect.size.width, GLYPH_WIDTH) - 0.5;
-                let top = edge(rect.origin.y, GLYPH_HEIGHT) + 0.5;
-                let bottom = edge(rect.origin.y + rect.size.height, GLYPH_HEIGHT) - 0.5;
+            // Each edge on a half point, a half point in from the grid
+            // line, so neighbours stay apart at any share of the column.
+            let edge = |share: f32, length: f32| (share * length * 2.).round() / 2.;
+            let rect = cell.rect;
+            let left = edge(rect.origin.x, GLYPH_WIDTH) + 0.5;
+            let right = edge(rect.origin.x + rect.size.width, GLYPH_WIDTH) - 0.5;
+            let top = edge(rect.origin.y, GLYPH_HEIGHT) + 0.5;
+            let bottom = edge(rect.origin.y + rect.size.height, GLYPH_HEIGHT) - 0.5;
+            glyph = glyph.child(
                 div()
                     .absolute()
                     .left(px(left))
@@ -2911,23 +2920,10 @@ impl SessionsSidebar {
                     .w(px((right - left).max(0.)))
                     .h(px((bottom - top).max(0.)))
                     .rounded(px(1.))
-                    .bg(fill)
-            });
-            shown.fade(
-                div()
-                    .relative()
-                    .size_full()
-                    .children(cells.collect::<Vec<_>>()),
-            )
-        });
-        let row = row.to_owned();
-        div()
-            .flex_none()
-            .mx(px(-GLYPH_OVERLAP))
-            .w(px(GLYPH_WIDTH))
-            .h(px(GLYPH_HEIGHT))
-            .debug_selector(move || format!("pane-glyph-{row}"))
-            .children(glyph)
+                    .bg(fill),
+            );
+        }
+        Some(shown.fold_across_gap(ROW_GAP, glyph))
     }
 
     /// The row of the current pane's thread.
@@ -3559,7 +3555,7 @@ impl SessionsSidebar {
                     window,
                     cx,
                 ))
-                .child(self.pane_glyph(&meta.id, window, cx))
+                .children(self.pane_glyph(&meta.id, window, cx))
                 // The time narrows away while the thread works, giving the
                 // title its width gradually, and widens back after.
                 .when_some(
@@ -3757,7 +3753,7 @@ impl SessionsSidebar {
                 .when(!renaming, |line| {
                     line.children(Self::follow_up_glyph(meta, window, cx))
                         .children(self.pin_glyph(meta, &row_key, window, cx))
-                        .child(self.pane_glyph(&meta.id, window, cx))
+                        .children(self.pane_glyph(&meta.id, window, cx))
                         .child(self.render_flat_thread_right_slot(
                             meta,
                             &row_key,
