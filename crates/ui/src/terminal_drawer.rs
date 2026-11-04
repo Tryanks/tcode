@@ -869,34 +869,35 @@ impl TerminalDrawer {
     /// blinks: a tick that finds the drawer not drawn since the last one
     /// ends the blink, and the next render starts it again.
     fn sync_blink(&mut self, cx: &mut Context<Self>) {
-        if !self.caret_blinks.replace(false) {
+        let blinks = self.caret_blinks.replace(false);
+        let Some(interval) = blink_interval(cx).filter(|_| blinks) else {
             self.restart_blink();
             return;
-        }
+        };
         self.blink_drawn = true;
         if self.blink.is_none() {
-            self.blink = Self::blink(cx);
+            self.blink = Self::blink(interval, cx);
         }
     }
 
     #[cfg(not(test))]
-    fn blink(cx: &mut Context<Self>) -> Option<Task<()>> {
+    fn blink(mut interval: Duration, cx: &mut Context<Self>) -> Option<Task<()>> {
         Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(500))
-                    .await;
-                let blinking = this.update(cx, |this, cx| {
+                cx.background_executor().timer(interval).await;
+                let next = this.update(cx, |this, cx| {
                     if !std::mem::take(&mut this.blink_drawn) {
                         this.restart_blink();
-                        return false;
+                        return None;
                     }
-                    this.cursor_phase = !this.cursor_phase;
+                    let next = blink_interval(cx);
+                    this.cursor_phase = next.is_none() || !this.cursor_phase;
                     cx.notify();
-                    true
+                    next
                 });
-                if !blinking.unwrap_or(false) {
-                    break;
+                match next {
+                    Ok(Some(next)) => interval = next,
+                    _ => break,
                 }
             }
         }))
@@ -905,7 +906,7 @@ impl TerminalDrawer {
     // GPUI's deterministic test scheduler rejects the async-io timer's
     // background-thread wakeup during window teardown.
     #[cfg(test)]
-    fn blink(_cx: &mut Context<Self>) -> Option<Task<()>> {
+    fn blink(_interval: Duration, _cx: &mut Context<Self>) -> Option<Task<()>> {
         None
     }
 
@@ -2284,6 +2285,15 @@ impl Render for TerminalDrawer {
 }
 
 /// The glide of the drawer's split in `scene`.
+/// How long each half of a caret blink lasts, from the policy gpui-base's
+/// theme sets for every caret; `None` when carets stay shown.
+fn blink_interval(cx: &App) -> Option<Duration> {
+    cx.try_global::<gpui_base::Theme>()
+        .map(|theme| theme.cursor_blink)
+        .unwrap_or_default()
+        .interval()
+}
+
 fn split_glide(scene: &crate::motion::Epoch) -> crate::motion::resize_glide::ResizeGlide {
     crate::motion::resize_glide::ResizeGlide::new("terminal-split-glide", gpui::Axis::Horizontal)
         .in_scene(scene)
