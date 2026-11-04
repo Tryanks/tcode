@@ -451,7 +451,7 @@ settings:
     description: "Check for newer Tcode and provider CLI versions on launch, and refresh the Claude Code model list from t3code."
   inactive_frame_throttle:
     title: "Background frame throttle"
-    description: "Drop to ~2 FPS while the window is unfocused to save energy. Takes effect after restart."
+    description: "Lower the frame rate while the window is unfocused to save energy. Takes effect after restart."
   abort_on_model_fallback:
     title: "Abort on model change"
     description: "When on, Tcode stops the turn if Claude Code serves a different model or the safety classifier flags it. Context-window suffix differences such as [1m] are ignored. Subagents are unaffected."

@@ -45,10 +45,6 @@ fn main_window_background() -> WindowBackgroundAppearance {
     }
 }
 
-/// Background redraws of an inactive window are capped to this interval
-/// unless Settings turns the throttle off.
-const INACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(500);
-
 const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn finish_quit_prompt(window_state: &Entity<WindowState>, epoch: u64, cx: &mut App) -> bool {
@@ -255,8 +251,8 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
 }
 
 /// Every desktop window: the main one and the startup migration's.
-fn window_options(cx: &App, inactive_frame_interval: Option<Duration>) -> WindowOptions {
-    WindowOptions {
+fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
+    let mut options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
         // Low enough that the window can actually be dragged into the
         // compact layout; the launch geometry above is unchanged.
@@ -292,13 +288,14 @@ fn window_options(cx: &App, inactive_frame_interval: Option<Duration>) -> Window
         // Persistent windows use the platform's system material:
         // macOS sidebar vibrancy, Windows Acrylic, or an opaque fallback.
         window_background: main_window_background(),
-        // Throttle background redraws (spinners, streaming output) to
-        // ~2 FPS while the window is inactive; gpui lifts the cap the
-        // moment the window is active or receiving high-rate input.
-        // This setting is captured at window creation and requires a restart.
-        inactive_frame_interval,
         ..Default::default()
+    };
+    // gpui reads the inactive-window frame cap only as it creates the window,
+    // so turning it off in Settings takes a restart.
+    if !throttle_inactive {
+        options.inactive_frame_interval = None;
     }
+    options
 }
 
 /// The local host, once this process owns the data dir.
@@ -639,11 +636,7 @@ fn main() {
                     }
                 });
 
-                let options = window_options(
-                    cx,
-                    (!local_settings.inactive_frame_throttle_disabled)
-                        .then_some(INACTIVE_FRAME_INTERVAL),
-                );
+                let options = window_options(cx, !local_settings.inactive_frame_throttle_disabled);
                 let (window, shell) = tcode_ui::run_shell(
                     cx,
                     native_client.clone(),
@@ -717,7 +710,7 @@ fn main() {
             match started {
                 Ok(LocalStart::Started(kernel)) => launch(cx, Ok(kernel)),
                 Ok(LocalStart::Migrate(store)) => {
-                    let options = window_options(cx, Some(INACTIVE_FRAME_INTERVAL));
+                    let options = window_options(cx, true);
                     let kernel_store = store.clone();
                     migration::run(cx, store, options, appearance, move |cx| {
                         launch(cx, Ok(LocalKernel::start(kernel_store)?));
