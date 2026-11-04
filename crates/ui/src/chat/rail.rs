@@ -24,7 +24,7 @@ use super::ChatView;
 use crate::icon::{Icon, IconName};
 use crate::material::{
     CARD_INSET, CHAT_CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING, CHAT_RAIL_EDGE, CHAT_RAIL_GAP,
-    CHAT_RAIL_NARROWEST, CHAT_RAIL_WIDEST, PANEL_CONTENT_MIN_WIDTH,
+    CHAT_RAIL_NARROWEST, CHAT_RAIL_WIDEST, CHAT_SIDE_GRIP, PANEL_CONTENT_MIN_WIDTH,
 };
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
@@ -62,6 +62,8 @@ pub(super) struct BodyLayout {
     side_reach: Pixels,
     /// How far in the agent's card is.
     side_presence: f32,
+    /// Whether the body is compact, where nothing takes the slot.
+    compact: bool,
 }
 
 impl BodyLayout {
@@ -73,7 +75,8 @@ impl BodyLayout {
     /// far that it narrows; narrower still, or compact, nothing takes the
     /// slot. The rail fills its gutter up to its widest; the agent's card
     /// takes its share, within its narrowest and what the column leaves, and
-    /// the rail gives way to it.
+    /// the rail gives way to it. The card holds its edge's grip in the slot
+    /// with it ([`CHAT_SIDE_GRIP`]), so the column clears that too.
     pub(super) fn of(
         width: Pixels,
         has_cards: bool,
@@ -87,7 +90,9 @@ impl BodyLayout {
         let side_width = side_share.map_or(PANEL_CONTENT_MIN_WIDTH, |share| {
             (body * share).min(widest_side).max(PANEL_CONTENT_MIN_WIDTH)
         });
-        let side = !compact && side_share.is_some() && fits(body, PANEL_CONTENT_MIN_WIDTH);
+        let side = !compact
+            && side_share.is_some()
+            && fits(body, PANEL_CONTENT_MIN_WIDTH + CHAT_SIDE_GRIP);
         Self {
             body: width,
             rail: !compact && fits(body, CHAT_RAIL_NARROWEST) && has_cards && !side,
@@ -96,8 +101,13 @@ impl BodyLayout {
             presence: 0.,
             side,
             side_width: px(side_width),
-            side_reach: px(if compact { 0. } else { reach(body, side_width) }),
+            side_reach: px(if compact {
+                0.
+            } else {
+                reach(body, side_width + CHAT_SIDE_GRIP)
+            }),
             side_presence: 0.,
+            compact,
         }
     }
 
@@ -159,8 +169,29 @@ impl BodyLayout {
     /// column keep their widths, so no row is measured again as the slot
     /// changes hands.
     pub(super) fn shift(&self) -> Pixels {
-        let rail = self.reach * self.presence;
-        let side = self.side_reach * self.side_presence;
+        self.blend(self.reach, self.side_reach)
+    }
+
+    /// The right inset of the timeline's scrollbar track: left of what takes
+    /// the slot, and of the grip of an agent's card `side_width` wide, in
+    /// the gap the column keeps clear; at the body's edge with nothing there.
+    /// It takes `side_width` rather than the layout's own because a card
+    /// leaving keeps the width it had.
+    pub(super) fn track_inset(&self, side_width: Pixels) -> Pixels {
+        if self.compact {
+            return px(0.);
+        }
+        self.blend(
+            self.width + px(CHAT_RAIL_EDGE),
+            side_width + px(CHAT_SIDE_GRIP + CHAT_RAIL_EDGE),
+        )
+    }
+
+    /// `rail` as far as the rail is in and `side` as far as the agent's
+    /// card is; while one gives way to the other, from one to the other.
+    fn blend(&self, rail: Pixels, side: Pixels) -> Pixels {
+        let rail = rail * self.presence;
+        let side = side * self.side_presence;
         let both = self.presence + self.side_presence;
         if both > 1. {
             (rail + side) / both
@@ -194,7 +225,11 @@ fn reach(body: f32, width: f32) -> f32 {
 /// The widest an agent's card in the slot of a body `body` wide is: as wide
 /// as the widest column leaves.
 fn side_widest(body: f32) -> f32 {
-    body - CHAT_CONTENT_MAX_WIDTH - CHAT_CONTENT_MIN_PADDING - CHAT_RAIL_GAP - CHAT_RAIL_EDGE
+    body - CHAT_CONTENT_MAX_WIDTH
+        - CHAT_CONTENT_MIN_PADDING
+        - CHAT_RAIL_GAP
+        - CHAT_RAIL_EDGE
+        - CHAT_SIDE_GRIP
 }
 
 /// The slot right of the content column that the rail or an agent's card

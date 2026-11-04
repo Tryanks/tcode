@@ -23,7 +23,7 @@ use gpui_base::{ResizeHandleContext, ResizeHandleState};
 
 use super::ChatView;
 use crate::icon::IconName;
-use crate::material::CHAT_RAIL_GAP;
+use crate::material::CHAT_SIDE_GRIP;
 use crate::motion::Colour;
 use crate::motion::owned::Owned;
 use crate::sizing::Sizable as _;
@@ -441,6 +441,12 @@ impl ChatView {
             Some(of) => of.lead.upgrade(),
             None => self.session_id.is_some().then(|| cx.entity()),
         }
+    }
+
+    /// The right inset of the timeline's scrollbar track this frame: see
+    /// [`super::rail::BodyLayout::track_inset`].
+    pub(super) fn track_inset(&self) -> gpui::Pixels {
+        self.body.track_inset(self.side.width)
     }
 
     /// The agent shown beside the thread.
@@ -1061,6 +1067,8 @@ impl ChatView {
         // gpui-base's resize handle straddles the leading edge of what holds
         // it; held by nothing as wide, it straddles the middle of the gap
         // left of the card, which the drag measures the card's width from.
+        // gpui-base's band also occludes the wheel, which has no way past it
+        // to the lead's timeline under the gap, so the band hands it on.
         let edge = (shown && morph.is_none() && live).then(|| {
             let motion = self.motion.clone();
             let lead = cx.entity_id();
@@ -1068,7 +1076,7 @@ impl ChatView {
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .left(px(-CHAT_RAIL_GAP / 2.))
+                .left(px(-CHAT_SIDE_GRIP / 2.))
                 .child(
                     gpui_base::resize_handle::<SideEdgeDrag, SideEdgeDrag>(
                         "chat-side-edge",
@@ -1082,7 +1090,14 @@ impl ChatView {
                     .on_drag(SideEdgeDrag(lead), |drag, _, _, cx| {
                         cx.stop_propagation();
                         cx.new(|_| *drag)
-                    }),
+                    })
+                    .on_scroll(cx.listener(
+                        |this, event: &gpui::ScrollEvent, window, cx| {
+                            let delta = event.delta.pixel_delta(window.line_height());
+                            this.list_state.scroll_by(-delta.y);
+                            cx.notify();
+                        },
+                    )),
                 )
         });
         let card = self.side_surface("chat-side-card", content, morph, live, cx);
@@ -1094,7 +1109,7 @@ impl ChatView {
                         return;
                     }
                     let width =
-                        event.bounds.right() - event.event.position.x - px(CHAT_RAIL_GAP / 2.);
+                        event.bounds.right() - event.event.position.x - px(CHAT_SIDE_GRIP / 2.);
                     let share = this.body.side_share_at(width);
                     if share != this.side.share {
                         this.side.share = share;

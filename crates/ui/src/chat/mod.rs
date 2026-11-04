@@ -46,7 +46,7 @@ use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::copy::CopiedMark;
 use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, open_in_zed};
-use crate::widgets::scrollbar::Scrollbar;
+use crate::widgets::scrollbar::{Scrollbar, TRACK};
 use crate::widgets::tooltip::Tooltip;
 use crate::{
     icon::{Icon, IconName},
@@ -977,6 +977,7 @@ impl ChatView {
             .update(cx, |composer, cx| composer.set_column_shift(shift, cx));
         let rail = self.render_rail(rail_cards, window, cx);
         let mut side = self.render_side(window, cx);
+        let track_inset = self.track_inset();
         let phone_strip = self.render_phone_strip(agents.as_ref(), window, cx);
         let phone_strip_height = phone_strip.as_ref().map_or(px(0.), |(_, progress)| {
             px(crate::material::bar_height(
@@ -1037,10 +1038,28 @@ impl ChatView {
                         ),
                 )
                 .when(!window.is_inspector_picking(cx), |timeline| {
+                    let side = self.is_side();
                     timeline.child(
-                        Scrollbar::vertical(&self.list_state)
-                            .id("timeline-scrollbar")
-                            .motion(&self.motion),
+                        div()
+                            .debug_selector(move || {
+                                if side {
+                                    "chat-side-track"
+                                } else {
+                                    "chat-track"
+                                }
+                                .into()
+                            })
+                            .absolute()
+                            .top(timeline_inset(cx))
+                            .bottom(timeline_inset(cx))
+                            .right(track_inset)
+                            .w(TRACK)
+                            .child(
+                                Scrollbar::vertical(&self.list_state)
+                                    .id("timeline-scrollbar")
+                                    .motion(&self.motion)
+                                    .viewport_from_layout(),
+                            ),
                     )
                 })
                 .into_any_element()

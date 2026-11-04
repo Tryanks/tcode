@@ -36,7 +36,7 @@ use crate::motion::owned::Owned;
 use crate::theme::{ActiveTheme as _, Theme};
 
 /// gpui-base's track: the widest thumb and its inset on both sides.
-const TRACK: Pixels = px(16.);
+pub(crate) const TRACK: Pixels = px(16.);
 const MIN_THUMB: Pixels = px(48.);
 /// The thumb at rest, and under the pointer or dragged.
 const THUMB: Pixels = px(6.);
