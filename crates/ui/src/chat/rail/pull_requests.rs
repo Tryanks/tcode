@@ -196,6 +196,9 @@ fn row(
     .child(state)
     .children(checks)
     .children(review)
+    // The panel this opens replaces the rail, and the keyboard would go with
+    // the row.
+    .on_mouse_down(gpui::MouseButton::Left, crate::chat::header::stop_press)
     .on_click(cx.listener(move |chat, _, _, cx| {
         let key = key.clone();
         let session = session.clone();

@@ -374,6 +374,14 @@ impl ResizeFrame {
         }
     }
 
+    /// The size panel `ix` is held at while the group glides.
+    pub(crate) fn size(&self, ix: usize) -> Option<Pixels> {
+        match self.pins.get(ix) {
+            Some(Pin::Sized { size, .. }) => Some(*size),
+            _ => None,
+        }
+    }
+
     /// Whether panel `ix`'s content is drawn this frame: shown, or gliding.
     pub(crate) fn shows(&self, ix: usize) -> bool {
         match self.pins.get(ix) {

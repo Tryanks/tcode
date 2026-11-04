@@ -294,7 +294,7 @@ impl ChatView {
                     .w_full()
                     .items_center()
                     .px(inset)
-                    .pr(inset + this.body.shift())
+                    .pr(inset + this.body.shift() + this.overhang)
                     .rounded(crate::material::radius_card(cx))
                     .bg(highlight)
                     // A press inside the mark lets it go, and still does what

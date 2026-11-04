@@ -205,6 +205,29 @@ pub fn floating_panel<E: Styled>(el: E, side: Side, cx: &App) -> E {
     .border_color(cx.theme().border)
 }
 
+/// A side panel `lift` of the way from docked to [floating](floating_panel). A
+/// docked one is a peer of the content beside it: the same paper, opaque for
+/// what runs on beneath it, the same hairline, and no shadow.
+pub fn lifting_panel<E: Styled>(el: E, side: Side, lift: f32, cx: &App) -> E {
+    let mut el = floating_panel(el, side, cx);
+    let style = el.style();
+    style.box_shadow = style
+        .box_shadow
+        .take()
+        .filter(|_| lift > 0.)
+        .map(|shadows| {
+            shadows
+                .into_iter()
+                .map(|mut shadow| {
+                    shadow.color.a *= lift;
+                    shadow
+                })
+                .collect()
+        });
+    let docked = opaque_canvas(cx).blend(content_surface(cx));
+    el.bg(docked.blend(cx.theme().popover.opacity(lift)))
+}
+
 /// A card inside a page or a chat column: its radius, inset, gap and the muted
 /// wash. [`card_secondary`] and [`card_raised`] change only the fill.
 pub fn card(cx: &App) -> Div {

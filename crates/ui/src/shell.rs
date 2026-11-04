@@ -764,7 +764,8 @@ const CHAT_MIN_WIDTH: f32 = crate::chat::HEADER_COMPACT_MIN_WIDTH;
 /// A pane among others may narrow to its header's overflow tier, which holds
 /// the pane's close button among others; panes side by side add up
 /// ([`AppShell::column_min_width`]).
-const PANE_MIN_WIDTH: f32 = crate::chat::HEADER_OVERFLOW_MIN_WIDTH + crate::chat::PANE_CLOSE_WIDTH;
+pub(crate) const PANE_MIN_WIDTH: f32 =
+    crate::chat::HEADER_OVERFLOW_MIN_WIDTH + crate::chat::PANE_CLOSE_WIDTH;
 const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
@@ -5611,6 +5612,7 @@ pub(crate) mod tests {
     use super::*;
 
     mod compact_agent;
+    mod docked_panel;
     mod lead_scrollbar;
     mod scenes;
 
@@ -8313,6 +8315,12 @@ pub(crate) mod tests {
                 [Some("agent-1".into()), None],
                 "{width}"
             );
+            // Its panel stays beside it until the reader closes it, and
+            // while it shows the agents the rail does not.
+            store.update(cx, |store, cx| {
+                store.close_right_panel_for(Some("agent-1"), cx)
+            });
+            settle_panes(cx);
         }
     }
 
@@ -8347,6 +8355,9 @@ pub(crate) mod tests {
     /// agent's card growing out of what opened it beside its lead, or
     /// shrinking back into it.
     fn settle_panes(cx: &mut VisualTestContext) {
+        // A glide starts on the frame that draws its change, and a display
+        // draws one before any time has gone by.
+        draw(cx);
         cx.executor().advance_clock(Duration::from_millis(800));
         draw(cx);
     }
@@ -8441,13 +8452,14 @@ pub(crate) mod tests {
     }
 
     /// An agent opened from its lead's Agents panel shows beside the lead in
-    /// the lead's own pane, the panel sliding away from over it: on a card in
-    /// the side rail's place, under the lead's header, at the rail's edge and
-    /// a third of the pane wide, the lead's column keeping its width clear of
-    /// it, and the lead keeping the store's focus. Close takes it away, and
-    /// the lead's pane, its column and the keyboard are back where they were
-    /// before it opened, the panel still shut, with the agent's thread
-    /// closed. Opening and closing again leaves the same layout each time.
+    /// the lead's own pane, the panel staying docked beside them: on a card
+    /// in the side rail's place, under the lead's header, at the rail's edge
+    /// and a third of what the panel leaves, the lead's column keeping its
+    /// width clear of it, and the lead keeping the store's focus. Close takes
+    /// it away, the panel still there, and with that closed the lead's pane,
+    /// its column and the keyboard are back where they were before it opened,
+    /// with the agent's thread closed. Opening and closing again leaves the
+    /// same layout each time.
     /// The card's edge, dragged, widens it, and the lead's column keeps its
     /// width.
     #[gpui::test]
@@ -8468,13 +8480,15 @@ pub(crate) mod tests {
                 store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Agents, cx)
             });
             settle_panes(cx);
-            assert!(cx.debug_bounds("right-panel").is_some(), "round {round}");
+            let panel = cx.debug_bounds("right-panel").expect("the panel");
             open_agent_from_panel(&shell, &host, cx);
             assert_eq!(
                 cx.debug_bounds("right-panel"),
-                None,
-                "round {round}: the panel slid away from over the agent"
+                Some(panel),
+                "round {round}: the panel stays beside the agent"
             );
+            let beside = cx.debug_bounds("pane-conversation").expect("the lead");
+            assert_eq!(beside.right(), panel.left(), "round {round}");
             assert_eq!(
                 pane_threads(&shell, cx),
                 [Some("thread-1".into())],
@@ -8497,12 +8511,13 @@ pub(crate) mod tests {
                 "{side:?} on {card:?}"
             );
             assert!(
-                (pane.right() - px(crate::material::CHAT_RAIL_EDGE) - card.right()).abs() < px(1.),
-                "{card:?} at the rail's edge of {pane:?}"
+                (beside.right() - px(crate::material::CHAT_RAIL_EDGE) - card.right()).abs()
+                    < px(1.),
+                "{card:?} at the rail's edge of {beside:?}"
             );
             assert!(
-                (card.size.width * 3. - pane.size.width).abs() < pane.size.width * 0.03,
-                "{card:?} is a third of {pane:?}"
+                (card.size.width * 3. - beside.size.width).abs() < beside.size.width * 0.03,
+                "{card:?} is a third of {beside:?}"
             );
             let lead = lead_card(column, cx).unwrap_or_else(|| {
                 panic!("round {round}: the lead's composer keeps the width of {column:?}")
@@ -8525,6 +8540,11 @@ pub(crate) mod tests {
                 "round {round}"
             );
             assert_eq!(pane_bounds(&shell, cx), panes, "round {round}");
+            assert_eq!(cx.debug_bounds("right-panel"), Some(panel), "round {round}");
+            store.update(cx, |store, cx| {
+                store.close_right_panel_for(Some("thread-1"), cx)
+            });
+            settle_panes(cx);
             assert_eq!(
                 cx.debug_bounds("composer-card"),
                 Some(column),
@@ -8543,6 +8563,11 @@ pub(crate) mod tests {
         });
         settle_panes(cx);
         open_agent_from_panel(&shell, &host, cx);
+        // Beside a docked panel the card is about as wide as it can be.
+        store.update(cx, |store, cx| {
+            store.close_right_panel_for(Some("thread-1"), cx)
+        });
+        settle_panes(cx);
         let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
         let lead = lead_card(column, cx).expect("the lead's composer");
         let grip = cx
@@ -10305,10 +10330,9 @@ pub(crate) mod tests {
     }
 
     /// A panel toggle in the header of the pane without the keyboard acts on
-    /// that pane's thread. The press moves nothing; the release opens the
-    /// thread's drawer in its own pane, which takes the keyboard, and closed
-    /// from inside it gives the keyboard back. Each toggle closes only the
-    /// drawer of its own thread.
+    /// that pane's thread. Neither the press nor the release moves the
+    /// keyboard; the release opens the thread's panel docked in its own pane.
+    /// Each toggle closes only the panel of its own thread.
     #[gpui::test]
     fn a_header_toggle_acts_on_the_thread_of_its_own_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -10352,7 +10376,7 @@ pub(crate) mod tests {
         settle_panes(cx);
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Agents));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
-        assert_eq!(keyboard_pane(&shell, cx), Some(1), "the drawer takes it");
+        assert_eq!(keyboard_pane(&shell, cx), Some(0), "the panel leaves it");
         assert!(
             bounds("right-panel", cx).contains(&bounds("agent-row-spawn-1", cx).center()),
             "the panel lists the agents of the thread whose toggle was pressed"
@@ -10362,7 +10386,7 @@ pub(crate) mod tests {
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         settle_panes(cx);
         assert_eq!(panel_of(&store, "thread-2", cx), None);
-        assert_eq!(keyboard_pane(&shell, cx), Some(0), "back where it was");
+        assert_eq!(keyboard_pane(&shell, cx), Some(0), "still where it was");
 
         let diff = bounds("diff-panel", cx);
         press_with_a_frame_between(diff.center(), cx);
@@ -10441,9 +10465,7 @@ pub(crate) mod tests {
         press_control("diff-close", cx);
 
         shows_agents_file(cx);
-        // The panel lies over the card's Close here; it reaches the same place.
-        store.update(cx, |store, cx| store.set_side_thread("thread-1", None, cx));
-        settle_panes(cx);
+        press_control("side-close", cx);
         assert_eq!(cx.debug_bounds("chat-side-header"), None);
         assert_eq!(cx.debug_bounds("right-panel"), None, "nothing in its place");
         assert_eq!(panel_of(&store, "thread-1", cx), None);
@@ -10481,10 +10503,11 @@ pub(crate) mod tests {
         assert_eq!(panel_of(&store, "thread-1", cx), None);
     }
 
-    /// Two panes each have a drawer. Diff opened from the left pane's header
-    /// lies inside that pane with the right pane uncovered; Plan opened in
-    /// the right pane too shows beside it, each with its own thread's
-    /// content. A thread moved to the other pane takes its drawer along.
+    /// Two panes each have a panel. Diff opened from the left pane's header
+    /// docks inside that pane, its conversation yielding to it and the right
+    /// pane untouched; Plan opened in the right pane too docks there, each
+    /// with its own thread's content. A thread moved to the other pane takes
+    /// its panel along.
     #[gpui::test]
     fn each_pane_has_a_drawer_of_its_own(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -10534,10 +10557,27 @@ pub(crate) mod tests {
         cx.simulate_click(left_diff, gpui::Modifiers::default());
         settle_panes(cx);
         draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
+        let conversations = |cx: &mut VisualTestContext| {
+            shell.read_with(cx, |shell, cx| {
+                let attachment = shell.attachment.as_ref().expect("attached");
+                attachment
+                    .all_panes(cx)
+                    .iter()
+                    .map(|pane| pane.read(cx).chat_drawn(cx))
+                    .collect::<Vec<_>>()
+            })
+        };
         let drawer = cx.debug_bounds("right-panel").expect("the left drawer");
         assert!(inside(panes[0], drawer), "{drawer:?} in {panes:?}");
         assert_eq!(drawer.right(), panes[0].right());
         assert_eq!(panel_of(&store, "thread-2", cx), None);
+        assert_eq!(pane_bounds(&shell, cx), panes);
+        let [left, right] = conversations(cx)[..] else {
+            panic!("two panes");
+        };
+        assert_eq!(left.left(), panes[0].left());
+        assert_eq!(left.right(), drawer.left());
+        assert_eq!(right, panes[1], "the right pane's conversation is its own");
 
         // Uncovered, the right pane's own header still takes a click.
         let plan = cx.debug_bounds("plan-panel").expect("the Plan toggle");
@@ -10556,8 +10596,17 @@ pub(crate) mod tests {
             .expect("the right thread's plan");
         assert!(inside(panes[0], diff), "{diff:?} in {panes:?}");
         assert!(inside(panes[1], step), "{step:?} in {panes:?}");
+        assert_eq!(pane_bounds(&shell, cx), panes);
+        let [both_left, both_right] = conversations(cx)[..] else {
+            panic!("two panes");
+        };
+        assert_eq!(both_left, left, "the left keeps what it had");
+        assert_eq!(both_right.left(), panes[1].left());
+        assert!(both_right.right() <= step.left(), "{both_right:?}");
+        assert_eq!(both_right.size.width, left.size.width);
 
-        cx.simulate_keystrokes("secondary-alt-shift-left");
+        // The keyboard stayed in the left pane, which carries its thread over.
+        cx.simulate_keystrokes("secondary-alt-shift-right");
         settle_panes(cx);
         assert_eq!(
             pane_threads(&shell, cx),
@@ -10582,6 +10631,8 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_panes(cx);
         let store = store_of(&shell, cx);
         side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
+        resize(cx, 2600.);
+        settle_panes(cx);
         let open = |thread: &str, cx: &mut VisualTestContext| {
             store.update(cx, |store, cx| {
                 store.toggle_tab_panel_for(thread, RightTab::Plan, cx)
@@ -10623,21 +10674,25 @@ pub(crate) mod tests {
         assert_eq!(other.size.width, chosen);
     }
 
-    /// A zoomed pane's drawer stays inside the zoomed pane, which covers the
-    /// column, and spans it from the pane's right edge.
+    /// A pane too narrow for its panel, zoomed, has room for both: the panel
+    /// stays inside the zoomed pane, which covers the column, docked beside
+    /// its conversation.
     #[gpui::test]
     fn a_zoomed_panes_drawer_stays_inside_it(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         let store = store_of(&shell, cx);
         side_by_side(&shell, || serve_thread(&host, "thread-2"), cx);
+        resize(cx, 1440.);
+        settle_panes(cx);
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Plan, cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let slot = pane_bounds(&shell, cx)[0];
+        assert_eq!(cx.debug_bounds("right-panel"), Some(slot), "it covers");
         cx.simulate_keystrokes("secondary-shift-enter");
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
         let zoomed = pane_bounds(&shell, cx)[0];
         assert!(
             zoomed.size.width > slot.size.width,
@@ -10645,7 +10700,13 @@ pub(crate) mod tests {
         );
         let drawer = cx.debug_bounds("right-panel").expect("the drawer");
         assert_eq!(drawer.right(), zoomed.right());
-        assert!(zoomed.left() <= drawer.left());
+        assert!(zoomed.left() < drawer.left());
+        let conversation = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                .read(cx)
+                .chat_drawn(cx)
+        });
+        assert_eq!(conversation.right(), drawer.left(), "docked");
     }
 
     /// A file listed in the rail of the pane without the keyboard opens that
@@ -10736,7 +10797,11 @@ pub(crate) mod tests {
         assert_eq!(panel_of(&store, "thread-2", cx), Some(RightTab::Diff));
         assert_eq!(panel_of(&store, "thread-1", cx), None);
         settle_panes(cx);
-        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        assert_eq!(
+            keyboard_pane(&shell, cx),
+            Some(0),
+            "the keyboard stays where it was, not lost with the row"
+        );
     }
 
     /// The way back to an agent's lead in the header of the pane without the
@@ -11870,6 +11935,9 @@ pub(crate) mod tests {
             store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
         });
         draw(cx);
+        assert_eq!(settled(cx), 0., "a docked panel leaves the keyboard alone");
+        let panel = cx.debug_bounds("right-panel").expect("the drawer");
+        cx.simulate_click(panel.center(), gpui::Modifiers::default());
         assert_eq!(settled(cx), lit, "its drawer");
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
@@ -15690,12 +15758,12 @@ pub(crate) mod tests {
         (shell, host, cx)
     }
 
-    /// The right panel over the chat at the widths a desktop window passes
-    /// through, on a thread whose header and tab strip are as full as they
+    /// The right panel at the widths a desktop window passes through, on a thread whose header and tab strip are as full as they
     /// get, with the sidebar open and collapsed: it rests against the
-    /// window's right edge at the width the user chose, or everything beside
-    /// the sidebar where that would leave no usable strip of chat, and comes
-    /// back to that width after the
+    /// window's right edge at the width the user chose, as far as that leaves
+    /// the conversation a pane's narrowest beside it, or everything beside
+    /// the sidebar where the two do not fit, and comes back to that width
+    /// after the
     /// window narrows and widens again, after a drag of its edge chose
     /// another, after a sidebar drag, and after it was expanded to everything
     /// beside the sidebar and dragged there. At every width no tab label is
@@ -15730,13 +15798,11 @@ pub(crate) mod tests {
                     }
                 });
                 let beside = px(width) - sidebar;
-                // All of the pane where a strip of chat too narrow to use
-                // would be left beside it.
-                let fits = chosen.get().min(beside);
-                let expected = if beside - fits < px(240.) {
+                let panel_min = px(crate::material::PANEL_CONTENT_MIN_WIDTH);
+                let expected = if beside < panel_min + px(PANE_MIN_WIDTH) {
                     beside
                 } else {
-                    fits
+                    chosen.get().min(beside - px(PANE_MIN_WIDTH)).max(panel_min)
                 };
                 let panel = cx.debug_bounds("right-panel").expect("the right panel");
                 assert_eq!(
@@ -15851,12 +15917,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// The reader opening the right panel hands it the keyboard, a press on
-    /// the chat beside it takes the keyboard back there with the panel left
-    /// open, and closing the panel from inside gives the keyboard back to
-    /// what had it.
+    /// A docked right panel leaves the keyboard where it was as it opens. A
+    /// press in the panel takes it there, a press on the chat beside it takes
+    /// it back with the panel left open, and closing the panel from inside
+    /// gives it back to what had it.
     #[gpui::test]
-    fn the_right_panel_takes_the_keyboard_and_gives_it_back(cx: &mut TestAppContext) {
+    fn the_right_panel_gives_the_keyboard_back(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_panes(cx);
         let store = store_of(&shell, cx);
@@ -15877,15 +15943,22 @@ pub(crate) mod tests {
             store.update(cx, |store, cx| {
                 store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
             });
-            settle_panes(cx);
-            cx.update(|window, _| assert!(!input.is_focused(window), "the panel has the keyboard"));
+            crate::test_frames::draw_settled(cx);
+            cx.update(|window, _| assert!(input.is_focused(window), "the keyboard stays"));
+        };
+        let press_panel = |cx: &mut VisualTestContext| {
+            let panel = cx.debug_bounds("right-panel").unwrap();
+            cx.simulate_click(panel.center(), gpui::Modifiers::default());
+            draw(cx);
+            cx.update(|window, _| assert!(!input.is_focused(window), "the press takes it"));
         };
 
         open(cx);
+        press_panel(cx);
         let panel = cx.debug_bounds("right-panel").unwrap();
         let composer = cx.debug_bounds("chat-composer").unwrap();
         assert!(
-            composer.left() < panel.left(),
+            composer.right() <= panel.left(),
             "{composer:?} beside {panel:?}"
         );
         cx.simulate_click(
@@ -15900,9 +15973,10 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
         });
-        settle_panes(cx);
+        crate::test_frames::draw_settled(cx);
 
         open(cx);
+        press_panel(cx);
         let close = cx.debug_bounds("diff-close").unwrap();
         cx.simulate_click(close.center(), gpui::Modifiers::default());
         draw(cx);
@@ -15943,10 +16017,10 @@ pub(crate) mod tests {
         }));
     }
 
-    /// The right panel slides in from the window's edge over the chat as it
-    /// opens and, on Escape, back out, never moving the chat beneath; the
-    /// reader opening it again on its way out turns it back from where it
-    /// is, its content still drawn.
+    /// In a pane too narrow for both, the right panel slides in from the
+    /// window's edge over the chat as it opens and, on Escape, back out,
+    /// never moving the chat beneath; the reader opening it again on its way
+    /// out turns it back from where it is, its content still drawn.
     #[gpui::test]
     fn the_right_panel_slides_in_over_the_chat_and_escape_slides_it_out(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -15954,7 +16028,7 @@ pub(crate) mod tests {
         // As the app binds its keys before it opens a window.
         cx.update(|_, cx| crate::shortcut::init(cx));
         let store = store_of(&shell, cx);
-        resize(cx, 1600.);
+        resize(cx, 800.);
         draw_until(&shell, cx, &host, "chat-composer", None);
         crate::test_frames::draw_settled(cx);
         let chat = cx.debug_bounds("chat-composer").expect("the composer");
@@ -15980,7 +16054,7 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         let open = left(cx).expect("the open panel");
         assert!(
-            opening > open && opening < px(1600.),
+            opening > open && opening < px(800.),
             "{opening:?}, at rest {open:?}"
         );
 
@@ -15991,7 +16065,7 @@ pub(crate) mod tests {
         }));
         half_way(cx);
         let closing = left(cx).expect("the panel slides out");
-        assert!(closing > open && closing < px(1600.), "{closing:?}");
+        assert!(closing > open && closing < px(800.), "{closing:?}");
         assert!(cx.debug_bounds("diff-body").is_some(), "drawn as it goes");
 
         store.update(cx, |store, cx| {
