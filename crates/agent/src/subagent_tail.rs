@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::claude::{ToolItem, is_agent_tool, one_line_summary, spawned_subagent};
+use crate::claude::{
+    ToolItem, is_agent_tool, is_handback_note, one_line_summary, spawned_subagent,
+};
 use crate::{AgentEvent, ItemContent, ItemStatus, ThreadItem};
 
 enum ChildTool {
@@ -206,13 +208,15 @@ impl TranscriptMapper {
                     else {
                         continue;
                     };
+                    let summary = (!output.trim().is_empty() && !is_handback_note(&output))
+                        .then(|| one_line_summary(&output));
                     events.push(AgentEvent::ItemCompleted(self.nested_subagent(
                         id,
                         ItemContent::Subagent {
                             agent_type,
                             description,
                             status,
-                            summary: (!output.trim().is_empty()).then(|| one_line_summary(&output)),
+                            summary,
                             model,
                             effort,
                         },
