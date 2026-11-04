@@ -100,6 +100,13 @@ pub struct StoreChange {
     pub topic: TopicKind,
 }
 
+/// A terminal's grid changed: its bell and clipboard requests, if any, arrived
+/// with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalChange {
+    pub terminal_id: u64,
+}
+
 /// A thread is to be shown; the shell picks the pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowThread {
@@ -249,6 +256,9 @@ enum Reach {
     Store,
     /// Only these parts of one thread's replica: only their readers are.
     Thread(String, &'static [Part]),
+    /// Only one terminal's grid: only what draws it, and what drains its
+    /// bell and clipboard, is told.
+    Terminal(u64),
 }
 
 /// Where a window of a thread's log sits in the whole log.
@@ -1176,6 +1186,8 @@ impl WorkspaceStore {
                     }
                 }
             }
+            // Its grid and label revisions are moved on as it applies.
+            Reach::Terminal(terminal_id) => cx.emit(TerminalChange { terminal_id }),
         }
         cx.emit(change);
     }
@@ -1324,7 +1336,8 @@ impl WorkspaceStore {
                     frame,
                 },
             ) if *terminal_id == frame_id => {
-                self.apply_terminal_frame(frame_id, *frame);
+                self.apply_terminal_frame(frame_id, *frame, cx);
+                reach = Reach::Terminal(frame_id);
                 None
             }
             (
@@ -1356,7 +1369,10 @@ impl WorkspaceStore {
                         terminal_id: delta_id,
                         delta,
                     },
-                ) if terminal_id == delta_id => self.apply_terminal_delta(*terminal_id, delta),
+                ) if terminal_id == delta_id => {
+                    self.apply_terminal_delta(*terminal_id, delta, cx);
+                    reach = Reach::Terminal(*terminal_id);
+                }
                 (
                     Topic::CommandOutput {
                         session_id,
@@ -1583,7 +1599,7 @@ impl WorkspaceStore {
                             thread.resettle();
                             let destination = thread.destination.clone();
                             let conversations = self.conversation_ui.len();
-                            self.sync_terminal_topics();
+                            self.sync_terminal_topics(cx);
                             self.sync_conversation_ui(session_id);
                             // A status that moves the thread's conversation
                             // state, or first brings it, reaches past the
@@ -4174,6 +4190,7 @@ impl Drop for WorkspaceStore {
 
 impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
 impl EventEmitter<StoreChange> for WorkspaceStore {}
+impl EventEmitter<TerminalChange> for WorkspaceStore {}
 impl EventEmitter<ShowThread> for WorkspaceStore {}
 impl EventEmitter<ConnectionState> for WorkspaceStore {}
 impl EventEmitter<tcode_protocol::HostingState> for WorkspaceStore {}

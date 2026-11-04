@@ -559,7 +559,7 @@ impl WorkspaceStore {
                 after: None,
             });
         }
-        self.sync_terminal_topics();
+        self.sync_terminal_topics(cx);
     }
 
     /// Hold `session_id`'s timeline for a surface that draws it, so if the
@@ -681,7 +681,7 @@ impl WorkspaceStore {
                 topic,
             });
         }
-        self.sync_terminal_topics();
+        self.sync_terminal_topics(cx);
         self.sync_conversation_ui(session_id);
     }
     /// The user moved to another pane, which a reply in flight no longer

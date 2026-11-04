@@ -36,7 +36,7 @@ use tcode_protocol::terminal::{
 use crate::{
     material,
     store::{
-        StoreChange, TopicKind, WorkspaceStore, observe_store_topics,
+        TerminalChange, WorkspaceStore,
         terminal::{HyperlinkMatch, SelectionKind, SelectionSide, TerminalModel},
     },
     terminal_key_bar::{
@@ -423,18 +423,22 @@ impl TerminalDrawer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let store_observer = observe_store_topics(
-            &workspace_store,
-            &[TopicKind::SessionStatus, TopicKind::Terminal],
-            cx,
-        );
         // Bell and OSC 52 arrive with the grid delta rather than on a private
-        // event stream, so they are drained where the store change lands.
+        // event stream, so they are drained where the change lands, for the
+        // drawer's own terminals.
         let notice_observer = cx.subscribe_in(
             &workspace_store,
             window,
-            |this, _, change: &StoreChange, window, cx| {
-                if change.topic == TopicKind::Terminal {
+            |this, store, change: &TerminalChange, window, cx| {
+                let own = store
+                    .read(cx)
+                    .with_terminal_workspace_for(
+                        this.session_id.as_deref(),
+                        |workspace| workspace.terminal(change.terminal_id).is_some(),
+                        cx,
+                    )
+                    .unwrap_or(false);
+                if own {
                     this.drain_terminal_notices(window, cx);
                 }
             },
@@ -520,7 +524,7 @@ impl TerminalDrawer {
             blink: None,
             terminal_focused: false,
             current_size: None,
-            _store_subscriptions: vec![store_observer, notice_observer],
+            _store_subscriptions: vec![notice_observer],
         }
     }
 
@@ -1542,6 +1546,7 @@ impl TerminalDrawer {
         };
         let register_input = active_id == Some(terminal_id);
 
+        terminal.watch_grid(cx);
         let model = terminal.model();
         let label = model.title();
         let (exited, exit_code) = (model.exited(), model.exit_code());
@@ -1790,6 +1795,7 @@ impl Render for TerminalDrawer {
         let tabs = terminals
             .iter()
             .map(|(id, terminal)| {
+                terminal.watch_label(cx);
                 (
                     *id,
                     terminal.label(),
