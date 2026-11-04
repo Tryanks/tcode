@@ -12,8 +12,8 @@ use crate::widgets::tooltip::Tooltip;
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
     HighlightStyle, Hitbox, InspectorElementId, InteractiveText, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
-    StyledText, TextLayout, Window, point, px, quad,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout,
+    Window, point, px, quad,
 };
 
 use super::{
@@ -259,7 +259,18 @@ impl Element for Inline {
             .with_runs(runs)
             .with_font_family_overrides(self.font_overrides.clone());
         self.text_layout = styled_text.layout().clone();
-        self.interactive_text = InteractiveText::new(self.id.clone(), styled_text);
+        let interactive_text = InteractiveText::new(self.id.clone(), styled_text);
+        self.interactive_text = if self.links.is_empty() {
+            interactive_text
+        } else {
+            // For the hand InteractiveText sets over the links' own hitboxes.
+            // Its click is not used: it fires for any button, for a drag that
+            // starts and ends on one link and for each press of a double
+            // click, and a press released outside the text stays pending for
+            // the next release. Selectable text needs the click in `paint`.
+            let ranges = self.links.iter().map(|(range, _)| range.clone()).collect();
+            interactive_text.on_click(ranges, |_, _, _| {})
+        };
         let (layout, _) = self
             .interactive_text
             .request_layout(global_id, inspector_id, window, cx);
@@ -310,8 +321,12 @@ impl Element for Inline {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let current_view = window.current_view();
         let text_layout = self.text_layout.clone();
+        // Before the text paints its links' hand, which the window takes
+        // over the I-beam because it is set later.
+        if self.origin.is_some() && self.view.read(cx).is_selectable() {
+            window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        }
         if let Some((glyph, baseline)) = self.math_glyph {
             let style = window.text_style();
             let font_id = window.text_system().resolve_font(&style.font());
@@ -327,12 +342,6 @@ impl Element for Inline {
                 .paint(global_id, None, bounds, &mut (), hitbox, window, cx);
         }
 
-        if self.origin.is_some() && self.view.read(cx).is_selectable() {
-            window.set_cursor_style(CursorStyle::IBeam, hitbox);
-        }
-        if Self::link_for_position(&text_layout, &self.links, window.mouse_position()).is_some() {
-            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
-        }
         if let Some(selected) = &self.selected {
             Self::paint_selection(selected, &text_layout, bounds, window, cx);
         }
@@ -366,25 +375,6 @@ impl Element for Inline {
             window,
             cx,
         );
-
-        window.on_mouse_event({
-            let hitbox = hitbox.clone();
-            let layout = text_layout.clone();
-            let links = self.links.clone();
-            let mut hovered_link =
-                Self::link_for_position(&layout, &links, window.mouse_position()).is_some();
-            move |event: &MouseMoveEvent, phase, window, cx| {
-                if !phase.bubble() {
-                    return;
-                }
-                let updated = hitbox.is_hovered(window)
-                    && Self::link_for_position(&layout, &links, event.position).is_some();
-                if updated != hovered_link {
-                    hovered_link = updated;
-                    cx.notify(current_view);
-                }
-            }
-        });
 
         window.on_mouse_event({
             let hitbox = hitbox.clone();
