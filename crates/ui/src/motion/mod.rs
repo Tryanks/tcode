@@ -508,17 +508,57 @@ pub(crate) fn cross_fade_part<T: Clone + PartialEq + 'static, C: BorrowMut<App>>
     Clock::Element.cross_fade_part(id, value, &curve.into(), window, cx, build)
 }
 
+/// What a cross-fade keeps of the width each of its states, by key, was
+/// last laid out at while current, so that one leaving is laid out as it
+/// was at rest.
+#[derive(Clone, Default)]
+struct AtRest(std::rc::Rc<std::cell::RefCell<Vec<(u64, Pixels)>>>);
+
+impl AtRest {
+    /// `region`, noting the width of its child at `index`, the state
+    /// `current`, and forgetting the states it no longer draws.
+    fn noting(&self, region: Div, current: u64, index: usize, drawn: Vec<u64>) -> Div {
+        let widths = self.0.clone();
+        region.on_children_prepainted(move |bounds, _, _| {
+            let mut widths = std::cell::RefCell::borrow_mut(&widths);
+            widths.retain(|(key, _)| *key != current && drawn.contains(key));
+            if let Some(bounds) = bounds.get(index) {
+                widths.push((current, bounds.size.width));
+            }
+        })
+    }
+
+    /// `layer`, the state `key` leaving, out of flow at its region's top
+    /// left.
+    fn leaving(&self, key: u64, layer: Stateful<Div>) -> Stateful<Div> {
+        let width = self
+            .0
+            .borrow()
+            .iter()
+            .find_map(|(kept, width)| (*kept == key).then_some(*width));
+        // Out of flow, a state is as wide as its content: one that fills its
+        // row would shrink, and a line that fades its end rather than wrap
+        // would widen to its whole text and stop fading. It keeps the width
+        // it had while current, and is as wide as the region at least.
+        layer
+            .absolute()
+            .top_0()
+            .left_0()
+            .when_some(width, |layer, width| layer.w(width))
+            .min_w_full()
+    }
+}
+
 /// A [`cross_fade`]'s frame: the `current` state, of its generation, coming
 /// in at `progress` over the `previous` one, which is shielded when
-/// `shield`. `laid_out` is told the width the current state is laid out
-/// at, which the state keeps while it leaves.
+/// `shield`.
 fn draw_change(
     id: ElementId,
     (current, generation): (AnyElement, u64),
-    previous: Option<(AnyElement, u64, Option<Pixels>)>,
+    previous: Option<(AnyElement, u64)>,
     progress: f32,
     shield: bool,
-    laid_out: impl Fn(Pixels) + 'static,
+    at_rest: &AtRest,
 ) -> AnyElement {
     let slot = |generation: u64| {
         ElementId::NamedChild(
@@ -526,28 +566,17 @@ fn draw_change(
             generation.to_string().into(),
         )
     };
-    div()
+    let drawn = std::iter::once(generation)
+        .chain(previous.as_ref().map(|(_, generation)| *generation))
+        .collect();
+    at_rest
+        .noting(div(), generation, 0, drawn)
         .relative()
-        .on_children_prepainted(move |bounds, _, _| {
-            if let Some(current) = bounds.first() {
-                laid_out(current.size.width);
-            }
-        })
         .child(div().id(slot(generation)).opacity(progress).child(current))
-        .when_some(previous, |frame, (previous, generation, width)| {
+        .when_some(previous, |frame, (previous, generation)| {
             frame.child(
-                div()
-                    .id(slot(generation))
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    // Out of flow, a state is as wide as its content: one that
-                    // fills its row would shrink, and a line that fades its
-                    // end rather than wrap would widen to its whole text and
-                    // stop fading. It keeps the width it had while current,
-                    // and is as wide as the frame at least.
-                    .when_some(width, |previous, width| previous.w(width))
-                    .min_w_full()
+                at_rest
+                    .leaving(generation, div().id(slot(generation)))
                     .opacity(1. - progress)
                     .child(previous)
                     .when(shield, |previous| {
@@ -575,6 +604,7 @@ pub(crate) struct CrossFade {
     column: bool,
     staged: Option<usize>,
     keyboard: Option<gpui::FocusHandle>,
+    at_rest: AtRest,
 }
 
 impl CrossFade {
@@ -602,7 +632,15 @@ impl CrossFade {
             column: false,
             staged: None,
             keyboard: None,
+            at_rest: AtRest::default(),
         }
+    }
+
+    /// Leaving layers keep the widths `at_rest` noted while they were
+    /// current.
+    fn at_rest(mut self, at_rest: AtRest) -> Self {
+        self.at_rest = at_rest;
+        self
     }
 
     pub(crate) fn fill(mut self) -> Self {
@@ -665,7 +703,16 @@ impl CrossFade {
         layers.sort_by_key(|(layer, _)| *layer == self.current);
         let (fill, span, column) = (self.fill, self.span, self.column);
         let keyboard = self.keyboard.clone();
-        div()
+        let at_rest = self.at_rest.clone();
+        let current = layers.iter().position(|(layer, _)| *layer == self.current);
+        let drawn = layers.iter().map(|(layer, _)| *layer as u64).collect();
+        let region = match current {
+            Some(index) => self
+                .at_rest
+                .noting(div(), self.current as u64, index, drawn),
+            None => div(),
+        };
+        region
             .id(self.id.clone())
             .relative()
             .when(column, |region| region.flex().flex_col().min_h_0())
@@ -677,15 +724,10 @@ impl CrossFade {
                     .map(|el| {
                         if fill {
                             el.absolute().inset_0()
+                        } else if leaving && span {
+                            el.absolute().top_0().left_0().right_0()
                         } else if leaving {
-                            // As wide as the region at least, as it was while
-                            // current: out of flow, a row that fills the width
-                            // it is given would shrink to its content.
-                            el.absolute()
-                                .top_0()
-                                .left_0()
-                                .min_w_full()
-                                .when(span, |el| el.right_0())
+                            at_rest.leaving(layer as u64, el)
                         } else if column {
                             el.flex().flex_col().flex_1().min_h_0()
                         } else {
@@ -1023,7 +1065,8 @@ mod tests {
     }
 
     /// Two states of a region in a column, the first a bar that fills the
-    /// width it is given (a note card, a progress bar).
+    /// width it is given (a note card, a progress bar) with a line too long
+    /// for it, which fades its end.
     struct Bars {
         current: usize,
     }
@@ -1039,6 +1082,10 @@ mod tests {
                         .debug_selector(|| "bar".into())
                         .w_full()
                         .h(px(20.))
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(
+                            "Listing the plugins of every marketplace this provider knows of",
+                        ))
                         .into_any_element(),
                 ));
             }
@@ -1054,7 +1101,8 @@ mod tests {
     }
 
     /// A state that filled its region's width keeps filling it while it
-    /// fades out, rather than shrinking to its content.
+    /// fades out, rather than shrinking to its content or widening to its
+    /// whole line, which would stop the line fading.
     #[gpui::test]
     fn a_leaving_state_keeps_the_width_it_filled(cx: &mut TestAppContext) {
         use crate::test_frames::draw;
