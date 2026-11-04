@@ -6,9 +6,13 @@ pub(crate) struct DomainDiff {
     subscriptions: HashSet<Topic>,
     index: IndexSnapshot,
     summary_revisions: [u64; 7],
+    /// Residents borrowed one at a time from this revision on have not been
+    /// projected into the summaries yet.
+    residents_seen: u64,
     space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
     providers: Option<ProvidersStatus>,
+    providers_revisions: [u64; 3],
     git_status: HashMap<String, GitStatusStatus>,
     session_statuses: HashMap<String, SessionStatus>,
     session_plans: HashMap<String, SessionPlan>,
@@ -28,12 +32,14 @@ impl DomainDiff {
                 }
             },
             summary_revisions: state.index_summary_revisions(),
+            residents_seen: revisioned::upcoming_revision(),
             space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
             providers: state
                 .subscriptions
                 .contains(&Topic::Providers)
                 .then(|| state.providers_status_snapshot()),
+            providers_revisions: state.providers_revisions(),
             git_status: HashMap::new(),
             session_statuses: state.subscribed_session_status_snapshots(),
             session_plans: state.subscribed_session_plan_snapshots(),
@@ -41,6 +47,7 @@ impl DomainDiff {
     }
 
     pub(crate) fn emit_changes(&mut self, state: &mut AppState, cx: &mut HostCx) {
+        let residents_seen = revisioned::upcoming_revision();
         if self.index.projects != state.projects {
             state.space_archives_revision = None;
         }
@@ -49,6 +56,11 @@ impl DomainDiff {
         let summary_revisions = state.index_summary_revisions();
         let sessions_changed = self.summary_revisions[0] != summary_revisions[0];
         let summary_changed = self.summary_revisions != summary_revisions || settings_changed;
+        let residents_touched = state
+            .residents
+            .touched_since(self.residents_seen)
+            .next()
+            .is_some();
         if state.subscriptions.contains(&Topic::Index) {
             if !self.subscriptions.contains(&Topic::Index) {
                 self.index = state.index_snapshot();
@@ -65,7 +77,9 @@ impl DomainDiff {
                         emit_replacement(Topic::Index, event, cx);
                     }
                     self.index = index;
-                } else if summary_changed {
+                } else if summary_changed
+                    || (residents_touched && !self.update_touched_activity(state, cx))
+                {
                     let summary = state.build_index_summary();
                     for event in index_summary_changes(&self.index.summary, &summary) {
                         emit_replacement(Topic::Index, event, cx);
@@ -123,6 +137,7 @@ impl DomainDiff {
                     })))
             {
                 if summary_changed
+                    || residents_touched
                     || old.summary.archived_revision
                         != state
                             .space_archives
@@ -162,21 +177,39 @@ impl DomainDiff {
             self.settings = settings;
         }
 
+        let providers_revisions = state.providers_revisions();
         if state.subscriptions.contains(&Topic::Providers) {
-            let providers = state.providers_status_snapshot();
-            if self.providers.as_ref() != Some(&providers) {
-                if self.providers.is_some() {
-                    emit_replacement(
-                        Topic::Providers,
-                        ServerEvent::ProvidersReplaced(providers.clone()),
-                        cx,
-                    );
+            let stale = self.providers.as_ref().is_none_or(|last| {
+                settings_changed
+                    || self.providers_revisions != providers_revisions
+                    || last.acp_registry_loading != state.acp_registry_loading
+                    || last.acp_registry_error != state.acp_registry_error
+                    || last.acp_installing != state.acp_installing
+            });
+            if stale {
+                let providers = state.providers_status_snapshot();
+                if self.providers.as_ref() != Some(&providers) {
+                    if self.providers.is_some() {
+                        emit_replacement(
+                            Topic::Providers,
+                            ServerEvent::ProvidersReplaced(providers.clone()),
+                            cx,
+                        );
+                    }
+                    self.providers = Some(providers);
                 }
-                self.providers = Some(providers);
+            } else {
+                #[cfg(debug_assertions)]
+                assert_eq!(
+                    self.providers.as_ref(),
+                    Some(&state.providers_status_snapshot()),
+                    "provider status inputs changed without a revision"
+                );
             }
         } else {
             self.providers = None;
         }
+        self.providers_revisions = providers_revisions;
 
         let git_status: HashMap<_, _> = state
             .subscriptions
@@ -261,7 +294,46 @@ impl DomainDiff {
         }
         self.session_plans = session_plans;
         self.summary_revisions = summary_revisions;
+        self.residents_seen = residents_seen;
         self.subscriptions.clone_from(&state.subscriptions);
+    }
+
+    /// Bring the index summary up to date when only residents borrowed one
+    /// at a time moved: their activity and their ancestors' (whom a child
+    /// holds) is all such a change can reach. `false` when a touched thread
+    /// is not an unarchived stored one, which only a full rebuild places.
+    fn update_touched_activity(&mut self, state: &AppState, cx: &mut HostCx) -> bool {
+        let Some(activity) =
+            state.touched_activity(state.residents.touched_since(self.residents_seen))
+        else {
+            return false;
+        };
+        let upserts: HashMap<_, _> = activity
+            .into_iter()
+            .filter(|(id, activity)| self.index.summary.activity.get(id) != Some(activity))
+            .collect();
+        if !upserts.is_empty() {
+            self.index.summary.activity.extend(
+                upserts
+                    .iter()
+                    .map(|(id, activity)| (id.clone(), activity.clone())),
+            );
+            emit_replacement(
+                Topic::Index,
+                ServerEvent::IndexActivitiesChanged {
+                    upserts,
+                    removed: Vec::new(),
+                },
+                cx,
+            );
+        }
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            self.index.summary,
+            state.build_index_summary(),
+            "a resident borrowed alone moved the index summary beyond its activity"
+        );
+        true
     }
 }
 
@@ -501,6 +573,45 @@ impl<'a> ActivityProjection<'a> {
 }
 
 impl AppState {
+    /// Every input of [`AppState::providers_status_snapshot`] apart from
+    /// the settings and the ACP flags, which are compared by value.
+    fn providers_revisions(&self) -> [u64; 3] {
+        [
+            self.providers.revision(),
+            self.acp_registry.revision(),
+            self.plugin_catalogs.revision(),
+        ]
+    }
+
+    /// The activity entries of `touched` threads and their ancestors, or
+    /// `None` when one of them is not an unarchived stored thread.
+    fn touched_activity<'a>(
+        &self,
+        touched: impl Iterator<Item = &'a str>,
+    ) -> Option<HashMap<String, SessionActivity>> {
+        let projection = ActivityProjection::new(self);
+        let mut activity = HashMap::new();
+        for id in touched {
+            let mut next = Some(id);
+            while let Some(id) = next {
+                if activity.contains_key(id) {
+                    break;
+                }
+                let meta = self.sessions.by_id(id)?;
+                if meta.archived_at.is_some() {
+                    return None;
+                }
+                let resident = self.resident(id);
+                activity.insert(
+                    id.to_owned(),
+                    projection.session_activity(resident.map_or(meta, |s| &s.meta), resident),
+                );
+                next = meta.parent_session_id.as_deref();
+            }
+        }
+        Some(activity)
+    }
+
     fn index_summary_revisions(&self) -> [u64; 7] {
         [
             self.sessions.revision(),

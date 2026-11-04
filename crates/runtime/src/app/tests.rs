@@ -2413,7 +2413,7 @@ fn marketplace_items_are_runtime_owned_views() {
     let test_store = TestStore::new("tcode-marketplace-view-test");
     let store = (*test_store).clone();
     let mut state = TestClientState::new(store);
-    state.acp_registry = Some(
+    *state.acp_registry = Some(
         serde_json::from_value(serde_json::json!({
             "agents": [
                 {

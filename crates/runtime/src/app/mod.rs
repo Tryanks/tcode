@@ -286,7 +286,7 @@ use providers::{
     McpServers, computer_use_attaches, effort_selection, normalized_selections,
     provider_secret_names, session_options,
 };
-pub use revisioned::Revisioned;
+pub use revisioned::{Revisioned, RevisionedMap};
 pub use session_index::SessionIndex;
 pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
@@ -399,7 +399,7 @@ pub struct AppState {
     /// spawns a nested mirror is created from once a grandchild item arrives.
     nested_subagent_spawns: HashMap<(String, String), subagents::NestedSpawn>,
     pub settings: Settings,
-    pub providers: ProviderCatalog,
+    pub providers: Revisioned<ProviderCatalog>,
     next_terminal_spawn_id: u64,
     pending_terminal_spawns: HashMap<String, HashMap<u64, TerminalSpawnAction>>,
     next_start_generation: u64,
@@ -415,13 +415,13 @@ pub struct AppState {
     /// The ACP agent marketplace: the registry index (from the CDN, cached on
     /// disk with a one-hour TTL), whether a refresh is in flight, and the last
     /// failure to show when there is nothing cached to fall back on.
-    pub acp_registry: Option<Registry>,
+    pub acp_registry: Revisioned<Option<Registry>>,
     pub acp_registry_loading: bool,
     pub acp_registry_error: Option<String>,
     /// Registry ids currently downloading (their marketplace row shows a spinner).
     pub acp_installing: std::collections::HashSet<String>,
     /// Native plugin catalogs by profile id, listed on demand.
-    plugin_catalogs: HashMap<String, plugins::PluginCatalog>,
+    plugin_catalogs: Revisioned<HashMap<String, plugins::PluginCatalog>>,
     mcp: McpWiring,
     control: control::ControlState,
     callback_approval_requests: HashSet<(String, String)>,
@@ -604,7 +604,7 @@ impl AppState {
             native_subagent_turns: HashMap::new(),
             nested_subagent_spawns: HashMap::new(),
             settings,
-            providers: ProviderCatalog::new(model_catalogs, provider_secret_names),
+            providers: ProviderCatalog::new(model_catalogs, provider_secret_names).into(),
             next_terminal_spawn_id: 0,
             pending_terminal_spawns: HashMap::new(),
             next_start_generation: 0,
@@ -613,11 +613,11 @@ impl AppState {
             ai_title_generation_enabled,
             title_generating: Default::default(),
             provider_launcher: ProviderLauncher::default(),
-            acp_registry: None,
+            acp_registry: None.into(),
             acp_registry_loading: false,
             acp_registry_error: None,
             acp_installing: std::collections::HashSet::new(),
-            plugin_catalogs: HashMap::new(),
+            plugin_catalogs: HashMap::new().into(),
             mcp: McpWiring::default(),
             control: control::ControlState::new(review_records, control_activity),
             callback_approval_requests: HashSet::new(),
