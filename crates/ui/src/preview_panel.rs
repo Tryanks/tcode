@@ -47,7 +47,7 @@
 //! its conversation's page go ([`PreviewPanel::release_page`]).
 
 use gpui::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _,
 };
@@ -143,6 +143,14 @@ fn normalize_url(input: &str) -> String {
 pub struct PreviewPanel {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
+    /// The thread whose page this panel shows. None on the attachment's
+    /// panel, which draws nothing and answers the preview tools.
+    session_id: Option<String>,
+    /// Another pane is drawn over this one, under which a native page would
+    /// still show.
+    covered: bool,
+    /// Whether the panel's pane reaches the window's top right corner.
+    at_window_corner: bool,
     /// The shared address-bar input (reflects the active session's URL).
     url_input: Entity<InputState>,
     /// Session id whose URL is currently mirrored into `url_input`.
@@ -169,9 +177,54 @@ pub struct PreviewPanel {
 }
 
 impl PreviewPanel {
+    /// The attachment's panel, owner of its pages.
     pub fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        #[cfg(preview_backend)]
+        let backend = backend::Backend::new(store.read(cx).preview_proxy(), cx);
+        Self::with_backend(
+            store,
+            window_state,
+            None,
+            #[cfg(preview_backend)]
+            backend,
+            window,
+            cx,
+        )
+    }
+
+    /// A panel on this panel's pages, showing `session_id`'s in a pane.
+    pub(crate) fn for_pane(
+        &self,
+        session_id: Option<String>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let (store, window_state) = (self.store.clone(), self.window_state.clone());
+        cx.new(|cx| {
+            #[cfg(preview_backend)]
+            let backend = self.backend.sharing(cx);
+            Self::with_backend(
+                store,
+                window_state,
+                session_id,
+                #[cfg(preview_backend)]
+                backend,
+                window,
+                cx,
+            )
+        })
+    }
+
+    fn with_backend(
+        store: Entity<WorkspaceStore>,
+        window_state: Entity<WindowState>,
+        session_id: Option<String>,
+        #[cfg(preview_backend)] backend: backend::Backend,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -204,10 +257,21 @@ impl PreviewPanel {
                 cx.notify();
             }),
             cx.subscribe_in(&url_input, window, Self::on_url_event),
+            #[cfg(preview_backend)]
+            {
+                let owner = cx.entity_id();
+                cx.on_release(move |this, cx| {
+                    this.lifecycle_entity()
+                        .update(cx, |lifecycle, cx| lifecycle.forget_owner(owner, cx));
+                })
+            },
         ];
         let mut panel = Self {
             store: store.clone(),
             window_state,
+            session_id,
+            covered: false,
+            at_window_corner: false,
             url_input,
             mirrored: None,
             mirrored_url: None,
@@ -219,14 +283,38 @@ impl PreviewPanel {
             #[cfg(preview_backend)]
             port_scan_generation: 0,
             #[cfg(preview_backend)]
-            backend: backend::Backend::new(store.read(cx).preview_proxy(), cx),
+            backend,
             _subscriptions: subscriptions,
         };
         panel.observe_backend(cx);
         panel
     }
 
-    /// Keep the panel's motion in `scene`, the right panel's: the page and
+    /// Show `session_id`'s page, or none.
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        if self.session_id != session_id {
+            self.session_id = session_id;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_at_window_corner(&mut self, at_corner: bool, cx: &mut Context<Self>) {
+        if self.at_window_corner != at_corner {
+            self.at_window_corner = at_corner;
+            cx.notify();
+        }
+    }
+
+    /// Another pane is drawn over this panel's, or no longer.
+    pub(crate) fn set_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
+        if self.covered != covered {
+            self.covered = covered;
+            self.sync_visibility(cx);
+            cx.notify();
+        }
+    }
+
+    /// Keep the panel's motion in `scene`, its pane's drawer's: the page and
     /// its address follow the thread it shows.
     pub(crate) fn share_scene(&mut self, scene: &crate::motion::Epoch) {
         self.motion = crate::motion::owned::Owned::in_scene(scene);
@@ -238,11 +326,11 @@ impl PreviewPanel {
         self.reconcile_active_key(current, cx)
     }
 
-    /// The thread the right panel shows, and its preview's stable key.
-    fn identity(&self, cx: &gpui::App) -> Option<(String, String)> {
-        let store = self.store.read(cx);
-        let session_id = store.panel_subject()?;
-        Some((session_id.to_owned(), store.preview_key_for(session_id)?))
+    /// The panel's thread, and its preview's stable key.
+    fn identity(&self, cx: &App) -> Option<(String, String)> {
+        let session_id = self.session_id.as_deref()?;
+        let key = self.store.read(cx).preview_key_for(session_id)?;
+        Some((session_id.to_owned(), key))
     }
 
     /// Mirror a URL into the store, then navigate whatever backend exists.
@@ -361,8 +449,7 @@ impl PreviewPanel {
     fn close_panel(&mut self, cx: &mut Context<Self>) {
         self.release_preview(cx);
         self.store.update(cx, |store, cx| {
-            let subject = store.panel_subject().map(str::to_owned);
-            store.close_preview_panel_for(subject.as_deref(), cx)
+            store.close_preview_panel_for(self.session_id.as_deref(), cx)
         });
         cx.notify();
     }
@@ -463,13 +550,16 @@ impl PreviewPanel {
         // Windows: an open Preview tab is the rightmost column, so its
         // chrome row is a top strip hosting the caption buttons, which reach
         // the window's true top-right corner.
-        let hosts_caption = {
-            let (diff_open, right_tab) = self.store.read(cx).window_caption_state();
+        let hosts_caption = self.at_window_corner && {
+            let panel = self
+                .store
+                .read(cx)
+                .panel_state_for(self.session_id.as_deref());
             window_caption::hosts_caption_for_state(
                 window_caption::CaptionSurface::Preview,
                 self.window_state.read(cx).route(),
-                diff_open,
-                right_tab,
+                panel.right_panel_open,
+                panel.right_tab,
             )
         };
         // Port discovery scans *this* machine's listeners. Over a remote link

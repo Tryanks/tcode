@@ -199,8 +199,10 @@ struct GitPreviewOptions {
 pub struct DiffPanel {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
-    /// The store's panel subject, as the tabs were last told it.
+    /// The thread the drawer shows, which the pane tells it.
     session_id: Option<String>,
+    /// Whether the panel's pane reaches the window's top right corner.
+    at_window_corner: bool,
     /// The Plan/Tasks tab content (the other tab in this right panel).
     plan: Entity<PlanPanel>,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
@@ -228,9 +230,9 @@ impl DiffPanel {
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
+        session_id: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let session_id = workspace_store.read(cx).panel_subject().map(str::to_owned);
         let pull_requests = cx.new(|cx| {
             crate::pull_requests::PullRequestsPanel::new(
                 workspace_store.clone(),
@@ -242,8 +244,6 @@ impl DiffPanel {
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), session_id.clone(), cx));
         let agents = cx.new(|cx| AgentsPanel::new(workspace_store.clone(), session_id.clone(), cx));
         let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
-            let session_id = store.read(cx).panel_subject().map(str::to_owned);
-            this.set_session(session_id, cx);
             this.sync_agents_shown(cx);
             let comments = store
                 .read(cx)
@@ -258,6 +258,7 @@ impl DiffPanel {
             workspace_store,
             window_state,
             session_id,
+            at_window_corner: false,
             plan,
             pull_requests,
             agents,
@@ -280,7 +281,7 @@ impl DiffPanel {
     }
 
     /// Show the tabs of `session_id`'s thread, or none.
-    fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
         if self.session_id == session_id {
             return;
         }
@@ -292,6 +293,15 @@ impl DiffPanel {
         });
         self.agents
             .update(cx, |agents, cx| agents.set_session(session_id, cx));
+        self.sync_agents_shown(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_at_window_corner(&mut self, at_corner: bool, cx: &mut Context<Self>) {
+        if self.at_window_corner != at_corner {
+            self.at_window_corner = at_corner;
+            cx.notify();
+        }
     }
 
     fn sync_agents_shown(&mut self, cx: &mut Context<Self>) {
@@ -749,12 +759,13 @@ impl DiffPanel {
         // strip hosts the caption buttons. It is shorter than the 52px shell
         // header, so grow it to match — the buttons must reach the window top,
         // and a taller strip keeps the tabs aligned with the chat header.
-        let hosts_caption = window_caption::hosts_caption_for_state(
-            window_caption::CaptionSurface::RightPanel,
-            self.window_state.read(cx).route(),
-            panel_open,
-            active,
-        );
+        let hosts_caption = self.at_window_corner
+            && window_caption::hosts_caption_for_state(
+                window_caption::CaptionSurface::RightPanel,
+                self.window_state.read(cx).route(),
+                panel_open,
+                active,
+            );
         let store = self.workspace_store.clone();
         let store_close = self.workspace_store.clone();
         let session_expand = self.session_id.clone();
@@ -1979,7 +1990,7 @@ mod tests {
             )
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let panel = cx.new(|cx| DiffPanel::new(store, window_state, cx));
+        let panel = cx.new(|cx| DiffPanel::new(store, window_state, None, cx));
         panel.update(cx, |panel, cx| {
             panel.request_rendered_files(
                 RenderKey {
@@ -2084,7 +2095,7 @@ mod tests {
             )
         });
         let window_state = cx.new(|_| WindowState::new(false));
-        let panel = cx.new(|cx| DiffPanel::new(store, window_state, cx));
+        let panel = cx.new(|cx| DiffPanel::new(store, window_state, None, cx));
         panel.update(cx, |panel, cx| {
             panel.request_rendered_files(
                 RenderKey {

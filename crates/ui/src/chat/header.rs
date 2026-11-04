@@ -227,6 +227,12 @@ fn pane_items(menu: PopupMenu, panes: crate::shell::PaneControls) -> PopupMenu {
     })
 }
 
+/// A press on a header control ends here, for it not to arm the header's
+/// window drag.
+fn stop_press(_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
+}
+
 impl ChatView {
     /// The phone's row over the foot of the timeline: the Agents pill first,
     /// then the linked pull requests, scrolling sideways when they overflow.
@@ -371,7 +377,7 @@ impl ChatView {
             Button::new("agent-parent-link")
                 .motion(&self.motion)
                 .debug_selector(|| "agent-parent-link".into())
-                .on_mouse_down(gpui::MouseButton::Left, self.header_press(cx))
+                .on_mouse_down(gpui::MouseButton::Left, stop_press)
                 .ghost()
                 .xsmall()
                 .icon(IconName::ArrowLeft)
@@ -389,7 +395,12 @@ impl ChatView {
                 .tooltip(name)
                 .on_click({
                     let store = self.workspace_store.clone();
-                    move |_, _, cx| {
+                    let agent = self.session_id.clone();
+                    move |_, window, cx| {
+                        // In the pane it was drawn in, wherever the keyboard is.
+                        if let Some(agent) = &agent {
+                            crate::shell::act_in_pane_of(agent, window, cx);
+                        }
                         crate::agents_panel::back_to_lead(&store, parent_id.clone(), cx);
                     }
                 })
@@ -532,13 +543,16 @@ impl ChatView {
         // Windows: with no right panel open this header is the window's
         // top-right corner, so it hosts the caption buttons — flush to the
         // right edge, past the header's usual inset.
-        let (right_panel_open, right_tab) = self.workspace_store.read(cx).window_caption_state();
+        let drawer = self
+            .workspace_store
+            .read(cx)
+            .panel_state_for(self.drawer_subject());
         let hosts_caption = self.edges.right
             && window_caption::hosts_caption_for_state(
                 window_caption::CaptionSurface::Chat,
                 self.window_state.read(cx).route(),
-                right_panel_open,
-                right_tab,
+                drawer.right_panel_open,
+                drawer.right_tab,
             );
         let under_traffic_lights = collapsed && self.edges.left;
         // The pane's close button holds the right end in every tier, so each
@@ -645,7 +659,7 @@ impl ChatView {
         let sidebar_toggle = Button::new("toggle-sidebar")
             .motion(&self.motion)
             .debug_selector(|| "toggle-sidebar".into())
-            .on_mouse_down(gpui::MouseButton::Left, self.header_press(cx))
+            .on_mouse_down(gpui::MouseButton::Left, stop_press)
             .ghost()
             .small()
             .compact()
@@ -824,7 +838,7 @@ impl ChatView {
                             let button = Button::new("header-pr-badge")
                                 .motion(&self.motion)
                                 .debug_selector(|| "header-pr-badge".into())
-                                .on_mouse_down(gpui::MouseButton::Left, self.toggle_press(cx))
+                                .on_mouse_down(gpui::MouseButton::Left, stop_press)
                                 .ghost()
                                 .small()
                                 .compact()
@@ -919,10 +933,7 @@ impl ChatView {
                                 .child(
                                     Button::new("panel-layout")
                                         .motion(&self.motion)
-                                        .on_mouse_down(
-                                            gpui::MouseButton::Left,
-                                            self.toggle_press(cx),
-                                        )
+                                        .on_mouse_down(gpui::MouseButton::Left, stop_press)
                                         .ghost()
                                         .small()
                                         .compact()
@@ -937,10 +948,7 @@ impl ChatView {
                                     Button::new("plan-panel")
                                         .motion(&self.motion)
                                         .debug_selector(|| "plan-panel".into())
-                                        .on_mouse_down(
-                                            gpui::MouseButton::Left,
-                                            self.toggle_press(cx),
-                                        )
+                                        .on_mouse_down(gpui::MouseButton::Left, stop_press)
                                         .ghost()
                                         .small()
                                         .compact()
@@ -962,7 +970,7 @@ impl ChatView {
                                                     .debug_selector(|| "agents-panel".into())
                                                     .on_mouse_down(
                                                         gpui::MouseButton::Left,
-                                                        self.toggle_press(cx),
+                                                        stop_press,
                                                     )
                                                     .ghost()
                                                     .small()
@@ -988,10 +996,7 @@ impl ChatView {
                                         toggle_gap,
                                         Button::new("preview-panel")
                                             .motion(&self.motion)
-                                            .on_mouse_down(
-                                                gpui::MouseButton::Left,
-                                                self.toggle_press(cx),
-                                            )
+                                            .on_mouse_down(gpui::MouseButton::Left, stop_press)
                                             .ghost()
                                             .small()
                                             .compact()
@@ -1011,10 +1016,7 @@ impl ChatView {
                                     Button::new("diff-panel")
                                         .motion(&self.motion)
                                         .debug_selector(|| "diff-panel".into())
-                                        .on_mouse_down(
-                                            gpui::MouseButton::Left,
-                                            self.toggle_press(cx),
-                                        )
+                                        .on_mouse_down(gpui::MouseButton::Left, stop_press)
                                         .ghost()
                                         .small()
                                         .compact()
@@ -1091,49 +1093,6 @@ impl ChatView {
         Some(swap.render(layers))
     }
 
-    /// Make the pane's thread the one the store acts on, which moves the
-    /// pane's keyboard with it. Returns whether another thread had that place.
-    fn claim_pane(&self, cx: &mut Context<Self>) -> bool {
-        let Some(session_id) = self.pane_session() else {
-            return false;
-        };
-        self.workspace_store.update(cx, |store, cx| {
-            let behind = store.legacy_focus().as_deref() != Some(session_id.as_str());
-            store.focus_thread(&session_id, cx);
-            behind
-        })
-    }
-
-    /// A press on a header control: it takes the pane's focus, which the
-    /// chat's own focus-on-press does not, as the press must stop here for
-    /// it not to arm the header's window drag.
-    fn header_press(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static {
-        cx.listener(|this, _, _, cx| {
-            cx.stop_propagation();
-            this.claim_pane(cx);
-        })
-    }
-
-    /// [`Self::header_press`] for a panel toggle, which remembers whether the
-    /// press brought the pane's thread forward for
-    /// [`Self::on_toggle_panel`].
-    fn toggle_press(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> impl Fn(&gpui::MouseDownEvent, &mut Window, &mut App) + 'static {
-        cx.listener(|this, _, _, cx| {
-            cx.stop_propagation();
-            this.toggle_brought_forward = this.claim_pane(cx);
-        })
-    }
-
-    /// A toggle in the header of a thread that was not the focused one shows
-    /// that thread's panel: a panel it left open is lit on its toggle but
-    /// was off screen, so it is not there to close, and the focused thread's
-    /// panel is not this toggle's.
     pub(super) fn on_toggle_panel(
         &mut self,
         panel: &TogglePanel,
@@ -1143,8 +1102,6 @@ impl ChatView {
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
-        let brought_forward = std::mem::take(&mut self.toggle_brought_forward);
-        let brought_forward = self.claim_pane(cx) || brought_forward;
         let tab = match panel {
             TogglePanel::Terminal => None,
             TogglePanel::Plan => Some(RightTab::Plan),
@@ -1155,7 +1112,6 @@ impl ChatView {
         };
         self.workspace_store.update(cx, |store, cx| match tab {
             None => store.toggle_terminal_panel_for(session_id, cx),
-            Some(tab) if brought_forward => store.open_tab_for(&session_id, tab, cx),
             Some(tab) => store.toggle_tab_panel_for(&session_id, tab, cx),
         });
     }

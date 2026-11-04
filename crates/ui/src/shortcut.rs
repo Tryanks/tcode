@@ -90,8 +90,8 @@ pub(crate) fn init(cx: &mut App) {
         ),
         KeyBinding::new(
             "escape",
-            crate::shell::CloseRightPanel,
-            Some(crate::shell::RIGHT_PANEL_CONTEXT),
+            crate::panes::CloseRightPanel,
+            Some(crate::panes::RIGHT_PANEL_CONTEXT),
         ),
     ]);
     cx.bind_keys(blanks);

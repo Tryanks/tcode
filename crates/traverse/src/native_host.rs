@@ -230,6 +230,10 @@ impl ClientHost for NativeClientHost {
                 .get("remote_attachment_limit_mib")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|limit| u32::try_from(limit).ok()),
+            right_panel_width: prefs
+                .get("right_panel_width")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|width| u32::try_from(width).ok()),
         }
     }
 
@@ -241,6 +245,7 @@ impl ClientHost for NativeClientHost {
         prefs["navigation"] = serde_json::json!(preferences.navigation);
         prefs["remote_attachment_limit_mib"] =
             serde_json::json!(preferences.remote_attachment_limit_mib);
+        prefs["right_panel_width"] = serde_json::json!(preferences.right_panel_width);
         self.write_prefs(&prefs);
     }
 
@@ -798,6 +803,7 @@ mod tests {
             device_name: Some("Renamed".into()),
             navigation: Some(serde_json::json!({"history": ["hosts", "threads"]})),
             remote_attachment_limit_mib: Some(4),
+            right_panel_width: Some(480),
         });
 
         let saved: serde_json::Value =
@@ -812,6 +818,8 @@ mod tests {
         assert!(saved["language"].is_null());
         assert_eq!(saved["remote_attachment_limit_mib"], 4);
         assert_eq!(host.load_preferences().remote_attachment_limit_mib, Some(4));
+        assert_eq!(saved["right_panel_width"], 480);
+        assert_eq!(host.load_preferences().right_panel_width, Some(480));
 
         host.set_last_host_id(Some("next-host"));
         assert_eq!(host.last_host_id().as_deref(), Some("next-host"));

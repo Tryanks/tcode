@@ -4,10 +4,10 @@
 //! creation, visibility, navigation warmth, key migration, pruning, and
 //! teardown all live here. Callers must preserve two ordering facts:
 //!
-//! - Native children outlive GPUI layout nodes. Before the Preview panel can be
-//!   unmounted, call [`BrowserLifecycle::hide_except`] with the key that may
-//!   remain mounted (or `None` to hide every child). Only call
-//!   [`BrowserLifecycle::set_visible`] after the owning WebView element has been
+//! - Native children outlive GPUI layout nodes. Before a Preview panel can be
+//!   unmounted, call [`BrowserLifecycle::hide_except`] with the key it may keep
+//!   mounted (or `None` to let its page go). Only call
+//!   [`BrowserLifecycle::show_for`] after the owning WebView element has been
 //!   laid out for the current frame.
 //! - lb-wry drops value-operation callbacks until a first navigation has made a
 //!   view warm. [`BrowserLifecycle::evaluate_json`] enforces that cold-start
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 #[cfg(target_os = "android")]
 use super::android::WebView;
-use gpui::{App, AppContext as _, Context, Entity, Window};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, Window};
 #[cfg(not(target_os = "android"))]
 use gpui_webview::WebView;
 #[cfg(not(target_os = "android"))]
@@ -129,12 +129,12 @@ pub struct BrowserLifecycle {
     owner: Weak<()>,
     slots: HashMap<String, WebViewSlot>,
     warm: HashSet<String>,
-    active_identity: Option<(String, String)>,
-    /// The key the panel last showed. Any other page still on screen is
-    /// leaving: it fades out (`PreviewPanel::native_fade`) and hides when
-    /// that lands.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    wanted: Option<String>,
+    /// The session and key each panel addresses.
+    active_identity: HashMap<EntityId, (String, String)>,
+    /// The key each panel last showed; one panel per pane can show a page.
+    /// Any other page still on screen is leaving: it fades out
+    /// (`PreviewPanel::native_fade`) and hides when that lands.
+    shown: HashMap<EntityId, String>,
     /// The size the Preview panel last showed a page at: what a conversation
     /// nobody is looking at would get on screen.
     #[cfg(not(target_os = "android"))]
@@ -211,9 +211,8 @@ impl BrowserLifecycle {
             _native_proxy: native_proxy,
             slots: HashMap::new(),
             warm: HashSet::new(),
-            active_identity: None,
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            wanted: None,
+            active_identity: HashMap::new(),
+            shown: HashMap::new(),
             #[cfg(not(target_os = "android"))]
             panel_size: None,
             creator,
@@ -228,8 +227,19 @@ impl BrowserLifecycle {
         }
     }
 
-    pub(super) fn active_identity(&self) -> Option<&(String, String)> {
-        self.active_identity.as_ref()
+    pub(super) fn active_identity(&self, owner: EntityId) -> Option<&(String, String)> {
+        self.active_identity.get(&owner)
+    }
+
+    /// Whether a panel has `key`'s page on screen.
+    pub(super) fn is_shown(&self, key: &str) -> bool {
+        self.shown.values().any(|shown| shown == key)
+    }
+
+    /// The panel `owner` is gone: it shows and addresses nothing any more.
+    pub(super) fn forget_owner(&mut self, owner: EntityId, cx: &mut Context<Self>) {
+        self.active_identity.remove(&owner);
+        self.hide_except(owner, None, cx);
     }
 
     #[cfg(test)]
@@ -331,8 +341,16 @@ impl BrowserLifecycle {
     /// faded here; a snapshot drawn by GPUI in the page's place is the open
     /// alternative.
     pub fn set_visible(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        let mut fading = self.set_wanted(key);
+        self.shown.clear();
+        self.show_for(cx.entity_id(), key, cx);
+    }
+
+    /// Show `key`'s page for the panel `owner`, whose element has laid it out
+    /// for this frame, letting go of what that panel showed. Pages other
+    /// panels show are theirs to place.
+    pub(super) fn show_for(&mut self, owner: EntityId, key: Option<&str>, cx: &mut Context<Self>) {
+        #[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(unused_mut))]
+        let mut fading = self.set_wanted(owner, key);
         for (candidate, slot) in &self.slots {
             let Some(view) = slot.ready() else {
                 continue;
@@ -347,7 +365,7 @@ impl BrowserLifecycle {
                     }
                     set_webview_visible(view, true);
                 });
-            } else {
+            } else if !self.shown.values().any(|shown| shown == candidate) {
                 leave(view, cx);
             }
             #[cfg(not(target_os = "android"))]
@@ -362,16 +380,20 @@ impl BrowserLifecycle {
         if fading {
             cx.notify();
         }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        let _ = fading;
     }
 
-    /// Record the page the panel wants on screen; whether that changed, so
-    /// a fade starts.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    fn set_wanted(&mut self, key: Option<&str>) -> bool {
-        if self.wanted.as_deref() == key {
+    /// Record the page `owner` wants on screen; whether that changed, so a
+    /// fade starts.
+    fn set_wanted(&mut self, owner: EntityId, key: Option<&str>) -> bool {
+        if self.shown.get(&owner).map(String::as_str) == key {
             return false;
         }
-        self.wanted = key.map(str::to_owned);
+        match key {
+            Some(key) => self.shown.insert(owner, key.to_owned()),
+            None => self.shown.remove(&owner),
+        };
         true
     }
 
@@ -411,15 +433,21 @@ impl BrowserLifecycle {
         );
     }
 
-    /// Hide children that cannot remain mounted, without showing a newly
-    /// selected child before its GPUI owner has current bounds.
-    pub(super) fn hide_except(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        if self.wanted.as_deref() != key && self.set_wanted(None) {
+    /// Hide children `owner` cannot keep mounted, without showing a newly
+    /// selected child before its GPUI owner has current bounds. Pages other
+    /// panels show stay.
+    pub(super) fn hide_except(
+        &mut self,
+        owner: EntityId,
+        key: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shown.get(&owner).map(String::as_str) != key && self.set_wanted(owner, None) {
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             cx.notify();
         }
         for (candidate, slot) in &self.slots {
-            if Some(candidate.as_str()) == key {
+            if Some(candidate.as_str()) == key || self.is_shown(candidate) {
                 continue;
             }
             let Some(view) = slot.ready() else {
@@ -429,15 +457,19 @@ impl BrowserLifecycle {
         }
     }
 
-    /// Hide every page now, with no fade, for a pointer that must not reach
-    /// one before the next frame.
-    pub(super) fn hide_now(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+    /// Hide `key`'s page, or every page, now, with no fade, for a pointer
+    /// that must not reach one before the next frame.
+    pub(super) fn hide_now(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
+        self.shown
+            .retain(|_, shown| key.is_some_and(|key| key != shown));
+        for (_, slot) in self
+            .slots
+            .iter()
+            .filter(|(candidate, _)| key.is_none_or(|key| key == candidate.as_str()))
         {
-            self.wanted = None;
-        }
-        for view in self.slots.values().filter_map(WebViewSlot::ready) {
-            view.update(cx, |view, _| set_webview_visible(view, false));
+            if let Some(view) = slot.ready() {
+                view.update(cx, |view, _| set_webview_visible(view, false));
+            }
         }
     }
 
@@ -455,7 +487,7 @@ impl BrowserLifecycle {
                 Some((
                     view.entity_id().to_string().into(),
                     view.clone(),
-                    self.wanted.as_deref() == Some(key.as_str()),
+                    self.is_shown(key),
                 ))
             })
             .collect()
@@ -465,8 +497,12 @@ impl BrowserLifecycle {
     /// commits retain the physical id, so every cached lifecycle fact moves as
     /// one operation. The returned old key lets chrome preserve an in-progress
     /// address-bar edit while it updates only its mirror identity.
-    pub(super) fn reconcile_key(&mut self, current: Option<(String, String)>) -> KeyReconciliation {
-        let migration = match (self.active_identity.as_ref(), current.as_ref()) {
+    pub(super) fn reconcile_key(
+        &mut self,
+        owner: EntityId,
+        current: Option<(String, String)>,
+    ) -> KeyReconciliation {
+        let migration = match (self.active_identity.get(&owner), current.as_ref()) {
             (Some((old_session, old_key)), Some((session, key)))
                 if old_session == session && old_key != key =>
             {
@@ -478,7 +514,10 @@ impl BrowserLifecycle {
             self.migrate_key(&old_key, &key);
             old_key
         });
-        self.active_identity = current.clone();
+        match &current {
+            Some(current) => self.active_identity.insert(owner, current.clone()),
+            None => self.active_identity.remove(&owner),
+        };
         KeyReconciliation {
             key: current.map(|(_, key)| key),
             migrated_from,
@@ -1242,5 +1281,38 @@ mod platform {
         })
         .detach();
         Availability::Starting(CreationPhase::Queued)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Weak;
+
+    use gpui::{AppContext as _, TestAppContext};
+
+    use super::BrowserLifecycle;
+
+    /// Two panes can show a page each: one panel letting its page go, or
+    /// moving to another, leaves the other panel's on screen.
+    #[gpui::test]
+    fn each_panel_keeps_the_page_it_shows(cx: &mut TestAppContext) {
+        let (left, right) = (cx.new(|_| ()).entity_id(), cx.new(|_| ()).entity_id());
+        let lifecycle = cx.new(|_| BrowserLifecycle::new(Weak::new(), Ok(None)));
+        lifecycle.update(cx, |lifecycle, cx| {
+            lifecycle.show_for(left, Some("thread-1"), cx);
+            lifecycle.show_for(right, Some("thread-2"), cx);
+            assert!(lifecycle.is_shown("thread-1") && lifecycle.is_shown("thread-2"));
+
+            lifecycle.show_for(left, Some("thread-3"), cx);
+            assert!(!lifecycle.is_shown("thread-1"));
+            assert!(lifecycle.is_shown("thread-2") && lifecycle.is_shown("thread-3"));
+
+            lifecycle.hide_except(right, None, cx);
+            assert!(!lifecycle.is_shown("thread-2"));
+            assert!(lifecycle.is_shown("thread-3"));
+
+            lifecycle.forget_owner(left, cx);
+            assert!(!lifecycle.is_shown("thread-3"));
+        });
     }
 }
