@@ -3539,6 +3539,23 @@ impl AppShell {
 /// never truncates, takes more.
 const NAV_CONTROL_WIDTH: f32 = 104.;
 
+/// A page that is the whole window: one of the compact stack, or the Hosts
+/// page a tablet shows before it attaches. Its background reaches the
+/// window's edges, under the status bar, the home indicator, a landscape
+/// phone's sides and the keyboard, and what it holds is inset from them. The
+/// page paints there rather than the shell, so those edges show whichever
+/// page covers them and slide with it as it is pushed or dragged back.
+fn page_surface(window: &mut Window, cx: &mut App) -> Div {
+    let seam = crate::window_seam::content_insets_gliding("page-seam", None, window, cx);
+    v_flex()
+        .size_full()
+        .bg(crate::material::content_surface(cx))
+        .pt(seam.top)
+        .pb(seam.bottom)
+        .pl(seam.left)
+        .pr(seam.right)
+}
+
 /// Navigation header with a centered title and at most two trailing actions.
 fn nav_bar(
     back: Option<AnyElement>,
@@ -4008,9 +4025,7 @@ impl AppShell {
     fn render_hosts_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
         let body = self.hosts_surface(false, window, cx);
-        v_flex()
-            .size_full()
-            .bg(crate::material::content_surface(cx))
+        page_surface(window, cx)
             .debug_selector(|| "hosts-page".into())
             .child(nav_bar(
                 back,
@@ -4033,9 +4048,7 @@ impl AppShell {
     fn render_pair_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
         let body = self.hosts_surface(true, window, cx);
-        v_flex()
-            .size_full()
-            .bg(crate::material::content_surface(cx))
+        page_surface(window, cx)
             .child(nav_bar(
                 back,
                 crate::tr!("hosts.pair.page_title").into_owned().into(),
@@ -4081,9 +4094,7 @@ impl AppShell {
                 page.render_compact_list(cx)
             }
         });
-        v_flex()
-            .size_full()
-            .bg(crate::material::content_surface(cx))
+        page_surface(window, cx)
             .child(nav_bar(
                 back,
                 title,
@@ -4118,10 +4129,8 @@ impl AppShell {
             )
             .into_any_element();
         let body = sidebar.update(cx, |sidebar, cx| sidebar.render_arrange(window, cx));
-        v_flex()
+        page_surface(window, cx)
             .debug_selector(|| "compact-arrange-page".into())
-            .size_full()
-            .bg(crate::material::content_surface(cx))
             .child(nav_bar(None, "".into(), None, vec![done], window, cx))
             .child(body)
             .into_any_element()
@@ -4167,10 +4176,8 @@ impl AppShell {
             }))
             .into_any_element(),
         ];
-        v_flex()
+        page_surface(window, cx)
             .debug_selector(|| "compact-threads-page".into())
-            .size_full()
-            .bg(crate::material::content_surface(cx))
             .child(nav_bar(
                 back,
                 title,
@@ -4281,10 +4288,8 @@ impl AppShell {
                     "new_thread"
                 })
             });
-        v_flex()
+        page_surface(window, cx)
             .debug_selector(|| "compact-thread-page".into())
-            .size_full()
-            .bg(crate::material::content_surface(cx))
             .child(nav_bar(
                 Some(back),
                 title.into(),
@@ -4449,9 +4454,7 @@ impl AppShell {
             }
         }
 
-        v_flex()
-            .size_full()
-            .bg(crate::material::content_surface(cx))
+        page_surface(window, cx)
             .child(nav_bar(
                 back,
                 crate::tr!("chat.panels").into_owned().into(),
@@ -4500,9 +4503,7 @@ impl AppShell {
             });
         }
         let (title, actions) = view.update(cx, |view, cx| (view.nav_title(), view.nav_actions(cx)));
-        v_flex()
-            .size_full()
-            .bg(crate::material::content_surface(cx))
+        page_surface(window, cx)
             .child(nav_bar(back, title, None, actions, window, cx))
             .child(div().flex_1().min_h_0().child(view))
             .into_any_element()
@@ -4909,33 +4910,6 @@ impl AppShell {
             })
             .into_any_element()
     }
-
-    /// Constrain the shell to the window's safe content rectangle. Backgrounds
-    /// paint edge to edge — the surface below is the window's — and interactive
-    /// content is inset exactly once, at both widths. A window the system does
-    /// not occlude gets no wrapper at all. The insets glide to each new value
-    /// (a software keyboard sliding up, a rotation) on gpui-base's default
-    /// curve, not the keyboard's own (`content_insets_gliding` names why).
-    fn within_seam(
-        &self,
-        body: AnyElement,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let seam = crate::window_seam::content_insets_gliding("shell-seam", None, window, cx);
-        if seam == gpui::Edges::default() {
-            return body;
-        }
-        div()
-            .size_full()
-            .bg(crate::material::canvas(cx))
-            .pt(seam.top)
-            .pb(seam.bottom)
-            .pl(seam.left)
-            .pr(seam.right)
-            .child(body)
-            .into_any_element()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5227,7 +5201,37 @@ impl AppShell {
                 }
             })
             .collect();
-        scene.render(layers).into_any_element()
+        let workspace = scene.render(layers).into_any_element();
+        self.within_seam(workspace, window, cx)
+    }
+
+    /// An attached workspace inset from the window's seam. Unlike a page
+    /// ([`page_surface`]), its columns — the sidebar, the thread panes,
+    /// Settings — do not lay themselves out against the seam, so they are
+    /// inset together and the window's canvas shows behind the system's
+    /// edges. A window the system does not occlude gets no wrapper at all.
+    /// The insets glide to each new value (a software keyboard sliding up, a
+    /// rotation) on gpui-base's default curve, not the keyboard's own
+    /// (`content_insets_gliding` names why).
+    fn within_seam(
+        &self,
+        body: AnyElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let seam = crate::window_seam::content_insets_gliding("shell-seam", None, window, cx);
+        if seam == gpui::Edges::default() {
+            return body;
+        }
+        div()
+            .size_full()
+            .bg(crate::material::canvas(cx))
+            .pt(seam.top)
+            .pb(seam.bottom)
+            .pl(seam.left)
+            .pr(seam.right)
+            .child(body)
+            .into_any_element()
     }
 
     /// The Settings route, its rail at `rail` opacity.
@@ -5666,7 +5670,7 @@ impl Render for AppShell {
             // fallback stack prefers Lilex once the terminal font is loaded.
             .font_family(cx.theme().font_family.clone())
             .children(dismissal.map(|dismissal| dismissal.release_listener().into_any_element()))
-            .child(self.within_seam(body, window, cx))
+            .child(body)
             .children(
                 self.attachment
                     .as_ref()
@@ -13751,6 +13755,72 @@ pub(crate) mod tests {
             cx.debug_bounds("compact-open-palette").unwrap().top(),
             uncovered + px(47.)
         );
+    }
+
+    /// What a phone's status bar, home indicator and landscape sides cover
+    /// is the page beneath them, painted to the window's edges in either
+    /// theme, not a band of another colour that leaves the page looking cut
+    /// off above the screen's bottom.
+    #[gpui::test]
+    fn the_safe_areas_show_the_page_they_cover(cx: &mut TestAppContext) {
+        use tcode_core::settings::ThemeMode;
+
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        let topmost = |at: gpui::Point<Pixels>, cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                let at = at.scale(window.scale_factor());
+                crate::test_frames::painted_quads(window)
+                    .into_iter()
+                    .filter(|quad| {
+                        quad.bounds.contains(&at) && quad.content_mask.bounds.contains(&at)
+                    })
+                    .filter(|quad| quad.background.as_solid().is_some_and(|fill| fill.a > 0.))
+                    .max_by_key(|quad| quad.order)
+                    .and_then(|quad| quad.background.as_solid())
+            })
+        };
+        let portrait = gpui::Edges {
+            top: px(59.),
+            bottom: px(34.),
+            ..Default::default()
+        };
+        let landscape = gpui::Edges {
+            left: px(59.),
+            right: px(59.),
+            bottom: px(21.),
+            ..Default::default()
+        };
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            cx.update(|window, cx| {
+                crate::settings_page::apply_theme(mode, window, cx);
+            });
+            for destination in [Destination::Thread, Destination::Hosts] {
+                state.update(cx, |state, cx| state.go(destination, cx));
+                for ((width, height), insets, covered) in [
+                    ((393., 852.), portrait, vec![(196., 20.), (196., 840.)]),
+                    (
+                        (852., 393.),
+                        landscape,
+                        vec![(20., 196.), (832., 196.), (426., 385.)],
+                    ),
+                ] {
+                    cx.simulate_resize(size(px(width), px(height)));
+                    crate::window_seam::occlude_for_test(cx, insets);
+                    crate::test_frames::draw_settled(cx);
+                    let page = cx.update(|_, cx| crate::material::content_surface(cx));
+                    for (x, y) in covered {
+                        assert_eq!(
+                            topmost(gpui::point(px(x), px(y)), cx),
+                            Some(page),
+                            "{mode:?} {destination:?} at ({x}, {y}) of {width}x{height}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn draw(cx: &mut VisualTestContext) {
