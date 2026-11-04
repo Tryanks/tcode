@@ -1539,21 +1539,96 @@ mod tests {
         crate::test_frames::draw_settled(cx);
 
         let plain = cx.debug_bounds("markdown-block-0").expect("drawn");
-        for at in [
-            point(px(600.), px(20.)),
-            point(px(600.), plain.center().y),
-            point(px(600.), px(500.)),
-        ] {
+        let linked = cx.debug_bounds("markdown-block-1").expect("drawn");
+        let moves_to = |at, cx: &mut VisualTestContext| {
             cx.simulate_mouse_move(at, None, Modifiers::default());
             cx.update(|window, _| window.reset_layout_stats());
             around.update(cx, |_, cx| cx.notify());
             cx.run_until_parked();
+            cx.update(|window, _| window.layout_stats().views_built)
+        };
+        let beside_the_message = [point(px(600.), px(20.)), point(px(600.), plain.center().y)];
+        for at in beside_the_message {
             assert_eq!(
-                cx.update(|window, _| window.layout_stats().views_built),
+                moves_to(at, cx),
                 1,
-                "the pointer at {at:?} built the message again"
+                "the pointer at {at:?} built the message"
             );
         }
+        // Entering the message's own element is a hover it is drawn by.
+        moves_to(point(px(200.), plain.top() + px(4.)), cx);
+        let over_text_beside_the_link = [
+            point(px(4.), plain.top() + px(4.)),
+            point(px(4.), linked.top() + px(4.)),
+            point(px(200.), plain.top() + px(4.)),
+        ];
+        for at in over_text_beside_the_link {
+            assert_eq!(
+                moves_to(at, cx),
+                1,
+                "the pointer at {at:?} built the message"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn a_link_shows_its_tooltip_on_the_rows_it_wraps_onto(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let markdown = cx.new(|cx| {
+                MarkdownState::new(
+                    "Plain words.\n\nWords, then [a link whose words run on past the end \
+                     of the row it starts on](https://example.com)",
+                    cx,
+                )
+            });
+            gpui_base::Root::new(cx.new(|_| Message(markdown)), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(gpui::size(px(1_024.), px(600.)));
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        };
+        let rest_at = |at, time, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            draw(cx);
+            cx.executor().advance_clock(time);
+            draw(cx);
+            cx.executor().advance_clock(crate::edge_back::SETTLE);
+            draw(cx);
+            cx.debug_bounds("tcode-tooltip")
+        };
+        draw(cx);
+        let defaults = cx.update(|_, cx| gpui_base::TooltipDefaults::global(cx));
+        let rem = cx.update(|window, _| window.rem_size());
+        // The paragraph above is one row and the gap below it.
+        let row = cx.debug_bounds("markdown-block-0").unwrap().size.height - rem;
+        let linked = cx.debug_bounds("markdown-block-1").unwrap();
+        assert!(linked.size.height > row * 1.5, "the link wraps");
+
+        let beside = point(linked.left() + px(4.), linked.top() + row / 2.);
+        assert_eq!(
+            rest_at(beside, defaults.show_delay(), cx),
+            None,
+            "the text before the link on its first row shows none"
+        );
+        let wrapped = point(linked.left() + px(4.), linked.bottom() - row / 2.);
+        let shown = rest_at(wrapped, defaults.show_delay(), cx).expect("shown on its last row");
+        assert!(
+            shown.top() >= wrapped.y || shown.bottom() <= linked.bottom() - row,
+            "beside the row under the pointer: {shown:?}"
+        );
+        assert_eq!(
+            rest_at(beside, defaults.grace_period(), cx),
+            None,
+            "gone once the pointer left the link"
+        );
     }
 
     /// The view under the window `Root`, which owns Copy for the window
