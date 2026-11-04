@@ -479,7 +479,7 @@ impl AppState {
     /// Claude Code keeps its sessions per directory and cannot resume one from another — so
     /// the move clears the resume cursor and the next turn starts a fresh provider session
     /// there, handed the conversation so far by the relay owner
-    /// ([`Self::hand_off_moved_conversation`]). The Tcode transcript stays as it is.
+    /// ([`Self::hand_off_conversation`]). The Tcode transcript stays as it is.
     pub fn move_session(
         &mut self,
         session_id: &str,
@@ -1573,6 +1573,7 @@ impl AppState {
         fork.acp_agent_id = source.acp_agent_id.clone();
         fork.profile_id = source.profile_id.clone();
         fork.resume_cursor = source.resume_cursor.clone();
+        fork.session_transfer_from = source.session_transfer_from.clone();
         // The fork carries the source's context, so it may read what the source could.
         fork.references = source.references.clone();
         fork.pending_fork = true;

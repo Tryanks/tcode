@@ -67,6 +67,14 @@ impl AppState {
                 return;
             }
             AgentEvent::SessionClosed { reason } => {
+                // A provider started on a carried session that closes before it reports the
+                // session started could not resume the copy.
+                if let Some(resident) = self.resident_mut(session_id)
+                    && resident.meta.session_transfer_from.is_some()
+                    && resident.live_profile_id == resident.meta.profile_id
+                {
+                    resident.fail_session_transfer();
+                }
                 self.pending_native_rewinds.remove(session_id);
                 self.clear_approvals(session_id);
                 self.interrupt_native_subagent_work(session_id, cx);
@@ -257,8 +265,15 @@ impl AppState {
             }
             AgentEvent::SessionStarted { resume, model, .. } => {
                 let mut filled_default_model = false;
+                // A session carried from another account now lives in this one's home.
+                let carried = self
+                    .resident(session_id)
+                    .is_some_and(|resident| resident.live_profile_id == resident.meta.profile_id);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.resume_cursor = Some(resume.clone());
+                    if carried {
+                        meta.session_transfer_from = None;
+                    }
                     meta.pending_fork = false;
                     if meta.model.is_none() {
                         meta.model = model.clone();

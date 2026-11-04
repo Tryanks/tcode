@@ -5376,17 +5376,17 @@ fn provider_switch_mid_turn_relays_the_partial_answer() {
     });
 }
 
-/// One provider process a test launched: the directory and resume cursor it started with,
-/// and its command and event channels.
+/// One provider process a test launched: the options it started with, and its command and
+/// event channels.
 type Launch = (
-    PathBuf,
-    Option<agent::ResumeCursor>,
+    SessionOptions,
     smol::channel::Receiver<SessionCommand>,
     smol::channel::Sender<AgentEvent>,
 );
+type Launches = Arc<std::sync::Mutex<Vec<Launch>>>;
 
 /// A launcher that records every start and gives each its own channels.
-fn recording_launcher() -> (ProviderLauncher, Arc<std::sync::Mutex<Vec<Launch>>>) {
+fn recording_launcher() -> (ProviderLauncher, Launches) {
     let launches = Arc::new(std::sync::Mutex::new(Vec::<Launch>::new()));
     let recorded = launches.clone();
     let launcher = ProviderLauncher(Arc::new(move |provider, options: SessionOptions| {
@@ -5395,7 +5395,7 @@ fn recording_launcher() -> (ProviderLauncher, Arc<std::sync::Mutex<Vec<Launch>>>
         recorded
             .lock()
             .unwrap()
-            .push((options.cwd, options.resume, command_rx, event_tx));
+            .push((options, command_rx, event_tx));
         Box::pin(async move {
             Ok(SessionHandle {
                 provider,
@@ -5405,6 +5405,55 @@ fn recording_launcher() -> (ProviderLauncher, Arc<std::sync::Mutex<Vec<Launch>>>
         })
     }));
     (launcher, launches)
+}
+
+/// Run `command` through the pipe as a client would, and return its acknowledgement.
+fn acked(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    id: u64,
+    command: Command,
+) -> Result<CommandResponse, tcode_protocol::ProtocolError> {
+    through_pipe(
+        state,
+        cx,
+        id,
+        tcode_protocol::ClientPayload::Command(command),
+    )
+    .into_iter()
+    .find_map(|message| match message {
+        HostMessage::Ack { id: acked, result } if acked == id => Some(result),
+        _ => None,
+    })
+    .unwrap()
+}
+
+/// Wait for the provider of `launch` to be sent a turn, answering the usage reads before it
+/// as [`next_command`] does; the turn's delivery id, text and the channel its events go back
+/// on.
+fn next_turn(
+    cx: &mut TestAppContext,
+    launches: &Launches,
+    launch: usize,
+) -> (u64, String, smol::channel::Sender<AgentEvent>) {
+    loop {
+        cx.run_until(|_| {
+            launches
+                .lock()
+                .unwrap()
+                .get(launch)
+                .is_some_and(|launch| !launch.1.is_empty())
+        });
+        let launches = launches.lock().unwrap();
+        let (_, commands, events) = &launches[launch];
+        match next_command(commands) {
+            Ok(SessionCommand::SendTurn {
+                delivery_id, text, ..
+            }) => return (delivery_id, text, events.clone()),
+            Err(smol::channel::TryRecvError::Empty) => {}
+            other => panic!("expected SendTurn, got {other:?}"),
+        }
+    }
 }
 
 /// A thread moved from a quick chat into a new project keeps its transcript, survives a
@@ -5427,39 +5476,8 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
         state.set_provider_launcher_for_test(launcher.clone());
         state
     });
-    let command = |state: &TestEntity, cx: &mut TestAppContext, id, command| {
-        through_pipe(
-            state,
-            cx,
-            id,
-            tcode_protocol::ClientPayload::Command(command),
-        )
-        .into_iter()
-        .find_map(|message| match message {
-            HostMessage::Ack { id: acked, result } if acked == id => Some(result),
-            _ => None,
-        })
-        .unwrap()
-    };
-    let next_send = |cx: &mut TestAppContext, launch: usize| {
-        cx.run_until(|_| {
-            launches
-                .lock()
-                .unwrap()
-                .get(launch)
-                .is_some_and(|launch| !launch.2.is_empty())
-        });
-        let launches = launches.lock().unwrap();
-        let (_, _, commands, events) = &launches[launch];
-        match commands.try_recv() {
-            Ok(SessionCommand::SendTurn {
-                delivery_id, text, ..
-            }) => (delivery_id, text, events.clone()),
-            other => panic!("expected SendTurn, got {other:?}"),
-        }
-    };
 
-    let Ok(CommandResponse::SessionId(Some(session_id))) = command(
+    let Ok(CommandResponse::SessionId(Some(session_id))) = acked(
         &state,
         cx,
         1,
@@ -5470,7 +5488,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     ) else {
         panic!("draft not started");
     };
-    command(
+    acked(
         &state,
         cx,
         2,
@@ -5481,7 +5499,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
         },
     )
     .unwrap();
-    let (delivery_id, _, events) = next_send(cx, 0);
+    let (delivery_id, _, events) = next_turn(cx, &launches, 0);
     for event in [
         AgentEvent::SessionStarted {
             provider_session_id: "native-1".into(),
@@ -5510,7 +5528,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
     });
 
     let Ok(CommandResponse::ProjectId(Some(demo_id))) =
-        command(&state, cx, 3, Command::CreateProject { root: demo.clone() })
+        acked(&state, cx, 3, Command::CreateProject { root: demo.clone() })
     else {
         panic!("project not created");
     };
@@ -5520,7 +5538,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
         cwd: Some(PathBuf::from("app")),
     };
     assert_eq!(
-        command(&state, cx, 4, move_to_demo()).unwrap_err().code,
+        acked(&state, cx, 4, move_to_demo()).unwrap_err().code,
         "thread_busy"
     );
     events
@@ -5547,7 +5565,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
         });
         state.persist_meta(&worktree, cx);
     });
-    let refusal = command(
+    let refusal = acked(
         &state,
         cx,
         5,
@@ -5565,7 +5583,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
             .contains("move the worktree's branch instead")
     );
 
-    command(&state, cx, 6, move_to_demo()).unwrap();
+    acked(&state, cx, 6, move_to_demo()).unwrap();
     state.read(|state| {
         let session = state.resident(&session_id).unwrap();
         assert!(matches!(session.runtime, Runtime::Idle));
@@ -5594,7 +5612,7 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
             .selected_session()
             .is_some_and(|session| session.timeline.turns.len() == 1)
     });
-    command(
+    acked(
         &state,
         cx,
         7,
@@ -5605,11 +5623,11 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
         },
     )
     .unwrap();
-    let (_, text, _) = next_send(cx, 1);
+    let (_, text, _) = next_turn(cx, &launches, 1);
     {
         let launches = launches.lock().unwrap();
-        assert_eq!(launches[1].0, demo.join("app"));
-        assert_eq!(launches[1].1, None, "a fresh provider session");
+        assert_eq!(launches[1].0.cwd, demo.join("app"));
+        assert_eq!(launches[1].0.resume, None, "a fresh provider session");
     }
     assert!(
         text.starts_with(tcode_core::relay::RELAY_PREAMBLE),
@@ -5645,6 +5663,362 @@ fn moved_thread_continues_in_the_new_project_with_a_handoff() {
         assert_eq!(relay, (Some(text.clone()), Some(quick.clone())));
         assert!(session.meta.moved_from.is_none());
     });
+}
+
+/// Two Claude accounts, each signed in through its own config directory, an
+/// Anthropic-compatible endpoint profile, and a thread whose first turn ran on the built-in
+/// account under the native session `native-1`.
+struct AccountSwitch {
+    _store: TestStore,
+    state: TestEntity,
+    launches: Launches,
+    session_id: String,
+    default_home: PathBuf,
+    work_home: PathBuf,
+}
+
+/// The project directory the CLI keeps the thread's sessions under: its own encoding of the
+/// working directory, which Tcode reuses rather than derives.
+const CLI_PROJECT_DIR: &str = "-tmp-release-project-3f2a";
+
+impl AccountSwitch {
+    /// With `on_disk`, the built-in account's home holds the session as the CLI writes it:
+    /// the transcript, the subagent transcripts and stored tool results beside it, and its
+    /// file checkpoints, next to another session of the same project.
+    fn new(cx: &mut TestAppContext, name: &str, on_disk: bool) -> Self {
+        let store = TestStore::new(name);
+        let cwd = store.root().join("release");
+        let default_home = store.root().join("claude-default");
+        let work_home = store.root().join("claude-work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = Project::from_root(cwd.clone());
+        store.upsert_project(&project).unwrap();
+        let (launcher, launches) = recording_launcher();
+        // No `claude` runs here: a usage read the scripted provider leaves unanswered
+        // would otherwise start the CLI.
+        let binary = Some(store.root().join("no-claude"));
+        let mut host = TestClientState::new((*store).clone());
+        host.set_provider_launcher_for_test(launcher);
+        let builtin = host.settings.provider_mut(ProviderKind::ClaudeCode);
+        builtin.home_path = Some(default_home.clone());
+        builtin.binary_path = binary.clone();
+        for (id, home, env) in [
+            ("work", &work_home, Vec::new()),
+            (
+                "proxy",
+                &store.root().join("claude-proxy"),
+                vec![EnvVar {
+                    name: "ANTHROPIC_BASE_URL".into(),
+                    value: "https://llm-proxy.example/anthropic".into(),
+                    sensitive: false,
+                }],
+            ),
+        ] {
+            host.settings.profiles.insert(
+                id.into(),
+                ProviderProfile {
+                    kind: ProviderKind::ClaudeCode,
+                    settings: ProviderSettings {
+                        display_name: Some(id.into()),
+                        env,
+                        home_path: Some(home.clone()),
+                        binary_path: binary.clone(),
+                        ..ProviderSettings::default()
+                    },
+                },
+            );
+        }
+        let state = cx.new_entity(host);
+
+        let Ok(CommandResponse::SessionId(Some(session_id))) = acked(
+            &state,
+            cx,
+            1,
+            Command::StartDraft {
+                project_id: project.id.clone(),
+                cwd,
+            },
+        ) else {
+            panic!("draft not started");
+        };
+        let switch = Self {
+            _store: store,
+            state,
+            launches,
+            session_id,
+            default_home,
+            work_home,
+        };
+        switch.select(cx, 2, None).unwrap();
+        switch.send(cx, 3, "plan the release").unwrap();
+        let (delivery_id, _, events) = next_turn(cx, &switch.launches, 0);
+        if on_disk {
+            let project = switch.default_home.join("projects").join(CLI_PROJECT_DIR);
+            for (path, content) in [
+                ("native-1.jsonl", "{\"turn\":1}\n"),
+                ("native-1/subagents/agent-a.jsonl", "{\"agent\":\"a\"}\n"),
+                ("native-1/subagents/agent-a.meta.json", "{}"),
+                ("native-1/tool-results/toolu_1.txt", "release notes"),
+                ("other-session.jsonl", "{\"other\":true}\n"),
+            ] {
+                let path = project.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, content).unwrap();
+            }
+            let checkpoint = switch.default_home.join("file-history/native-1/9c1e@v1");
+            std::fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+            std::fs::write(checkpoint, "before").unwrap();
+        }
+        switch.run_turn(cx, &events, delivery_id, "Tag v1 on Friday.");
+        switch
+    }
+
+    fn select(
+        &self,
+        cx: &mut TestAppContext,
+        id: u64,
+        profile_id: Option<&str>,
+    ) -> Result<CommandResponse, tcode_protocol::ProtocolError> {
+        acked(
+            &self.state,
+            cx,
+            id,
+            Command::SetActiveModel {
+                session_id: self.session_id.clone(),
+                provider: ProviderKind::ClaudeCode,
+                model: None,
+                profile_id: profile_id.map(str::to_owned),
+            },
+        )
+    }
+
+    fn send(
+        &self,
+        cx: &mut TestAppContext,
+        id: u64,
+        text: &str,
+    ) -> Result<CommandResponse, tcode_protocol::ProtocolError> {
+        acked(
+            &self.state,
+            cx,
+            id,
+            Command::SendTurn {
+                session_id: self.session_id.clone(),
+                text: text.into(),
+                attachment_paths: Vec::new(),
+            },
+        )
+    }
+
+    /// Answer the turn the provider was sent, as Claude Code does on `native-1`.
+    fn run_turn(
+        &self,
+        cx: &mut TestAppContext,
+        events: &smol::channel::Sender<AgentEvent>,
+        delivery_id: u64,
+        answer: &str,
+    ) {
+        for event in [
+            AgentEvent::SessionStarted {
+                provider_session_id: "native-1".into(),
+                resume: agent::ResumeCursor(serde_json::json!({ "session_id": "native-1" })),
+                model: None,
+            },
+            AgentEvent::TurnAccepted { delivery_id },
+            AgentEvent::TurnStarted {
+                turn_id: format!("turn-{delivery_id}"),
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: format!("assistant-{delivery_id}"),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: answer.into(),
+                    summarized: false,
+                },
+            }),
+            AgentEvent::TurnCompleted {
+                turn_id: format!("turn-{delivery_id}"),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ] {
+            events.try_send(event).unwrap();
+        }
+        let session_id = self.session_id.clone();
+        cx.run_until(|state| {
+            state
+                .resident(&session_id)
+                .is_some_and(|session| !session.turn_in_flight && session.queue.is_empty())
+        });
+    }
+
+    /// The config directory and resume cursor launch `launch` started with.
+    fn launched(&self, launch: usize) -> (Option<PathBuf>, Option<agent::ResumeCursor>) {
+        let launches = self.launches.lock().unwrap();
+        let options = &launches[launch].0;
+        (options.launch_env.home.clone(), options.resume.clone())
+    }
+
+    fn relays(&self) -> Vec<Option<String>> {
+        self.state.read(|state| {
+            state
+                .resident(&self.session_id)
+                .unwrap()
+                .timeline
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.content {
+                    EntryContent::ProviderRelay { prompt, .. } => Some(prompt.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+}
+
+fn native_session() -> Option<agent::ResumeCursor> {
+    Some(agent::ResumeCursor(
+        serde_json::json!({ "session_id": "native-1" }),
+    ))
+}
+
+/// Switching a Claude Code thread to another account takes its native session along: the
+/// turn running when the switch is made finishes under the old account, and the next one
+/// restarts the provider under the new account, which resumes the same session from a copy
+/// in its own home, with no relay and nothing asked. Only that session is copied. Switching
+/// back carries the newer copy home again. A backend that is not an account still asks for
+/// the relay.
+#[test]
+fn switching_accounts_carries_the_native_session() {
+    let cx = &mut TestAppContext::default();
+    let switch = AccountSwitch::new(cx, "tcode-account-transfer", true);
+    assert_eq!(
+        switch.launched(0),
+        (Some(switch.default_home.clone()), None)
+    );
+
+    switch.send(cx, 10, "draft the notes").unwrap();
+    let (delivery_id, _, events) = next_turn(cx, &switch.launches, 0);
+    switch.select(cx, 11, Some("proxy")).unwrap();
+    assert_eq!(
+        switch.send(cx, 12, "ship it").unwrap_err().code,
+        "relay_confirmation_required"
+    );
+    switch.select(cx, 13, Some("work")).unwrap();
+    switch.run_turn(cx, &events, delivery_id, "Notes drafted.");
+    switch.send(cx, 14, "ship it").unwrap();
+    let (delivery_id, text, events) = next_turn(cx, &switch.launches, 1);
+    assert_eq!(text, "ship it");
+    assert!(matches!(
+        next_command(&switch.launches.lock().unwrap()[0].1),
+        Ok(SessionCommand::Shutdown)
+    ));
+    assert_eq!(
+        switch.launched(1),
+        (Some(switch.work_home.clone()), native_session())
+    );
+    let read = |home: &Path, path: &str| std::fs::read_to_string(home.join(path)).ok();
+    let project = format!("projects/{CLI_PROJECT_DIR}");
+    for path in [
+        format!("{project}/native-1.jsonl"),
+        format!("{project}/native-1/subagents/agent-a.jsonl"),
+        format!("{project}/native-1/subagents/agent-a.meta.json"),
+        format!("{project}/native-1/tool-results/toolu_1.txt"),
+        "file-history/native-1/9c1e@v1".into(),
+    ] {
+        assert!(read(&switch.work_home, &path).is_some(), "{path}");
+        assert_eq!(
+            read(&switch.work_home, &path),
+            read(&switch.default_home, &path)
+        );
+    }
+    assert_eq!(
+        read(&switch.work_home, &format!("{project}/other-session.jsonl")),
+        None
+    );
+    std::fs::write(
+        switch.work_home.join(format!("{project}/native-1.jsonl")),
+        "{\"turn\":1}\n{\"turn\":2}\n",
+    )
+    .unwrap();
+    switch.run_turn(cx, &events, delivery_id, "Tagged.");
+
+    switch.select(cx, 15, None).unwrap();
+    switch.send(cx, 16, "and the changelog").unwrap();
+    let (_, text, _) = next_turn(cx, &switch.launches, 2);
+    assert_eq!(text, "and the changelog");
+    assert_eq!(
+        switch.launched(2),
+        (Some(switch.default_home.clone()), native_session())
+    );
+    assert_eq!(
+        read(&switch.default_home, &format!("{project}/native-1.jsonl")).as_deref(),
+        Some("{\"turn\":1}\n{\"turn\":2}\n")
+    );
+    assert!(switch.relays().is_empty());
+}
+
+/// When the session the thread switched accounts with is not where the old account keeps
+/// it, the new account starts a fresh session that the switching message hands the
+/// conversation to, as a relay does.
+#[test]
+fn an_account_switch_relays_when_the_session_cannot_be_copied() {
+    let cx = &mut TestAppContext::default();
+    let switch = AccountSwitch::new(cx, "tcode-account-transfer-missing", false);
+
+    switch.select(cx, 10, Some("work")).unwrap();
+    switch.send(cx, 11, "ship it").unwrap();
+    let (_, text, _) = next_turn(cx, &switch.launches, 1);
+    assert_eq!(switch.launched(1), (Some(switch.work_home.clone()), None));
+    assert!(
+        text.starts_with(tcode_core::relay::RELAY_PREAMBLE),
+        "{text}"
+    );
+    assert!(text.contains("Tag v1 on Friday."), "{text}");
+    assert!(text.ends_with("ship it\n</new-user-message>"), "{text}");
+    assert_eq!(switch.relays(), [Some(text)]);
+}
+
+/// When the new account's provider closes before it resumes the copied session, the next
+/// message starts a fresh session there and hands it the conversation, the failed turn
+/// included.
+#[test]
+fn an_account_switch_relays_when_the_copy_does_not_resume() {
+    let cx = &mut TestAppContext::default();
+    let switch = AccountSwitch::new(cx, "tcode-account-transfer-unresumed", true);
+
+    switch.select(cx, 10, Some("work")).unwrap();
+    switch.send(cx, 11, "ship it").unwrap();
+    let (delivery_id, _, events) = next_turn(cx, &switch.launches, 1);
+    assert_eq!(
+        switch.launched(1),
+        (Some(switch.work_home.clone()), native_session())
+    );
+    for event in [
+        AgentEvent::TurnAccepted { delivery_id },
+        AgentEvent::SessionClosed {
+            reason: Some("No conversation found with session ID: native-1".into()),
+        },
+    ] {
+        events.try_send(event).unwrap();
+    }
+    let session_id = switch.session_id.clone();
+    cx.run_until(|state| {
+        state
+            .resident(&session_id)
+            .is_some_and(|session| matches!(session.runtime, Runtime::Idle))
+    });
+
+    switch.send(cx, 12, "try again").unwrap();
+    let (_, text, _) = next_turn(cx, &switch.launches, 2);
+    assert_eq!(switch.launched(2), (Some(switch.work_home.clone()), None));
+    assert!(
+        text.starts_with(tcode_core::relay::RELAY_PREAMBLE),
+        "{text}"
+    );
+    assert!(text.contains("ship it"), "{text}");
+    assert!(text.ends_with("try again\n</new-user-message>"), "{text}");
+    assert_eq!(switch.relays(), [Some(text)]);
 }
 
 /// A live session with `provider`, nothing queued, no turn in flight.

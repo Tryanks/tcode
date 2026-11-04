@@ -94,12 +94,20 @@ impl AppState {
         active.idle_since = None;
         active.live_model = active.meta.model.clone();
         active.live_cwd = active.meta.cwd.clone();
+        active.live_profile_id = active.meta.profile_id.clone();
         active.live_option_selections = active.meta.option_selections.clone();
         active.confirmed_option_selections.clear();
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();
         let launch_env = self.prepare_session_env(&meta, cx);
+        // The thread switched accounts since its session last ran: that session
+        // is copied into this profile's home before the provider resumes it.
+        let transfer = meta
+            .session_transfer_from
+            .as_deref()
+            .zip(meta.resume_cursor.clone())
+            .map(|(home, cursor)| (self.prepare_profile_env(home, cx), cursor));
         let preview_registration = if meta.provider.caps().mcp_servers {
             self.preview_registration_for(&meta)
         } else {
@@ -133,8 +141,30 @@ impl AppState {
 
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
+            let mut transfer_failed = None;
             let result = async {
                 let launch_env = launch_env.await.map_err(agent::AgentError::Spawn)?;
+                if let Some((from, cursor)) = transfer {
+                    let to = launch_env.clone();
+                    let provider = meta.provider;
+                    let copied = match from.await {
+                        Ok(from) => {
+                            host_cx
+                                .unblock(move || {
+                                    agent::transfer_session(provider, &from, &to, &cursor)
+                                })
+                                .await
+                        }
+                        Err(error) => Err(std::io::Error::other(error)),
+                    };
+                    if let Err(error) = copied {
+                        log::warn!(
+                            "session {} could not be carried to its new profile: {error}",
+                            meta.id
+                        );
+                        transfer_failed = Some(error);
+                    }
+                }
                 let mut opts = session_options(
                     &meta,
                     &settings,
@@ -147,6 +177,10 @@ impl AppState {
                 );
                 opts.mcp_servers.extend(pull_request_registration);
                 opts.instructions = instructions;
+                if transfer_failed.is_some() {
+                    opts.resume = None;
+                    opts.fork = false;
+                }
                 provider_launcher.launch(meta.provider, opts).await
             }
             .await;
@@ -160,6 +194,12 @@ impl AppState {
                     && state
                         .resident(&session_id)
                         .is_some_and(|parked| parked.is_starting_generation(generation));
+                if transfer_failed.is_some()
+                    && (matches_active || matches_parked)
+                    && let Some(resident) = state.resident_mut(&session_id)
+                {
+                    resident.fail_session_transfer();
+                }
                 match result {
                     Ok(handle) => {
                         if !matches_active && !matches_parked {

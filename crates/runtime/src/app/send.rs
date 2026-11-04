@@ -448,6 +448,7 @@ impl AppState {
     ) -> Option<String> {
         let active = self.resident_mut(target_id)?;
         let moved_from = active.meta.moved_from.take();
+        active.meta.session_transfer_from = None;
         let mut transcript = render_relay_transcript(
             &active.timeline,
             moved_from.as_deref().unwrap_or(&active.meta.cwd),
@@ -478,26 +479,44 @@ impl AppState {
         Some(transcript)
     }
 
-    /// Give the first turn of a moved thread's fresh provider session the conversation so
-    /// far; a thread with nothing worth handing over just starts over there.
-    fn hand_off_moved_conversation(&mut self, target_id: &str, cx: &mut HostCx) {
+    /// Give the first turn of a fresh provider session the conversation so far, when the
+    /// thread moved or its native session could not be carried to its new account; a
+    /// thread with nothing worth handing over just starts over there.
+    fn hand_off_conversation(&mut self, target_id: &str, cx: &mut HostCx) {
+        if self
+            .resident(target_id)
+            .and_then(ActiveSession::handoff_message)
+            .is_none()
+        {
+            return;
+        }
+        // The turn a provider that died left open is closed first, since closing it
+        // dispatches the next message, which then carries the handoff itself.
+        self.close_abandoned_turn(target_id, cx);
         let Some(active) = self.resident(target_id) else {
             return;
         };
-        let Some((message_id, text)) = active.moved_handoff_message() else {
+        let Some((message_id, text)) = active.handoff_message() else {
             return;
         };
         if !has_meaningful_history(&active.timeline) {
             let active = self.resident_mut(target_id).unwrap();
             active.meta.moved_from = None;
+            active.meta.session_transfer_from = None;
             let meta = active.meta.clone();
             self.persist_meta(&meta, cx);
             return;
         }
+        let from_profile = match &active.meta.session_transfer_from {
+            Some(home) if active.meta.moved_from.is_none() => {
+                (!Settings::is_builtin_profile_id(home)).then(|| home.clone())
+            }
+            _ => active.meta.profile_id.clone(),
+        };
         let from = PendingRelay {
             from_provider: active.meta.provider,
             from_model: active.meta.model.clone(),
-            from_profile: active.meta.profile_id.clone(),
+            from_profile,
         };
         let transcript = self.record_relay(target_id, from, &text, cx);
         if let Some(message) = self
@@ -522,7 +541,7 @@ impl AppState {
         if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
             return Ok(false);
         }
-        self.hand_off_moved_conversation(target_id, cx);
+        self.hand_off_conversation(target_id, cx);
         self.resident_mut(target_id)
             .ok_or(())?
             .dispatch_next_pending()
