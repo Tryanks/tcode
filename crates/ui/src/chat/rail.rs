@@ -650,7 +650,11 @@ impl Clock {
     fn new(since: u64, cx: &mut gpui::Context<Self>) -> Self {
         let tick = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                // A fixed wait drifts off the second and sooner or later
+                // skips a number; this one lands on the next elapsed second.
+                let into_second = crate::time::now_millis().saturating_sub(since) % 1000;
+                let delay = Duration::from_millis(1000 - into_second);
+                cx.background_executor().timer(delay).await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -662,10 +666,8 @@ impl Clock {
 
 impl gpui::Render for Clock {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
-        let now = tcode_core::project::now_secs() * 1000;
-        div().child(super::format_elapsed_seconds(
-            now.saturating_sub(self.since),
-        ))
+        let elapsed = crate::time::now_millis().saturating_sub(self.since);
+        div().child(super::format_elapsed_seconds(elapsed))
     }
 }
 
