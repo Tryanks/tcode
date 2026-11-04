@@ -520,28 +520,6 @@ pub(crate) fn shown_in_pane(session_id: &str, cx: &App) -> bool {
     })
 }
 
-/// The outline colour of the pane of this window showing `session_id`,
-/// while the column shows more than one pane: none in a single or zoomed
-/// pane, nor in the compact layout.
-pub(crate) fn pane_colour(session_id: &str, cx: &App) -> Option<gpui::Hsla> {
-    let shell = current_shell(cx)?;
-    let shell = shell.read(cx);
-    let attachment = shell.attachment.as_ref()?;
-    if shell.compact(cx) || attachment.zoom.is_zoomed() {
-        return None;
-    }
-    let panes = attachment.panes(cx);
-    if panes.len() < 2 {
-        return None;
-    }
-    let slot = panes
-        .iter()
-        .find(|pane| pane.read(cx).session_id() == Some(session_id))?
-        .read(cx)
-        .colour()?;
-    Some(crate::material::pane_colour(slot, cx))
-}
-
 /// The thread of the current pane, for what acts on the whole window.
 pub(crate) fn current_thread(cx: &App) -> Option<String> {
     current_shell(cx)?.read(cx).page_thread(cx)
@@ -2269,9 +2247,9 @@ impl AppShell {
     }
 
     /// `from` and its neighbour on `side` exchange their conversations, each with its own composer, scroll and expanded rows,
-    /// so a half-written message stays with its thread; the panes, their
-    /// slots and colours stay where they are. The keyboard stays in `from`,
-    /// or with `follow` goes with its thread to the neighbour.
+    /// so a half-written message stays with its thread; the panes and their
+    /// slots stay where they are. The keyboard stays in `from`, or with
+    /// `follow` goes with its thread to the neighbour.
     /// Neither conversation closes. Each conversation shown travels from
     /// where it was drawn into its new pane (see
     /// [`ThreadPanel::replace_chat`]); a waiting pane's has nothing shown to
@@ -2659,29 +2637,6 @@ impl AppShell {
         cx.notify();
     }
 
-    /// Give each pane that has no colour yet the lowest palette slot no
-    /// other pane drawn holds. A pane keeps its slot while it changes thread
-    /// and while it glides out; the slot is free again once the pane is
-    /// taken out.
-    fn colour_panes(&self, cx: &mut App) {
-        let Some(attachment) = self.attachment.as_ref() else {
-            return;
-        };
-        let panes = attachment.all_panes(cx);
-        let mut taken: Vec<usize> = panes
-            .iter()
-            .filter_map(|pane| pane.read(cx).colour())
-            .collect();
-        for pane in panes {
-            if pane.read(cx).colour().is_none()
-                && let Some(slot) = (0..crate::panes::MAX_PANES).find(|slot| !taken.contains(slot))
-            {
-                taken.push(slot);
-                pane.update(cx, |pane, cx| pane.set_colour(slot, cx));
-            }
-        }
-    }
-
     /// Tell each pane whether it shares the column and how a zoom leaves it,
     /// and its conversation which window edges its header runs along and
     /// whether its header holds the pane's close button. The layout's tree
@@ -2759,7 +2714,11 @@ impl AppShell {
             let thread = pane.read(cx).session_id()?;
             Some(store.roster_row(thread))
         };
-        let panes = match attachment.zoom.pane().filter(|_| attachment.zoom.is_zoomed()) {
+        let panes = match attachment
+            .zoom
+            .pane()
+            .filter(|_| attachment.zoom.is_zoomed())
+        {
             Some(zoomed) => vec![zoomed.clone()],
             None => attachment.panes(cx),
         };
@@ -5528,7 +5487,6 @@ impl Render for AppShell {
         self.glide_panes(window, cx);
         self.swap_layout(window, cx);
         self.zoom_panes(window, cx);
-        self.colour_panes(cx);
         self.sync_panes(window, cx);
         if let Some(attachment) = &self.attachment {
             let title = attachment
@@ -7861,50 +7819,6 @@ pub(crate) mod tests {
             panes[1].contains(&landed.center()),
             "{landed:?} in {panes:?}"
         );
-    }
-
-    /// A pane's outline keeps fading in when the dock draws the pane under a
-    /// new parent part of the way: here a second split, below the pane, put
-    /// in while the first one's outline is still coming.
-    #[gpui::test]
-    fn a_panes_outline_keeps_fading_when_the_dock_moves_it(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (_shell, _host, cx) = mount_panes(cx);
-        let outline_alpha = |cx: &mut VisualTestContext| {
-            let outline = cx.debug_bounds("pane-outline-0")?;
-            cx.update(|window, _| {
-                window
-                    .painted_quads()
-                    .iter()
-                    .find(|quad| {
-                        quad.bounds == outline.scale(window.scale_factor())
-                            && quad.border_widths.top > gpui::ScaledPixels(0.)
-                    })
-                    .map(|quad| quad.border_color.a)
-            })
-        };
-        assert_eq!(outline_alpha(cx), None, "a lone pane wears no outline");
-        let full = cx.update(|_, cx| crate::material::pane_colour(0, cx).a);
-
-        cx.simulate_keystrokes("secondary-d");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 8);
-        draw(cx);
-        let coming = outline_alpha(cx).expect("the outline, fading in");
-        assert!(0. < coming && coming < full, "{coming} of {full}");
-        // The keyboard back to the first pane, which then splits downward:
-        // its group moves under a new split.
-        cx.simulate_keystrokes("secondary-alt-left");
-        cx.simulate_keystrokes("secondary-shift-d");
-        draw(cx);
-        let moved = outline_alpha(cx).expect("the outline, still fading in");
-        assert!(
-            coming <= moved && moved < full,
-            "{coming}, then {moved} of {full}"
-        );
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert_eq!(outline_alpha(cx), Some(full));
     }
 
     /// Dropped in a pane's middle, a thread takes that pane's place and the
@@ -10859,8 +10773,7 @@ pub(crate) mod tests {
 
     /// ⇧⌥⌘← exchanges the right pane's thread with the left one's, a
     /// half-written message going along with it, and the keyboard stays in
-    /// the right pane, now on the left one's thread; each pane keeps its
-    /// colour, so the threads swap colours.
+    /// the right pane, now on the left one's thread.
     #[gpui::test]
     fn swapping_panes_takes_the_thread_and_its_draft_along(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -10869,7 +10782,6 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         cx.simulate_input("half a thought");
         draw(cx);
-        let colours = pane_outlines(&shell, cx);
 
         cx.simulate_keystrokes("secondary-alt-shift-left");
         draw(cx);
@@ -10894,21 +10806,9 @@ pub(crate) mod tests {
             assert!(store.is_thread_open("thread-1"));
             assert!(store.is_thread_open("thread-2"));
         });
-        let row = |selector: &'static str, cx: &mut VisualTestContext| {
-            let row = cx.debug_bounds(selector).expect("the thread's row");
-            outline_at(row, cx).expect("outlined")
-        };
-        let [Some(left), Some(right)] = colours[..] else {
-            panic!("two panes, each in its colour: {colours:?}");
-        };
         let slots = pane_bounds(&shell, cx);
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         draw(cx);
-        let midway = row("sidebar-thread-thread-2", cx);
-        assert!(
-            midway != left && midway != right,
-            "the moved thread's row glides between the colours: {midway:?}"
-        );
         // Each conversation is on its way across to the other pane.
         let leftward = cx.debug_bounds("flying-chat-thread-2").expect("travels");
         let rightward = cx.debug_bounds("flying-chat-thread-1").expect("travels");
@@ -10925,9 +10825,6 @@ pub(crate) mod tests {
         assert_eq!(cx.debug_bounds("flying-chat-thread-2"), None, "landed");
         assert_eq!(cx.debug_bounds("flying-chat-thread-1"), None, "landed");
         assert_eq!(pane_bounds(&shell, cx), slots, "the panes held still");
-        assert_eq!(pane_outlines(&shell, cx), colours);
-        assert_eq!(row("sidebar-thread-thread-2", cx), left);
-        assert_eq!(row("sidebar-thread-thread-1", cx), right);
     }
 
     /// Moving the right pane's thread left trades it with the left pane's:
@@ -11938,112 +11835,6 @@ pub(crate) mod tests {
         current(true, "the pane zoomed", cx);
     }
 
-    /// The outline painted along `bounds`, a pane's or a thread row's.
-    fn outline_at(bounds: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> Option<gpui::Hsla> {
-        cx.update(|window, _| {
-            let bounds = bounds.scale(window.scale_factor());
-            window
-                .painted_quads()
-                .iter()
-                .find(|quad| quad.bounds == bounds && quad.border_widths.left.as_f32() > 0.)
-                .map(|quad| quad.border_color)
-        })
-    }
-
-    /// The colour each pane on screen wears, in the layout's order.
-    fn pane_outlines(
-        shell: &Entity<AppShell>,
-        cx: &mut VisualTestContext,
-    ) -> Vec<Option<gpui::Hsla>> {
-        let panes = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .expect("attached")
-                .all_panes(cx)
-                .iter()
-                .map(|pane| pane.read(cx).bounds())
-                .collect::<Vec<_>>()
-        });
-        panes.into_iter().map(|pane| outline_at(pane, cx)).collect()
-    }
-
-    /// Beside others each pane wears a colour of its own, and the threads
-    /// list outlines the row of the thread it shows in that colour; a lone
-    /// pane wears none. A pane that shows another thread keeps its colour,
-    /// and the outline glides from the old thread's row to the new one's.
-    #[gpui::test]
-    fn each_pane_and_its_threads_row_wear_the_panes_colour(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
-            unreachable!("an index")
-        };
-        let mut third = index.sessions[1].clone();
-        third.id = "thread-3".into();
-        third.title = "thread-3".into();
-        third.updated_at = 0;
-        index.sessions.push(third);
-        send_events(&host, vec![(topic, ServerEvent::IndexSnapshot(index))]);
-        await_restore_update(&shell, cx, |store| store.thread_meta("thread-3").is_some());
-        let row = |selector: &'static str, cx: &mut VisualTestContext| {
-            let row = cx.debug_bounds(selector).expect("the thread's row");
-            outline_at(row, cx)
-        };
-        let choose = |selector: &'static str, id: &str, cx: &mut VisualTestContext| {
-            let row = cx.debug_bounds(selector).expect("the thread's row");
-            cx.simulate_click(row.center(), gpui::Modifiers::default());
-            draw(cx);
-            serve_thread(&host, id);
-            await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some(id)));
-        };
-        assert_eq!(pane_outlines(&shell, cx), [None]);
-        assert_eq!(row("sidebar-thread-thread-1", cx), None);
-
-        cx.simulate_keystrokes("secondary-d");
-        draw(cx);
-        answer_draft(&shell, &host, "draft-1", cx);
-        choose("sidebar-thread-thread-2", "thread-2", cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), Some("thread-2".into())]
-        );
-        let colours = pane_outlines(&shell, cx);
-        let [Some(left), Some(right)] = colours[..] else {
-            panic!("each pane wears a colour: {colours:?}");
-        };
-        assert_ne!(left, right);
-        assert_eq!(row("sidebar-thread-thread-1", cx), Some(left));
-        assert_eq!(row("sidebar-thread-thread-2", cx), Some(right));
-        assert_eq!(row("sidebar-thread-thread-3", cx), None);
-
-        // The right pane, holding the keyboard, shows thread-3 instead.
-        choose("sidebar-thread-thread-3", "thread-3", cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), Some("thread-3".into())]
-        );
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
-        draw(cx);
-        for leaving_or_coming in ["sidebar-thread-thread-2", "sidebar-thread-thread-3"] {
-            let outline = row(leaving_or_coming, cx).expect("still or already outlined");
-            assert!(
-                0. < outline.a
-                    && outline.a < right.a
-                    && (outline.h, outline.s, outline.l) == (right.h, right.s, right.l),
-                "{leaving_or_coming} halfway: {outline:?} toward {right:?}"
-            );
-        }
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert_eq!(pane_outlines(&shell, cx), [Some(left), Some(right)]);
-        assert_eq!(row("sidebar-thread-thread-1", cx), Some(left));
-        assert_eq!(row("sidebar-thread-thread-2", cx), None);
-        assert_eq!(row("sidebar-thread-thread-3", cx), Some(right));
-    }
-
     /// How far the selected fill has come on `row`.
     fn row_fill(row: &'static str, cx: &mut VisualTestContext) -> f32 {
         let row = cx.debug_bounds(row).expect("the thread's row");
@@ -12235,9 +12026,7 @@ pub(crate) mod tests {
         draw(cx);
         serve_status(&host, "thread-2", false);
         serve_answer(&host, "thread-2");
-        await_restore_update(&shell, cx, |store| {
-            store.timeline_settled_for("thread-2")
-        });
+        await_restore_update(&shell, cx, |store| store.timeline_settled_for("thread-2"));
         settle_panes(cx);
         let active = cx.update(|_, cx| cx.theme().list_active);
         let (full, weak) = (active.a, active.a * 0.5);
@@ -12313,9 +12102,7 @@ pub(crate) mod tests {
     /// composer and the layout as it is; another thread's replaces the
     /// current pane's, whichever pane holds the keyboard.
     #[gpui::test]
-    fn a_rows_click_goes_to_its_shown_thread_or_replaces_the_current_pane(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_rows_click_goes_to_its_shown_thread_or_replaces_the_current_pane(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
         let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
@@ -12517,42 +12304,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The colour of a pane closed is the next new pane's.
-    #[gpui::test]
-    fn a_closed_panes_colour_goes_to_the_next_pane(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        cx.simulate_keystrokes("secondary-d");
-        draw(cx);
-        answer_draft(&shell, &host, "draft-1", cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        let colours = pane_outlines(&shell, cx);
-        let [Some(left), Some(right)] = colours[..] else {
-            panic!("each pane wears a colour: {colours:?}");
-        };
-
-        cx.simulate_keystrokes("secondary-alt-left");
-        draw(cx);
-        cx.simulate_keystrokes("secondary-shift-w");
-        draw(cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
-        assert_eq!(pane_outlines(&shell, cx), [None]);
-
-        cx.simulate_keystrokes("secondary-d");
-        draw(cx);
-        answer_draft(&shell, &host, "draft-2", cx);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
-        draw(cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("draft-1".into()), Some("draft-2".into())]
-        );
-        assert_eq!(pane_outlines(&shell, cx), [Some(right), Some(left)]);
-    }
-
     /// Choosing from the threads list a thread another pane shows moves the
     /// keyboard there instead of showing the thread twice.
     #[gpui::test]
@@ -12660,9 +12411,9 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
-        cx.update(|window, cx| assert!(!chat.read(cx).composer()
-                    .read(cx)
-                    .has_keyboard(window, cx)));
+        cx.update(|window, cx| {
+            assert!(!chat.read(cx).composer().read(cx).has_keyboard(window, cx))
+        });
     }
 
     /// The draft an empty workspace falls back on comes up in its pane and
@@ -17335,108 +17086,6 @@ pub(crate) mod tests {
         );
         settle_frames(cx);
         assert_eq!(button_fill("diff-panel", cx), on, "it comes to rest lit");
-    }
-
-    /// How opaque the title tint of a narrow pane's header is painted: none
-    /// when it is not drawn.
-    fn title_tint(cx: &mut VisualTestContext) -> f32 {
-        let Some(tint) = cx.debug_bounds("pane-tint") else {
-            return 0.;
-        };
-        cx.update(|window, _| {
-            let tint = tint.scale(window.scale_factor());
-            window
-                .painted_quads()
-                .iter()
-                .filter(|quad| {
-                    quad.bounds.contains(&tint.center())
-                        && (quad.bounds.size.width.0 - tint.size.width.0).abs() < 1.
-                        && (quad.bounds.size.height.0 - tint.size.height.0).abs() < 1.
-                })
-                .filter_map(|quad| quad.background.as_solid().map(|fill| fill.a))
-                .fold(0., f32::max)
-        })
-    }
-
-    /// Beside another pane, a header narrowed into its overflow tier tints
-    /// its title area with its pane's colour, fading in and carrying on as a
-    /// split draws the pane's group under a new parent part way, and fading
-    /// out as the window widens it again. With motion reduced it comes and
-    /// goes at once.
-    #[gpui::test]
-    fn a_narrow_panes_title_tint_fades_with_its_tier(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, host, cx) = mount_panes(cx);
-        settle_frames(cx);
-        let _ = sent(&host);
-        cx.simulate_keystrokes("secondary-d");
-        settle_frames(cx);
-        cx.simulate_keystrokes("secondary-alt-left");
-        settle_frames(cx);
-        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into()), None]);
-        assert_eq!(title_tint(cx), 0., "a wide header has no tint");
-
-        // The panes follow the narrower window over a few frames; the tint
-        // comes as the header folds.
-        resize(cx, 1200.);
-        for _ in 0..30 {
-            if cx.debug_bounds("header-overflow").is_some() {
-                break;
-            }
-            display_frame(cx);
-        }
-        assert!(
-            cx.debug_bounds("header-overflow").is_some(),
-            "the header folded into its overflow tier"
-        );
-        cx.executor().advance_clock(crate::edge_back::SETTLE / 4);
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-        });
-        draw(cx);
-        let early = title_tint(cx);
-        cx.simulate_keystrokes("secondary-shift-d");
-        draw(cx);
-        assert_eq!(
-            pane_threads(&shell, cx),
-            [Some("thread-1".into()), None, None]
-        );
-        display_frame(cx);
-        let coming = title_tint(cx);
-        settle_frames(cx);
-        let full = title_tint(cx);
-        assert!(full > 0.05, "the title area is tinted: {full}");
-        assert!(
-            0. < early && early < coming && coming < full,
-            "the tint fades in through the split: {early} -> {coming} -> {full}"
-        );
-
-        // Each frame's tint as the window goes to `width`, until it rests.
-        let follow = |width: f32, cx: &mut VisualTestContext| {
-            resize(cx, width);
-            let mut seen = vec![title_tint(cx)];
-            for _ in 0..30 {
-                display_frame(cx);
-                seen.push(title_tint(cx));
-            }
-            seen
-        };
-        let seen = follow(2000., cx);
-        assert!(
-            seen.iter().any(|tint| 0. < *tint && *tint < full),
-            "the tint fades out: {seen:?}"
-        );
-        assert_eq!(seen.last(), Some(&0.), "a wide header has no tint");
-
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        for (width, rest) in [(1200., full), (2000., 0.)] {
-            let seen = follow(width, cx);
-            assert!(
-                seen.iter().all(|tint| *tint == 0. || *tint == full),
-                "with motion reduced the tint comes and goes at once: {seen:?}"
-            );
-            assert_eq!(seen.last(), Some(&rest));
-        }
     }
 
     /// A tablet turning compact draws the conversation on the compact
