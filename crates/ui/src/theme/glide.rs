@@ -15,10 +15,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use gpui::{App, Global, Hsla, Rgba, Window};
-use gpui_base::{
-    ColorTokens,
-    motion::{Easing, Timing},
-};
+use gpui_base::motion::{Easing, Timing};
 
 use super::{ActiveTheme as _, Theme, ThemeMode};
 
@@ -153,26 +150,25 @@ impl Theme {
         let m = |from: Hsla, to: Hsla| mix(from, to, progress);
         let (a, b) = (&self.tokens.colors, &to.tokens.colors);
         let mut tokens = to.tokens.clone();
-        tokens.colors = ColorTokens {
-            background: m(a.background, b.background),
-            foreground: m(a.foreground, b.foreground),
-            surface: m(a.surface, b.surface),
-            surface_foreground: m(a.surface_foreground, b.surface_foreground),
-            primary: m(a.primary, b.primary),
-            primary_foreground: m(a.primary_foreground, b.primary_foreground),
-            secondary: m(a.secondary, b.secondary),
-            secondary_foreground: m(a.secondary_foreground, b.secondary_foreground),
-            muted: m(a.muted, b.muted),
-            muted_foreground: m(a.muted_foreground, b.muted_foreground),
-            accent: m(a.accent, b.accent),
-            accent_foreground: m(a.accent_foreground, b.accent_foreground),
-            destructive: m(a.destructive, b.destructive),
-            destructive_foreground: m(a.destructive_foreground, b.destructive_foreground),
-            border: m(a.border, b.border),
-            input: m(a.input, b.input),
-            ring: m(a.ring, b.ring),
-            selection: m(a.selection, b.selection),
-        };
+        let colors = &mut tokens.colors;
+        colors.background = m(a.background, b.background);
+        colors.foreground = m(a.foreground, b.foreground);
+        colors.surface = m(a.surface, b.surface);
+        colors.surface_foreground = m(a.surface_foreground, b.surface_foreground);
+        colors.primary = m(a.primary, b.primary);
+        colors.primary_foreground = m(a.primary_foreground, b.primary_foreground);
+        colors.secondary = m(a.secondary, b.secondary);
+        colors.secondary_foreground = m(a.secondary_foreground, b.secondary_foreground);
+        colors.muted = m(a.muted, b.muted);
+        colors.muted_foreground = m(a.muted_foreground, b.muted_foreground);
+        colors.accent = m(a.accent, b.accent);
+        colors.accent_foreground = m(a.accent_foreground, b.accent_foreground);
+        colors.destructive = m(a.destructive, b.destructive);
+        colors.destructive_foreground = m(a.destructive_foreground, b.destructive_foreground);
+        colors.border = m(a.border, b.border);
+        colors.input = m(a.input, b.input);
+        colors.ring = m(a.ring, b.ring);
+        colors.selection = m(a.selection, b.selection);
         Theme {
             accent: m(self.accent, to.accent),
             background: m(self.background, to.background),

@@ -120,7 +120,16 @@ impl IosWindow {
             raw_window_handle: raw_handles.window,
         };
         let bootstrap_surface = unsafe { instance.create_surface_unsafe(target) }?;
-        let context = WgpuContext::new(instance, &bootstrap_surface, None)?;
+        let drawable_size = size(
+            DevicePixels((f32::from(logical_size.width) * scale_factor).round() as i32),
+            DevicePixels((f32::from(logical_size.height) * scale_factor).round() as i32),
+        );
+        let surface_config = WgpuSurfaceConfig {
+            size: drawable_size,
+            transparent: false,
+            preferred_present_mode: Some(wgpu::PresentMode::Fifo),
+        };
+        let context = WgpuContext::new(instance, &bootstrap_surface, &surface_config, None)?;
         let surface_capabilities = bootstrap_surface.get_capabilities(&context.adapter);
         let surface_format = [
             wgpu::TextureFormat::Bgra8Unorm,
@@ -148,20 +157,7 @@ impl IosWindow {
                 .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
         drop(bootstrap_surface);
         let gpu_context = Rc::new(RefCell::new(Some(context)));
-        let drawable_size = size(
-            DevicePixels((f32::from(logical_size.width) * scale_factor).round() as i32),
-            DevicePixels((f32::from(logical_size.height) * scale_factor).round() as i32),
-        );
-        let renderer = WgpuRenderer::new(
-            gpu_context.clone(),
-            &raw_handles,
-            WgpuSurfaceConfig {
-                size: drawable_size,
-                transparent: false,
-                preferred_present_mode: Some(wgpu::PresentMode::Fifo),
-            },
-            None,
-        )?;
+        let renderer = WgpuRenderer::new(gpu_context.clone(), &raw_handles, surface_config, None)?;
         log::info!(
             "GPUI iOS Metal surface format selected: {surface_format:?}; scale factor: \
              {scale_factor:.2}; glass enabled: {glass_enabled}"
