@@ -829,6 +829,8 @@ impl ProviderDialog {
         );
 
         let fav_id = row.id.clone();
+        let fav_profile_id = self.profile_id.clone();
+        let fav_provider = self.store.read(cx).provider_profile_kind(&fav_profile_id);
         let is_fav = row.favorite;
         let store = self.store.clone();
         let hide_id = row.id.clone();
@@ -878,7 +880,12 @@ impl ProviderDialog {
                     })
                     .on_click(move |_, _, cx| {
                         store.update(cx, |store, cx| {
-                            store.toggle_favorite_model(fav_id.clone(), cx);
+                            store.toggle_favorite_model(
+                                fav_provider,
+                                Some(fav_profile_id.clone()),
+                                fav_id.clone(),
+                                cx,
+                            );
                         });
                     }),
             )

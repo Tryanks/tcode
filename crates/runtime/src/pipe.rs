@@ -1046,7 +1046,11 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::CheckoutBranch { session_id, branch } => {
             app.checkout_branch(&session_id, branch, cx);
         }
-        Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
+        Command::ToggleFavoriteModel {
+            provider,
+            profile_id,
+            model,
+        } => app.toggle_favorite_model(provider, profile_id, model, cx),
         Command::RewindTurn {
             session_id,
             turn,

@@ -2761,8 +2761,13 @@ impl WorkspaceStore {
         picker_models(
             &self.profile_catalog(profile_id),
             &self.provider_profile_settings(profile_id),
-            &self.settings_replica.favorite_models,
+            &self.favorite_ids(profile_id),
         )
+    }
+
+    fn favorite_ids(&self, profile_id: &str) -> Vec<String> {
+        self.settings_replica
+            .favorite_ids(self.provider_profile_kind(profile_id), profile_id)
     }
 
     pub fn provider_profile_display_name(&self, profile_id: &str) -> String {
@@ -2846,7 +2851,7 @@ impl WorkspaceStore {
         resolve_models(
             &self.profile_catalog(profile_id),
             &settings,
-            &self.settings_replica.favorite_models,
+            &self.favorite_ids(profile_id),
         )
     }
 
@@ -4547,7 +4552,7 @@ pub(crate) mod tests {
             store.toggle_project_collapsed("shared".into(), cx);
             store.set_sidebar_collapsed(true, cx);
             store.cycle_project_sort(cx);
-            store.toggle_favorite_model("team-model".into(), cx);
+            store.toggle_favorite_model(agent::ProviderKind::Codex, None, "team-model".into(), cx);
             store.mark_session_unread("shared-thread".into(), cx);
             assert!(store.session_unread("shared-thread"));
             store.dispatch(Command::MarkSessionRead {
@@ -4561,7 +4566,14 @@ pub(crate) mod tests {
                 store.project_sort(),
                 tcode_core::settings::ProjectSort::NameAsc
             );
-            assert_eq!(store.settings().favorite_models, ["team-model"]);
+            assert_eq!(
+                store.settings().favorite_models,
+                [tcode_core::settings::FavoriteModel::Row {
+                    provider: agent::ProviderKind::Codex,
+                    profile_id: None,
+                    model: "team-model".into(),
+                }]
+            );
         });
         host.barrier(cx, &workspace);
         assert!(

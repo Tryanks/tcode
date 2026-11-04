@@ -499,7 +499,10 @@ mod tests {
         // The legacy keys are consumed, not echoed back.
         assert_eq!(loaded.claude_binary, None);
         assert_eq!(loaded.theme_mode, ThemeMode::Light);
-        assert_eq!(loaded.favorite_models, vec!["opus".to_string()]);
+        assert_eq!(
+            loaded.favorite_ids(ProviderKind::ClaudeCode, "claude"),
+            ["opus"]
+        );
         // Never-configured providers default to enabled with no overrides.
         let codex = loaded.provider(ProviderKind::Codex);
         assert!(codex.enabled);

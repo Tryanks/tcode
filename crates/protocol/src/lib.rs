@@ -255,7 +255,9 @@ pub use wire::{
 // Unreleased: SessionMeta drops orchestrate_enabled and result_max_chars;
 // subagents start through tcode_control rather than a tcode_orchestrate
 // server; SessionActivity carries latest_activity, what the thread's running
-// turn last started.
+// turn last started. Settings' favorite_models holds {provider, profile_id,
+// model} rows beside the bare ids older settings stored, which still read, and
+// ToggleFavoriteModel carries provider and profile_id.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

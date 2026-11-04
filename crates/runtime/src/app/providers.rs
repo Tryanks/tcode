@@ -675,6 +675,10 @@ impl AppState {
         let Some(profile) = settings.profiles.remove(id) else {
             return;
         };
+        // A later profile of the same name gets this id and owns none of its stars.
+        settings.favorite_models.retain(|favorite| {
+            !matches!(favorite, FavoriteModel::Row { profile_id: Some(starred), .. } if starred == id)
+        });
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
         self.providers.provider_secret_names.remove(id);
         self.providers.secret_writes.remove(id);

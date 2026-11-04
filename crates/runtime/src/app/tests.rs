@@ -1155,7 +1155,12 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         },
     );
     settings.collapsed_projects.push("project".into());
-    settings.favorite_models.push("gpt-5.6-sol".into());
+    let favorite = FavoriteModel::Row {
+        provider: ProviderKind::Codex,
+        profile_id: Some("work-codex".into()),
+        model: "gpt-5.6-sol".into(),
+    };
+    settings.favorite_models.push(favorite.clone());
     settings.sidebar_collapsed = true;
     settings.project_sort = tcode_core::settings::ProjectSort::NameAsc;
     settings.sidebar_layout = tcode_core::settings::SidebarLayout::Grouped;
@@ -1185,7 +1190,7 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         assert_eq!(reset.claude_binary, Some(PathBuf::from("/custom/claude")));
         assert!(reset.acp_agents.contains_key("first"));
         assert_eq!(reset.collapsed_projects, vec!["project".to_string()]);
-        assert_eq!(reset.favorite_models, vec!["gpt-5.6-sol".to_string()]);
+        assert_eq!(reset.favorite_models, [favorite]);
         assert!(reset.sidebar_collapsed);
         assert_eq!(
             reset.project_sort,
@@ -2583,6 +2588,45 @@ fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
     assert!(configuration.contains(
         "Unavailable: model `gpt-6.1-sol` is not present in the loaded `codex` catalog."
     ));
+}
+
+/// A deleted profile's id comes back with the next profile of that name, which
+/// owns none of its stars; other accounts' stars and bare ids stay.
+#[test]
+fn deleting_a_profile_takes_its_stars_with_it() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-delete-profile-stars");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, cx| {
+        state.settings.profiles.insert(
+            "second-account".into(),
+            ProviderProfile {
+                kind: ProviderKind::Codex,
+                settings: Default::default(),
+            },
+        );
+        for profile_id in [Some("second-account".to_owned()), None] {
+            state.toggle_favorite_model(ProviderKind::Codex, profile_id, "model".into(), cx);
+        }
+        state
+            .settings
+            .favorite_models
+            .push(FavoriteModel::Id("older".into()));
+
+        state.delete_profile("second-account", cx);
+
+        assert_eq!(
+            state.settings.favorite_models,
+            [
+                FavoriteModel::Row {
+                    provider: ProviderKind::Codex,
+                    profile_id: None,
+                    model: "model".into(),
+                },
+                FavoriteModel::Id("older".into()),
+            ]
+        );
+    });
 }
 
 #[test]

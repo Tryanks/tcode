@@ -647,6 +647,39 @@ impl OrchestrateSettings {
     }
 }
 
+/// A star in the model picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FavoriteModel {
+    /// One model under one account: `profile_id` is `None` on the provider's
+    /// built-in profile, as on a thread.
+    Row {
+        provider: ProviderKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_id: Option<String>,
+        model: String,
+    },
+    /// An id saved before stars named an account. Nothing records which
+    /// provider or account it was starred under, so it stars every row with
+    /// that id.
+    Id(String),
+}
+
+impl FavoriteModel {
+    /// The model id this star lights on an account, if any.
+    fn id_on(&self, provider: ProviderKind, profile_id: Option<&str>) -> Option<&str> {
+        match self {
+            Self::Row {
+                provider: starred_provider,
+                profile_id: starred_profile,
+                model,
+            } => (*starred_provider == provider && starred_profile.as_deref() == profile_id)
+                .then_some(model),
+            Self::Id(id) => Some(id),
+        }
+    }
+}
+
 /// Provider and model used for the isolated, background request that names a
 /// thread, initially or on request. Reasoning effort is intentionally fixed to
 /// `low` by the runtime: title generation is a small, latency-sensitive task.
@@ -1155,10 +1188,10 @@ pub struct Settings {
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
-    /// Model ids the user has starred in the model picker (favorites float to
+    /// Models the user has starred in the model picker (favorites float to
     /// the top and are shown first under the star filter).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub favorite_models: Vec<String>,
+    pub favorite_models: Vec<FavoriteModel>,
     /// Sidebar PROJECTS ordering (cycled by the sort button).
     #[serde(default)]
     pub project_sort: ProjectSort,
@@ -1464,6 +1497,38 @@ impl Settings {
             | ProviderKind::Pi
             | ProviderKind::OpenCode
             | ProviderKind::Acp => provider_key(kind),
+        }
+    }
+
+    /// The model ids starred on one account.
+    pub fn favorite_ids(&self, provider: ProviderKind, profile_id: &str) -> Vec<String> {
+        let profile_id = Some(profile_id).filter(|id| !Self::is_builtin_profile_id(id));
+        self.favorite_models
+            .iter()
+            .filter_map(|favorite| favorite.id_on(provider, profile_id))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Star a model on one account, or take the star off. Taking off a star
+    /// saved as a bare id takes it off every account it lit.
+    pub fn toggle_favorite_model(
+        &mut self,
+        provider: ProviderKind,
+        profile_id: Option<String>,
+        model: String,
+    ) {
+        let profile_id = profile_id.filter(|id| !Self::is_builtin_profile_id(id));
+        let starred = self.favorite_models.len();
+        self.favorite_models.retain(|favorite| {
+            favorite.id_on(provider, profile_id.as_deref()) != Some(model.as_str())
+        });
+        if self.favorite_models.len() == starred {
+            self.favorite_models.push(FavoriteModel::Row {
+                provider,
+                profile_id,
+                model,
+            });
         }
     }
 
@@ -2376,6 +2441,77 @@ mod tests {
         assert_eq!(settings.orchestrate.decision_models.len(), 2);
         assert_eq!(settings.orchestrate.decision_models[0], peer);
         assert_eq!(settings.orchestrate.child_models[0], executor);
+    }
+
+    /// `favorite_models` as settings stored it before stars named an account:
+    /// bare ids, with no provider to place them. They keep lighting every row
+    /// of that id, and are written back as they were.
+    #[test]
+    fn favorites_read_older_bare_ids_beside_rows() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{"favorite_models":["opus",
+                {"provider":"codex","model":"gpt-6.1-sol","profile_id":"second"},
+                {"provider":"codex","model":"gpt-6-astra"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::ClaudeCode, "claude"),
+            ["opus"]
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::ClaudeCode, "second-claude"),
+            ["opus"]
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::Codex, "codex"),
+            ["opus", "gpt-6-astra"]
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::Codex, "second"),
+            ["opus", "gpt-6.1-sol"]
+        );
+        assert_eq!(
+            serde_json::to_value(&settings).unwrap()["favorite_models"],
+            serde_json::json!([
+                "opus",
+                {"provider":"codex","model":"gpt-6.1-sol","profile_id":"second"},
+                {"provider":"codex","model":"gpt-6-astra"}
+            ])
+        );
+
+        settings.toggle_favorite_model(ProviderKind::ClaudeCode, None, "opus".into());
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::ClaudeCode, "second-claude"),
+            Vec::<String>::new(),
+            "a bare id has one star to take off"
+        );
+    }
+
+    #[test]
+    fn a_favorite_stars_one_account() {
+        let mut settings = Settings::default();
+        settings.toggle_favorite_model(ProviderKind::Codex, Some("second".into()), "model".into());
+        settings.toggle_favorite_model(
+            ProviderKind::Codex,
+            Some("codex".into()),
+            "built-in".into(),
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::Codex, "second"),
+            ["model"]
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::Codex, "codex"),
+            ["built-in"]
+        );
+        assert_eq!(
+            settings.favorite_ids(ProviderKind::ClaudeCode, "claude"),
+            Vec::<String>::new()
+        );
+
+        settings.toggle_favorite_model(ProviderKind::Codex, Some("second".into()), "model".into());
+        settings.toggle_favorite_model(ProviderKind::Codex, None, "built-in".into());
+        assert!(settings.favorite_models.is_empty());
     }
 
     #[test]

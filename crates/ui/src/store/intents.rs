@@ -104,15 +104,15 @@ impl WorkspaceStore {
                 Command::CycleProjectSort => {
                     self.settings_replica.project_sort = self.settings_replica.project_sort.next()
                 }
-                Command::ToggleFavoriteModel { model } => {
-                    if self.settings_replica.favorite_models.contains(model) {
-                        self.settings_replica
-                            .favorite_models
-                            .retain(|id| id != model);
-                    } else {
-                        self.settings_replica.favorite_models.push(model.clone());
-                    }
-                }
+                Command::ToggleFavoriteModel {
+                    provider,
+                    profile_id,
+                    model,
+                } => self.settings_replica.toggle_favorite_model(
+                    *provider,
+                    profile_id.clone(),
+                    model.clone(),
+                ),
                 Command::MarkSessionRead {
                     session_id,
                     through,
@@ -1276,8 +1276,18 @@ impl WorkspaceStore {
             profile_id,
         });
     }
-    pub fn toggle_favorite_model(&mut self, model: String, cx: &mut Context<Self>) {
-        self.dispatch(Command::ToggleFavoriteModel { model });
+    pub fn toggle_favorite_model(
+        &mut self,
+        provider: agent::ProviderKind,
+        profile_id: Option<String>,
+        model: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch(Command::ToggleFavoriteModel {
+            provider,
+            profile_id,
+            model,
+        });
         self.local_settings_changed(cx);
     }
     pub fn set_active_option_for(
