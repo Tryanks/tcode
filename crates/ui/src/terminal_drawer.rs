@@ -3373,7 +3373,7 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         let session_id = status.session_id.clone();
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         let (drawer, cx) = cx.add_window_view(|window, cx| {
             TerminalDrawer::new(store.clone(), Some(session_id), window, cx)
         });
@@ -3431,7 +3431,7 @@ mod tests {
         ) -> R {
             self.store.read_with(cx, |store, _| {
                 store
-                    .with_terminal_workspace_for(store.legacy_focus().as_deref(), |workspace| {
+                    .with_terminal_workspace_for(store.sole_thread().as_deref(), |workspace| {
                         f(workspace.terminal(terminal_id).expect("the terminal"))
                     })
                     .expect("the thread's terminals")

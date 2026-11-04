@@ -5521,9 +5521,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| {
-            store.select_session("background".into(), cx)
-        });
+        store.update(cx, |store, cx| store.show_alone("background".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -5882,7 +5880,7 @@ mod tests {
         let pressed = cx.debug_bounds("sidebar-thread-middle").unwrap().center();
         cx.simulate_click(pressed, Default::default());
         assert_ne!(
-            store.read_with(cx, |store, _| store.roster_session_id()),
+            store.read_with(cx, |store, _| store.sole_thread()),
             Some("middle".into()),
             "a leaving row takes no clicks"
         );
@@ -6295,9 +6293,7 @@ mod tests {
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(320.), px(600.)));
-        store.update(cx, |store, cx| {
-            store.select_session("codex-thread".into(), cx)
-        });
+        store.update(cx, |store, cx| store.show_alone("codex-thread".into(), cx));
         // (row selector, mark selector); the active Codex row comes first.
         let selectors = [
             (
@@ -6985,7 +6981,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| store.select_session("virtual-0".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("virtual-0".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
             sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state, cx)),
@@ -7127,7 +7123,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| store.select_session("virtual-0".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("virtual-0".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
@@ -7296,7 +7292,7 @@ mod tests {
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // A selection keeps the store from opening a draft against a host
         // this fake transport never answers.
-        store.update(cx, |store, cx| store.select_session("other".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("other".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (_, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -7496,9 +7492,7 @@ mod tests {
         });
         crate::shell::tests::shell_behind(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| {
-            store.select_session("settled-39".into(), cx)
-        });
+        store.update(cx, |store, cx| store.show_thread("settled-39".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -7670,9 +7664,7 @@ mod tests {
         crate::shell::tests::shell_behind(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // The open thread is settled, so the closed shelf shows its row.
-        store.update(cx, |store, cx| {
-            store.select_session("settled-20".into(), cx)
-        });
+        store.update(cx, |store, cx| store.show_thread("settled-20".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -7870,7 +7862,7 @@ mod tests {
         });
         crate::shell::tests::shell_behind(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| store.select_session("mixed-a".into(), cx));
+        store.update(cx, |store, cx| store.show_thread("mixed-a".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -7908,7 +7900,7 @@ mod tests {
             draw_settled(cx);
         };
         for compact in [false, true] {
-            store.update(cx, |store, cx| store.select_session("mixed-a".into(), cx));
+            store.update(cx, |store, cx| store.show_thread("mixed-a".into(), cx));
             window_state.update(cx, |state, cx| {
                 state.compact = compact;
                 cx.notify();
@@ -8022,7 +8014,7 @@ mod tests {
             click(cx, "settled-lead");
             verify(cx, expected(shown, false, false));
             store.update(cx, |store, cx| {
-                store.select_session("many-settled-1".into(), cx);
+                store.show_thread("many-settled-1".into(), cx);
             });
             draw_settled(cx);
             verify(cx, expected(shown, false, true));
@@ -8555,7 +8547,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| store.select_session("arranged".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("arranged".into(), cx));
         let mut driver = crate::store::tests::LocalHostDriver::from_link(link);
         // The host records commands on its own thread; the driver routes replies
         // while the UI awaits each acknowledgement, as in the running app.

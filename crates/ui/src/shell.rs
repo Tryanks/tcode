@@ -574,7 +574,7 @@ pub(crate) fn pane_shows(session_id: &str, cx: &App) -> bool {
 }
 
 /// The chat that shows an agent opened from `lead` beside it, for what
-/// knows only the lead (the right panel, which shows the focused thread's
+/// knows only the lead (the right panel, which shows a thread's
 /// agents): the chat of the pane showing `lead`, or else of a pane showing
 /// `lead` beside its own lead, which has room for one agent beside it. A
 /// thread shown in a pane and beside its lead in another is the pane's.
@@ -1467,7 +1467,7 @@ impl AppShell {
     }
 
     /// The keyboard entered `pane`, its drawer included: the next thread
-    /// lands there, and the store acts on its thread.
+    /// lands there.
     fn pane_entered(&mut self, pane: Entity<ThreadPanel>, cx: &mut Context<Self>) {
         if self
             .attachment
@@ -1477,11 +1477,6 @@ impl AppShell {
             return;
         }
         self.set_last_input(&pane, cx);
-        if let (Some(store), Some(session_id)) =
-            (self.store(), pane.read(cx).session_id().map(str::to_owned))
-        {
-            store.update(cx, |store, cx| store.focus_thread(&session_id, cx));
-        }
         cx.notify();
     }
 
@@ -1514,9 +1509,10 @@ impl AppShell {
         };
         let store = attachment.link.store.clone();
         let panes = attachment.panes(cx);
-        store.update(cx, |store, _| {
+        store.update(cx, |store, cx| {
             if !store.is_thread_open(session_id) {
                 store.open_thread(session_id);
+                cx.notify();
             }
         });
         let left = pane.read(cx).session_id().map(str::to_owned);
@@ -1538,7 +1534,6 @@ impl AppShell {
                 store.update(cx, |store, cx| store.close_thread(&left, cx));
             }
         }
-        store.update(cx, |store, cx| store.focus_thread(session_id, cx));
     }
 
     /// Where a thread shown without naming a pane goes: the pane showing it,
@@ -2332,9 +2327,9 @@ impl AppShell {
         let chat = from.read(cx).chat();
         let theirs = to.update(cx, |to, cx| to.replace_chat(chat, ours_at, cx));
         from.update(cx, |from, cx| from.replace_chat(theirs, theirs_at, cx));
-        let focused = if follow { to } else { from };
-        window.focus(&focused.focus_handle(cx), cx);
-        self.pane_entered(focused, cx);
+        let keeper = if follow { to } else { from };
+        window.focus(&keeper.focus_handle(cx), cx);
+        self.pane_entered(keeper, cx);
     }
 
     /// What a pane command does to `pane`.
@@ -2475,12 +2470,12 @@ impl AppShell {
             return None;
         }
         let attachment = self.attachment.as_ref()?;
-        let focused = attachment.last_input.clone();
+        let last_input = attachment.last_input.clone();
         let panes = attachment.panes(cx);
-        let first = std::iter::once(Slot::Pane(focused.clone()));
+        let first = std::iter::once(Slot::Pane(last_input.clone()));
         let (fills, fewest): (Vec<_>, _) = match layout {
             PaneLayout::SpreadAgents => {
-                let parent = focused.read(cx).session_id()?;
+                let parent = last_input.read(cx).session_id()?;
                 let mut agents: Vec<_> = attachment
                     .link
                     .store
@@ -2508,7 +2503,7 @@ impl AppShell {
                 let count = layout.splits(0).len() + 1;
                 let others = panes
                     .iter()
-                    .filter(|pane| **pane != focused)
+                    .filter(|pane| **pane != last_input)
                     .cloned()
                     .map(Slot::Pane);
                 let fills = first
@@ -2524,7 +2519,7 @@ impl AppShell {
             .read(cx)
             .layout(DockPlacement::Center)?
             .clone();
-        let anchor = PanelId::from(focused.entity_id());
+        let anchor = PanelId::from(last_input.entity_id());
         for panel in tree.panels().collect::<Vec<_>>() {
             if panel != anchor {
                 tree.remove_panel(panel);
@@ -2539,8 +2534,8 @@ impl AppShell {
                 tree.split(node, id, placement, None);
                 ids.push(id);
             }
-            // Every split opens right of or below its pane, so the focused
-            // pane leads the tree's order.
+            // Every split opens right of or below its pane, so the last
+            // input leads the tree's order.
             let slots: Vec<_> = tree.panels().zip(fills.iter().cloned()).collect();
             let session_of = |panel: PanelId| match slots.iter().find(|(id, _)| *id == panel)? {
                 (_, Slot::Pane(pane)) => pane.read(cx).session_id().map(str::to_owned),
@@ -2568,9 +2563,9 @@ impl AppShell {
         if !(unchanged && attachment.zoom.pane().is_none() && attachment.layout_swap.is_idle()) {
             attachment.layout_swap.choose(layout);
         }
-        let focused = attachment.last_input.clone();
-        self.pane_entered(focused.clone(), cx);
-        window.focus(&focused.focus_handle(cx), cx);
+        let last_input = attachment.last_input.clone();
+        self.pane_entered(last_input.clone(), cx);
+        window.focus(&last_input.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -2647,7 +2642,7 @@ impl AppShell {
         let store = attachment.link.store.clone();
         let preview = attachment.preview.clone();
         let area = attachment.thread_panes.clone();
-        let focused = attachment.last_input.clone();
+        let last_input = attachment.last_input.clone();
         let before = attachment.panes(cx);
         let mut panes = HashMap::new();
         let mut threads = Vec::new();
@@ -2683,8 +2678,8 @@ impl AppShell {
         for (pane, session_id) in threads {
             self.bind_pane(&pane, &session_id, window, cx);
         }
-        self.pane_entered(focused.clone(), cx);
-        window.focus(&focused.focus_handle(cx), cx);
+        self.pane_entered(last_input.clone(), cx);
+        window.focus(&last_input.focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -3737,7 +3732,7 @@ impl AppShell {
         }
         let chat = pane.update(cx, |pane, cx| pane.replace_chat(lead.chat, None, cx));
         store.update(cx, |store, cx| {
-            store.focus_thread(&lead.session_id, cx);
+            store.selection_moved_on();
             store.release_timeline(&lead.session_id, cx);
             if let Some(agent) = &agent
                 && store.is_thread_open(agent)
@@ -12674,6 +12669,7 @@ pub(crate) mod tests {
         let own = store_of(&shell, cx);
         cx.update(|_, cx| {
             cx.subscribe(store, move |_, shown: &ShowThread, cx| {
+                // Held here, the shell's link stays open as long as the store.
                 let _ = &host;
                 own.update(cx, |own, cx| own.show_thread(shown.session_id.clone(), cx));
             })

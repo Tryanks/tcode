@@ -567,10 +567,10 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading()
+                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
             })
         });
         store.update(cx, |store, cx| {
@@ -587,7 +587,11 @@ mod tests {
         let (store, composer, cx) = composer_window(true, cx);
         cx.simulate_resize(size(px(393.), px(852.)));
         composer.update_in(cx, |composer, window, cx| {
-            let cwd = store.read(cx).composer_state().active_cwd.unwrap();
+            let cwd = store
+                .read(cx)
+                .composer_state_for(store.read(cx).sole_thread().as_deref())
+                .active_cwd
+                .unwrap();
             composer.workspace = Some((cwd, vec![PathEntry::from_rel("file.rs".into(), false)]));
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
@@ -640,7 +644,9 @@ mod tests {
         composer.update_in(cx, |composer, window, cx| {
             window.focus(&composer.input.read(cx).focus_handle(cx), cx);
         });
-        assert!(store.read_with(cx, |store, _| compact_offered(&store.composer_state())));
+        assert!(store.read_with(cx, |store, _| compact_offered(
+            &store.composer_state_for(store.sole_thread().as_deref())
+        )));
         cx.simulate_input("/comp");
         cx.update(|window, cx| _ = window.draw(cx));
         composer.read_with(cx, |composer, cx| {
@@ -667,7 +673,11 @@ mod tests {
         let (store, composer, cx) = composer_window(false, cx);
         cx.simulate_resize(size(px(800.), px(600.)));
         composer.update_in(cx, |composer, window, cx| {
-            let cwd = store.read(cx).composer_state().active_cwd.unwrap();
+            let cwd = store
+                .read(cx)
+                .composer_state_for(store.read(cx).sole_thread().as_deref())
+                .active_cwd
+                .unwrap();
             let entries = (0..FILE_MENU_ROW_CAP)
                 .map(|index| PathEntry::from_rel(format!("file-{index:02}.rs"), false))
                 .collect();

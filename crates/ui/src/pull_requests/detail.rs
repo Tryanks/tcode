@@ -2630,7 +2630,7 @@ mod tests {
             .unwrap();
         settle(cx);
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        store.update(cx, |store, cx| store.select_session("session".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         view.update(cx, |view, cx| {
             view.window_state
                 .update(cx, |state, cx| state.set_compact(true, cx))
@@ -3313,7 +3313,7 @@ mod tests {
         send_links(&incoming, &[7, 8, 9]);
         settle(cx);
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        store.update(cx, |store, cx| store.select_session("session".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("session".into(), cx));
         cx.replace_root_view(|_, cx| {
             super::super::PullRequestsPanel::new(
                 store.clone(),

@@ -2229,9 +2229,11 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
-            store.read_with(cx, |store, _| !store.chat_loading())
+            store.read_with(cx, |store, _| {
+                !store.chat_loading_for(store.sole_thread().as_deref())
+            })
         });
         let window_state = cx.new(|_| WindowState::new(false));
         let (_, cx) = cx.add_window_view(|window, cx| {
@@ -2263,14 +2265,14 @@ mod tests {
         let watched = |cx: &mut VisualTestContext| {
             store.read_with(cx, |store, _| {
                 store
-                    .command_output_for(store.legacy_focus().as_deref(), "run")
+                    .command_output_for(store.sole_thread().as_deref(), "run")
                     .and_then(|output| output.watched())
             })
         };
         let frame = |cx: &mut VisualTestContext| {
             store.read_with(cx, |store, _| {
                 store
-                    .command_output_for(store.legacy_focus().as_deref(), "run")
+                    .command_output_for(store.sole_thread().as_deref(), "run")
                     .and_then(|output| output.frame().cloned())
             })
         };
@@ -2384,7 +2386,7 @@ mod tests {
         cx.simulate_click(header.center(), gpui::Modifiers::default());
         settle(cx, "the reopened panel", &|_| output_topics().len() == 1);
 
-        store.update(cx, |store, cx| store.select_session(other_id, cx));
+        store.update(cx, |store, cx| store.show_alone(other_id, cx));
         settle(cx, "leaving the thread", &|_| output_topics().is_empty());
         driver.shutdown(cx, &store, &host);
     }
@@ -2430,7 +2432,7 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         store.update(cx, |store, _| {
             store.send_turn_for(session_id.clone(), "Plan it first".into(), Vec::new())
         });
@@ -2692,10 +2694,10 @@ This begins after the hard break."#;
         driver.wait_until(cx, &workspace_store, "workspace baseline", |cx| {
             workspace_store.read_with(cx, |store, _| store.baseline_ready())
         });
-        workspace_store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        workspace_store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
             workspace_store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading()
+                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
             })
         });
         workspace_store.update(cx, |store, cx| {

@@ -100,7 +100,7 @@ impl FocusPane {
     }
 }
 
-/// Exchange the focused pane's thread with its neighbour's on a side; the
+/// Exchange the acting pane's thread with its neighbour's on a side; the
 /// keyboard stays in the pane, which now shows the neighbour's thread. Each
 /// pane keeps its colour.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -118,8 +118,8 @@ impl SwapPane {
     }
 }
 
-/// Move the focused pane's thread to its neighbour on a side, the thread
-/// there coming back into the focused pane, and the keyboard with the moved
+/// Move the acting pane's thread to its neighbour on a side, the thread
+/// there coming back into the acting pane, and the keyboard with the moved
 /// thread: [`SwapPane`]'s exchange, with the keyboard following instead of
 /// staying. Nothing closes.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -137,14 +137,14 @@ impl MoveThreadToPane {
     }
 }
 
-/// Show a thread in a new pane right of the focused one, or focus the pane
+/// Show a thread in a new pane right of the acting one, or focus the pane
 /// already showing it.
 #[derive(Action, Clone, Debug, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
 pub(crate) struct OpenInNewPane(pub(crate) String);
 
 /// Lay the whole column out anew, as a layout swap (see [`LayoutSwap`]). The
-/// panes there fill the new slots in the layout's order, the focused one
+/// panes there fill the new slots in the layout's order, the last input
 /// first; panes left over close, and slots left over wait for a thread.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
@@ -153,7 +153,7 @@ pub(crate) enum PaneLayout {
     Grid,
     OneBesideTwo,
     Single,
-    /// The focused thread on the left, its agents stacked on the right.
+    /// The last input's thread on the left, its agents stacked on the right.
     SpreadAgents,
 }
 

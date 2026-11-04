@@ -1739,7 +1739,7 @@ mod tests {
         driver.wait_until(cx, &store, "child status", |cx| {
             store.read_with(cx, |store, _| store.agent_status("worker").is_some())
         });
-        store.update(cx, |store, cx| store.select_session("lead".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("lead".into(), cx));
 
         let events = || Topic::SessionEvents {
             session_id: "lead".into(),
@@ -1956,7 +1956,7 @@ mod tests {
         driver.wait_until(cx, &store, "child status", |cx| {
             store.read_with(cx, |store, _| store.agent_status("finished").is_some())
         });
-        store.update(cx, |store, cx| store.select_session("lead".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("lead".into(), cx));
         let (_, cx) = cx.add_window_view(|window, cx| {
             let panel =
                 cx.new(|cx| super::AgentsPanel::new(store.clone(), Some("lead".into()), cx));
