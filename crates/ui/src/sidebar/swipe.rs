@@ -359,6 +359,10 @@ pub(super) struct RowSwipes {
     catching_fling: Option<Point<Pixels>>,
     /// A sideways pan no row took: it moves nothing, but flings all the same.
     idle_pan: Option<Point<Pixels>>,
+    /// A pan on a row that began by catching a fling. gpui starts such a pan
+    /// at once, with no direction, and gives it the direction of its first
+    /// movement.
+    caught: Option<Point<Pixels>>,
 }
 
 impl RowSwipes {
@@ -588,22 +592,34 @@ impl SessionsSidebar {
             return;
         }
         let now = cx.background_executor().now();
-        if event.touch_phase == TouchPhase::Started {
+        let ended = matches!(event.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled);
+        let begins = if event.touch_phase == TouchPhase::Started {
             self.row_swipes.drop_lost_fingers(now, cx);
+            if over && delta == Point::default() {
+                self.row_swipes.caught = Some(event.position);
+            }
+            over
+        } else if self.row_swipes.caught == Some(event.position)
+            && (ended || (over && delta != Point::default()))
+        {
+            self.row_swipes.caught = None;
+            !ended
+        } else {
+            false
+        };
+        if begins {
             // Inward from the screen's edge is navigation's. Outward, the
             // edge has no gesture and the row has its own.
             let inward_from_edge =
                 delta.x > px(0.) && event.position.x - row.bounds.left() <= EDGE_WIDTH;
-            if over && delta.x != px(0.) && delta.y == px(0.) {
+            if delta.x != px(0.) && delta.y == px(0.) {
                 if row.can_swipe && !inward_from_edge {
                     self.take_row(row, event.position, now);
                 } else {
                     self.row_swipes.idle_pan = Some(event.position);
                 }
             }
-        } else if self.row_swipes.idle_pan == Some(event.position)
-            && matches!(event.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled)
-        {
+        } else if self.row_swipes.idle_pan == Some(event.position) && ended {
             self.row_swipes.idle_pan = None;
             if event.touch_phase == TouchPhase::Ended {
                 self.catch_row_fling(event.position, window, cx);
@@ -620,7 +636,6 @@ impl SessionsSidebar {
         cx.stop_propagation();
         let swipe = &mut self.row_swipes.rows[index];
         let moved = swipe.moved() - delta.x;
-        let ended = matches!(event.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled);
         swipe.follow(moved, !ended && delta.x != px(0.), now);
         if ended {
             self.let_go_of_row(index, event.touch_phase == TouchPhase::Ended, window, cx);
