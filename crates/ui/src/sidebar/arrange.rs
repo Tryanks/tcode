@@ -935,7 +935,7 @@ impl SessionsSidebar {
     ) -> gpui::AnyElement {
         self.clear_finished_drag(cx);
         let scope = self.arrange_scope.clone();
-        let sessions = self.store.read(cx).flat_sessions();
+        let sessions = self.thread_lists(cx).flat;
         let sections = partition_threads(sessions.iter().filter(|meta| {
             scope
                 .as_deref()

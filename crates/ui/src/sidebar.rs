@@ -632,7 +632,7 @@ struct FlatFrame {
     scope: Option<String>,
     settled_count: usize,
     project_names: HashMap<String, String>,
-    flags: HashMap<String, ThreadFlags>,
+    flags: Rc<HashMap<String, ThreadFlags>>,
 }
 
 /// A row of the desktop grouped list. Project-scoped rows index into the
@@ -666,8 +666,8 @@ enum GroupedListRow {
 struct GroupedFrame {
     rows: Vec<GroupedListRow>,
     folds: Vec<f32>,
-    groups: Vec<ProjectGroup>,
-    flags: HashMap<String, ThreadFlags>,
+    groups: Rc<Vec<ProjectGroup>>,
+    flags: Rc<HashMap<String, ThreadFlags>>,
 }
 
 impl GroupedListRow {
@@ -682,6 +682,16 @@ impl GroupedListRow {
             Self::Hint(_) => ("hint", ""),
         }
     }
+}
+
+/// What the thread lists show of the store, derived once for each
+/// [`WorkspaceStore::thread_list_revision`].
+#[derive(Clone)]
+struct ThreadLists {
+    revision: u64,
+    groups: Rc<Vec<ProjectGroup>>,
+    flat: Rc<Vec<SessionMeta>>,
+    flags: Rc<HashMap<String, ThreadFlags>>,
 }
 
 #[derive(Clone, Default)]
@@ -747,6 +757,7 @@ pub struct SessionsSidebar {
     grouped_flip: crate::motion::ListFlip,
     grouped_presence: presence::RowPresence<(Rc<GroupedFrame>, usize)>,
     grouped_drawn: Rc<GroupedFrame>,
+    thread_lists: Option<ThreadLists>,
     compact_list_state: ListState,
     compact_scroll: crate::motion::ListScroll,
     compact_model: Option<Rc<CompactListModel>>,
@@ -791,6 +802,24 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
 }
 
 impl SessionsSidebar {
+    fn thread_lists(&mut self, cx: &App) -> ThreadLists {
+        let store = self.store.read(cx);
+        let revision = store.thread_list_revision();
+        if let Some(lists) = &self.thread_lists
+            && lists.revision == revision
+        {
+            return lists.clone();
+        }
+        let lists = ThreadLists {
+            revision,
+            groups: Rc::new(store.grouped_sessions()),
+            flat: Rc::new(store.flat_sessions()),
+            flags: Rc::new(session_flags(store.sidebar_sessions(), store)),
+        };
+        self.thread_lists = Some(lists.clone());
+        lists
+    }
+
     /// The rows `scope` shows, as a drag over them would leave them.
     fn thread_rows<'a>(
         &self,
@@ -914,12 +943,12 @@ impl SessionsSidebar {
                 .collect();
         }
 
+        let lists = self.thread_lists(cx);
         let store = self.store.read(cx);
         let mut ids = Vec::new();
         match store.sidebar_layout() {
             SidebarLayout::Flat => {
-                let sessions = store.flat_sessions();
-                let rows = self.thread_rows(&sessions, self.project_filter.as_deref(), "recent");
+                let rows = self.thread_rows(&lists.flat, self.project_filter.as_deref(), "recent");
                 ids.extend(
                     rows.pinned
                         .into_iter()
@@ -930,7 +959,7 @@ impl SessionsSidebar {
             }
             SidebarLayout::Grouped => {
                 ids.extend(
-                    self.grouped_rows(&store.grouped_sessions(), store)
+                    self.grouped_rows(&lists.groups, store)
                         .into_iter()
                         .filter_map(|(row, _)| match row {
                             GroupedListRow::Thread(meta) => Some(meta.id),
@@ -1000,10 +1029,8 @@ impl SessionsSidebar {
     /// change that resets them does not animate.
     fn sample_folds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
-        let (layout, groups) = {
-            let store = self.store.read(cx);
-            (store.sidebar_layout(), store.grouped_sessions())
-        };
+        let layout = self.store.read(cx).sidebar_layout();
+        let groups = self.thread_lists(cx).groups;
         let mut targets = Vec::new();
         match layout {
             SidebarLayout::Flat => targets.push((
@@ -1012,7 +1039,7 @@ impl SessionsSidebar {
             )),
             SidebarLayout::Grouped => {
                 let headers = !compact || groups.len() > 1;
-                for group in &groups {
+                for group in groups.iter() {
                     let id = group.project.id.as_str();
                     let collapsed = self.store.read(cx).is_project_collapsed(id)
                         && (headers || group.project.quick_chat);
@@ -1191,6 +1218,7 @@ impl SessionsSidebar {
             grouped_flip: Default::default(),
             grouped_presence: Default::default(),
             grouped_drawn: Rc::default(),
+            thread_lists: None,
             compact_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
             compact_presence: Default::default(),
             compact_flip: Default::default(),
@@ -4080,12 +4108,13 @@ impl SessionsSidebar {
                 .is_none_or(|model| model.locale.as_str() != &*locale)
         {
             let swiped_off = self.swiped_off(cx);
+            let lists = self.thread_lists(cx);
             let (groups, collapsed_projects, sessions, flags, layout) = {
                 let store = self.store.read(cx);
-                let mut sessions = store.flat_sessions();
+                let mut sessions = (*lists.flat).clone();
                 sessions.retain(|meta| !swiped_off.contains(&meta.id));
-                let flags = session_flags(&sessions, store);
-                let mut groups = store.grouped_sessions();
+                let flags = lists.flags;
+                let mut groups = (*lists.groups).clone();
                 for group in &mut groups {
                     group.sessions.retain(|meta| !swiped_off.contains(&meta.id));
                 }
@@ -5034,8 +5063,8 @@ impl SessionsSidebar {
     /// The Grouped layout's header and list.
     fn render_grouped_layout(
         &mut self,
-        groups: Vec<ProjectGroup>,
-        flags: HashMap<String, ThreadFlags>,
+        groups: Rc<Vec<ProjectGroup>>,
+        flags: Rc<HashMap<String, ThreadFlags>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (gpui::AnyElement, gpui::AnyElement) {
@@ -5164,7 +5193,7 @@ impl SessionsSidebar {
         &mut self,
         groups: &[ProjectGroup],
         flat_sessions: &[SessionMeta],
-        flags: HashMap<String, ThreadFlags>,
+        flags: Rc<HashMap<String, ThreadFlags>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (gpui::AnyElement, gpui::AnyElement) {
@@ -5441,17 +5470,13 @@ impl Render for SessionsSidebar {
             return self.render_compact(window, cx);
         }
 
-        let (layout, groups, flat_sessions, flags) = {
-            let store = self.store.read(cx);
-            let sessions = store.sidebar_sessions();
-            let flags = session_flags(&sessions, store);
-            (
-                store.sidebar_layout(),
-                store.grouped_sessions(),
-                store.flat_sessions(),
-                flags,
-            )
-        };
+        let layout = self.store.read(cx).sidebar_layout();
+        let ThreadLists {
+            groups,
+            flat: flat_sessions,
+            flags,
+            ..
+        } = self.thread_lists(cx);
         // Flat and Grouped are each their own list; switching cross-fades
         // them, the one left keeping its scroll while it fades. Until the
         // settings and threads load, the layout is only adopted.

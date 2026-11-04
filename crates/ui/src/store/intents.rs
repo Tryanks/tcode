@@ -136,6 +136,7 @@ impl WorkspaceStore {
                     return;
                 }
             }
+            self.thread_list_revision += 1;
             self.save_member_settings();
             return;
         }
@@ -191,6 +192,7 @@ impl WorkspaceStore {
                 }
                 _ => return,
             }
+            self.thread_list_revision += 1;
             self.save_member_settings();
             return;
         }
