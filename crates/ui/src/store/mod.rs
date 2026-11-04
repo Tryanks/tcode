@@ -3512,6 +3512,15 @@ impl WorkspaceStore {
         cx.notify();
     }
 
+    /// Whether text from [`Self::append_to_composer`] or a native rewind's
+    /// prefill waits for the thread's composer.
+    pub fn composer_text_waiting_for(&self, session_id: Option<&str>) -> bool {
+        self.thread_status(session_id).is_some_and(|status| {
+            self.composer_appends.contains_key(&status.session_id)
+                || self.native_rewind_prefills.contains_key(&status.session_id)
+        })
+    }
+
     /// Consume the thread's text from [`Self::append_to_composer`].
     pub fn take_composer_append_for(&mut self, session_id: Option<&str>) -> Option<String> {
         let session_id = self.thread_status(session_id)?.session_id.clone();

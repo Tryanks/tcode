@@ -1569,8 +1569,16 @@ impl Composer {
         self.sync_images_session();
         self.sync_text_destination(window, cx);
         self.sync_queued_refill(window, cx);
-        self.sync_native_rewind_prefill(window, cx);
-        self.sync_composer_append(window, cx);
+        // Taking the text writes the store, which draws every view that
+        // reads it again; most frames have none to take.
+        if self
+            .workspace_store
+            .read(cx)
+            .composer_text_waiting_for(self.session_id.as_deref())
+        {
+            self.sync_native_rewind_prefill(window, cx);
+            self.sync_composer_append(window, cx);
+        }
         self.sync_fallback_review_draft(window, cx);
         let composer_state = self.composer_state(cx);
         let subagent = composer_state.conversation_read_only;
