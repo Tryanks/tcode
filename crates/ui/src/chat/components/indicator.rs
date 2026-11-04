@@ -32,44 +32,50 @@ struct WorkingIndicator {
 impl RenderOnce for WorkingIndicator {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let started_at = self.started_at;
+        // The view is kept with the start it shows, so it is placed without
+        // reading it: what draws the indicator is not built again with it.
         window.with_global_id(self.id, |id, window| {
-            window.with_element_state(id, |view: Option<Entity<WorkingClock>>, _| {
-                let view = view
-                    .filter(|view| view.read(cx).started_at == started_at)
-                    .unwrap_or_else(|| cx.new(|cx| WorkingClock::new(started_at, cx)));
-                (view.clone(), view)
-            })
+            window.with_element_state(
+                id,
+                |held: Option<(Option<u64>, Entity<WorkingClock>)>, _| {
+                    let view = match held {
+                        Some((held_at, view)) if held_at == started_at => view,
+                        _ => cx.new(|_| WorkingClock {
+                            started_at,
+                            tick: None,
+                        }),
+                    };
+                    (view.clone(), (started_at, view))
+                },
+            )
         })
     }
 }
 
 struct WorkingClock {
     started_at: Option<u64>,
-    _tick: Task<()>,
-}
-
-impl WorkingClock {
-    fn new(started_at: Option<u64>, cx: &mut Context<Self>) -> Self {
-        // The elapsed time is shown to the decisecond.
-        let tick = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        });
-        Self {
-            started_at,
-            _tick: tick,
-        }
-    }
+    tick: Option<Task<()>>,
 }
 
 impl Render for WorkingClock {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The indicator's animations draw it again on every frame, which moves
+        // its time with them. Reduced motion stills them, and the time, shown
+        // to the decisecond, is then moved by a timer.
+        if !cx.reduce_motion() {
+            self.tick = None;
+        } else if self.tick.is_none() {
+            self.tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
         working_indicator("working".into(), self.started_at, window, cx)
     }
 }
