@@ -3637,7 +3637,7 @@ impl WorkspaceStore {
         })
     }
 
-    pub(super) fn session_loading_for(&self, session_id: &str) -> bool {
+    pub(crate) fn session_loading_for(&self, session_id: &str) -> bool {
         self.threads
             .get(session_id)
             .is_none_or(|thread| thread.timeline.is_none() || thread.status.is_none())

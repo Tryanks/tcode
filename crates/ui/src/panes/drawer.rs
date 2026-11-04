@@ -144,6 +144,15 @@ impl ThreadPanel {
     /// The Diff, Plan, Agents and Pull Requests tabs of the pane's drawer,
     /// made now if they never showed: the compact layout's panel page shows
     /// the same entity, as a page.
+    /// Whether the keyboard is in the pane's conversation: its composer, the
+    /// card of the agent beside it, or its drawer.
+    pub(crate) fn holds_input(&self, window: &Window, cx: &App) -> bool {
+        let chat = self.chat.read(cx);
+        chat.composer_has_keyboard(window, cx)
+            || chat.side_composer_has_keyboard(window, cx)
+            || self.drawer.focus.contains_focused(window, cx)
+    }
+
     pub(crate) fn drawer_tabs(&mut self, cx: &mut Context<Self>) -> Entity<DiffPanel> {
         let subject = self.drawer_subject(cx);
         let lead = self
