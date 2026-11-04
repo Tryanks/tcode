@@ -34,6 +34,10 @@ impl<K: Clone + Eq + Hash, V: Clone> RecentCache<K, V> {
         }
     }
 
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        self.entries.get(key)
+    }
+
     pub(crate) fn remove(&mut self, key: &K) {
         if let Some(value) = self.entries.remove(key) {
             self.weight -= (self.weigh)(key, &value);

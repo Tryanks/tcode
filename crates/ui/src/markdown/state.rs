@@ -687,6 +687,12 @@ impl MarkdownState {
         cx.notify();
     }
 
+    /// Whether a Mermaid fence's first picture is still being drawn: the
+    /// document shows the fence's code until it is.
+    pub(crate) fn drawing_first_diagrams(&self) -> bool {
+        self.diagrams.opening()
+    }
+
     pub(super) fn is_selectable(&self) -> bool {
         self.selection.is_some()
     }
