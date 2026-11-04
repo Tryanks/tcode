@@ -736,7 +736,11 @@ impl CommandTheme {
 }
 
 struct OutputModel {
-    frame: Rc<TerminalFrame>,
+    /// The screen this was built from. Held weakly so the store's screen
+    /// stays its only holder and a change from the host updates it in place:
+    /// a changed screen is then a new allocation, which this no longer is.
+    frame: std::rc::Weak<TerminalFrame>,
+    cols: u16,
     budget: usize,
     model: TerminalModel,
     /// The rows the output shows at once.
@@ -843,48 +847,48 @@ impl Panel {
             selection: cx.theme().primary.opacity(0.28),
         };
         let command = grid_element(command_model, command_rows, cols, palette);
-        let (output, output_rows) =
-            match screen.frame {
-                Some(frame) => {
-                    if !self.output_model.as_ref().is_some_and(|built| {
-                        Rc::ptr_eq(&built.frame, frame) && built.budget == budget
-                    }) {
-                        let (mut model, rows, lines) = output_model(frame, budget);
-                        // Scrolled back, the reader keeps reading what they
-                        // were while more arrives; at the end, it follows.
-                        if let Some(built) = &self.output_model
-                            && built.model.display_offset() > 0
-                        {
-                            let grown = lines.saturating_sub(built.lines);
-                            model.scroll((built.model.display_offset() + grown) as i32);
-                        }
-                        self.output_model = Some(OutputModel {
-                            frame: frame.clone(),
-                            budget,
-                            model,
-                            rows,
-                            lines,
-                        });
+        let (output, output_rows) = match screen.frame {
+            Some(frame) => {
+                if !self.output_model.as_ref().is_some_and(|built| {
+                    std::ptr::eq(built.frame.as_ptr(), Rc::as_ptr(frame)) && built.budget == budget
+                }) {
+                    let (mut model, rows, lines) = output_model(frame, budget);
+                    // Scrolled back, the reader keeps reading what they
+                    // were while more arrives; at the end, it follows.
+                    if let Some(built) = &self.output_model
+                        && built.model.display_offset() > 0
+                    {
+                        let grown = lines.saturating_sub(built.lines);
+                        model.scroll((built.model.display_offset() + grown) as i32);
                     }
-                    let built = self.output_model.as_ref().expect("output model");
-                    (
-                        grid_element(&built.model, built.rows, built.frame.cols, palette),
-                        built.rows,
-                    )
-                }
-                // Space for the rows the output is likely to need, so the screen
-                // usually lands without moving what follows.
-                None => {
-                    let rows = placeholder_rows(output, budget);
-                    (
-                        div()
-                            .w_full()
-                            .h(px(rows as f32 * TERMINAL_CELL_HEIGHT))
-                            .into_any_element(),
+                    self.output_model = Some(OutputModel {
+                        frame: Rc::downgrade(frame),
+                        cols: frame.cols,
+                        budget,
+                        model,
                         rows,
-                    )
+                        lines,
+                    });
                 }
-            };
+                let built = self.output_model.as_ref().expect("output model");
+                (
+                    grid_element(&built.model, built.rows, built.cols, palette),
+                    built.rows,
+                )
+            }
+            // Space for the rows the output is likely to need, so the screen
+            // usually lands without moving what follows.
+            None => {
+                let rows = placeholder_rows(output, budget);
+                (
+                    div()
+                        .w_full()
+                        .h(px(rows as f32 * TERMINAL_CELL_HEIGHT))
+                        .into_any_element(),
+                    rows,
+                )
+            }
+        };
         let rows = command_rows + output_rows;
         self.resized |= self.shown_rows.is_some_and(|shown| shown != rows);
         self.shown_rows = Some(rows);

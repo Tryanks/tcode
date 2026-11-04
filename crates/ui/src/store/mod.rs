@@ -1227,6 +1227,14 @@ impl WorkspaceStore {
                 },
                 ServerEvent::CommandOutputReplaced(frame),
             ) => self.apply_command_output(session_id, item_id, *cols, frame),
+            (
+                Topic::CommandOutput {
+                    session_id,
+                    item_id,
+                    cols,
+                },
+                ServerEvent::CommandOutputDelta(delta),
+            ) => self.apply_command_output_delta(session_id, item_id, *cols, delta),
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 if let Some(archived) = &mut self.archived_replica {
                     archived.sessions.retain(|archived| archived.id != meta.id);

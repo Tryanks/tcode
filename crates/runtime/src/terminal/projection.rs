@@ -255,7 +255,7 @@ impl TerminalProjection {
 }
 
 /// Compare two rows whose style ids come from different tables.
-fn same_row(
+pub(super) fn same_row(
     current: &TerminalRow,
     current_styles: &[TerminalStyle],
     projected: &TerminalRow,

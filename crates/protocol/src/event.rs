@@ -83,9 +83,13 @@ pub enum ServerEvent {
         terminal_id: u64,
         delta: Box<crate::terminal::TerminalDelta>,
     },
-    /// The whole rendered screen of a [`Topic::CommandOutput`]: no cursor and
-    /// no scrollback, trailing blank rows trimmed.
+    /// The whole rendered screen of a [`Topic::CommandOutput`], with no cursor
+    /// and trailing blank rows trimmed: the answer to subscribing, and a push
+    /// when its subscribers may hold different screens.
     CommandOutputReplaced(Box<crate::terminal::TerminalFrame>),
+    /// What changed in a [`Topic::CommandOutput`]'s screen since the last
+    /// screen or change pushed on it.
+    CommandOutputDelta(Box<crate::terminal::TerminalDelta>),
     PreviewRequest {
         request_id: u64,
         session_id: String,
