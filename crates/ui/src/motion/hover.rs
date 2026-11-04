@@ -9,12 +9,15 @@
 //! and hovered fills.
 
 use gpui::{
-    App, ElementId, Hsla, InteractiveElement as _, IntoElement as _, Pixels, SharedString,
+    App, ElementId, Entity, Hsla, InteractiveElement as _, IntoElement as _, Pixels, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use gpui_base::motion::Interpolate as _;
 
 use super::{Clock, Colour, Curve, Sampled, child_id, owned::Owned};
+
+/// The id a [`hover_layer`] and the hover it keeps go by, under its item's.
+const LAYER: &str = "hover-layer";
 
 /// The fill of an element `reveal` of the way from `rest`, its fill while
 /// the pointer is away (a highlight, or nothing), to `hover`: mixed over
@@ -39,6 +42,42 @@ pub(crate) fn pointer_hover(
     }
 }
 
+/// An element's hover, kept under its id.
+#[derive(Clone, Copy, Default)]
+struct Hover {
+    /// Whether the pointer is over it, as its `on_hover` last heard.
+    pointer: bool,
+    /// Whether it keeps its hover fill with the pointer gone
+    /// ([`hold_hover_layer`]).
+    held: bool,
+}
+
+fn hover_state(id: &ElementId, window: &mut Window, cx: &mut App) -> Entity<Hover> {
+    window.use_keyed_state(child_id(id, "hovered"), cx, |_, _| Hover::default())
+}
+
+/// The element `id`'s hover, and the handler for its `on_hover`.
+fn tracked_hover(
+    id: &ElementId,
+    window: &mut Window,
+    cx: &mut App,
+) -> (
+    Hover,
+    impl Fn(&bool, &mut Window, &mut App) + 'static + use<>,
+) {
+    let state = hover_state(id, window, cx);
+    let now = *state.read(cx);
+    let on_hover = pointer_hover(move |is_hovered: &bool, _: &mut Window, cx: &mut App| {
+        state.update(cx, |hover, cx| {
+            if hover.pointer != *is_hovered {
+                hover.pointer = *is_hovered;
+                cx.notify();
+            }
+        });
+    });
+    (now, on_hover)
+}
+
 /// Whether the pointer is over the element `id`, as its `on_hover` last
 /// heard, and that handler: for an element whose hover moves more than a
 /// fill (a label's colour too), each part gliding to its hovered value.
@@ -50,17 +89,23 @@ pub(crate) fn hovered<I: Into<ElementId>>(
     bool,
     impl Fn(&bool, &mut Window, &mut App) + 'static + use<I>,
 ) {
-    let hovered = window.use_keyed_state(child_id(&id.into(), "hovered"), cx, |_, _| false);
-    let now = *hovered.read(cx);
-    let on_hover = pointer_hover(move |is_hovered: &bool, _: &mut Window, cx: &mut App| {
-        hovered.update(cx, |hovered, cx| {
-            if *hovered != *is_hovered {
-                *hovered = *is_hovered;
-                cx.notify();
-            }
-        });
+    let (hover, on_hover) = tracked_hover(&id.into(), window, cx);
+    (hover.pointer, on_hover)
+}
+
+/// Keeps the [`hover_layer`] of the element `owner` hovered while `held`,
+/// wherever the pointer goes: the layer's one fill is what stays, so a pointer
+/// over the element adds nothing to it, and the fill never leaves to come
+/// back as the pointer moves off. Called from above the element, before it
+/// renders. An element with no hover layer of its own (a message, a
+/// terminal) has no hover to keep, and shows nothing.
+pub(crate) fn hold_hover_layer(owner: ElementId, held: bool, window: &mut Window, cx: &mut App) {
+    // gpui-fast keeps what a `RenderOnce` renders under its type's name.
+    let layer = ElementId::Name(std::any::type_name::<Sampled>().into());
+    let state = window.with_id(owner, |window| {
+        window.with_id(layer, |window| hover_state(&LAYER.into(), window, cx))
     });
-    (now, on_hover)
+    state.update(cx, |hover, _| hover.held = held);
 }
 
 /// A hover fill gliding along `curve` on `clock`: the fill to paint now,
@@ -104,15 +149,19 @@ pub(crate) fn hover_layer(
 ) -> Sampled {
     let owner = owner.map(|(motion, key)| (motion.clone(), key));
     Sampled::new(move |window, cx| {
-        let (hovered, on_hover) = hovered("hover-layer", window, cx);
+        let (state, on_hover) = tracked_hover(&LAYER.into(), window, cx);
         let (clock, id) = match &owner {
             Some((motion, key)) => (Clock::Owned(motion), ElementId::from(key.clone())),
-            None => (Clock::Element, ElementId::from("hover-layer")),
+            None => (Clock::Element, ElementId::from(LAYER)),
         };
-        let target = Colour(if hovered { hover } else { rest });
+        let target = Colour(if state.pointer || state.held {
+            hover
+        } else {
+            rest
+        });
         let fill = clock.transition(child_id(&id, "hover-fill"), target, &curve, window, cx);
         div()
-            .id("hover-layer")
+            .id(LAYER)
             .absolute()
             .inset_0()
             .rounded(radius)
