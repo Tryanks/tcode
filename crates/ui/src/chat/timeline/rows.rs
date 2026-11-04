@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use agent::{ItemContent, ItemStatus, TurnStatus};
 use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta};
@@ -128,7 +128,13 @@ pub(crate) enum TimelineContinuity {
 /// Stateful input snapshot for reusing indexed turns across store notifications.
 #[derive(Debug, Default)]
 pub(crate) struct TurnIndexCache {
-    entries: Vec<Arc<TimelineEntry>>,
+    /// Each entry indexed, by identity, with its turn. Weak: a strong
+    /// reference would make the fold's `Arc::make_mut` on a streaming entry
+    /// copy the whole message or output on every delta instead of writing it
+    /// in place. A weak one keeps the allocation, so its address is never
+    /// reused while it is held here, and an entry changed in place moves to
+    /// a new one.
+    entries: Vec<(Weak<TimelineEntry>, usize)>,
     turns: Vec<TurnIndexMeta>,
     expanded: HashSet<String>,
 }
@@ -150,7 +156,7 @@ impl TurnIndexCache {
             .entries
             .iter()
             .zip(entries)
-            .position(|(old, new)| !Arc::ptr_eq(old, new))
+            .position(|((old, _), new)| !std::ptr::eq(old.as_ptr(), Arc::as_ptr(new)))
             .unwrap_or(self.entries.len().min(entries.len()));
         let tail_replace = entries.len() == self.entries.len()
             && entry_divergence.checked_add(1) == Some(entries.len());
@@ -174,7 +180,7 @@ impl TurnIndexCache {
                 reindex_from = reindex_from.min(entries[entry_divergence].turn);
             }
             if entry_divergence < self.entries.len() {
-                reindex_from = reindex_from.min(self.entries[entry_divergence].turn);
+                reindex_from = reindex_from.min(self.entries[entry_divergence].1);
             }
             if turn_divergence < turns.len() {
                 reindex_from = reindex_from.min(turn_divergence);
@@ -204,8 +210,11 @@ impl TurnIndexCache {
         items.extend(suffix);
 
         self.entries.truncate(entry_divergence);
-        self.entries
-            .extend(entries[entry_divergence..].iter().cloned());
+        self.entries.extend(
+            entries[entry_divergence..]
+                .iter()
+                .map(|entry| (Arc::downgrade(entry), entry.turn)),
+        );
         self.turns.truncate(turn_divergence);
         self.turns
             .extend(turns[turn_divergence..].iter().map(TurnIndexMeta::from));

@@ -175,9 +175,21 @@ impl ChatView {
                     let row = row_of_entry(&self.rows, index, entry.turn);
                     // A running turn's text arrives into its last entry.
                     let streaming = running && Some(index) == last;
-                    if let Some(text) = entry_markdown(entry) {
-                        texts.push((row, entry.id.clone(), text, streaming));
-                    }
+                    // A resident message whose entry is unchanged keeps its
+                    // text: it is neither copied out again nor compared.
+                    let text = if self
+                        .md_states
+                        .get(&entry.id)
+                        .is_some_and(|md| md.synced_from(entry))
+                    {
+                        None
+                    } else {
+                        let Some(text) = entry_markdown(entry) else {
+                            continue;
+                        };
+                        Some(text)
+                    };
+                    texts.push((row, entry.clone(), text, streaming));
                 }
                 (texts, decisions)
             })
@@ -187,28 +199,28 @@ impl ChatView {
             .retain(|id, _| decisions.build.contains(id) && !decisions.evict.contains(id));
 
         let mut rebuilt_rows = HashSet::new();
-        for (row, id, text, streaming) in texts {
-            match self.md_states.get_mut(&id) {
-                Some(md) => {
-                    md.sync(text, cx);
-                    md.set_streaming(streaming, cx);
+        for (row, entry, text, streaming) in texts {
+            let id = entry.id.clone();
+            if let Some(md) = self.md_states.get_mut(&id) {
+                if let Some(text) = text {
+                    md.sync_from(&entry, text, cx);
                 }
-                None if self.pending_md_builds.contains_key(&id) => {
-                    let pending = self
-                        .pending_md_builds
-                        .get_mut(&id)
-                        .expect("pending Markdown build disappeared");
-                    pending.desired_text = text;
-                }
-                None if text.len() > ASYNC_MARKDOWN_THRESHOLD_BYTES => {
-                    self.spawn_markdown_build(id, text, cx);
-                }
-                None => {
-                    let md = MdState::new(&text, cx);
-                    md.set_streaming(streaming, cx);
-                    self.md_states.insert(id, md);
-                    rebuilt_rows.extend(row);
-                }
+                md.set_streaming(streaming, cx);
+                continue;
+            }
+            let Some(text) = text else {
+                continue;
+            };
+            if let Some(pending) = self.pending_md_builds.get_mut(&id) {
+                pending.desired_text = text;
+            } else if text.len() > ASYNC_MARKDOWN_THRESHOLD_BYTES {
+                self.spawn_markdown_build(id, text, cx);
+            } else {
+                let mut md = MdState::new(&text, cx);
+                md.sync_from(&entry, text, cx);
+                md.set_streaming(streaming, cx);
+                self.md_states.insert(id, md);
+                rebuilt_rows.extend(row);
             }
         }
         self.place_messages_in_selection(cx);

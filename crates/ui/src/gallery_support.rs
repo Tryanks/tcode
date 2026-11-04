@@ -125,6 +125,7 @@ pub fn assistant(
         assistant::AssistantData {
             id,
             text: "",
+            copy_text: std::sync::Arc::from(""),
             summarized,
             cwd,
             markdown: Some(markdown),
@@ -165,6 +166,7 @@ pub fn plan(
         plan::PlanData {
             id,
             text: "",
+            copy_text: std::sync::Arc::from(""),
             cwd,
             markdown: Some(markdown),
             compact: false,

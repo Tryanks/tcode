@@ -214,6 +214,7 @@ impl ChatView {
                         components::assistant::AssistantData {
                             id: &entry.id,
                             text,
+                            copy_text: copy_text.clone(),
                             summarized: *summarized,
                             cwd,
                             markdown,
@@ -883,6 +884,7 @@ impl ChatView {
             components::plan::PlanData {
                 id: &entry.id,
                 text,
+                copy_text: copy_text.clone(),
                 cwd,
                 markdown,
                 compact: self.window_state.read(cx).compact,
