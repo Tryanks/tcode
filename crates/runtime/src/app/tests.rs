@@ -3134,11 +3134,19 @@ fn model_switch_restores_last_effort_used_with_that_model() {
         );
         fable.project_id = Some("project-target".into());
         fable.updated_at = 20;
-        state.sessions = vec![sol, fable].into();
+        // The same model last ran on another account, at an effort of its own.
+        let mut other_account = sol.clone();
+        other_account.profile_id = Some("second-account".into());
+        other_account.updated_at = 15;
+        other_account.option_selections = vec![OptionSelection {
+            id: "reasoningEffort".into(),
+            value: serde_json::json!("low"),
+        }];
+        state.sessions = vec![sol, other_account, fable].into();
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
-        // Switching the draft to a model brings back the effort it last ran at,
-        // not the model's default.
+        // Switching the draft to a model brings back the effort it last ran at
+        // on that account, not the model's default.
         state.host.set_active_model(
             state.selected.as_deref().unwrap_or_default(),
             ProviderKind::Codex,
@@ -3157,6 +3165,25 @@ fn model_switch_restores_last_effort_used_with_that_model() {
                 .find(|selection| selection.id == "reasoningEffort")
                 .map(|selection| &selection.value),
             Some(&serde_json::json!("max"))
+        );
+
+        state.host.set_active_model(
+            state.selected.as_deref().unwrap_or_default(),
+            ProviderKind::Codex,
+            Some("gpt-5.6-sol".into()),
+            Some("second-account".into()),
+            cx,
+        );
+
+        let draft = state.selected_session().unwrap();
+        assert_eq!(
+            draft
+                .meta
+                .option_selections
+                .iter()
+                .find(|selection| selection.id == "reasoningEffort")
+                .map(|selection| &selection.value),
+            Some(&serde_json::json!("low"))
         );
     });
 }

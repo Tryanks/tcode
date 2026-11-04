@@ -127,6 +127,8 @@ pub struct ScriptedProvider {
     pub launcher: ProviderLauncher,
     pub commands: smol::channel::Receiver<SessionCommand>,
     pub events: smol::channel::Sender<AgentEvent>,
+    /// Every launch's options, which carry the profile's environment and home.
+    pub launches: smol::channel::Receiver<SessionOptions>,
 }
 
 /// Build a provider launcher whose command and event channels are owned by the test.
@@ -134,7 +136,9 @@ pub struct ScriptedProvider {
 pub fn scripted_provider(provider: ProviderKind) -> ScriptedProvider {
     let (commands_tx, commands) = smol::channel::unbounded();
     let (events, events_rx) = smol::channel::unbounded();
-    let launcher = ProviderLauncher(Arc::new(move |requested, _options| {
+    let (launches_tx, launches) = smol::channel::unbounded();
+    let launcher = ProviderLauncher(Arc::new(move |requested, options| {
+        let _ = launches_tx.try_send(options);
         let commands = commands_tx.clone();
         let events = events_rx.clone();
         Box::pin(async move {
@@ -154,6 +158,7 @@ pub fn scripted_provider(provider: ProviderKind) -> ScriptedProvider {
         launcher,
         commands,
         events,
+        launches,
     }
 }
 
