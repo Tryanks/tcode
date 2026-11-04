@@ -248,15 +248,9 @@ impl DiffPanel {
         });
         let plan = cx.new(|cx| PlanPanel::new(workspace_store.clone(), session_id.clone(), cx));
         let agents = cx.new(|cx| AgentsPanel::new(workspace_store.clone(), session_id.clone(), cx));
-        let subscriptions = vec![cx.observe(&workspace_store, |this, store, cx| {
+        let subscriptions = vec![cx.observe(&workspace_store, |this, _, cx| {
             this.sync_agents_shown(cx);
-            let comments = store
-                .read(cx)
-                .review_comments_for(this.session_id.as_deref());
-            if this.observed_review_comments != comments {
-                this.observed_review_comments = comments;
-                this.remeasure_lists();
-            }
+            this.sync_review_comments(cx);
             cx.notify();
         })];
         let mut panel = Self {
@@ -283,7 +277,22 @@ impl DiffPanel {
             _subscriptions: subscriptions,
         };
         panel.sync_agents_shown(cx);
+        panel.sync_review_comments(cx);
         panel
+    }
+
+    /// Hold the thread's review comments, which every row the panel draws
+    /// reads, and lay the rows out again when they change.
+    fn sync_review_comments(&mut self, cx: &App) {
+        let comments = self
+            .workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref())
+            .map_or(&[][..], |status| &status.review_comment_drafts);
+        if self.observed_review_comments != comments {
+            self.observed_review_comments = comments.to_vec();
+            self.remeasure_lists();
+        }
     }
 
     /// Show the tabs of `session_id`'s thread, or none.
@@ -292,6 +301,7 @@ impl DiffPanel {
             return;
         }
         self.session_id = session_id.clone();
+        self.sync_review_comments(cx);
         self.plan
             .update(cx, |plan, cx| plan.set_session(session_id.clone(), cx));
         self.pull_requests.update(cx, |pull_requests, cx| {
@@ -1664,9 +1674,7 @@ impl DiffPanel {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows = self
-            .workspace_store
-            .read(cx)
-            .review_comments_for(self.session_id.as_deref())
+            .observed_review_comments
             .iter()
             .filter(|comment| {
                 comment.file == file
