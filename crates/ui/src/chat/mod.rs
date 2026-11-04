@@ -29,7 +29,7 @@ mod header;
 pub(crate) mod model;
 mod rail;
 mod side;
-pub(crate) use model::format_elapsed;
+pub(crate) use model::{format_elapsed, format_elapsed_seconds};
 pub(crate) use side::{CloseSide, SIDE_CONTEXT};
 mod timeline;
 pub(crate) mod tools;

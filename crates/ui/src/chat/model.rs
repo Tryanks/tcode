@@ -459,12 +459,12 @@ pub(crate) fn one_line_with_break_markers(text: &str) -> (String, Vec<Range<usiz
     (out, markers)
 }
 
-/// A span of time as every timing in the app reads: tenths of a second
-/// under a minute, then minutes and seconds, hours, minutes and seconds,
-/// and past a day, days, hours and minutes, so a long span never grows an
-/// unreadable count of a small unit.
+const MINUTE: u64 = 60;
+
+/// A span of time: tenths of a second under a minute, then minutes and
+/// seconds, hours, minutes and seconds, and past a day, days, hours and
+/// minutes, so a long span never grows an unreadable count of a small unit.
 pub(crate) fn format_elapsed(elapsed_ms: u64) -> String {
-    const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;
     let secs = elapsed_ms / 1000;
@@ -498,6 +498,17 @@ pub(crate) fn format_elapsed(elapsed_ms: u64) -> String {
             minutes = format!("{:02}", (secs % HOUR) / MINUTE)
         )
         .into_owned()
+    }
+}
+
+/// [`format_elapsed`] for a clock that ticks each second, where tenths would
+/// only repeat from tick to tick: whole seconds, floored, under a minute.
+pub(crate) fn format_elapsed_seconds(elapsed_ms: u64) -> String {
+    let secs = elapsed_ms / 1000;
+    if secs < MINUTE {
+        crate::tr!("time.duration_seconds", seconds = secs).into_owned()
+    } else {
+        format_elapsed(elapsed_ms)
     }
 }
 
@@ -1625,6 +1636,9 @@ pub(in crate::chat) mod tests {
             (7_323_276_000, "84d 18h 14m"),
         ] {
             assert_eq!(format_elapsed(ms), text, "{ms}");
+        }
+        for (ms, text) in [(15_900, "15s"), (59_999, "59s"), (65_299, "1m 05s")] {
+            assert_eq!(format_elapsed_seconds(ms), text, "{ms}");
         }
     }
 }
