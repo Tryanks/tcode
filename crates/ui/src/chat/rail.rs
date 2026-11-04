@@ -670,9 +670,38 @@ mod tests {
         }
     }
 
+    /// Every card in `keys` is drawn on its surface: the card's fill under
+    /// its header, as wide as the rail.
+    fn on_surfaces(cx: &mut VisualTestContext, keys: &[&str], when: &str) {
+        let rail = bounds(cx, "chat-rail").expect("the rail is drawn");
+        for key in keys {
+            let header = bounds(cx, &format!("rail-card-{key}")).expect("the header shows");
+            let surface = cx.update(|window, cx| {
+                let scale = window.scale_factor();
+                let fill = cx.theme().popover;
+                let (top, left) = (header.top().scale(scale), rail.left().scale(scale));
+                let width = rail.size.width.scale(scale).0 - 1.;
+                let near = |a: gpui::ScaledPixels, b: gpui::ScaledPixels| (a - b).0.abs() <= 1.;
+                crate::test_frames::painted_quads(window)
+                    .iter()
+                    .any(|quad| {
+                        quad.background.as_solid() == Some(fill)
+                            && near(quad.bounds.top(), top)
+                            && near(quad.bounds.left(), left)
+                            && quad.bounds.size.width.0 >= width
+                    })
+            });
+            assert!(
+                surface,
+                "{when}: the {key} card is drawn without its surface"
+            );
+        }
+    }
+
     /// Cards with more to show than a short rail holds share its height:
     /// the rail never runs past its bottom, as a card comes in or once it
-    /// is in, and each card's body scrolls inside its share.
+    /// is in, and each card's body scrolls inside its share, on its card's
+    /// surface whatever height its share comes to.
     #[gpui::test]
     fn cards_share_a_short_rail_and_scroll_inside_it(cx: &mut TestAppContext) {
         let mut threads = seed_two_threads(cx, timeline(0));
@@ -703,6 +732,7 @@ mod tests {
                 &["frame"],
                 &format!("frame {frame}"),
             );
+            on_surfaces(cx, &["goal", "plan"], &format!("frame {frame}"));
             cx.update(|window, cx| window.simulate_next_frame(cx));
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(16));
@@ -712,6 +742,11 @@ mod tests {
             cx,
             &["goal", "plan", "commands"],
             AT_REST,
+            "at rest with three cards",
+        );
+        on_surfaces(
+            cx,
+            &["goal", "plan", "commands"],
             "at rest with three cards",
         );
 

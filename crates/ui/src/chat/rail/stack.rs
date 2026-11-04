@@ -272,6 +272,10 @@ impl gpui::Element for RailStack {
             let card_bounds = Bounds::new(origin, size(width, height));
             // A card just in or almost out is shorter than its surface's
             // border, which would then reach below it: it shows no surface.
+            // The layout puts the surface's bottom on the nearest device
+            // pixel, up to half of one below a card whose height falls
+            // between them, which is not the border reaching below it.
+            let snap = px(0.5 / window.scale_factor());
             let surface = card
                 .chrome
                 .layout_as_root(
@@ -283,7 +287,7 @@ impl gpui::Element for RailStack {
                     cx,
                 )
                 .height
-                <= height;
+                <= height + snap;
             if surface {
                 card.chrome.prepaint_at(origin, window, cx);
             }
