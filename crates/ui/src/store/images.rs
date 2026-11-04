@@ -939,8 +939,7 @@ mod tests {
             });
             let executor = cx.background_executor.clone();
             let pump = cx.background_executor.spawn(async move {
-                link.pump_with_timer(|| executor.timer(Duration::from_millis(25)))
-                    .await;
+                link.pump_with_timer(|delay| executor.timer(delay)).await;
             });
             Self {
                 requests,
@@ -1442,8 +1441,7 @@ mod tests {
         store.update(cx, |store, cx| store.show_alone("selected".into(), cx));
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
+            link.pump_with_timer(|delay| executor.timer(delay)).await;
         });
         let project = Project::from_root(PathBuf::from("/host/project"));
         let drawn = Rc::new(RefCell::new(Vec::new()));
@@ -1606,8 +1604,7 @@ mod tests {
         });
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
-            link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                .await;
+            link.pump_with_timer(|delay| executor.timer(delay)).await;
         });
         // These paths exist only on the scripted host, never on the viewing client.
         let cwd = std::env::current_dir().unwrap().join("host-only-images");

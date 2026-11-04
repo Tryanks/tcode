@@ -376,7 +376,6 @@ impl Render for CommitDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     use gpui::{ScrollDelta, ScrollEvent, TestAppContext, point};
     use tcode_core::git::GitStatus;
@@ -422,7 +421,7 @@ mod tests {
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
             pump_link
-                .pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                .pump_with_timer(|delay| executor.timer(delay))
                 .await;
         });
         let store = cx.new(|cx| {

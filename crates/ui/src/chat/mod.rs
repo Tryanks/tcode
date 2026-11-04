@@ -2261,8 +2261,7 @@ pub(crate) mod tests {
             let pump = cx.background_executor.spawn({
                 let link = link.clone();
                 async move {
-                    link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
-                        .await;
+                    link.pump_with_timer(|delay| executor.timer(delay)).await;
                 }
             });
             let store = cx.new(|cx| {
