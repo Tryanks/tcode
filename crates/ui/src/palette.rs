@@ -526,7 +526,7 @@ impl CommandPalette {
                 Action::CheckUpdates,
             );
         }
-        if let Some(session_id) = store.legacy_focus()
+        if let Some(session_id) = crate::shell::last_input_thread(cx)
             && let Some(meta) = store
                 .sidebar_sessions()
                 .into_iter()
@@ -674,18 +674,25 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleDiff => {
-                self.store
-                    .update(cx, |store, cx| store.toggle_diff_panel(cx));
+                if let Some(session_id) = crate::shell::last_input_thread(cx) {
+                    self.store.update(cx, |store, cx| {
+                        store.toggle_tab_panel_for(&session_id, tcode_core::ui::RightTab::Diff, cx)
+                    });
+                }
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                self.store
-                    .update(cx, |store, cx| store.toggle_terminal_panel(cx));
+                let session_id = crate::shell::last_input_thread(cx).unwrap_or_default();
+                self.store.update(cx, |store, cx| {
+                    store.toggle_terminal_panel_for(session_id, cx)
+                });
                 self.close(cx);
             }
             Action::OpenPreview => {
-                self.store
-                    .update(cx, |store, cx| store.open_preview_panel(cx));
+                let session_id = crate::shell::last_input_thread(cx);
+                self.store.update(cx, |store, cx| {
+                    store.open_preview_panel_for(session_id.as_deref(), cx)
+                });
                 self.close(cx);
             }
             Action::CheckUpdates => {

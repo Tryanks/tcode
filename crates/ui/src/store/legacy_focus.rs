@@ -11,7 +11,9 @@ use tcode_core::{
 };
 use tcode_protocol::SessionStatus;
 
-use super::{ComposerState, PanelState, WorkspaceStore};
+#[cfg(test)]
+use super::PanelState;
+use super::{ComposerState, WorkspaceStore};
 
 impl WorkspaceStore {
     pub fn legacy_focus(&self) -> Option<String> {
@@ -73,6 +75,7 @@ impl WorkspaceStore {
         Some((session_id.to_owned(), self.preview_key_for(session_id)?))
     }
 
+    #[cfg(test)]
     pub(crate) fn panel_state(&self) -> PanelState {
         self.panel_state_for(self.focus())
     }
@@ -147,6 +150,7 @@ impl WorkspaceStore {
     }
 
     /// Leave the focused thread: nothing is focused, and the thread closes.
+    #[cfg(test)]
     pub(crate) fn leave_session(&mut self, cx: &mut Context<Self>) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
