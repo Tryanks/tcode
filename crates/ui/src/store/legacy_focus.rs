@@ -9,9 +9,9 @@ use tcode_core::{
     session::{ReviewComment, Timeline},
     ui::RightTab,
 };
-use tcode_protocol::{SessionStatus, Topic};
+use tcode_protocol::SessionStatus;
 
-use super::{ComposerState, PanelState, ShowThread, WorkspaceStore};
+use super::{ComposerState, PanelState, WorkspaceStore};
 
 impl WorkspaceStore {
     pub fn legacy_focus(&self) -> Option<String> {
@@ -42,10 +42,6 @@ impl WorkspaceStore {
         self.chat_loading_for(self.focus())
     }
 
-    pub fn baseline_ready(&self) -> bool {
-        self.baseline_ready_for(self.focus())
-    }
-
     pub fn composer_state(&self) -> ComposerState {
         self.composer_state_for(self.focus())
     }
@@ -54,6 +50,7 @@ impl WorkspaceStore {
         self.with_timeline_for(self.focus(), read)
     }
 
+    #[cfg(test)]
     pub(crate) fn delivery_messages(&self) -> Vec<(String, String, Option<String>, bool)> {
         self.delivery_messages_for(self.focus())
     }
@@ -172,130 +169,32 @@ impl WorkspaceStore {
     }
 
     /// What store-only tests act on a thread with, there being no shell for
-    /// [`Self::show_thread`] to reach.
+    /// [`Self::show_thread`] to reach: it replaces the focused thread, or
+    /// focuses one already open.
     #[cfg(test)]
     pub(crate) fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
-        self.fall_back_to(session_id, cx);
-    }
-
-    /// The workspace, not the user, goes to a thread: one another surface
-    /// shows only takes the focus, any other replaces the focused thread.
-    pub(super) fn fall_back_to(&mut self, session_id: String, cx: &mut Context<Self>) {
-        cx.emit(ShowThread {
+        cx.emit(super::ShowThread {
             session_id: session_id.clone(),
             replacing: None,
             asked: false,
         });
-        let shown = self.is_thread_open(&session_id);
-        self.select(session_id, shown, cx);
+        self.select_for_test(session_id, cx);
     }
 
-    /// Select the focused thread afresh once a new baseline dropped its
-    /// subscriptions.
-    pub(super) fn reselect_focused(&mut self, cx: &mut Context<Self>) {
-        if let Some(session_id) = self.focused_session_id.take() {
-            self.select(session_id, false, cx);
-        }
-    }
-
-    fn select(&mut self, session_id: String, shown: bool, cx: &mut Context<Self>) {
+    #[cfg(test)]
+    pub(crate) fn select_for_test(&mut self, session_id: String, cx: &mut Context<Self>) {
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
         if self.focused_session_id.as_ref() == Some(&session_id) {
             return;
         }
         self.remember_project_of(&session_id);
-        if shown {
+        if self.is_thread_open(&session_id) {
             self.focus_thread(&session_id, cx);
             return;
         }
         self.leave_session(cx);
         self.focused_session_id = Some(session_id.clone());
         self.open_thread(&session_id);
-    }
-
-    /// Decide what the workspace shows after the index changed.
-    ///
-    /// Every open thread that left the visible index — archived (alone or
-    /// with its lead), deleted — closes, so no surface keeps showing it. Only
-    /// the conversation on screen picks what comes next, so archiving a
-    /// background thread (an Orchestrate sibling completing, a sweep) never
-    /// steals navigation: the workspace follows the focused thread's
-    /// still-visible parent; with no such parent it falls back to the last
-    /// interacted project's draft, which is also what an empty workspace
-    /// opens.
-    pub(super) fn reconcile_destination(&mut self, cx: &mut Context<Self>) {
-        // A deletion can arrive before the rejected Ack. Keep the authored
-        // write on screen so its failure still has Retry and Discard controls.
-        if !self.delivery_messages().is_empty() {
-            return;
-        }
-        let left: Vec<String> = self
-            .threads
-            .iter()
-            .filter(|(id, thread)| {
-                thread.open
-                    && self.focused_session_id.as_ref() != Some(*id)
-                    && thread
-                        .status
-                        .as_ref()
-                        .is_some_and(|status| self.left_index(status))
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for session_id in left {
-            self.close_thread(&session_id, cx);
-        }
-        match self.focused_status() {
-            Some(status) if !self.left_index(status) => return,
-            // A draft has no index entry of its own; its project leaving
-            // the index leaves nothing to draft into.
-            Some(status) if status.draft => self.leave_session(cx),
-            Some(status) => {
-                let session_id = status.session_id.clone();
-                let parent = self
-                    .index_replica
-                    .0
-                    .iter()
-                    .chain(&self.removed_session)
-                    .find(|meta| meta.id == session_id)
-                    .and_then(|meta| meta.parent_session_id.clone())
-                    .filter(|parent| self.session_visible(parent));
-                if let Some(parent) = parent {
-                    self.fall_back_to(parent, cx);
-                    return;
-                }
-                self.leave_session(cx);
-            }
-            // Focused, but its first status has not arrived: nothing to
-            // decide yet. Without a focus this is the empty workspace.
-            None if self.focused_session_id.is_some() => return,
-            None => {}
-        }
-        self.open_last_project_draft(cx);
-    }
-
-    pub(super) fn restore_index_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.focused_session_id.clone() {
-            let visible = self.index_replica.0.iter().any(|meta| meta.id == id)
-                || self.focused_status().is_some_and(|status| {
-                    status.draft
-                        && status.project_id.as_ref().is_some_and(|project| {
-                            self.index_replica.1.iter().any(|p| &p.id == project)
-                        })
-                });
-            if visible
-                && !self
-                    .host
-                    .subscribed_topics()
-                    .contains(&Topic::SessionStatus {
-                        session_id: id.clone(),
-                    })
-            {
-                self.reselect_focused(cx);
-            } else if !visible && !self.scope.is_full() {
-                self.leave_session(cx);
-            }
-        }
     }
 }
