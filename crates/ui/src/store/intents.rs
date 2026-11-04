@@ -693,8 +693,8 @@ impl WorkspaceStore {
         self.place_thread(session_id, replacing, true, cx);
     }
 
-    /// Put back a thread that went from a pane, which takes neither the
-    /// compact stack nor the keyboard.
+    /// Put back a thread that went from a pane, unasked: it leaves the compact
+    /// stack, and any keyboard something holds, alone.
     pub(crate) fn put_back_thread(&mut self, session_id: String, cx: &mut Context<Self>) {
         self.place_thread(session_id, None, false, cx);
     }
@@ -949,8 +949,8 @@ impl WorkspaceStore {
     pub fn start_scratch_draft(&mut self, cx: &mut Context<Self>) {
         self.create_and_show(Command::StartScratchDraft, true, cx);
     }
-    /// A project's draft for a workspace left with nothing to show, which
-    /// takes neither the compact stack nor the keyboard.
+    /// A project's draft for a workspace left with nothing to show, unasked:
+    /// it leaves the compact stack, and any keyboard something holds, alone.
     pub(super) fn fall_back_to_draft(
         &mut self,
         project_id: String,

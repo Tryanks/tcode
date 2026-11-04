@@ -132,7 +132,10 @@ impl Overlays {
                     .and_then(|focus| focus.upgrade())
                 {
                     Some(previous) => previous.focus(window, cx),
-                    None => window.blur(cx),
+                    None => {
+                        window.blur(cx);
+                        crate::shell::return_keyboard(window, cx);
+                    }
                 }
             }
             cx.notify();
@@ -155,7 +158,10 @@ impl Overlays {
         }
         match previous {
             Some(previous) => previous.focus(window, cx),
-            None if focused => window.blur(cx),
+            None if focused => {
+                window.blur(cx);
+                crate::shell::return_keyboard(window, cx);
+            }
             None => {}
         }
         cx.notify();
