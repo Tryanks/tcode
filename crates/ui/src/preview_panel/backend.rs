@@ -129,7 +129,17 @@ impl Backend {
 
 impl Backend {
     /// A backend for another panel on `self`'s pages.
-    pub(super) fn sharing(&self, cx: &mut Context<PreviewPanel>) -> Self {
+    pub(super) fn sharing(
+        &self,
+        #[cfg_attr(
+            target_os = "android",
+            expect(
+                unused_variables,
+                reason = "Android's webview reports no load errors to watch"
+            )
+        )]
+        cx: &mut Context<PreviewPanel>,
+    ) -> Self {
         Self {
             lifecycle: self.lifecycle.clone(),
             _owner: self._owner.clone(),
@@ -964,7 +974,7 @@ impl PreviewPanel {
                 window,
                 cx,
             ),
-            PreviewRequest::Screenshot => self.screenshot(&session_id, &key, reply, window, cx),
+            PreviewRequest::Screenshot => self.screenshot(&key, reply, window, cx),
         }
     }
 
@@ -1243,7 +1253,6 @@ impl PreviewPanel {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn screenshot(
         &mut self,
-        _session_id: &str,
         key: &str,
         reply: ReplyTx,
         _window: &mut Window,
@@ -1307,7 +1316,6 @@ impl PreviewPanel {
     #[cfg(target_os = "android")]
     fn screenshot(
         &mut self,
-        session_id: &str,
         key: &str,
         reply: ReplyTx,
         _window: &mut Window,
@@ -1356,7 +1364,6 @@ impl PreviewPanel {
     #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
     fn screenshot(
         &mut self,
-        _session_id: &str,
         _key: &str,
         reply: ReplyTx,
         _window: &mut Window,
