@@ -1336,8 +1336,8 @@ mod tests {
                 assert_eq!((cell.text.as_str(), cell.width), (text, width));
             }
             let paint = layout_grid(&model, palette(), false, None, false, false);
-            assert!(paint.text_runs.iter().any(|run| run.start_col == 3));
-            assert!(paint.text_runs.iter().any(|run| run.start_col == 5));
+            assert!(paint.rows[0].text_runs.iter().any(|run| run.start_col == 3));
+            assert!(paint.rows[0].text_runs.iter().any(|run| run.start_col == 5));
         }
         {
             let (model, rows) = command_model("abc中文e\u{301}👩‍💻z", 4, None);

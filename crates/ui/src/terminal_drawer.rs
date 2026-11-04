@@ -24,8 +24,8 @@ use gpui::{
     ExternalPaths, FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role, ScrollEvent,
-    Styled as _, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div,
-    fill, font, point, prelude::FluentBuilder as _, px, rgb, size,
+    SharedString, Styled as _, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
+    canvas, div, fill, font, point, prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_base::{ElementExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable};
 use tcode_protocol::terminal::{
@@ -280,9 +280,8 @@ pub(crate) struct GridTextStyle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BatchedTextRun {
-    pub(crate) row: usize,
     pub(crate) start_col: usize,
-    pub(crate) text: String,
+    pub(crate) text: SharedString,
     /// The number of non-spacer grid cells, matching Zed's batching model.
     cell_count: usize,
     pub(crate) style: GridTextStyle,
@@ -297,7 +296,6 @@ pub(crate) struct TerminalPalette {
 
 #[derive(Clone, Copy)]
 struct BackgroundRect {
-    row: usize,
     start_col: usize,
     cell_count: usize,
     color: Hsla,
@@ -316,15 +314,14 @@ struct CursorPaint {
 
 #[derive(Clone)]
 pub(crate) struct GridPaintData {
-    pub(crate) text_runs: Vec<BatchedTextRun>,
-    backgrounds: Vec<BackgroundRect>,
-    selections: Vec<BackgroundRect>,
+    /// Each screen row's layout, top first.
+    pub(crate) rows: Vec<Rc<RowPaintData>>,
     cursor: Option<CursorPaint>,
 }
 
-#[derive(Clone, Default)]
-struct RowPaintData {
-    text_runs: Vec<BatchedTextRun>,
+#[derive(Default)]
+pub(crate) struct RowPaintData {
+    pub(crate) text_runs: Vec<BatchedTextRun>,
     backgrounds: Vec<BackgroundRect>,
     selections: Vec<BackgroundRect>,
 }
@@ -350,7 +347,7 @@ struct RowLayoutKey {
 #[derive(Clone)]
 struct CachedRowLayout {
     key: RowLayoutKey,
-    paint: RowPaintData,
+    paint: Rc<RowPaintData>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1477,26 +1474,20 @@ impl TerminalDrawer {
         self.pressed_link = None;
     }
 
-    fn render_terminal(&self, terminal_id: u64, cx: &mut Context<Self>) -> AnyElement {
-        let Some(terminal) = self
-            .workspace_store
-            .read(cx)
-            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
-                workspace
-                    .terminal(terminal_id)
-                    .map(|entry| entry.terminal.clone())
-            })
-            .flatten()
+    fn render_terminal(
+        &self,
+        terminal_id: u64,
+        terminals: &[(u64, Rc<crate::store::ClientTerminal>)],
+        active_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(terminal) = terminals
+            .iter()
+            .find_map(|(id, terminal)| (*id == terminal_id).then_some(terminal))
         else {
             return div().into_any_element();
         };
-        let register_input = self
-            .workspace_store
-            .read(cx)
-            .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
-                workspace.active_id == Some(terminal_id)
-            })
-            .unwrap_or(false);
+        let register_input = active_id == Some(terminal_id);
 
         let model = terminal.model();
         let label = model.title();
@@ -1720,7 +1711,7 @@ impl Render for TerminalDrawer {
         self.cell_height = f32::from(shaped_cell.ascent + shaped_cell.descent)
             .ceil()
             .max(TERMINAL_FONT_SIZE + 2.);
-        let (tabs, active_id, active_split) = self
+        let (terminals, active_id, active_split) = self
             .workspace_store
             .read(cx)
             .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
@@ -1728,20 +1719,24 @@ impl Render for TerminalDrawer {
                     workspace
                         .terminals
                         .iter()
-                        .map(|entry| {
-                            (
-                                entry.id,
-                                entry.terminal.label(),
-                                entry.terminal.exited(),
-                                self.bell_tabs.contains(&entry.id),
-                            )
-                        })
+                        .map(|entry| (entry.id, entry.terminal.clone()))
                         .collect::<Vec<_>>(),
                     workspace.active_id,
                     workspace.active_id.and_then(|id| workspace.split_for(id)),
                 )
             })
             .unwrap_or_default();
+        let tabs = terminals
+            .iter()
+            .map(|(id, terminal)| {
+                (
+                    *id,
+                    terminal.label(),
+                    terminal.exited(),
+                    self.bell_tabs.contains(id),
+                )
+            })
+            .collect::<Vec<_>>();
 
         if self
             .marked_text
@@ -2134,7 +2129,7 @@ impl Render for TerminalDrawer {
                 1,
                 div()
                     .size_full()
-                    .child(self.render_terminal(id, cx))
+                    .child(self.render_terminal(id, &terminals, active_id, cx))
                     .into_any_element(),
             ));
         }
@@ -2147,7 +2142,7 @@ impl Render for TerminalDrawer {
             .size_range(frame.range(0, gpui_base::PANEL_MIN_SIZE..Pixels::MAX))
             .child(frame.hold(0, gutter(first, true)));
         let second = second.filter(|_| paired).map(|id| {
-            let pane = self.render_terminal(id, cx);
+            let pane = self.render_terminal(id, &terminals, active_id, cx);
             // No size of its own: at rest the group splits the body evenly
             // until a drag, as the glide lands it.
             resizable_panel()
@@ -2315,13 +2310,18 @@ pub(crate) fn paint_terminal_grid(
     let snap_up = |value: Pixels| px((f32::from(value) * scale_factor).ceil() / scale_factor);
     let origin = snapped_grid_origin(bounds, scale_factor);
 
-    for background in paint_data.backgrounds.iter().chain(&paint_data.selections) {
+    let rows = || paint_data.rows.iter().enumerate();
+    let backgrounds =
+        rows().flat_map(|(row, paint)| paint.backgrounds.iter().map(move |rect| (row, rect)));
+    let selections =
+        rows().flat_map(|(row, paint)| paint.selections.iter().map(move |rect| (row, rect)));
+    for (row, background) in backgrounds.chain(selections) {
         let left = origin.x + px(background.start_col as f32 * cell_width);
         let right =
             origin.x + px((background.start_col + background.cell_count) as f32 * cell_width);
         let left = snap_down(left);
         let background_bounds = Bounds::new(
-            point(left, origin.y + px(background.row as f32 * cell_height)),
+            point(left, origin.y + px(row as f32 * cell_height)),
             size(snap_up(right) - left, px(cell_height)),
         );
         window.paint_quad(fill(background_bounds, background.color));
@@ -2385,8 +2385,11 @@ pub(crate) fn paint_terminal_grid(
         }
     }
 
-    for run in &paint_data.text_runs {
-        let mut run_font = terminal_font();
+    let font = terminal_font();
+    for (row, run) in
+        rows().flat_map(|(row, paint)| paint.text_runs.iter().map(move |run| (row, run)))
+    {
+        let mut run_font = font.clone();
         run_font.weight = if run.style.bold {
             FontWeight::BOLD
         } else {
@@ -2415,14 +2418,14 @@ pub(crate) fn paint_terminal_grid(
             }),
         };
         let shaped = window.text_system().shape_line(
-            run.text.clone().into(),
+            run.text.clone(),
             px(TERMINAL_FONT_SIZE),
             &[text_run],
             Some(px(cell_width)),
         );
         let position = point(
             origin.x + px(run.start_col as f32 * cell_width),
-            origin.y + px(run.row as f32 * cell_height),
+            origin.y + px(row as f32 * cell_height),
         );
         let _ = shaped.paint(position, px(cell_height), TextAlign::Left, None, window, cx);
     }
@@ -2483,8 +2486,7 @@ fn layout_grid_cached(
         cache.rows = vec![None; state.rows()];
     }
 
-    let mut paint = RowPaintData::default();
-
+    let mut rows = Vec::with_capacity(state.rows());
     for row in 0..state.rows() {
         let row_key = row_layout_key(
             state,
@@ -2501,7 +2503,7 @@ fn layout_grid_cached(
             .filter(|cached| clean && cached.key == row_key)
             .map(|cached| cached.paint.clone());
         let row_paint = cached.unwrap_or_else(|| {
-            let paint = layout_row(
+            let paint = Rc::new(layout_row(
                 state,
                 row,
                 palette,
@@ -2510,22 +2512,18 @@ fn layout_grid_cached(
                 focused,
                 blink_phase,
                 cursor_cell,
-            );
+            ));
             cache.rows[row] = Some(CachedRowLayout {
                 key: row_key,
                 paint: paint.clone(),
             });
             paint
         });
-        paint.text_runs.extend(row_paint.text_runs);
-        paint.backgrounds.extend(row_paint.backgrounds);
-        paint.selections.extend(row_paint.selections);
+        rows.push(row_paint);
     }
 
     GridPaintData {
-        text_runs: paint.text_runs,
-        backgrounds: paint.backgrounds,
-        selections: paint.selections,
+        rows,
         cursor: cursor.map(|mut cursor| {
             cursor.focused = focused;
             cursor.visible &= !composing && (!state.cursor_blinking() || blink_phase);
@@ -2579,6 +2577,8 @@ fn layout_row(
     cursor_cell: Option<(usize, usize)>,
 ) -> RowPaintData {
     let mut paint = RowPaintData::default();
+    // Each run's text grows cell by cell before it is shared.
+    let mut runs: Vec<(usize, String, usize, GridTextStyle)> = Vec::new();
     let mut previous_cell_had_extras = false;
     for col in 0..state.cols() {
         let Some(cell) = state.cell(row, col) else {
@@ -2595,10 +2595,10 @@ fn layout_row(
             Some(terminal_color(bg, palette))
         };
         if let Some(color) = background {
-            push_background(&mut paint.backgrounds, row, col, color);
+            push_background(&mut paint.backgrounds, col, color);
         }
         if selected {
-            push_background(&mut paint.selections, row, col, palette.selection);
+            push_background(&mut paint.selections, col, palette.selection);
         }
 
         // A wide spacer still participates in backgrounds and hit-testing,
@@ -2630,11 +2630,7 @@ fn layout_row(
             && (!state.cursor_blinking() || blink_phase);
         let hyperlink_hovered =
             hovered_link.is_some_and(|link| (row, col) >= link.start && (row, col) <= link.end);
-        let text = if blank {
-            " ".to_string()
-        } else {
-            cell.text.clone()
-        };
+        let text = if blank { " " } else { cell.text.as_str() };
         let style = GridTextStyle {
             fg,
             bg,
@@ -2646,36 +2642,36 @@ fn layout_row(
             cursor: cursor_visible,
         };
 
-        if let Some(current) = paint.text_runs.last_mut()
-            && current.row == row
-            && current.start_col + current.cell_count == col
-            && current.style == style
+        if let Some((start_col, run_text, cell_count, run_style)) = runs.last_mut()
+            && *start_col + *cell_count == col
+            && *run_style == style
         {
-            current.text.push_str(&text);
-            current.cell_count += 1;
+            run_text.push_str(text);
+            *cell_count += 1;
         } else {
-            paint.text_runs.push(BatchedTextRun {
-                row,
-                start_col: col,
-                text,
-                cell_count: 1,
-                style,
-            });
+            runs.push((col, text.to_owned(), 1, style));
         }
     }
+    paint.text_runs = runs
+        .into_iter()
+        .map(|(start_col, text, cell_count, style)| BatchedTextRun {
+            start_col,
+            text: text.into(),
+            cell_count,
+            style,
+        })
+        .collect();
     paint
 }
 
-fn push_background(backgrounds: &mut Vec<BackgroundRect>, row: usize, col: usize, color: Hsla) {
+fn push_background(backgrounds: &mut Vec<BackgroundRect>, col: usize, color: Hsla) {
     if let Some(previous) = backgrounds.last_mut()
-        && previous.row == row
         && previous.start_col + previous.cell_count == col
         && previous.color == color
     {
         previous.cell_count += 1;
     } else {
         backgrounds.push(BackgroundRect {
-            row,
             start_col: col,
             cell_count: 1,
             color,
@@ -3270,15 +3266,15 @@ mod tests {
             ),
         ] {
             let paint = layout_grid(&state, palette, false, None, true, true);
-            let boundaries = paint
+            let boundaries = paint.rows[0]
                 .text_runs
                 .iter()
-                .map(|run| (run.start_col, run.text.as_str(), run.cell_count))
+                .map(|run| (run.start_col, run.text.as_ref(), run.cell_count))
                 .collect::<Vec<_>>();
             assert_eq!(boundaries, expected);
-            assert!(paint.selections.is_empty());
-            assert!(paint.backgrounds.is_empty());
-            for run in &paint.text_runs {
+            assert!(paint.rows[0].selections.is_empty());
+            assert!(paint.rows[0].backgrounds.is_empty());
+            for run in &paint.rows[0].text_runs {
                 assert_eq!(run.style.underline, wavy);
                 assert_eq!(run.style.underline_wavy, wavy);
             }
@@ -3296,13 +3292,13 @@ mod tests {
         let mut state = model(vec![cell('a', CellWidth::Narrow)]);
         let mut caches = HashMap::new();
         let first = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
-        assert_eq!(first.text_runs[0].text, "a");
+        assert_eq!(first.rows[0].text_runs[0].text, "a");
 
         // A delta that changes nothing on this row preserves its painted text.
         state.clear_damage();
         state.apply_delta(&idle_delta(1, 1));
         let cached = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
-        assert_eq!(cached.text_runs[0].text, "a");
+        assert_eq!(cached.rows[0].text_runs[0].text, "a");
 
         state.clear_damage();
         let mut delta = idle_delta(1, 1);
@@ -3316,7 +3312,7 @@ mod tests {
         }];
         state.apply_delta(&delta);
         let rebuilt = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
-        assert_eq!(rebuilt.text_runs[0].text, "b");
+        assert_eq!(rebuilt.rows[0].text_runs[0].text, "b");
     }
 
     fn idle_delta(cols: u16, rows: u16) -> tcode_protocol::terminal::TerminalDelta {
