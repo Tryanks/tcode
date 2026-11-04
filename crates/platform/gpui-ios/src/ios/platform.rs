@@ -8,7 +8,7 @@ use gpui::{
     CursorStyle, DummyKeyboardMapper, ForegroundExecutor, GestureTuning, Keymap, Menu, MenuItem,
     OperatingSystem, PathPromptOptions, Platform, PlatformDisplay, PlatformGestures, PlatformInfo,
     PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTarget, PlatformTextSystem,
-    PlatformWindow, Task, ThermalState, WindowAppearance, WindowParams,
+    PlatformWindow, PowerMode, Task, ThermalState, WindowAppearance, WindowParams,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -24,6 +24,7 @@ pub(crate) struct IosPlatform {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     thermal_state: Cell<ThermalState>,
+    power_mode: Cell<PowerMode>,
     state: RefCell<IosPlatformState>,
 }
 
@@ -40,6 +41,7 @@ struct IosPlatformState {
     on_lifecycle: Option<Box<dyn FnMut(AppLifecyclePhase)>>,
     on_memory_warning: Option<Box<dyn FnMut()>>,
     on_thermal_state_change: Option<Box<dyn FnMut()>>,
+    on_power_mode_change: Option<Box<dyn FnMut()>>,
 }
 
 impl IosPlatform {
@@ -50,6 +52,7 @@ impl IosPlatform {
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system: Arc::new(IosTextSystem::new()),
             thermal_state: Cell::new(ThermalState::Nominal),
+            power_mode: Cell::new(PowerMode::Unknown),
             state: RefCell::new(IosPlatformState::default()),
         }
     }
@@ -100,6 +103,19 @@ impl IosPlatform {
         }
         if self.state.borrow().on_thermal_state_change.is_none() {
             self.state.borrow_mut().on_thermal_state_change = callback;
+        }
+    }
+
+    pub(crate) fn update_power_mode(&self, power_mode: PowerMode) {
+        if self.power_mode.replace(power_mode) == power_mode {
+            return;
+        }
+        let mut callback = self.state.borrow_mut().on_power_mode_change.take();
+        if let Some(callback) = callback.as_mut() {
+            callback();
+        }
+        if self.state.borrow().on_power_mode_change.is_none() {
+            self.state.borrow_mut().on_power_mode_change = callback;
         }
     }
 
@@ -305,6 +321,14 @@ impl Platform for IosPlatform {
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {
         self.state.borrow_mut().on_thermal_state_change = Some(callback);
+    }
+
+    fn power_mode(&self) -> PowerMode {
+        self.power_mode.get()
+    }
+
+    fn on_power_mode_change(&self, callback: Box<dyn FnMut()>) {
+        self.state.borrow_mut().on_power_mode_change = Some(callback);
     }
 
     fn prevent_idle_sleep(&self, _reason: &str) -> Task<Result<ActivityGuard>> {

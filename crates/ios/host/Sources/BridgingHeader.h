@@ -62,6 +62,7 @@ void gpui_ios_lifecycle_background(void);
 void gpui_ios_lifecycle_foreground(void);
 void gpui_ios_memory_warning(void);
 void gpui_ios_thermal_state_changed(uint8_t state);
+void gpui_ios_low_power_mode_changed(uint8_t enabled);
 
 typedef struct TextRange { size_t location; size_t length; } TextRange;
 typedef struct TextRect { double x; double y; double width; double height; } TextRect;

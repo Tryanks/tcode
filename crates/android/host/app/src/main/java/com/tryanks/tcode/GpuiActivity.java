@@ -3,11 +3,13 @@ package com.tryanks.tcode;
 import android.app.NativeActivity;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
@@ -56,6 +58,7 @@ public final class GpuiActivity extends NativeActivity {
     private DisplayManager displayManager;
     /** API 29 and later only; below, the thermal state stays nominal. */
     private PowerManager.OnThermalStatusChangedListener thermalListener;
+    private BroadcastReceiver powerSaveReceiver;
     private final Choreographer.FrameCallback frameCallback = frameTimeNanos -> {
         framePosted = false;
         if (renderSurface == null || !renderSurface.isValid()) return;
@@ -71,6 +74,7 @@ public final class GpuiActivity extends NativeActivity {
     private native boolean nativeFrame();
     private native void nativeRefreshRate(float rate);
     private native void nativeThermalStatus(int status);
+    private native void nativePowerSaveMode(boolean enabled);
 
     private void updateDisplayRate() {
         Display display = getWindow().getDecorView().getDisplay();
@@ -291,6 +295,7 @@ public final class GpuiActivity extends NativeActivity {
         updateDisplayRate();
         watchDefaultNetwork();
         watchThermalStatus();
+        watchPowerSaveMode();
     }
 
     private void watchThermalStatus() {
@@ -302,6 +307,20 @@ public final class GpuiActivity extends NativeActivity {
         power.addThermalStatusListener(getMainExecutor(), thermalListener);
     }
 
+    private void watchPowerSaveMode() {
+        PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (power == null) return;
+        nativePowerSaveMode(power.isPowerSaveMode());
+        powerSaveReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                nativePowerSaveMode(power.isPowerSaveMode());
+            }
+        };
+        registerReceiver(
+                powerSaveReceiver, new IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED));
+    }
+
     @Override
     protected void onDestroy() {
         if (displayManager != null) displayManager.unregisterDisplayListener(displayListener);
@@ -309,6 +328,7 @@ public final class GpuiActivity extends NativeActivity {
             ((PowerManager) getSystemService(Context.POWER_SERVICE))
                     .removeThermalStatusListener(thermalListener);
         }
+        if (powerSaveReceiver != null) unregisterReceiver(powerSaveReceiver);
         gpuiPauseFrames();
         unwatchDefaultNetwork();
         super.onDestroy();

@@ -19,6 +19,8 @@ pub(crate) enum HostEvent {
     RefreshRate(f32),
     /// `PowerManager.THERMAL_STATUS_*`.
     ThermalStatus(i32),
+    /// `PowerManager.isPowerSaveMode`.
+    PowerSaveMode(bool),
     CommitText(String),
     SetComposingText(String),
     FinishComposing,
@@ -102,6 +104,10 @@ pub fn refresh_rate(rate: f32) {
 
 pub fn thermal_status(status: i32) {
     enqueue(HostEvent::ThermalStatus(status));
+}
+
+pub fn power_save_mode(enabled: bool) {
+    enqueue(HostEvent::PowerSaveMode(enabled));
 }
 
 pub(crate) fn request_frame() {

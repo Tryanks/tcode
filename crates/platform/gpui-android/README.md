@@ -24,7 +24,9 @@ maximum refresh capability and uses `Surface.setFrameRate` on API 30+, with
 seamless-only switching on API 31+. Idle clears the frame-rate vote, leaving
 system power and thermal policy in control. On API 29+ the host also reports
 `PowerManager`'s thermal status and its changes, so GPUI's own thermal frame
-cap applies; below that the state stays nominal.
+cap applies; below that the state stays nominal. On every level it reports
+Battery Saver (`isPowerSaveMode` and `ACTION_POWER_SAVE_MODE_CHANGED`), so
+GPUI's Low Power Mode cap applies too.
 
 The platform exposes one full-screen `PlatformWindow`. It owns the current
 `ANativeWindow`, a `gpui_wgpu::WgpuRenderer`, and the shared `WgpuContext`.
