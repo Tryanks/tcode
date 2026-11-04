@@ -216,7 +216,12 @@ fn row(
     let mark = mark(key, line.mark, window, cx);
     let trailing = match line.mark {
         Mark::Running => line.started_ms.map(|since| {
-            super::Elapsed::new(format!("rail-command-elapsed-{key}"), since).into_any_element()
+            crate::widgets::clock::Clock::since(
+                SharedString::from(format!("rail-command-elapsed-{key}")),
+                since,
+                |elapsed| crate::chat::model::format_elapsed_seconds(elapsed).into(),
+            )
+            .into_any_element()
         }),
         Mark::Failed(Some(code)) => Some(
             div()

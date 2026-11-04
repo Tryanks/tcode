@@ -452,46 +452,6 @@ impl ChatView {
 
         self.sync_markdown_residency(requested_row, cx);
         self.sync_deciding_plan(cx);
-
-        let scheduled_limit_resume = {
-            let store = self.workspace_store.read(cx);
-            let deadlines: HashSet<u64> = store
-                .composer_state_for(self.session_id.as_deref())
-                .queue
-                .into_iter()
-                .flat_map(|queue| queue.messages)
-                .filter_map(|message| message.fire_at_unix_secs)
-                .collect();
-            store
-                .with_timeline_for(self.session_id.as_deref(), |timeline| {
-                    timeline
-                        .turn_retry
-                        .as_ref()
-                        .is_some_and(|retry| retry.retry_at.is_some())
-                        || timeline.entries.iter().any(|entry| {
-                            matches!(
-                                entry.content,
-                                EntryContent::Error {
-                                    limit_resets_at: Some(resets_at),
-                                    ..
-                                } if deadlines.contains(&resets_at)
-                            )
-                        })
-                })
-                .unwrap_or(false)
-        };
-        if scheduled_limit_resume && self._limit_tick.is_none() {
-            self._limit_tick = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
-                    }
-                }
-            }));
-        } else if !scheduled_limit_resume {
-            self._limit_tick = None;
-        }
     }
 
     /// Invalidate the measured heights of every row of `turn`.

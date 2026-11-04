@@ -608,69 +608,6 @@ impl ChatView {
     }
 }
 
-/// How long something running has run, ticking each second while a frame
-/// draws it: the clock is the element's state, so a row no longer drawn
-/// drops it.
-#[derive(gpui::IntoElement)]
-pub(super) struct Elapsed {
-    id: gpui::ElementId,
-    /// When it started (unix ms).
-    since: u64,
-}
-
-impl Elapsed {
-    pub(super) fn new(id: impl Into<SharedString>, since: u64) -> Self {
-        Self {
-            id: id.into().into(),
-            since,
-        }
-    }
-}
-
-impl gpui::RenderOnce for Elapsed {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl gpui::IntoElement {
-        let since = self.since;
-        window.with_global_id(self.id, |id, window| {
-            window.with_element_state(id, |clock: Option<gpui::Entity<Clock>>, _| {
-                let clock = clock
-                    .filter(|clock| clock.read(cx).since == since)
-                    .unwrap_or_else(|| gpui::AppContext::new(cx, |cx| Clock::new(since, cx)));
-                (clock.clone(), clock)
-            })
-        })
-    }
-}
-
-struct Clock {
-    since: u64,
-    _tick: gpui::Task<()>,
-}
-
-impl Clock {
-    fn new(since: u64, cx: &mut gpui::Context<Self>) -> Self {
-        let tick = cx.spawn(async move |this, cx| {
-            loop {
-                // A fixed wait drifts off the second and sooner or later
-                // skips a number; this one lands on the next elapsed second.
-                let into_second = crate::time::now_millis().saturating_sub(since) % 1000;
-                let delay = Duration::from_millis(1000 - into_second);
-                cx.background_executor().timer(delay).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        });
-        Self { since, _tick: tick }
-    }
-}
-
-impl gpui::Render for Clock {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
-        let elapsed = crate::time::now_millis().saturating_sub(self.since);
-        div().child(super::format_elapsed_seconds(elapsed))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use agent::{Goal, GoalStatus, PlanStep, PlanStepStatus};
