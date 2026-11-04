@@ -394,32 +394,57 @@ pub(crate) struct NotificationList {
     compact: bool,
     focus_handle: FocusHandle,
     subscriptions: HashMap<NotificationId, Subscription>,
+    /// Whether the clock that ages the notifications runs. It runs only
+    /// while one of them changes with time, so a window with nothing to show
+    /// never wakes for it.
+    ticking: bool,
 }
 
 impl NotificationList {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let weak = cx.entity().downgrade();
-        cx.spawn_in(window, async move |_, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(50))
-                    .await;
-                if weak
-                    .update_in(cx, |list, window, cx| list.advance(window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             manager: toast_manager(false),
             stack_state: ToastStackState::default(),
             compact: false,
             focus_handle: cx.focus_handle().tab_stop(true),
             subscriptions: HashMap::new(),
+            ticking: false,
         }
+    }
+
+    /// Starts the clock unless it runs or nothing needs it; it stops itself
+    /// once no notification changes with time.
+    fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ticking || !self.changes_with_time(cx) {
+            return;
+        }
+        self.ticking = true;
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let ticking = this.update_in(cx, |list, window, cx| {
+                    list.advance(window, cx);
+                    list.ticking = list.changes_with_time(cx);
+                    list.ticking
+                });
+                if !matches!(ticking, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Whether a notification is entering, leaving, or counting down to its
+    /// auto-dismiss. A countdown paused by an inactive window or an expanded
+    /// stack still needs the clock: the manager measures each step from the
+    /// previous one, so a stopped clock would charge the pause on resume.
+    fn changes_with_time(&self, cx: &App) -> bool {
+        self.manager.iter().any(|(_, note, status)| {
+            status != ToastTransitionStatus::Present || self.compact || note.read(cx).autohide
+        })
     }
 
     pub fn push(&mut self, note: Notification, window: &mut Window, cx: &mut Context<Self>) {
@@ -457,9 +482,13 @@ impl NotificationList {
                 let dismiss_id = id.clone();
                 self.subscriptions.insert(
                     id.clone(),
-                    cx.subscribe(&entity, move |this, _, _: &DismissRequest, cx| {
-                        this.dismiss(&dismiss_id, cx);
-                    }),
+                    cx.subscribe_in(
+                        &entity,
+                        window,
+                        move |this, _, _: &DismissRequest, window, cx| {
+                            this.dismiss(&dismiss_id, window, cx);
+                        },
+                    ),
                 );
                 entity
             }
@@ -470,6 +499,7 @@ impl NotificationList {
             ToastOptions { timeout },
             cx.background_executor().now(),
         );
+        self.tick(window, cx);
         cx.notify();
     }
 
@@ -507,7 +537,7 @@ impl NotificationList {
         }
     }
 
-    fn dismiss(&mut self, id: &NotificationId, cx: &mut Context<Self>) {
+    fn dismiss(&mut self, id: &NotificationId, window: &mut Window, cx: &mut Context<Self>) {
         if self.manager.dismiss(id, cx.background_executor().now())
             && let Some(note) = self.manager.get(id)
         {
@@ -516,6 +546,7 @@ impl NotificationList {
                 cx.notify();
             });
         }
+        self.tick(window, cx);
         cx.notify();
     }
 
@@ -566,10 +597,15 @@ impl NotificationList {
         })
     }
 
-    pub fn close(&mut self, id: impl Into<NotificationId>, _: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss(&id.into(), cx);
+    pub fn close(
+        &mut self,
+        id: impl Into<NotificationId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dismiss(&id.into(), window, cx);
     }
-    pub fn close_by_type(&mut self, kind: TypeId, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn close_by_type(&mut self, kind: TypeId, window: &mut Window, cx: &mut Context<Self>) {
         let ids = self
             .manager
             .iter()
@@ -581,10 +617,10 @@ impl NotificationList {
             })
             .collect::<Vec<_>>();
         for id in ids {
-            self.dismiss(&id, cx);
+            self.dismiss(&id, window, cx);
         }
     }
-    pub fn clear(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ids = self.manager.dismiss_all(cx.background_executor().now());
         for id in ids {
             if let Some(note) = self.manager.get(&id) {
@@ -594,6 +630,7 @@ impl NotificationList {
                 });
             }
         }
+        self.tick(window, cx);
         cx.notify();
     }
 }
@@ -602,6 +639,7 @@ impl Render for NotificationList {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = crate::window_seam::window_is_compact(window, cx);
         self.sync_layout(compact, cx);
+        self.tick(window, cx);
         if compact {
             return div()
                 .max_w_full()
