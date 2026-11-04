@@ -303,14 +303,16 @@ impl AppState {
         outcome
     }
 
-    /// Toggle a model id in the persisted favorites list.
-    pub fn toggle_favorite_model(&mut self, model: &str, cx: &mut HostCx) {
+    /// Toggle a model on one account in the persisted favorites list.
+    pub fn toggle_favorite_model(
+        &mut self,
+        provider: ProviderKind,
+        profile_id: Option<String>,
+        model: String,
+        cx: &mut HostCx,
+    ) {
         let mut settings = self.settings.clone();
-        if let Some(pos) = settings.favorite_models.iter().position(|m| m == model) {
-            settings.favorite_models.remove(pos);
-        } else {
-            settings.favorite_models.push(model.to_string());
-        }
+        settings.toggle_favorite_model(provider, profile_id, model);
         self.update_settings(settings, cx);
     }
 }

@@ -2657,16 +2657,23 @@ mod replica_tests {
         assert_eq!(left, right, "{current:?} in {column:?}");
     }
 
-    /// Two accounts of one CLI list the same ids. A model picked under the
-    /// second reads as selected there alone, and the thread runs on it.
-    #[gpui::test]
-    fn a_model_is_selected_under_the_account_it_was_picked_on(cx: &mut TestAppContext) {
-        use crate::test_frames::draw_settled;
+    /// A draft on the built-in Claude account of a host with a second account
+    /// of that CLI, which lists the same two models.
+    struct TwoAccounts {
+        root: std::path::PathBuf,
+        host: tcode_runtime::pipe::SpawnedHost,
+        driver: crate::store::tests::LocalHostDriver,
+        store: gpui::Entity<WorkspaceStore>,
+        session_id: String,
+        launches: smol::channel::Receiver<agent::SessionOptions>,
+    }
+
+    fn two_accounts(cx: &mut TestAppContext, name: &str) -> TwoAccounts {
         use agent::ProviderKind;
 
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let root = crate::store::tests::scratch_root("account-selection");
+        let root = crate::store::tests::scratch_root(name);
         let project = tcode_core::project::Project::from_root(root.clone());
         let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
         disk.upsert_project(&project).unwrap();
@@ -2728,27 +2735,53 @@ mod replica_tests {
                     .is_some()
             })
         });
+        TwoAccounts {
+            root,
+            host,
+            driver,
+            store,
+            session_id,
+            launches,
+        }
+    }
+
+    fn show_rail(composer: &Entity<Composer>, rail: PickerRail, cx: &mut gpui::VisualTestContext) {
+        composer.update(cx, |composer, cx| {
+            composer.picker_rail = Some(rail);
+            cx.notify();
+        });
+        crate::test_frames::draw_settled(cx);
+    }
+
+    fn open_picker(cx: &mut gpui::VisualTestContext) {
+        let picker = cx.debug_bounds("model-picker").expect("model picker");
+        cx.simulate_click(picker.center(), Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+    }
+
+    /// Two accounts of one CLI list the same ids. A model picked under the
+    /// second reads as selected there alone, and the thread runs on it.
+    #[gpui::test]
+    fn a_model_is_selected_under_the_account_it_was_picked_on(cx: &mut TestAppContext) {
+        use crate::test_frames::draw_settled;
+        use agent::ProviderKind;
+
+        let TwoAccounts {
+            root,
+            host,
+            mut driver,
+            store,
+            session_id,
+            launches,
+        } = two_accounts(cx, "account-selection");
         let session = Some(session_id.clone());
         let (composer, cx) =
             cx.add_window_view(|window, cx| Composer::new(store.clone(), session, window, cx));
         cx.simulate_resize(gpui::size(px(1200.), px(800.)));
         draw_settled(cx);
 
-        let show_rail = |cx: &mut gpui::VisualTestContext, profile: &str| {
-            composer.update(cx, |composer, cx| {
-                composer.picker_rail = Some(PickerRail::Profile(profile.to_owned()));
-                cx.notify();
-            });
-            draw_settled(cx);
-        };
-        let open_picker = |cx: &mut gpui::VisualTestContext| {
-            let picker = cx.debug_bounds("model-picker").expect("model picker");
-            cx.simulate_click(picker.center(), Modifiers::default());
-            draw_settled(cx);
-        };
-
         open_picker(cx);
-        show_rail(cx, "second-account");
+        show_rail(&composer, PickerRail::Profile("second-account".into()), cx);
         cx.simulate_keystrokes("secondary-2");
         draw_settled(cx);
         driver.wait_until(cx, &store, "the pick to reach the thread", |cx| {
@@ -2769,7 +2802,7 @@ mod replica_tests {
             cx.debug_bounds("model-row-current").is_some(),
             "the account the model was picked on shows it selected"
         );
-        show_rail(cx, "claude");
+        show_rail(&composer, PickerRail::Profile("claude".into()), cx);
         assert!(
             cx.debug_bounds("model-row-current").is_none(),
             "the other account lists the same id, unselected"
@@ -2793,6 +2826,78 @@ mod replica_tests {
                 )),
             "the thread launches on the second account"
         );
+        driver.shutdown(cx, &store, &host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The star on a second account's row lights that row alone: the first
+    /// account's row of the same id stays dark, Favorites lists the one row,
+    /// and its shortcut picks it on the account it was starred under.
+    #[gpui::test]
+    fn a_favorite_under_the_second_account_stars_only_that_row(cx: &mut TestAppContext) {
+        use crate::test_frames::draw_settled;
+
+        let TwoAccounts {
+            root,
+            host,
+            mut driver,
+            store,
+            session_id,
+            ..
+        } = two_accounts(cx, "account-favorites");
+        let session = Some(session_id.clone());
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| Composer::new(store.clone(), session, window, cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        draw_settled(cx);
+
+        open_picker(cx);
+        show_rail(&composer, PickerRail::Profile("second-account".into()), cx);
+        let star = cx
+            .debug_bounds("model-fav-1")
+            .expect("the second row's star");
+        cx.simulate_click(star.center(), Modifiers::default());
+        driver.wait_until(cx, &store, "the star to reach the host", |cx| {
+            store.read_with(cx, |store, _| !store.settings().favorite_models.is_empty())
+        });
+        draw_settled(cx);
+
+        let starred = |profile: &str, cx: &gpui::VisualTestContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .picker_models_for_profile(profile)
+                    .into_iter()
+                    .filter(|model| model.favorite)
+                    .map(|model| model.id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(starred("second-account", cx), ["shared-model"]);
+        assert!(starred("claude", cx).is_empty());
+
+        show_rail(&composer, PickerRail::Favorites, cx);
+        assert!(cx.debug_bounds("model-fav-0").is_some());
+        assert!(
+            cx.debug_bounds("model-fav-1").is_none(),
+            "Favorites lists the starred row, not its namesake on the other account"
+        );
+        // Focus went with the star's button when its row moved to the top.
+        cx.update(|window, cx| {
+            let search = composer.read(cx).model_search_focus_handle(cx);
+            search.focus(window, cx);
+        });
+        cx.simulate_keystrokes("secondary-1");
+        driver.wait_until(cx, &store, "the favourite's pick", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .composer_state_for(Some(&session_id))
+                    .active_model
+                    .is_some_and(|active| {
+                        active.model.as_deref() == Some("shared-model")
+                            && active.profile_id.as_deref() == Some("second-account")
+                    })
+            })
+        });
         driver.shutdown(cx, &store, &host);
         std::fs::remove_dir_all(root).unwrap();
     }

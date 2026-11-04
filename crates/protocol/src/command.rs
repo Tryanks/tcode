@@ -585,6 +585,8 @@ pub enum Command {
         branch: String,
     },
     ToggleFavoriteModel {
+        provider: ProviderKind,
+        profile_id: Option<String>,
         model: String,
     },
     RewindTurn {

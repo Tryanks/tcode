@@ -37,8 +37,8 @@ use tcode_core::session::{
     Author, EntryContent, MessageOrigin, ReviewComment, Timeline, append_review_comments_to_prompt,
 };
 use tcode_core::settings::{
-    ChildApprovalMode, EnvVar, OrchestrateSettings, ProfileSettingsPatch, ProviderProfile,
-    ProviderSettings, ResolvedProfile, Settings,
+    ChildApprovalMode, EnvVar, FavoriteModel, OrchestrateSettings, ProfileSettingsPatch,
+    ProviderProfile, ProviderSettings, ResolvedProfile, Settings,
 };
 use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,

@@ -20,8 +20,8 @@ const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 #[derive(Clone)]
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
 struct ModelRow {
-    /// Provider-native model id (the favorites key + selection value), or the
-    /// ACP agent's registry id when `acp` is set.
+    /// Provider-native model id (the selection value), or the ACP agent's
+    /// registry id when `acp` is set.
     id: String,
     name: String,
     provider: ProviderKind,
@@ -1155,6 +1155,7 @@ fn render_model_row(
     let provider = row.provider;
     let profile_id = row.profile_id.clone();
     let fav_id = row.id.clone();
+    let fav_profile_id = row.profile_id.clone();
 
     let store_select = store_entity.clone();
     let popover_select = popover.clone();
@@ -1250,6 +1251,7 @@ fn render_model_row(
         })
         .child(
             Button::new(("model-fav", index))
+                .debug_selector(move || format!("model-fav-{index}"))
                 .ghost()
                 .xsmall()
                 .touch(compact)
@@ -1277,7 +1279,10 @@ fn render_model_row(
                 .on_click(move |_, _, cx| {
                     cx.stop_propagation();
                     let fav_id = fav_id.clone();
-                    store_fav.update(cx, |store, cx| store.toggle_favorite_model(fav_id, cx));
+                    let fav_profile_id = fav_profile_id.clone();
+                    store_fav.update(cx, |store, cx| {
+                        store.toggle_favorite_model(provider, fav_profile_id, fav_id, cx)
+                    });
                     // Refresh the open popover so the star + ordering update.
                     popover_fav.update(cx, |_, cx| cx.notify());
                 }),
