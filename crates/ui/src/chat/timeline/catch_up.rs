@@ -161,7 +161,7 @@ impl Workspace {
     /// Show `thread` in `chat` as the shell does when its pane switches.
     fn show(&self, chat: &Entity<ChatView>, thread: &str, cx: &mut VisualTestContext) {
         self.store
-            .update(cx, |store, cx| store.select_session(thread.to_owned(), cx));
+            .update(cx, |store, cx| store.show_alone(thread.to_owned(), cx));
         chat.update(cx, |chat, cx| chat.set_session(Some(thread.to_owned()), cx));
     }
 

@@ -60,12 +60,14 @@ impl StoredThread {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "the thread's history", |cx| {
             store.read_with(cx, |store, _| {
-                !store.chat_loading()
+                !store.chat_loading_for(store.sole_thread().as_deref())
                     && store
-                        .with_active_timeline(|timeline| !timeline.entries.is_empty())
+                        .with_timeline_for(store.sole_thread().as_deref(), |timeline| {
+                            !timeline.entries.is_empty()
+                        })
                         .unwrap_or(false)
             })
         });
@@ -95,7 +97,9 @@ impl StoredThread {
     pub(in crate::chat) fn entries(&self, cx: &mut VisualTestContext) -> Vec<Arc<TimelineEntry>> {
         self.store.read_with(cx, |store, _| {
             store
-                .with_active_timeline(|timeline| timeline.entries.clone())
+                .with_timeline_for(store.sole_thread().as_deref(), |timeline| {
+                    timeline.entries.clone()
+                })
                 .unwrap_or_default()
         })
     }

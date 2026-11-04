@@ -151,7 +151,7 @@ impl WorkspaceStore {
     /// does not control. A failed page holds prefetch until its retry cooldown.
     #[cfg(test)]
     pub(crate) fn suppress_history_prefetch_for_test(&mut self) {
-        if let Some(session_id) = self.legacy_focus()
+        if let Some(session_id) = self.sole_thread()
             && let Some(thread) = self.open_thread_mut(&session_id)
         {
             thread.history_error = Some("prefetch suppressed".into());

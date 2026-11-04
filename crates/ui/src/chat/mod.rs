@@ -391,8 +391,8 @@ impl ChatView {
             // keyboard goes on to the composer, as it does from the pane. A
             // composer not drawn yet, while the thread loads, is in no pane:
             // the keyboard would be nowhere on screen and the pane pressed
-            // would not take the store's focus, so the view keeps it until
-            // the composer is drawn.
+            // would not be entered, so the view keeps it until the composer
+            // is drawn.
             cx.on_focus(&focus_handle, window, |this, window, cx| {
                 if this.session_id.is_some() && this.composer_drawn {
                     this.focus_composer(window, cx);
@@ -1454,10 +1454,10 @@ pub(crate) mod tests {
                         .any(|model| model.id == "effort-layout")
             })
         });
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading()
+                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
             })
         });
         store.update(cx, |store, cx| {
@@ -1968,9 +1968,11 @@ pub(crate) mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, cx| store.select_session(first_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(first_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
-            store.read_with(cx, |store, _| !store.chat_loading())
+            store.read_with(cx, |store, _| {
+                !store.chat_loading_for(store.sole_thread().as_deref())
+            })
         });
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(first_id.clone(), timeline, cx);
@@ -1995,13 +1997,17 @@ pub(crate) mod tests {
             cx: &mut gpui::VisualTestContext,
         ) {
             let store = self.store.clone();
-            store.update(cx, |store, cx| store.select_session(thread.to_string(), cx));
+            store.update(cx, |store, cx| store.show_alone(thread.to_string(), cx));
             chat.update(cx, |chat, cx| {
                 chat.set_session(Some(thread.to_string()), cx)
             });
             self.driver
                 .wait_until(cx, &store, "the bound thread's history", |cx| {
-                    store.read_with(cx, |store, _| store.with_active_timeline(|_| ()).is_some())
+                    store.read_with(cx, |store, _| {
+                        store
+                            .with_timeline_for(store.sole_thread().as_deref(), |_| ())
+                            .is_some()
+                    })
                 });
             store.update(cx, |store, cx| {
                 store.set_session_replica_for_test(thread.to_string(), timeline, cx);
@@ -2067,10 +2073,10 @@ pub(crate) mod tests {
                 )
                 .expect("the seeded history is read");
         }
-        workspace_store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        workspace_store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &workspace_store, "selected conversation", |cx| {
             workspace_store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading()
+                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
             })
         });
         workspace_store.update(cx, |store, cx| {
@@ -2079,7 +2085,7 @@ pub(crate) mod tests {
         driver.wait_until(cx, &workspace_store, "Git status", |cx| {
             workspace_store.read_with(cx, |store, _| {
                 store
-                    .chat_git_controls_for(store.legacy_focus().as_deref())
+                    .chat_git_controls_for(store.sole_thread().as_deref())
                     .is_some()
             })
         });
@@ -2212,7 +2218,7 @@ pub(crate) mod tests {
                 )
             });
             crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-            store.update(cx, |store, cx| store.select_session(THREAD.into(), cx));
+            store.update(cx, |store, cx| store.show_alone(THREAD.into(), cx));
             let mut thread = Self {
                 store,
                 incoming,

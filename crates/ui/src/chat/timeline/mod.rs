@@ -970,7 +970,7 @@ mod tests {
             let turn = row.filter(|turn| highlighted == Some(first + *turn))?;
             store
                 .read_with(cx, |store, _| {
-                    store.with_active_timeline(|timeline| {
+                    store.with_timeline_for(store.sole_thread().as_deref(), |timeline| {
                         timeline
                             .entries
                             .iter()
@@ -1623,9 +1623,11 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
-            store.read_with(cx, |store, _| !store.chat_loading())
+            store.read_with(cx, |store, _| {
+                !store.chat_loading_for(store.sole_thread().as_deref())
+            })
         });
         let window_state = cx.new(|_| WindowState::new(false));
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -1650,7 +1652,7 @@ mod tests {
         let streamed = |cx: &mut VisualTestContext| {
             store.read_with(cx, |store, _| {
                 store
-                    .with_active_timeline(|timeline| {
+                    .with_timeline_for(store.sole_thread().as_deref(), |timeline| {
                         timeline
                             .entries
                             .last()
@@ -1766,10 +1768,10 @@ mod tests {
                 cx,
             )
         });
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "chat baseline", |cx| {
             store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading()
+                store.baseline_ready() && !store.chat_loading_for(store.sole_thread().as_deref())
             })
         });
         let window_state = cx.new(|_| WindowState::new(false));
@@ -1849,7 +1851,7 @@ mod tests {
         let row = cx.debug_bounds("timeline-row-89").unwrap_or_else(|| {
             panic!(
                 "last assistant row: selected={:?}, list_items={}",
-                store.read_with(cx, |store, _| store.legacy_focus()),
+                store.read_with(cx, |store, _| store.sole_thread()),
                 list.item_count()
             )
         });
@@ -2391,7 +2393,9 @@ mod tests {
             pages
         };
         let replica = |cx: &mut VisualTestContext| {
-            store.read_with(cx, |store, _| store.with_active_timeline(Timeline::clone))
+            store.read_with(cx, |store, _| {
+                store.with_timeline_for(store.sole_thread().as_deref(), Timeline::clone)
+            })
         };
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         // One trackpad gesture.
@@ -2424,7 +2428,12 @@ mod tests {
             while frame(&mut thread, cx).is_some() {
                 pages_away += 1;
                 view.read_with(cx, |chat, cx| {
-                    assert!(!chat.workspace_store.read(cx).chat_loading());
+                    assert!(
+                        !chat
+                            .workspace_store
+                            .read(cx)
+                            .chat_loading_for(chat.session_id.as_deref())
+                    );
                     assert!(!chat.rows.is_empty(), "the conversation stays on screen");
                 });
             }
@@ -2487,8 +2496,8 @@ mod tests {
         // the window its tail needed.
         while thread.outgoing.try_recv().is_ok() {}
         store.update(cx, |store, cx| {
-            store.select_session("other".into(), cx);
-            store.select_session(THREAD.into(), cx);
+            store.show_alone("other".into(), cx);
+            store.show_alone(THREAD.into(), cx);
         });
         let events_topic = Topic::SessionEvents {
             session_id: THREAD.into(),

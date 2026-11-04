@@ -1572,7 +1572,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, cx| store.select_session("thread-0".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("thread-0".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         window_state.update(cx, |state, cx| state.open_palette(cx));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {

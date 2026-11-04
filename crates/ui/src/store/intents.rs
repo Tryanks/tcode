@@ -470,8 +470,7 @@ impl WorkspaceStore {
             .clone()
     }
 
-    /// Show `side` beside `lead` in the lead's chat, or nothing there. The
-    /// focus stays on the lead: the chat showing it hosts the agent.
+    /// Show `side` beside `lead` in the lead's chat, or nothing there.
     pub(crate) fn set_side_thread(
         &mut self,
         lead: &str,
@@ -509,10 +508,8 @@ impl WorkspaceStore {
 
     /// Stop showing a thread: its topics are unsubscribed and its paging
     /// state forgotten, while its replicas stay for a while so reopening it
-    /// fetches only what it missed. Closing the focused thread leaves
-    /// nothing focused.
+    /// fetches only what it missed.
     pub(crate) fn close_thread(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        self.unfocus(session_id);
         cx.notify();
         self.clear_command_outputs(session_id);
         if let Some(thread) = self.threads.get_mut(session_id) {

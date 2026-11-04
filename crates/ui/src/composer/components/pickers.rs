@@ -2344,10 +2344,12 @@ mod sheet_tests {
                                 None, None, None, None, compact, None, window, cx,
                             )
                         } else {
-                            let mut composer = store.read(cx).composer_state();
+                            let mut composer = store
+                                .read(cx)
+                                .composer_state_for(store.read(cx).sole_thread().as_deref());
                             composer.provider = Some(ProviderKind::ClaudeCode);
                             let control = PermissionControl::from_composer(&composer).unwrap();
-                            let session_id = store.read(cx).legacy_focus();
+                            let session_id = store.read(cx).sole_thread();
                             render_permission_pane(
                                 &control,
                                 compact,

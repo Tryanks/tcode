@@ -580,7 +580,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         let (drawer, cx) = cx.add_window_view(|window, cx| {
             crate::terminal_drawer::TerminalDrawer::new(
                 store.clone(),
@@ -629,7 +629,7 @@ mod tests {
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         assert_eq!(
             store.read_with(cx, |store, _| store.with_terminal_workspace_for(
-                store.legacy_focus().as_deref(),
+                store.sole_thread().as_deref(),
                 |workspace| { workspace.active().map(|entry| entry.id) }
             )),
             Some(Some(7)),

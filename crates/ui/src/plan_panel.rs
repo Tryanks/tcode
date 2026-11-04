@@ -427,7 +427,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        store.update(cx, |store, cx| store.select_session("thread".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("thread".into(), cx));
         let plan = |steps: &[(&str, PlanStepStatus)]| {
             send(
                 Topic::SessionPlan {

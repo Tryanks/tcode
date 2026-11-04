@@ -1439,7 +1439,7 @@ mod tests {
         });
         crate::store::tests::seed_full_scope(&store, &replies, Vec::new(), cx);
         // Keep navigation out of this test when its Index baseline arrives.
-        store.update(cx, |store, cx| store.select_session("selected".into(), cx));
+        store.update(cx, |store, cx| store.show_alone("selected".into(), cx));
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
             link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
