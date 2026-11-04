@@ -20,7 +20,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     task::{Context, Poll},
 };
@@ -43,6 +43,14 @@ unsafe extern "C" {
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
+/// Speech recognition authorization as TCC last reported it, for the whole
+/// process. Reading TCC is a synchronous round trip to tccd, too slow for
+/// every render, so availability answers from this.
+static SPEECH_AUTHORIZATION: AtomicU8 = AtomicU8::new(UNKNOWN);
+const UNKNOWN: u8 = 0;
+const ALLOWED: u8 = 1;
+const DENIED: u8 = 2;
+
 pub struct SystemRecognizer {
     supported: bool,
 }
@@ -63,13 +71,24 @@ impl SystemRecognizer {
         // SAFETY: Swift copies the locale before returning.
         let supported = described
             && unsafe { tcode_macos_speech_available(locale.as_ptr(), locale.len()) } != 0;
+        // Once per process, with the first answer the button shows; window
+        // activation re-reads it off the main thread from then on.
+        if supported && SPEECH_AUTHORIZATION.load(Ordering::Relaxed) == UNKNOWN {
+            read_speech_authorization();
+        }
         Self { supported }
     }
 }
 
 impl SpeechRecognizer for SystemRecognizer {
     fn is_available(&self, _: &str) -> bool {
-        self.supported && !speech_denied()
+        self.supported && SPEECH_AUTHORIZATION.load(Ordering::Relaxed) != DENIED
+    }
+
+    fn permission_refresh(&self) -> Option<fn()> {
+        self.supported.then_some(|| {
+            read_speech_authorization();
+        })
     }
 
     fn start(
@@ -90,10 +109,10 @@ impl SpeechRecognizer for SystemRecognizer {
             finishing: false,
             done: false,
         }));
-        // SAFETY: reading authorization never prompts.
-        let status = unsafe { SFSpeechRecognizer::authorizationStatus() };
+        let status = read_speech_authorization();
         if status == SFSpeechRecognizerAuthorizationStatus::NotDetermined {
             let handler = RcBlock::new(move |status| {
+                record_speech_authorization(status);
                 _ = events.try_send(Event::Authorized(
                     status == SFSpeechRecognizerAuthorizationStatus::Authorized,
                 ));
@@ -110,11 +129,17 @@ impl SpeechRecognizer for SystemRecognizer {
     }
 }
 
-fn speech_denied() -> bool {
+fn read_speech_authorization() -> SFSpeechRecognizerAuthorizationStatus {
     // SAFETY: reading authorization never prompts.
     let status = unsafe { SFSpeechRecognizer::authorizationStatus() };
-    status == SFSpeechRecognizerAuthorizationStatus::Denied
-        || status == SFSpeechRecognizerAuthorizationStatus::Restricted
+    record_speech_authorization(status);
+    status
+}
+
+fn record_speech_authorization(status: SFSpeechRecognizerAuthorizationStatus) {
+    let denied = status == SFSpeechRecognizerAuthorizationStatus::Denied
+        || status == SFSpeechRecognizerAuthorizationStatus::Restricted;
+    SPEECH_AUTHORIZATION.store(if denied { DENIED } else { ALLOWED }, Ordering::Relaxed);
 }
 
 enum Event {

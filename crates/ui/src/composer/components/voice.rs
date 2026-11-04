@@ -53,6 +53,15 @@ impl Voice {
             }),
         );
         subscriptions.push(cx.observe(&state, |_, _, cx| cx.notify()));
+        // A permission granted or revoked in System Settings shows once the
+        // user comes back to Tcode.
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.voice
+                    .state
+                    .update(cx, |state, cx| state.refresh_permission(cx));
+            }
+        }));
         subscriptions.push(cx.on_release(|this, cx| {
             this.voice.insertion = None;
             this.voice.state.update(cx, |state, cx| state.cancel(cx));
