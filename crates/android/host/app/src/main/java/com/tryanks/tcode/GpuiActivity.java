@@ -55,7 +55,8 @@ public final class GpuiActivity extends NativeActivity {
     private DisplayManager displayManager;
     private final Choreographer.FrameCallback frameCallback = frameTimeNanos -> {
         framePosted = false;
-        if (renderSurface != null && renderSurface.isValid()) nativeFrame();
+        if (renderSurface == null || !renderSurface.isValid()) return;
+        if (nativeFrame()) postFrame();
     };
     private final DisplayManager.DisplayListener displayListener = new DisplayManager.DisplayListener() {
         @Override public void onDisplayAdded(int id) { updateDisplayRate(); }
@@ -63,7 +64,8 @@ public final class GpuiActivity extends NativeActivity {
         @Override public void onDisplayChanged(int id) { updateDisplayRate(); }
     };
 
-    private native void nativeFrame();
+    /** Returns whether frames should continue on the next vsync. */
+    private native boolean nativeFrame();
     private native void nativeRefreshRate(float rate);
 
     private void updateDisplayRate() {
@@ -97,10 +99,13 @@ public final class GpuiActivity extends NativeActivity {
             framesActive = true;
             hintFrameRate(maximumFrameRate);
         }
-        if (!framePosted) {
-            framePosted = true;
-            Choreographer.getInstance().postFrameCallback(frameCallback);
-        }
+        postFrame();
+    }
+
+    private void postFrame() {
+        if (framePosted) return;
+        framePosted = true;
+        Choreographer.getInstance().postFrameCallback(frameCallback);
     }
 
     public void gpuiPauseFrames() {

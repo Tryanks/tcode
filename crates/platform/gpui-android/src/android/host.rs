@@ -8,7 +8,10 @@ use jni::{
     strings::JNIStr,
 };
 use parking_lot::Mutex;
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 #[derive(Debug)]
 pub(crate) enum HostEvent {
@@ -64,6 +67,9 @@ pub enum ScrollCaptureRequest {
 
 pub(super) static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 static EVENTS: Mutex<VecDeque<HostEvent>> = Mutex::new(VecDeque::new());
+/// While set, the activity reposts its Choreographer callback on every
+/// vsync, so only starting and stopping frames hop to the UI thread.
+static FRAMES_WANTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn initialize(app: &AndroidApp) {
     *APP.lock() = Some(app.clone());
@@ -80,8 +86,10 @@ pub(crate) fn drain() -> Vec<HostEvent> {
     EVENTS.lock().drain(..).collect()
 }
 
-pub fn frame() {
+/// Returns whether the activity should post the next vsync's callback.
+pub fn frame() -> bool {
     enqueue(HostEvent::Frame);
+    FRAMES_WANTED.load(Ordering::Acquire)
 }
 
 pub fn refresh_rate(rate: f32) {
@@ -91,11 +99,15 @@ pub fn refresh_rate(rate: f32) {
 }
 
 pub(crate) fn request_frame() {
-    with_activity(jni_str!("gpuiRequestFrame"), jni_sig!(() -> void), vec![]);
+    if !FRAMES_WANTED.swap(true, Ordering::AcqRel) {
+        with_activity(jni_str!("gpuiRequestFrame"), jni_sig!(() -> void), vec![]);
+    }
 }
 
 pub(crate) fn pause_frames() {
-    with_activity(jni_str!("gpuiPauseFrames"), jni_sig!(() -> void), vec![]);
+    if FRAMES_WANTED.swap(false, Ordering::AcqRel) {
+        with_activity(jni_str!("gpuiPauseFrames"), jni_sig!(() -> void), vec![]);
+    }
 }
 
 enum OwnedArgument {
