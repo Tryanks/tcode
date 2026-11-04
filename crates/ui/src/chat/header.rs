@@ -1029,12 +1029,8 @@ impl ChatView {
                                         })),
                                 )
                                 .children(
-                                    crate::shell::pane_controls(
-                                        self.session_id.as_deref(),
-                                        window,
-                                        cx,
-                                    )
-                                    .map(|panes| pane_menu(panes, &self.motion)),
+                                    crate::shell::pane_controls(self.pane(), window, cx)
+                                        .map(|panes| pane_menu(panes, &self.motion)),
                                 ),
                         )
                         .into_any_element(),
@@ -1132,7 +1128,7 @@ impl ChatView {
         cx: &App,
     ) -> AnyElement {
         use crate::widgets::menu::{CopyText, OpenPathInZed, RevealPath};
-        let panes = crate::shell::pane_controls(self.session_id.as_deref(), window, cx);
+        let panes = crate::shell::pane_controls(self.pane(), window, cx);
         let cwd = cwd.map(|cwd| cwd.to_string_lossy().into_owned());
         // The panels every thread has come first, so their rows keep their
         // places.
