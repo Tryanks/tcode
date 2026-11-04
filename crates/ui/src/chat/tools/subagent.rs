@@ -64,10 +64,10 @@ pub(in crate::chat) fn child_thread(
     chat.workspace_store
         .read(cx)
         .sidebar_sessions()
-        .into_iter()
+        .iter()
         .find(|meta| {
             meta.parent_session_id.as_deref() == Some(lead)
                 && meta.native_subagent.as_deref() == Some(entry.id.as_str())
         })
-        .map(|meta| meta.id)
+        .map(|meta| meta.id.clone())
 }

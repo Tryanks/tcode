@@ -100,10 +100,8 @@ impl Render for MoveThreadDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = self.store.read(cx);
         let current = store
-            .sidebar_sessions()
-            .into_iter()
-            .find(|meta| meta.id == self.session_id)
-            .and_then(|meta| meta.project_id);
+            .thread_meta(&self.session_id)
+            .and_then(|meta| meta.project_id.clone());
         let projects: Vec<_> = store
             .projects()
             .into_iter()

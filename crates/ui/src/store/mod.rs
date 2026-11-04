@@ -2226,16 +2226,12 @@ impl WorkspaceStore {
     /// updated first. Pinning, arranging and settling order only the threads
     /// view.
     pub fn grouped_sessions(&self) -> Vec<ProjectGroup> {
-        let unarchived: Vec<_> = self
-            .index_replica
-            .0
-            .iter()
-            .filter(|meta| meta.archived_at.is_none())
-            .cloned()
-            .collect();
         let mut groups = group_sessions(
             &self.index_replica.1,
-            &unarchived,
+            self.index_replica
+                .0
+                .iter()
+                .filter(|meta| meta.archived_at.is_none()),
             self.settings_replica.project_sort,
         );
         for group in &mut groups {
@@ -2649,8 +2645,8 @@ impl WorkspaceStore {
             .map_or(ForkAvailability::Available, |activity| activity.fork)
     }
 
-    pub fn sidebar_sessions(&self) -> Vec<SessionMeta> {
-        self.index_replica.0.clone()
+    pub fn sidebar_sessions(&self) -> &[SessionMeta] {
+        &self.index_replica.0
     }
 
     pub fn settings_installed_acp_agents(&self) -> Vec<tcode_core::acp::InstalledAcpAgent> {

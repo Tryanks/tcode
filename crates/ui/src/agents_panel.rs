@@ -153,7 +153,7 @@ impl Agents {
     /// only the lists that show them read them, see [`Self::with_results`].
     pub(crate) fn of(store: &WorkspaceStore, parent_id: &str) -> Self {
         let live = store.sidebar_sessions();
-        let parent = live.iter().find(|meta| meta.id == parent_id);
+        let parent = store.thread_meta(parent_id);
         let attention = |id: Option<&str>| {
             let id = id?;
             if store.pending_approval_for(id) {

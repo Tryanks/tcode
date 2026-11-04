@@ -1410,19 +1410,18 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(meta) = self
+        let Some(cwd) = self
             .store
             .read(cx)
-            .sidebar_sessions()
-            .into_iter()
-            .find(|meta| meta.id == session_id)
+            .thread_meta(session_id)
+            .map(|meta| meta.cwd.clone())
         else {
             return;
         };
         crate::thread_export::prompt_thread_export(
             self.store.clone(),
-            meta.id,
-            meta.cwd,
+            session_id.to_owned(),
+            cwd,
             format,
             window,
             cx,
@@ -1675,32 +1674,27 @@ impl SessionsSidebar {
         if selected == self.last_selected {
             return;
         }
-        let sessions = self.store.read(cx).sidebar_sessions();
-        if selected.is_some()
-            && !sessions
-                .iter()
-                .any(|meta| Some(&meta.id) == selected.as_ref())
-        {
+        let meta = selected
+            .as_deref()
+            .and_then(|id| self.store.read(cx).thread_meta(id));
+        if selected.is_some() && meta.is_none() {
             return;
         }
-        self.last_selected = selected.clone();
-        let Some(meta) = sessions
-            .iter()
-            .find(|meta| Some(&meta.id) == selected.as_ref())
-        else {
+        self.last_selected = selected;
+        let Some(meta) = meta else {
             return;
         };
         if meta.is_settled()
-            && let Some(project_id) = &meta.project_id
+            && let Some(project_id) = meta.project_id.clone()
         {
             // The project view's shelf opens; the threads view shows the
             // viewed row under its closed shelf instead.
             if self.expanded_settled.insert(project_id.clone()) {
-                self.settled_limits.remove(project_id);
+                self.settled_limits.remove(&project_id);
             }
-            if self.store.read(cx).is_project_collapsed(project_id) {
+            if self.store.read(cx).is_project_collapsed(&project_id) {
                 self.store.update(cx, |store, cx| {
-                    store.toggle_project_collapsed(project_id.clone(), cx)
+                    store.toggle_project_collapsed(project_id, cx)
                 });
             }
         }
@@ -7913,7 +7907,7 @@ mod tests {
         // the list stays where it was instead of following it there.
         let (kind, lifted) = top_row.clone();
         assert_eq!(kind, "thread");
-        let mut sessions = store.read_with(cx, |store, _| store.sidebar_sessions());
+        let mut sessions = store.read_with(cx, |store, _| store.sidebar_sessions().to_vec());
         sessions
             .iter_mut()
             .find(|meta| meta.id == lifted)
