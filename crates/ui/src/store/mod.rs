@@ -99,6 +99,16 @@ pub struct StoreChange {
     pub topic: TopicKind,
 }
 
+/// A thread is to be shown; the shell picks the pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowThread {
+    pub session_id: String,
+    /// The thread the control asking shows, for its pane to take this one.
+    pub replacing: Option<String>,
+    /// The user asked for it, rather than the workspace falling back on it.
+    pub asked: bool,
+}
+
 /// Observe selected store domains while keeping topic filtering out of views.
 pub(crate) fn observe_store_topics<V: 'static>(
     store: &Entity<WorkspaceStore>,
@@ -3762,6 +3772,7 @@ impl Drop for WorkspaceStore {
 
 impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
 impl EventEmitter<StoreChange> for WorkspaceStore {}
+impl EventEmitter<ShowThread> for WorkspaceStore {}
 impl EventEmitter<ConnectionState> for WorkspaceStore {}
 
 #[cfg(test)]

@@ -669,8 +669,13 @@ impl ChatView {
                 _ => self.side.expand = None,
             }
         }
-        // The view's own focus, which it hands on to its composer: drawn from
-        // the first frame, where the composer is not until the thread loads.
+        self.focus_side(window, cx);
+    }
+
+    /// The agent beside the thread takes the keyboard, through the view's own
+    /// focus, which it hands on to its composer: drawn from the first frame,
+    /// where the composer is not until the thread loads.
+    pub(crate) fn focus_side(&self, window: &mut Window, cx: &mut App) {
         if let Some(host) = &self.side.host {
             let focus = host.chat.read(cx).focus_handle.clone();
             focus.focus(window, cx);
