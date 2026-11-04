@@ -22,7 +22,7 @@ use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
 
-use gpui::{AnyElement, App, ElementId, SharedString, Window};
+use gpui::{AnyElement, App, ElementId, Pixels, SharedString, Window};
 use gpui_base::motion::{
     Interpolate, MotionStatus, Presence, PresencePhase, PresenceSample, Timing,
 };
@@ -349,11 +349,12 @@ impl Clock<'_> {
             let change = state.get_or_insert_with(|| Change {
                 current: value.clone(),
                 generation: 0,
+                width: None,
                 previous: None,
             });
             if change.current != value {
                 let current = std::mem::replace(&mut change.current, value);
-                change.previous = Some((current, change.generation));
+                change.previous = Some((current, change.generation, change.width.take()));
                 change.generation += 1;
             }
             change.generation
@@ -374,20 +375,37 @@ impl Clock<'_> {
             (change.current.clone(), change.previous.clone())
         };
         let current = build(&current, window, cx);
-        let previous = previous.map(|(value, generation)| (build(&value, window, cx), generation));
-        super::draw_change(id, (current, generation), previous, progress, shield)
+        let previous = previous
+            .map(|(value, generation, width)| (build(&value, window, cx), generation, width));
+        let laid_out = move |width| {
+            if let Some(change) = state.borrow_mut().as_mut()
+                && change.generation == generation
+            {
+                change.width = Some(width);
+            }
+        };
+        super::draw_change(
+            id,
+            (current, generation),
+            previous,
+            progress,
+            shield,
+            laid_out,
+        )
     }
 }
 
 /// How near its target, in pixels, [`Clock::follow`]'s spring comes to rest.
 const FOLLOW_EPSILON: f32 = 0.25;
 
-/// What [`Clock::cross_fade`] keeps: the value shown, and the one it
-/// replaced while that fades out.
+/// What [`Clock::cross_fade`] keeps: the value shown and the width it was
+/// last laid out at, and the one it replaced, with its width, while that
+/// fades out.
 struct Change<T> {
     current: T,
     generation: u64,
-    previous: Option<(T, u64)>,
+    width: Option<Pixels>,
+    previous: Option<(T, u64, Option<Pixels>)>,
 }
 
 /// The motion state of one view, by key: clone it into whatever samples it
