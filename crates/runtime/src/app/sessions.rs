@@ -1052,8 +1052,7 @@ impl AppState {
 
     pub(super) fn find_meta(&self, id: &str) -> Option<SessionMeta> {
         self.sessions
-            .iter()
-            .find(|meta| meta.id == id)
+            .by_id(id)
             .cloned()
             .or_else(|| self.resident(id).map(|session| session.meta.clone()))
     }
