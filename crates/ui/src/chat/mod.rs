@@ -83,7 +83,7 @@ pub use self::timeline::CaptureScroll;
 use self::timeline::{
     AutoActivityExpansions, CaptureSession, FullOutput, LeftRow, PendingMarkdownBuild,
     ReservationScrollBack, history_screens_covered, jump_to_latest_visible, settle_carried_anchor,
-    timeline_inset, transcript_selection,
+    timeline_bottom_inset, transcript_selection,
 };
 
 /// A message's context-menu rewind, which the chat applies as the bubble's
@@ -1035,7 +1035,7 @@ impl ChatView {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .py(timeline_inset(cx))
+                .pb(timeline_bottom_inset(cx))
                 .child(
                     self.motion
                         .keep::<crate::motion::bounce::BounceState>("timeline-bounce")
@@ -1068,8 +1068,8 @@ impl ChatView {
                                 .into()
                             })
                             .absolute()
-                            .top(timeline_inset(cx))
-                            .bottom(timeline_inset(cx))
+                            .top_0()
+                            .bottom(timeline_bottom_inset(cx))
                             .right(track_inset)
                             .w(TRACK)
                             .child(

@@ -38,6 +38,29 @@ fn drag(from: gpui::Point<Pixels>, to: gpui::Point<Pixels>, cx: &mut VisualTestC
     settle_frames(cx);
 }
 
+/// Opens `agent-1` in the lead's slot, or on a sheet where it has no room.
+fn open_agent(shell: &Entity<AppShell>, host: &MountedShell, cx: &mut VisualTestContext) {
+    let store = store_of(shell, cx);
+    serve_finished_turns(host, "agent-1", 30, false);
+    serve_subagent_status(host, "agent-1");
+    cx.update(|window, cx| {
+        crate::agents_panel::open_agent(
+            &store,
+            "agent-1".into(),
+            crate::shell::side_host_for("thread-1", cx),
+            None,
+            window,
+            cx,
+        )
+    });
+    draw(cx);
+    await_restore_update(shell, cx, |store| {
+        !store.chat_loading() && store.timeline_settled_for("agent-1")
+    });
+    settle_panes(cx);
+    settle_frames(cx);
+}
+
 /// With the rail or the agent's card in the slot, the track stands between
 /// the column and it, the wheel over that gap moves the lead and the thumb
 /// drags there, the grip's whole band staying the grip's; the agent's own
@@ -47,7 +70,6 @@ fn drag(from: gpui::Point<Pixels>, to: gpui::Point<Pixels>, cx: &mut VisualTestC
 fn the_leads_scrollbar_stands_left_of_the_slot(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_lead_with_agent(cx);
-    let store = store_of(&shell, cx);
     serve_finished_turns(&host, "thread-1", 60, false);
     await_restore_update(&shell, cx, |store| {
         store.with_active_timeline(|timeline| timeline.turns.len()) == Some(60)
@@ -94,27 +116,7 @@ fn the_leads_scrollbar_stands_left_of_the_slot(cx: &mut TestAppContext) {
         "the thumb drags in the gap"
     );
 
-    let open_agent = |cx: &mut VisualTestContext| {
-        serve_finished_turns(&host, "agent-1", 30, false);
-        serve_subagent_status(&host, "agent-1");
-        cx.update(|window, cx| {
-            crate::agents_panel::open_agent(
-                &store,
-                "agent-1".into(),
-                crate::shell::side_host_for("thread-1", cx),
-                None,
-                window,
-                cx,
-            )
-        });
-        draw(cx);
-        await_restore_update(&shell, cx, |store| {
-            !store.chat_loading() && store.timeline_settled_for("agent-1")
-        });
-        settle_panes(cx);
-        settle_frames(cx);
-    };
-    open_agent(cx);
+    open_agent(&shell, &host, cx);
     let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
     let grip = cx.debug_bounds("chat-side-grip").expect("the card's grip");
     let band = grip.center().x - BAND / 2.;
@@ -198,11 +200,51 @@ fn the_leads_scrollbar_stands_left_of_the_slot(cx: &mut TestAppContext) {
     assert!((*glide.last().unwrap() - viewport.right()).abs() < slack);
     assert_eq!(cx.debug_bounds("chat-rail"), None, "the rail has left");
 
-    open_agent(cx);
+    open_agent(&shell, &host, cx);
     assert_eq!(cx.debug_bounds("chat-side-card"), None, "on a sheet");
     assert!(cx.debug_bounds("chat-side-header").is_some(), "the sheet");
     assert!(
         (track(cx).right() - viewport.right()).abs() < slack,
         "the track stays at the body's edge under the sheet"
     );
+}
+
+/// The header has no divider, so the eye measures the room under its title
+/// to the first thing below: the timeline, its track, and what takes the slot
+/// all start at the header's bottom edge, the agent's sheet included.
+#[gpui::test]
+fn the_body_starts_at_the_headers_bottom_edge(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_lead_with_agent(cx);
+    serve_finished_turns(&host, "thread-1", 60, false);
+    await_restore_update(&shell, cx, |store| {
+        store.with_active_timeline(|timeline| timeline.turns.len()) == Some(60)
+    });
+    let under_header = |top: Pixels, what: &str, cx: &mut VisualTestContext| {
+        let header = cx.debug_bounds("chat-header-scroll").expect("the header");
+        assert_eq!(top, header.bottom(), "{what}");
+    };
+
+    resize(cx, WIDE);
+    settle_frames(cx);
+    let viewport = lead_viewport(&shell, cx);
+    under_header(viewport.top(), "the timeline", cx);
+    under_header(track(cx).top(), "the track", cx);
+    let rail = cx.debug_bounds("chat-rail").expect("the lead's rail");
+    under_header(rail.top(), "the rail", cx);
+
+    open_agent(&shell, &host, cx);
+    let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
+    under_header(card.top(), "the agent's card", cx);
+
+    press_control("side-close", cx);
+    settle_panes(cx);
+    settle_frames(cx);
+    resize(cx, NARROW);
+    settle_frames(cx);
+    open_agent(&shell, &host, cx);
+    let sheet = cx
+        .debug_bounds("chat-side-sheet")
+        .expect("the agent's sheet");
+    under_header(sheet.top(), "the agent's sheet", cx);
 }

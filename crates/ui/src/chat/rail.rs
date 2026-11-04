@@ -234,12 +234,12 @@ fn side_widest(body: f32) -> f32 {
 
 /// The slot right of the content column that the rail or an agent's card
 /// takes, `width` wide and `presence` of the way in, in a [`Slots`]: from
-/// the timeline's top inset down to the bottom of the composer's card. It
+/// the header's bottom edge down to the bottom of the composer's card. It
 /// fades and slides in from the right, and out to it.
-pub(super) fn slot(width: Pixels, presence: f32, cx: &App) -> gpui::Div {
+pub(super) fn slot(width: Pixels, presence: f32) -> gpui::Div {
     div()
         .absolute()
-        .top(super::timeline_inset(cx))
+        .top_0()
         .bottom_0()
         .right(px(CHAT_RAIL_EDGE - SLIDE * (1. - presence)))
         .w(width)
@@ -509,7 +509,7 @@ impl ChatView {
             gap: cx.theme().tokens.spacing.sm,
         };
         Some(
-            slot(self.body.width, presence, cx)
+            slot(self.body.width, presence)
                 .debug_selector(|| "chat-rail".into())
                 .child(stack)
                 .when(!self.body.rail, |rail| rail.child(crate::motion::shield()))

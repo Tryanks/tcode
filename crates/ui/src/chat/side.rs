@@ -1131,7 +1131,7 @@ impl ChatView {
                 )
         });
         let card = self.side_surface("chat-side-card", content, morph, live, cx);
-        super::rail::slot(self.side.width, fade.map_or(presence, |_| 1.), cx)
+        super::rail::slot(self.side.width, fade.map_or(presence, |_| 1.))
             .when_some(fade, |slot, fade| slot.opacity(fade))
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<SideEdgeDrag>, _, cx| {
@@ -1154,9 +1154,9 @@ impl ChatView {
     }
 
     /// The agent's sheet over the lead, holding `content`, on its way as
-    /// `morph` says: inset from the lead's body at its sides, from the top
-    /// as far as the slot is, down to the bottom of the lead's composer
-    /// card, which [`super::rail::Slots`] lays it out to.
+    /// `morph` says: inset from the lead's body at its sides, from the
+    /// header's bottom edge down to the bottom of the lead's composer card,
+    /// which [`super::rail::Slots`] lays it out to.
     fn render_side_sheet(
         &self,
         content: AnyElement,
@@ -1166,7 +1166,7 @@ impl ChatView {
     ) -> AnyElement {
         div()
             .absolute()
-            .top(super::timeline_inset(cx))
+            .top_0()
             .left(px(SHEET_INSET))
             .right(px(SHEET_INSET))
             .bottom_0()

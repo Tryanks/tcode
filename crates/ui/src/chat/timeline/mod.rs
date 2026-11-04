@@ -618,21 +618,24 @@ impl ChatView {
     }
 }
 
-/// The breathing room between the timeline and the header/composer. A phone
-/// has none: its rows already inset themselves and the screen is short.
-pub(super) fn timeline_inset(cx: &App) -> gpui::Pixels {
+/// The breathing room between the timeline and the composer. A phone has
+/// none: its rows already inset themselves and the screen is short. The
+/// header gets none on any screen: it has no divider, so the eye measures the
+/// room under its title to the first thing below, and only
+/// [`TIMELINE_EDGE_PADDING`] keeps the first row off it.
+pub(super) fn timeline_bottom_inset(cx: &App) -> gpui::Pixels {
     if crate::window_seam::is_mobile(cx) {
         px(0.)
     } else {
-        px(TIMELINE_INSET)
+        px(TIMELINE_BOTTOM_INSET)
     }
 }
 
-/// Desktop timeline inset above and below the list, in pixels.
-pub(super) const TIMELINE_INSET: f32 = 8.;
+/// Desktop timeline inset below the list, in pixels.
+pub(super) const TIMELINE_BOTTOM_INSET: f32 = 8.;
 
 /// Padding inside the list on its first and last row, in pixels. Unlike
-/// `TIMELINE_INSET` it scrolls with the content: the header and composer still
+/// `TIMELINE_BOTTOM_INSET` it scrolls with the content: the header and composer still
 /// clip the timeline flush, but a reader at either end sees a little air
 /// between the edge turn and the chrome. It lives on the rows rather than on
 /// the List element, so the scrollbar, the wheel and tail-resume all measure
@@ -1302,7 +1305,11 @@ mod tests {
         for (mobile, running) in [(false, false), (false, true), (true, false), (true, true)] {
             for (width, height) in [(393., 852.), (1024., 768.)] {
                 cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, mobile));
-                let expected_gap = if mobile { 0. } else { super::TIMELINE_INSET };
+                let expected_gap = if mobile {
+                    0.
+                } else {
+                    super::TIMELINE_BOTTOM_INSET
+                };
                 let mut timeline = synthetic_markdown_timeline(30);
                 timeline.turn_running = running;
                 timeline.turns.last_mut().unwrap().running = running;
