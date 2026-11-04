@@ -699,6 +699,62 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     host.shutdown();
 }
 
+fn follow_hosting(id: u64) -> String {
+    json!({"id": id, "payload": {"type": "subscribe", "content": {"topic": {"type": "hosting"}, "after": null}}})
+        .to_string()
+}
+
+/// Whoever follows a machine's hosting state hears of each change made
+/// elsewhere without reading again: this machine's own window through the
+/// host, a full device through the topic, which answers with the state as it
+/// stands.
+#[test]
+fn hosting_followers_hear_of_a_change_made_elsewhere() {
+    let host_dir = TestDir::new("follow-host");
+    let (mux, _, _) = fake_host();
+    let host = start_host(mux, &host_dir, None);
+    let window = host.hosting_events();
+    let design = host.create_space("Design".into()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "the window was not told");
+        match window.try_recv() {
+            Ok(state) if state.spaces.iter().any(|space| space.id == design) => break,
+            Ok(_) => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+
+    let dir = TestDir::new("follow-phone");
+    let phone = device(&dir, "phone");
+    let minted = host.new_invitation();
+    let paired = pair(&minted.invite, &phone).unwrap();
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, syncing_directly);
+    client.to_host.send_blocking(follow_hosting(1)).unwrap();
+    let reply = recv_type(&client, "event", None);
+    assert_eq!(reply["content"]["request_id"], 1);
+    assert_eq!(reply["content"]["topic"], json!({"type": "hosting"}));
+    assert_eq!(reply["content"]["event"]["type"], "hosting_replaced");
+    assert_eq!(
+        reply["content"]["event"]["content"]["spaces"][0]["id"],
+        design.as_str()
+    );
+
+    let review = host.create_space("Review".into()).unwrap();
+    // The device's own path may settle meanwhile, which is a change too.
+    loop {
+        let pushed = recv_type(&client, "event", None);
+        assert_eq!(pushed["content"]["request_id"], Value::Null);
+        assert_eq!(pushed["content"]["event"]["type"], "hosting_replaced");
+        if pushed["content"]["event"]["content"]["spaces"][1]["id"] == review.as_str() {
+            break;
+        }
+    }
+    client.to_host.close();
+    host.shutdown();
+}
+
 /// A revocation is durable or it did not happen: while the allow list
 /// cannot be written, the device stays listed, its connection stays open and
 /// it is still admitted, and the caller is told. Once it is written, the
@@ -1047,6 +1103,9 @@ fn space_links_scope_members_survive_link_changes_and_revoke_until_repaired() {
     let refusal = recv_type(&client, "query_result", Some(2));
     assert_eq!(refusal["content"]["result"]["Err"]["code"], "out_of_scope");
     assert_eq!(host.spaces().len(), 1);
+    client.to_host.send_blocking(follow_hosting(30)).unwrap();
+    let refusal = recv_type(&client, "ack", Some(30));
+    assert_eq!(refusal["content"]["result"]["Err"]["code"], "out_of_scope");
     let opener = client.current_host.as_ref().unwrap().tunnels().unwrap();
     let refusal = tcode_traverse::block_on(opener.open("127.0.0.1", 1)).unwrap_err();
     assert!(

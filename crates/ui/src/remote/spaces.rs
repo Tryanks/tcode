@@ -4,15 +4,14 @@
 //! [`Spaces`] is the one owner of a machine's hosting state on this client —
 //! its spaces, its paired devices and its machine group: the window's own
 //! machine through [`RemoteController`] while it hosts, or a machine this
-//! window is attached to as a full device through `Query::Hosting`. Every
-//! surface — Settings → Remote, the Machines page and the sidebar's share
-//! items — reads and changes that state through it, so a change made on one
-//! repaints the others.
+//! window is attached to as a full device through the hosting topic and
+//! `Query::Hosting`. Every surface — Settings → Remote, the Machines page and
+//! the sidebar's share items — reads and changes that state through it, so a
+//! change made on one repaints the others.
 
 use crate::widgets::TooltipTrigger as _;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
 
@@ -96,29 +95,63 @@ pub(crate) struct Spaces {
     local_projects: Option<Vec<Project>>,
     #[cfg(feature = "remote-hosting")]
     projects_from: Option<(EntityId, Subscription)>,
-    _poll: Task<()>,
+    /// Members come and go and other clients change spaces too: the machine
+    /// tells this client of every change while this is held.
+    _follow: Option<Subscription>,
 }
 
 impl Spaces {
     fn new(host: SpacesHost, cx: &mut Context<Self>) -> Self {
-        // Members come and go and other clients change spaces too; local
-        // reads are a lock away, remote ones a round trip.
-        let interval = match &host {
+        let (follow, state) = match &host {
             #[cfg(feature = "remote-hosting")]
-            SpacesHost::Local => Duration::from_secs(2),
-            SpacesHost::Remote(_) => Duration::from_secs(3),
-        };
-        let poll = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(interval).await;
-                if this.update(cx, |spaces, cx| spaces.refresh(cx)).is_err() {
-                    return;
-                }
+            SpacesHost::Local => {
+                let follow = cx
+                    .try_global::<RemoteController>()
+                    .and_then(RemoteController::hosting_events)
+                    .map(|events| {
+                        let task = cx.spawn(async move |this, cx| {
+                            while let Ok(state) = events.recv().await {
+                                if this
+                                    .update(cx, |spaces, cx| spaces.set_state(Some(state), cx))
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            // Hosting stopped: a later start is followed afresh.
+                            let _ = this.update(cx, |spaces, cx| {
+                                spaces.set_state(None, cx);
+                                let this = cx.entity_id();
+                                let registry = cx.default_global::<Registry>();
+                                if registry
+                                    .local
+                                    .as_ref()
+                                    .is_some_and(|local| local.entity_id() == this)
+                                {
+                                    registry.local = None;
+                                }
+                            });
+                        });
+                        Subscription::new(move || drop(task))
+                    });
+                // Read once following, so no change falls between the two.
+                (follow, local_hosting(HostingAction::State, cx).ok())
             }
-        });
-        let mut spaces = Self {
+            // The subscription's reply is the state as it stands, and a
+            // reconnect subscribes again.
+            SpacesHost::Remote(store) => (
+                store.upgrade().map(|store| {
+                    store.read(cx).follow_hosting(true);
+                    cx.subscribe(&store, |spaces, _, state: &HostingState, cx| {
+                        spaces.set_state(Some(state.clone()), cx);
+                    })
+                }),
+                None,
+            ),
+        };
+        Self {
             host,
-            state: None,
+            state,
             read_at: Instant::now(),
             generation: 0,
             refreshing: false,
@@ -126,10 +159,8 @@ impl Spaces {
             local_projects: None,
             #[cfg(feature = "remote-hosting")]
             projects_from: None,
-            _poll: poll,
-        };
-        spaces.refresh(cx);
-        spaces
+            _follow: follow,
+        }
     }
 
     pub(crate) fn spaces(&self) -> &[SpaceInfo] {
@@ -561,6 +592,7 @@ pub(crate) fn for_store(store: &Entity<WorkspaceStore>, cx: &mut App) -> Option<
         if !store.read(cx).can_manage_host()
             && let Some((spaces, _)) = cx.default_global::<Registry>().remote.remove(&id)
         {
+            store.read(cx).follow_hosting(false);
             spaces.update(cx, |spaces, cx| {
                 spaces.generation = spaces.generation.wrapping_add(1);
                 spaces.set_state(None, cx);
@@ -2135,6 +2167,9 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         cx.update(crate::theme::init);
+        // The machine's host runs on its own threads and tells the window
+        // of hosting changes from there, as it does in the app.
+        cx.executor().allow_parking();
         let root = crate::store::tests::scratch_root("spaces-remove");
         let member_dir = root.join("member");
         std::fs::create_dir_all(&member_dir).unwrap();

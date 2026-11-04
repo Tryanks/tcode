@@ -254,6 +254,12 @@ impl RemoteController {
             .map_err(|error| error.message)
     }
 
+    /// This machine's hosting state after every change, while it hosts; see
+    /// [`TraverseHost::hosting_events`].
+    pub fn hosting_events(&self) -> Option<async_channel::Receiver<HostingState>> {
+        self.host.as_ref().map(TraverseHost::hosting_events)
+    }
+
     /// Answers hosting queries off the UI thread while hosting.
     pub fn hosting_handle(&self) -> Option<tcode_traverse::host::HostingHandle> {
         self.host.as_ref().map(TraverseHost::hosting_handle)
@@ -606,6 +612,9 @@ mod tests {
     #[gpui::test]
     fn the_remote_page_shows_the_invitation_while_accepting_devices(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // The machine's host runs on its own threads and tells the window
+        // of hosting changes from there, as it does in the app.
+        cx.executor().allow_parking();
         let root = crate::store::tests::scratch_root("hosting-pairing");
         std::fs::create_dir_all(&root).unwrap();
         // Idle pipes: the host is never attached to here.

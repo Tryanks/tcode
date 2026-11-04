@@ -2063,6 +2063,9 @@ mod tests {
         use tcode_client::HostLink;
         use tcode_traverse::{HostConfig, HostMux, TraverseHost};
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // The machine's host runs on its own threads and tells the window
+        // of hosting changes from there, as it does in the app.
+        cx.executor().allow_parking();
         let root = crate::store::tests::scratch_root("hosts-invitation");
         std::fs::create_dir_all(&root).unwrap();
         let (to_host, _host_rx) = async_channel::unbounded::<String>();

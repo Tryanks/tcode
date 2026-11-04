@@ -260,7 +260,10 @@ pub use wire::{
 // ToggleFavoriteModel carries provider and profile_id. TerminalDelta carries
 // scrolled, the rows its screen moved up before rows_replaced applies. A
 // command output topic pushes CommandOutputDelta, what changed since the
-// screen or change last sent on it, after the screen a subscriber holds.
+// screen or change last sent on it, after the screen a subscriber holds. The
+// Hosting topic answers a full device's subscription with HostingReplaced and
+// pushes it again whenever the machine's hosting state changes, which
+// replaces polling Query::Hosting for it.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

@@ -121,6 +121,7 @@ impl AppState {
                 | Topic::Providers
                 | Topic::RuntimeEvents
                 | Topic::Preview
+                | Topic::Hosting
                 | Topic::ExternalImport { .. } => Err(refusal("subscription")),
             },
             ClientPayload::Command(command) => match command {
