@@ -5949,7 +5949,7 @@ mod tests {
 
         let (sidebar, store, _, mut driver, host, root) =
             sidebar_over_host(cx, "sidebar-time-click", &["newest", "middle", "oldest"]);
-        crate::store::tests::show_asked_threads(&store, cx);
+        crate::store::tests::place_shown_threads(&store, cx);
         let opacity = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view(|window, cx| {
             let drawn = cx.new(|_| Drawn {
@@ -6438,7 +6438,7 @@ mod tests {
                 cx,
             )
         });
-        crate::store::tests::show_asked_threads(&store, cx);
+        crate::store::tests::place_shown_threads(&store, cx);
         driver.wait_until(cx, &store, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
@@ -6558,7 +6558,7 @@ mod tests {
                 cx,
             )
         });
-        crate::store::tests::show_asked_threads(&store, cx);
+        crate::store::tests::place_shown_threads(&store, cx);
         driver.wait_until(cx, &store, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
@@ -7696,7 +7696,7 @@ mod tests {
                 cx,
             )
         });
-        crate::store::tests::show_asked_threads(&store, cx);
+        crate::store::tests::place_shown_threads(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // The open thread is settled, so the closed shelf shows its row.
         store.update(cx, |store, cx| {

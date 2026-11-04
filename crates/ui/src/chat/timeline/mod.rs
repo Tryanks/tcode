@@ -949,7 +949,7 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
-        crate::store::tests::show_asked_threads(&store, cx);
+        crate::store::tests::place_shown_threads(&store, cx);
         // The shell binds its pane to the thread the link opens.
         chat.update(cx, |chat, cx| {
             chat.set_session(Some(session_id.clone()), cx)

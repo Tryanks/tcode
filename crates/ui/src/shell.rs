@@ -1391,40 +1391,58 @@ impl AppShell {
         })
     }
 
-    /// A pane whose thread the store closed leaves the column; the last
-    /// input's, and the last one, stay and show nothing until a thread is
-    /// placed there.
+    /// A pane whose thread the store closed leaves the column, and the last
+    /// one, on a compact window the page, takes what the store says follows
+    /// that thread.
     fn reconcile_panes(&mut self, cx: &mut Context<Self>) {
-        if self.compact(cx) {
+        let compact = self.compact(cx);
+        if compact {
             self.reconcile_leads(cx);
         }
-        let Some(attachment) = &mut self.attachment else {
+        let Some(attachment) = &self.attachment else {
             return;
         };
         let panes = attachment.panes(cx);
-        if !panes.contains(&attachment.last_input)
-            && let Some(first) = panes.first()
-        {
-            attachment.last_input = first.clone();
-        }
-        let store = attachment.link.store.read(cx);
-        let closed: Vec<_> = panes
+        let store = attachment.link.store.clone();
+        let last_input = attachment.last_input.clone();
+        let mut closed: Vec<_> = panes
             .iter()
             .filter(|pane| {
                 pane.read(cx)
                     .session_id()
-                    .is_some_and(|session_id| !store.is_thread_open(session_id))
+                    .is_some_and(|session_id| !store.read(cx).is_thread_open(session_id))
             })
             .cloned()
             .collect();
-        let last_input = attachment.last_input.clone();
+        // What stays is the pane in use, of those the store emptied.
+        closed.sort_by_key(|pane| *pane == last_input);
         let mut remaining = panes.len();
         for pane in closed {
-            if pane == last_input || remaining == 1 {
-                pane.update(cx, |pane, cx| pane.set_session(None, cx));
+            if remaining == 1 || (compact && pane == last_input) {
+                let left = pane.read(cx).session_id().map(str::to_owned);
+                let follows = left.is_some_and(|left| {
+                    store.update(cx, |store, cx| store.show_after_left(&left, cx))
+                });
+                if !follows {
+                    self.drop_leads(0, cx);
+                    pane.update(cx, |pane, cx| pane.set_session(None, cx));
+                }
             } else {
+                if let Some(attachment) = self.attachment.as_mut()
+                    && attachment.zoom.pane() == Some(&pane)
+                {
+                    attachment.zoom.zoom_out();
+                }
                 self.glide_out(&pane, cx);
                 remaining -= 1;
+            }
+        }
+        if let Some(attachment) = self.attachment.as_mut() {
+            let panes = attachment.panes(cx);
+            if !panes.contains(&attachment.last_input)
+                && let Some(first) = panes.first()
+            {
+                attachment.last_input = first.clone();
             }
         }
     }
@@ -1546,8 +1564,7 @@ impl AppShell {
 
     /// `pane` shows `session_id` and is the last input. A thread the user
     /// `asked` for takes the compact stack and the keyboard; one the
-    /// workspace fell back on leaves them, unless it moves the last input to
-    /// another pane.
+    /// workspace went to by itself leaves them.
     fn show_in_pane(
         &mut self,
         pane: &Entity<ThreadPanel>,
@@ -1575,7 +1592,6 @@ impl AppShell {
         if attachment.zoom.pane().is_some_and(|zoomed| zoomed != pane) {
             attachment.zoom.zoom_out();
         }
-        let moved = attachment.last_input != *pane;
         self.set_last_input(pane, cx);
         self.blur_navigation(window, cx);
         self.window_state
@@ -1583,12 +1599,14 @@ impl AppShell {
         if asked && compact {
             self.go(Destination::Thread, cx);
         }
-        if beside {
-            chat.update(cx, |chat, cx| chat.focus_side(window, cx));
-        } else if asked {
-            chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
-        } else if moved && !compact {
-            window.focus(&pane.focus_handle(cx), cx);
+        if asked {
+            chat.update(cx, |chat, cx| {
+                if beside {
+                    chat.focus_side(window, cx);
+                } else {
+                    chat.focus_composer(window, cx);
+                }
+            });
         }
         // Showing another thread can leave the destination unchanged. Its
         // checkpoint must not depend on the host delivering a notification.
@@ -3279,9 +3297,8 @@ impl AppShell {
         let Some(store) = self.store() else {
             return;
         };
-        // The open thread's transcript already shows the message.
-        if window.is_window_active() && store.read(cx).legacy_focus().as_deref() == Some(session_id)
-        {
+        // A pane's transcript already shows the message.
+        if window.is_window_active() && self.pane_showing(session_id, cx).is_some() {
             return;
         }
         let title = store
@@ -3731,29 +3748,18 @@ impl AppShell {
         self.sync_nav(NavMotion::Immediate, cx);
     }
 
-    /// A lead that closed goes, with the pages above it; the page's own
-    /// thread closing leaves nothing for the leads to stand under.
+    /// A lead that closed goes, with the pages above it.
     fn reconcile_leads(&mut self, cx: &mut Context<Self>) {
         let Some(attachment) = &self.attachment else {
             return;
         };
-        if attachment.leads.is_empty() {
-            return;
-        }
         let store = attachment.link.store.read(cx);
-        let page_open = attachment
-            .page()
-            .read(cx)
-            .session_id()
-            .is_some_and(|session_id| store.is_thread_open(session_id));
-        let closed = attachment
+        if let Some(closed) = attachment
             .leads
             .iter()
-            .position(|lead| !store.is_thread_open(&lead.session_id));
-        match (page_open, closed) {
-            (false, _) => self.drop_leads(0, cx),
-            (true, Some(closed)) => self.drop_leads(closed, cx),
-            (true, None) => {}
+            .position(|lead| !store.is_thread_open(&lead.session_id))
+        {
+            self.drop_leads(closed, cx);
         }
     }
 
@@ -11198,6 +11204,66 @@ mod tests {
         store_of(&shell, cx).read_with(cx, |store, _| {
             assert_eq!(store.legacy_focus().as_deref(), Some("thread-2"));
         });
+    }
+
+    /// An archived agent leaves its pane however the panes stand: beside
+    /// others the pane goes and its lead's pane, which nobody chose, does not
+    /// take the keyboard; alone it stays and shows the lead.
+    #[gpui::test]
+    fn an_archived_agent_gives_way_to_its_lead(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        let store = store_of(&shell, cx);
+        let archive_agent = |archived: bool| {
+            let (topic, ServerEvent::IndexSnapshot(mut index)) = lead_with_agent_index("thread-1")
+            else {
+                unreachable!("the index is a snapshot");
+            };
+            index
+                .sessions
+                .iter_mut()
+                .find(|meta| meta.id == "agent-1")
+                .expect("the agent")
+                .archived_at = archived.then_some(3);
+            (topic, ServerEvent::IndexSnapshot(index))
+        };
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(OpenInNewPane("agent-1".into())), cx)
+        });
+        draw(cx);
+        serve_thread(&host, "agent-1");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("agent-1".into())]
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+
+        send_events(&host, vec![archive_agent(true)]);
+        await_restore_update(&shell, cx, |store| !store.is_thread_open("agent-1"));
+        draw(cx);
+        assert_ne!(keyboard_pane(&shell, cx), Some(0));
+        settle_panes(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+
+        send_events(&host, vec![archive_agent(false)]);
+        await_restore_update(&shell, cx, |store| {
+            store
+                .sidebar_sessions()
+                .iter()
+                .any(|meta| meta.id == "agent-1")
+        });
+        store.update(cx, |store, cx| store.show_thread("agent-1".into(), cx));
+        serve_thread(&host, "agent-1");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("agent-1".into())]);
+
+        send_events(&host, vec![archive_agent(true)]);
+        await_restore_update(&shell, cx, |store| !store.is_thread_open("agent-1"));
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
     }
 
     /// A split's handle taken while the split glides stops the glide: the

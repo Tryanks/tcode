@@ -223,6 +223,9 @@ pub struct WorkspaceStore {
     /// The host resolving an anchor link's position to the turn it opens at.
     anchor_turn_task: Option<Task<()>>,
     native_rewind_prefills: HashMap<String, String>,
+    /// The parent of each thread that left the index, for the pane left
+    /// without it.
+    left_parents: HashMap<String, String>,
     /// Text a pull request action put into a thread's composer for the user to edit and send.
     composer_appends: HashMap<String, String>,
     fallback_blocks: HashMap<String, FallbackBlock>,
@@ -400,6 +403,7 @@ impl WorkspaceStore {
             selection_generation: 0,
             providers_replica: ProvidersStatus::default(),
             pending_chat_turn: None,
+            left_parents: HashMap::new(),
             anchor_turn_task: None,
             native_rewind_prefills: HashMap::new(),
             composer_appends: HashMap::new(),
@@ -663,7 +667,10 @@ impl WorkspaceStore {
                     let _ = self.host.unsubscribe(subscription);
                 }
             }
-            self.leave_session(cx);
+            self.selection_moved_on();
+            for session_id in self.open_threads() {
+                self.close_thread(&session_id, cx);
+            }
             self.threads.clear();
             self.conversation_ui.clear();
             self.index_replica = Default::default();
@@ -708,7 +715,9 @@ impl WorkspaceStore {
                         after: None,
                     });
                 }
-                self.reselect_focused(cx);
+                for session_id in self.open_threads() {
+                    self.reopen_thread(&session_id);
+                }
             }
             Scope::Full => {}
             Scope::Space {
@@ -970,6 +979,16 @@ impl WorkspaceStore {
 
     pub fn queued_outgoing(&self) -> usize {
         self.host.queued_outgoing()
+    }
+
+    /// The workspace's baselines have arrived, and those of every open
+    /// thread.
+    pub fn baseline_ready(&self) -> bool {
+        self.baseline_ready_for(None)
+            && self
+                .open_threads()
+                .iter()
+                .all(|id| self.baseline_ready_for(Some(id)))
     }
 
     /// The workspace's baselines have arrived, and those of `session_id`'s
@@ -1660,6 +1679,108 @@ impl WorkspaceStore {
             });
         }
         !self.session_visible(&status.session_id)
+    }
+
+    /// Every open thread that left the visible index — archived (alone or
+    /// with its lead), deleted — closes, so no surface keeps showing it,
+    /// unless it holds an authored write still undelivered, whose failure
+    /// needs its Retry and Discard controls on screen. What comes next is
+    /// the shell's, whose panes know what they showed
+    /// ([`Self::show_after_left`]). An index that took nothing away and
+    /// leaves nothing open is the empty workspace.
+    pub(super) fn reconcile_destination(&mut self, cx: &mut Context<Self>) {
+        let left: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|(id, thread)| {
+                thread.open
+                    && thread
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| self.left_index(status))
+                    && self.delivery_messages_for(Some(id)).is_empty()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        if left.is_empty() && self.open_threads().is_empty() {
+            self.open_last_project_draft(cx);
+        }
+        for session_id in left {
+            let parent = self
+                .index_replica
+                .0
+                .iter()
+                .chain(&self.removed_session)
+                .find(|meta| meta.id == session_id)
+                .and_then(|meta| meta.parent_session_id.clone());
+            match parent {
+                Some(parent) => self.left_parents.insert(session_id.clone(), parent),
+                None => self.left_parents.remove(&session_id),
+            };
+            self.close_thread(&session_id, cx);
+        }
+    }
+
+    /// What the last pane shows once `session_id` has left it: its parent,
+    /// while that is visible, or else the last interacted project's draft.
+    /// True when the parent is on its way, so the pane need not empty.
+    pub(crate) fn show_after_left(&mut self, session_id: &str, cx: &mut Context<Self>) -> bool {
+        let parent = self
+            .left_parents
+            .get(session_id)
+            .filter(|parent| self.session_visible(parent))
+            .cloned();
+        match parent {
+            Some(parent) => {
+                self.place_thread(parent, Some(session_id.to_owned()), false, cx);
+                true
+            }
+            None => {
+                self.open_last_project_draft(cx);
+                false
+            }
+        }
+    }
+
+    /// After a baseline: a thread still listed is subscribed again, what the
+    /// new baseline dropped of it included, and one a scoped host no longer
+    /// lists closes.
+    fn restore_index_selection(&mut self, cx: &mut Context<Self>) {
+        for session_id in self.open_threads() {
+            let visible = self
+                .index_replica
+                .0
+                .iter()
+                .any(|meta| meta.id == session_id)
+                || self
+                    .session_status_for(Some(&session_id))
+                    .is_some_and(|status| {
+                        status.draft
+                            && status.project_id.as_ref().is_some_and(|project| {
+                                self.index_replica.1.iter().any(|p| &p.id == project)
+                            })
+                    });
+            if visible
+                && !self
+                    .host
+                    .subscribed_topics()
+                    .contains(&Topic::SessionStatus {
+                        session_id: session_id.clone(),
+                    })
+            {
+                self.reopen_thread(&session_id);
+            } else if !visible && !self.scope.is_full() {
+                self.close_thread(&session_id, cx);
+            }
+        }
+    }
+
+    /// Subscribe an open thread afresh; a reply in flight is from before.
+    fn reopen_thread(&mut self, session_id: &str) {
+        self.selection_moved_on();
+        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
+        self.draft_fallback_pending = false;
+        self.open_thread(session_id);
     }
 
     fn session_visible(&self, session_id: &str) -> bool {
@@ -6241,19 +6362,16 @@ pub(crate) mod tests {
         };
     }
 
-    /// What the shell does with a thread the user asks for, for a test
-    /// without one.
-    pub(crate) fn show_asked_threads(
+    /// What the shell does with a thread to show, for a test without one.
+    pub(crate) fn place_shown_threads(
         store: &gpui::Entity<WorkspaceStore>,
         cx: &mut TestAppContext,
     ) {
         cx.update(|cx| {
             cx.subscribe(store, |store, shown: &super::ShowThread, cx| {
-                if shown.asked {
-                    store.update(cx, |store, cx| {
-                        store.select_session(shown.session_id.clone(), cx)
-                    });
-                }
+                store.update(cx, |store, cx| {
+                    store.select_for_test(shown.session_id.clone(), cx)
+                });
             })
             .detach();
         });
@@ -6289,7 +6407,7 @@ pub(crate) mod tests {
                     cx,
                 )
             });
-            show_asked_threads(&workspace, cx);
+            place_shown_threads(&workspace, cx);
             self.wait_until(cx, &workspace, "workspace baseline", |cx| {
                 workspace.read_with(cx, |store, _| store.baseline_ready())
             });
@@ -7332,6 +7450,11 @@ pub(crate) mod tests {
                 session_id: "child".into(),
             },
         );
+        driver.wait_until(cx, &workspace, "child closed", |cx| {
+            workspace.read_with(cx, |store, _| !store.is_thread_open("child"))
+        });
+        place_shown_threads(&workspace, cx);
+        workspace.update(cx, |store, cx| assert!(store.show_after_left("child", cx)));
         driver.wait_until(cx, &workspace, "parent reopened", |cx| {
             selected_status(cx, &workspace, "parent")
         });
@@ -7410,7 +7533,7 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        crate::store::tests::show_asked_threads(&workspace, cx);
+        crate::store::tests::place_shown_threads(&workspace, cx);
 
         // Let the launch fallback settle on the first project before the user
         // navigates into "p" themselves.
@@ -7494,9 +7617,6 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        driver.wait_until(cx, &workspace, "launch draft", |cx| {
-            workspace.read_with(cx, |store, _| store.legacy_focus().is_some())
-        });
         workspace.update(cx, |store, cx| store.select_session("first".into(), cx));
         driver.wait_until(cx, &workspace, "first selected", |cx| {
             selected_status(cx, &workspace, "first")
@@ -7541,6 +7661,44 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Threads opened before the baseline, one per pane on a restored window
+    /// or a scope's first answer, are all subscribed by it.
+    #[gpui::test]
+    fn a_baseline_subscribes_every_open_thread(cx: &mut TestAppContext) {
+        let root = scratch_root("baseline-every-thread");
+        let disk = SessionStore::open_at(root.clone()).expect("open test store");
+        disk.upsert_project(&project_at("p", &root))
+            .expect("persist project");
+        for id in ["one", "two"] {
+            disk.upsert_meta(&thread(&root, id, "p", None))
+                .expect("persist session");
+        }
+        let host = test_host(disk);
+        let mut driver = LocalHostDriver::new(&host);
+        let workspace = cx.new(|cx| {
+            let mut store = WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            );
+            store.open_thread("one");
+            store.open_thread("two");
+            store
+        });
+        driver.wait_until(cx, &workspace, "both threads' baselines", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
+        workspace.read_with(cx, |store, _| {
+            assert!(store.session_status_for(Some("one")).is_some());
+            assert!(store.session_status_for(Some("two")).is_some());
+        });
+        driver.shutdown(cx, &workspace, &host);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Launching with nothing selected opens the remembered project's new
     /// thread page instead of a dead empty page; a workspace with no project
     /// at all keeps its add-project state.
@@ -7572,6 +7730,7 @@ pub(crate) mod tests {
                 cx,
             )
         });
+        place_shown_threads(&workspace, cx);
         driver.wait_until(cx, &workspace, "remembered project draft", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.focused_status().is_some_and(|status| {

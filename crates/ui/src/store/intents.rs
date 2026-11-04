@@ -602,6 +602,14 @@ impl WorkspaceStore {
         }
     }
 
+    pub(super) fn open_threads(&self) -> Vec<String> {
+        self.threads
+            .iter()
+            .filter(|(_, thread)| thread.open)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Show a thread: subscribe its topics and fold what the client already
     /// holds of it, so a kept thread is ready to draw as soon as its window
     /// brings it up to date.
@@ -694,7 +702,7 @@ impl WorkspaceStore {
         self.place_thread(session_id, None, false, cx);
     }
 
-    fn place_thread(
+    pub(super) fn place_thread(
         &mut self,
         session_id: String,
         replacing: Option<String>,
@@ -1001,11 +1009,7 @@ impl WorkspaceStore {
                 if store.selection_generation == selection_generation
                     && let Ok(CommandResponse::SessionId(Some(id))) = response
                 {
-                    if asked {
-                        store.show_thread(id, cx);
-                    } else {
-                        store.fall_back_to(id, cx);
-                    }
+                    store.place_thread(id, None, asked, cx);
                 }
             });
         })
