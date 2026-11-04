@@ -2831,36 +2831,8 @@ impl SessionsSidebar {
             window,
             cx,
         );
-        // Among several panes, the thread's pane's colour outlines the row.
-        // It fades in and out, and keeps its colour while it fades out; a
-        // thread that moves to another pane glides to that pane's colour.
-        let outline = crate::motion::shown(
-            SharedString::from(format!("{row_id}-pane-outline")),
-            crate::shell::pane_colour(&meta.id, cx),
-            SHOW,
-            window,
-            cx,
-        )
-        .map(|shown| {
-            let colour = transition(
-                (row_id.clone(), "pane-outline-colour"),
-                shown.value,
-                gpui_base::motion::Transition::new(GLIDE),
-                window,
-                cx,
-            );
-            colour.opacity(shown.progress())
-        });
-        let radius = cx.theme().tokens.radius.md;
         let row = crate::material::accessible_clickable(
-            base.bg(fill).relative().children(outline.map(|colour| {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(radius)
-                    .border_1()
-                    .border_color(colour)
-            })),
+            base.bg(fill),
             row_id,
             Role::Button,
             crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
@@ -5278,8 +5250,7 @@ impl SessionsSidebar {
             .and_then(|project_id| frame.project_names.get(project_id))
             .cloned();
         let light = self.shown.light(&meta.id);
-        let thread =
-            self.render_flat_thread(meta, &frame.flags, project_name, light, window, cx);
+        let thread = self.render_flat_thread(meta, &frame.flags, project_name, light, window, cx);
         let row = div().w_full().px_2().pb(px(2.)).child(drag_ghost::slot(
             arrange::thread_slot(&meta.id),
             thread,

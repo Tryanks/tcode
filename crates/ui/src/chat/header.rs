@@ -60,10 +60,6 @@ pub(crate) const HEADER_OVERFLOW_MIN_WIDTH: f32 = 300.;
 /// right end: a 24pt button and the 4pt gap before it.
 pub(crate) const PANE_CLOSE_WIDTH: f32 = 28.;
 
-/// How far a narrow pane's title tint stops short of the header's top and
-/// bottom edges.
-const PANE_TINT_INSET: f32 = 10.;
-
 /// The way back to the parent thread, each with the 8pt gap that follows it.
 /// Its arrow alone measures 20pt. With the parent's title cut to its
 /// 24-character maximum it measured 215pt for an ordinary title; 265pt leaves
@@ -600,26 +596,6 @@ impl ChatView {
             window,
             cx,
         );
-        // Among several panes, a header folded into its overflow tier tints
-        // its title area with its pane's colour, fading with the tier in its
-        // own colour.
-        let tint = motion
-            .shown(
-                "pane-tint",
-                self.session_id
-                    .as_deref()
-                    .and_then(|session_id| crate::shell::pane_colour(session_id, cx))
-                    .filter(|_| overflow)
-                    .map(|colour| colour.alpha(1.)),
-                SHOW,
-                window,
-                cx,
-            )
-            .map(|tint| {
-                let colour = motion.transition("pane-tint-colour", tint.value, GLIDE, window, cx);
-                let progress = tint.progress();
-                (crate::material::pane_tint(colour, progress, cx), progress)
-            });
         let toggle_gap = gpui::rems(0.25).to_pixels(window.rem_size());
         let agents_toggle = motion.shown(
             "agents-toggle-fold",
@@ -694,25 +670,19 @@ impl ChatView {
         // nothing active shows "No active thread". The title stretch carries no
         // controls, so it doubles as the window's native drag handle where the
         // platform needs one.
-        let on_tint = |text: gpui::Hsla| match tint {
-            Some((tint, _)) => crate::material::text_over_tint(text, tint, cx),
-            None => text,
-        };
         // Beside the current pane the title recedes; the pane's content stays
         // as it is.
-        let (muted, foreground) = (
-            on_tint(cx.theme().muted_foreground),
-            on_tint(motion.transition(
-                "title-colour",
-                if self.title_recedes {
-                    cx.theme().muted_foreground
-                } else {
-                    cx.theme().foreground
-                },
-                GLIDE,
-                window,
-                cx,
-            )),
+        let muted = cx.theme().muted_foreground;
+        let foreground = motion.transition(
+            "title-colour",
+            if self.title_recedes {
+                muted
+            } else {
+                cx.theme().foreground
+            },
+            GLIDE,
+            window,
+            cx,
         );
         let title_el = if is_draft {
             crate::material::bar_title(crate::tr!("chat.new_thread"), cx).text_color(muted)
@@ -817,19 +787,6 @@ impl ChatView {
                     .gap_2()
                     .items_center()
                     .relative()
-                    .when_some(tint, |stretch, (tint, progress)| {
-                        stretch.px(cx.theme().tokens.spacing.sm * progress).child(
-                            div()
-                                .debug_selector(|| "pane-tint".into())
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .top(px(PANE_TINT_INSET))
-                                .bottom(px(PANE_TINT_INSET))
-                                .rounded(crate::material::radius_input(cx))
-                                .bg(tint),
-                        )
-                    })
                     .child(
                         // Sized by its text, not `bar_title`'s zero basis, so the title
                         // runs its full length and the badge follows it.

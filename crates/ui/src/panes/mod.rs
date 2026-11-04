@@ -101,8 +101,7 @@ impl FocusPane {
 }
 
 /// Exchange the acting pane's thread with its neighbour's on a side; the
-/// keyboard stays in the pane, which now shows the neighbour's thread. Each
-/// pane keeps its colour.
+/// keyboard stays in the pane, which now shows the neighbour's thread.
 #[derive(Action, Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
 pub(crate) struct SwapPane(pub(crate) Side);
@@ -231,10 +230,6 @@ pub(crate) struct ThreadPanel {
     slot: Rc<Cell<Bounds<Pixels>>>,
     among_others: bool,
     zoom: PaneZoom,
-    /// The palette slot of the pane's outline, given by the shell when the
-    /// pane joins the column and kept while it changes thread and while it
-    /// leaves.
-    colour: Option<usize>,
     /// Leaving the column: still drawn while its slot glides shut, inert.
     closing: bool,
     /// The thread whose timeline the pane holds in the store for its chat,
@@ -253,8 +248,7 @@ pub(crate) struct ThreadPanel {
     /// The chat on its way in from another pane: where it was drawn there,
     /// and when it set off.
     flight: Option<(Bounds<Pixels>, Instant)>,
-    /// The pane's fades: its outline and the waiting hint's cross-fade with
-    /// its chat. Kept here because the dock draws the pane under a new
+    /// The pane's fades: the waiting hint's cross-fade with its chat. Kept here because the dock draws the pane under a new
     /// parent whenever the layout around it changes (see [`ThreadPanes`]).
     motion: crate::motion::owned::Owned,
     /// Hears the pane being entered.
@@ -305,7 +299,6 @@ impl ThreadPanel {
             slot: Rc::default(),
             among_others: false,
             zoom: PaneZoom::default(),
-            colour: None,
             closing: false,
             lease: None,
             fading_out: false,
@@ -435,16 +428,6 @@ impl ThreadPanel {
     /// Where the dock last laid the pane's slot out.
     pub(crate) fn slot(&self) -> Bounds<Pixels> {
         self.slot.get()
-    }
-
-    /// The palette slot of the pane's outline, once it has one.
-    pub(crate) fn colour(&self) -> Option<usize> {
-        self.colour
-    }
-
-    pub(crate) fn set_colour(&mut self, slot: usize, cx: &mut Context<Self>) {
-        self.colour = Some(slot);
-        cx.notify();
     }
 
     /// Whether the pane is leaving the column.
@@ -734,8 +717,7 @@ pub(crate) type DropTarget = Rc<dyn Fn(&Window, &App) -> Option<Bounds<Pixels>>>
 /// `("dock-split", node)`, a merge or a close lifts it back out, and a layout
 /// builds every group anew. Element state is keyed by the full id path from
 /// the window root, so keyed state in a pane that moves in the tree starts
-/// over. What must not — a pane's outline and waiting hint, its header's
-/// scroll — lives with the pane's and its chat's entities instead (see
+/// over. What must not — a pane's waiting hint, its header's scroll — lives with the pane's and its chat's entities instead (see
 /// [`crate::motion::owned`]). A zoom moves no group, only the zoomed pane's
 /// own view.
 pub(crate) struct ThreadPanes {
@@ -862,40 +844,22 @@ impl TabGroupRenderer for ThreadTabs {
         Empty.into_any_element()
     }
 
-    /// Among several panes, each wears the outline of its colour; while a
-    /// pane is zoomed the column is that pane alone, so none does. Which pane
-    /// holds the keyboard shows in its composer and in the threads list, not
-    /// here. A group that may close is one with a neighbour; a pane whose
-    /// last neighbour is closing is alone already. The pane drawn over the
-    /// column leaves a placeholder of its slot's size here (see [`Zoom`]).
+    /// The pane drawn over the column leaves a placeholder of its slot's size
+    /// here (see [`Zoom`]).
     fn render_active_panel(
         &self,
         panel: AnyView,
-        group: &TabGroupContext,
-        window: &mut Window,
+        _: &TabGroupContext,
+        _: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
         let Ok(pane) = panel.clone().downcast::<ThreadPanel>() else {
             return panel.into_any_element();
         };
-        let (zoom, slot, motion, shared, colour) = {
+        let (zoom, slot) = {
             let pane = pane.read(cx);
-            (
-                pane.zoom,
-                pane.slot.clone(),
-                pane.motion.clone(),
-                !pane.zoom.zoomed && group.is_closable() && pane.among_others,
-                pane.colour,
-            )
+            (pane.zoom, pane.slot.clone())
         };
-        // Toward the colour at alpha 0 rather than transparent black, so it
-        // keeps its hue while it fades.
-        let outline = match colour.map(|slot| crate::material::pane_colour(slot, cx)) {
-            Some(colour) if shared => colour,
-            Some(colour) => colour.opacity(0.),
-            None => gpui::transparent_black(),
-        };
-        let outline = motion.transition("outline", outline, GLIDE, window, cx);
         div()
             .relative()
             .size_full()
@@ -905,18 +869,6 @@ impl TabGroupRenderer for ThreadTabs {
             .map(|this| match zoom.overlaid {
                 true => this.child(div().size_full()),
                 false => this.child(panel),
-            })
-            .when(outline.a > 0., |this| {
-                this.child(
-                    div()
-                        .debug_selector(move || {
-                            format!("pane-outline-{}", colour.unwrap_or_default())
-                        })
-                        .absolute()
-                        .inset_0()
-                        .border_1()
-                        .border_color(outline),
-                )
             })
             .into_any_element()
     }
