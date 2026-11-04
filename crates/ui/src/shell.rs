@@ -8996,34 +8996,218 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// Hand the window `input` and draw the frame it asks for as the app
+    /// does: a moment after the input is handled, on the platform's next
+    /// frame. The test platform otherwise draws a window an input dirtied
+    /// at once, on the very instant the input was handled.
+    fn input_then_frame(input: gpui::PlatformInput, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            window.dispatch_event(input, cx);
+            cx.background_executor()
+                .advance_clock(Duration::from_millis(1));
+        });
+        draw(cx);
+    }
+
+    /// Press the control `selector` with the pointer, and draw the frame
+    /// after as the app does.
+    fn press_side(selector: &'static str, cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
+        use gpui::InputEvent as _;
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        let position = bounds.center();
+        cx.simulate_mouse_move(position, None, gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_event(gpui::MouseDownEvent {
+            position,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        let up = gpui::MouseUpEvent {
+            position,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count: 1,
+        };
+        input_then_frame(up.to_platform_input(), cx);
+        bounds
+    }
+
+    /// Press Escape, and draw the frame after as the app does.
+    fn escape_then_frame(cx: &mut VisualTestContext) {
+        use gpui::InputEvent as _;
+        let escape = gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("escape").expect("Escape"),
+            is_held: false,
+            prefer_character_input: false,
+        };
+        input_then_frame(escape.to_platform_input(), cx);
+    }
+
+    /// Press the agent's row in the lead's rail, and serve the agent as its
+    /// thread opens; where the row was pressed.
+    fn open_from_row(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        cx: &mut VisualTestContext,
+    ) -> gpui::Bounds<Pixels> {
+        let row = press_side("rail-agent-agent-1", cx);
+        serve_finished_turns(host, "agent-1", 3, false);
+        serve_subagent_status(host, "agent-1");
+        await_restore_update(shell, cx, |store| store.timeline_settled_for("agent-1"));
+        row
+    }
+
+    /// What the agent's timeline draws this frame: each quad wholly inside
+    /// it, where it is and how opaque.
+    fn timeline_quads(cx: &mut VisualTestContext) -> Vec<(gpui::Bounds<gpui::ScaledPixels>, f32)> {
+        let Some(timeline) = cx.debug_bounds("chat-side-timeline") else {
+            return Vec::new();
+        };
+        cx.update(|window, _| {
+            let timeline = timeline.scale(window.scale_factor());
+            crate::test_frames::painted_quads(window)
+                .iter()
+                .filter(|quad| {
+                    timeline.contains(&quad.bounds.origin)
+                        && timeline.contains(&quad.bounds.bottom_right())
+                })
+                .filter_map(|quad| Some((quad.bounds, quad.background.as_solid()?.a)))
+                .filter(|(_, alpha)| *alpha > 0.)
+                .collect()
+        })
+    }
+
+    /// How far in what the agent's timeline drew at rest, `rest`, is now:
+    /// laid out at its place while its surface moves, each quad of it stays
+    /// where it was, as much of it as the surface shows.
+    fn held_in(
+        rest: &[(gpui::Bounds<gpui::ScaledPixels>, f32)],
+        cx: &mut VisualTestContext,
+    ) -> f32 {
+        let now = timeline_quads(cx);
+        let same = |a: gpui::Bounds<gpui::ScaledPixels>, b: gpui::Bounds<gpui::ScaledPixels>| {
+            (a.origin.x.0 - b.origin.x.0).abs() < 1.
+                && (a.origin.y.0 - b.origin.y.0).abs() < 1.
+                && (a.size.width.0 - b.size.width.0).abs() < 1.
+                && (a.size.height.0 - b.size.height.0).abs() < 1.
+        };
+        rest.iter()
+            .filter_map(|(bounds, alpha)| {
+                now.iter()
+                    .find(|(drawn, _)| same(*drawn, *bounds))
+                    .map(|(_, now)| now / alpha)
+            })
+            .fold(0., f32::max)
+    }
+
+    /// The agent's surface, `selector`, at rest, closed by `close`: it
+    /// shrinks from its place into the agent's row in the rail, last drawn
+    /// where the row is, holding what the agent shows on its way, which
+    /// fades as the surface does, so it is never an empty block over what
+    /// it covers and nothing pops as it goes.
+    fn shrinks_into_row(
+        selector: &'static str,
+        close: impl FnOnce(&mut VisualTestContext),
+        cx: &mut VisualTestContext,
+    ) -> Vec<SurfaceFrame> {
+        let rest = surface_frame(selector, cx).expect("the agent's surface, at rest");
+        let rest_content = timeline_quads(cx);
+        assert!(!rest_content.is_empty(), "the agent's timeline draws");
+        let place = rest.bounds;
+        close(cx);
+        let mut shrinking = Vec::new();
+        let mut held = Vec::new();
+        while let Some(frame) = surface_frame(selector, cx) {
+            assert!(shrinking.len() < 80, "{selector} is still drawn");
+            shrinking.push(frame);
+            held.push(held_in(&rest_content, cx));
+            display_frame(cx);
+        }
+        let row = cx
+            .debug_bounds("rail-agent-agent-1")
+            .expect("the row is back in the rail");
+        let last = *shrinking.last().expect("the surface shrinks");
+        assert!(
+            about(last.bounds, row, px(2.)),
+            "it goes into {row:?}, last drawn at {last:?}"
+        );
+        assert!(
+            shrinking
+                .iter()
+                .any(|frame| strictly_between(frame.bounds, row, place)),
+            "it shrinks from {place:?} to {row:?} through {shrinking:?}"
+        );
+        let apart = |a: gpui::Bounds<Pixels>, b: gpui::Bounds<Pixels>| {
+            [
+                a.left() - b.left(),
+                a.top() - b.top(),
+                a.right() - b.right(),
+                a.bottom() - b.bottom(),
+            ]
+            .into_iter()
+            .map(|edge| edge.abs())
+            .fold(px(0.), Pixels::max)
+        };
+        assert!(
+            apart(shrinking[0].bounds, place) <= apart(shrinking[1].bounds, shrinking[0].bounds),
+            "it closes from {place:?}, not from a place of its own: {shrinking:?}"
+        );
+        let frames: Vec<_> = shrinking.iter().zip(&held).collect();
+        assert!(
+            frames
+                .iter()
+                .any(|(frame, held)| strictly_between(frame.bounds, row, place) && **held > 0.9),
+            "it holds what the agent shows on its way: {frames:?}"
+        );
+        assert!(
+            frames
+                .iter()
+                .filter(|(frame, _)| frame.fill > rest.fill * 0.5)
+                .all(|(_, held)| **held > 0.5),
+            "never an empty block: {frames:?} of {rest:?}"
+        );
+        assert!(
+            shrinking
+                .iter()
+                .any(|frame| frame.fill > rest.fill * 0.1 && frame.fill < rest.fill * 0.9),
+            "the surface turns translucent on its way: {shrinking:?}"
+        );
+        assert!(
+            last.fill < rest.fill * 0.05 && held.last().is_some_and(|held| *held < 0.05),
+            "nothing pops as it goes: {frames:?} of {rest:?}"
+        );
+        assert!(
+            shrinking
+                .iter()
+                .filter(|frame| frame.fill < rest.fill)
+                .all(|frame| frame.row),
+            "the row is under the surface before it thins: {shrinking:?}"
+        );
+        shrinking
+    }
+
     /// An agent opened from its row in the lead's rail grows out of the row
-    /// into its card, and shrinks back into the row when it is closed:
-    /// partway, the card lies between the row and its place, and it rests
-    /// in its place; closing, it last draws where the row is, which has come
-    /// back with the rail. The surface comes in over the row from nothing;
-    /// closing, it moves on the next frame, with the row already under it,
-    /// and has faded to nothing by the time it goes, so what it covered is
-    /// seen rather than a block that vanishes. Over a lead too narrow for
-    /// the card, the agent grows out of the row into its sheet over the
-    /// lead; closed once the row is no longer on screen, it slides off the
-    /// lead without shrinking.
+    /// into its card, and shrinks back into the row when it is closed, by
+    /// Close or by Escape: partway, the card lies between the row and its
+    /// place, and it rests in its place; closing, it last draws where the
+    /// row is, which has come back with the rail. The surface comes in over
+    /// the row from nothing; closing, it moves on the next frame, with the
+    /// row already under it, holding what the agent shows as it shrinks and
+    /// fading with it, so what it covered is seen rather than a block that
+    /// vanishes. Over a lead too narrow for the card, the agent grows out of
+    /// the row into its sheet over the lead, and Back shrinks it into the
+    /// row again; closed once the row is no longer on screen, it slides off
+    /// the lead without shrinking.
     #[gpui::test]
     fn an_agent_grows_out_of_its_rail_row_and_back_into_it(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (_shell, host, cx) = mount_lead_with_agent(cx);
-        serve_finished_turns(&host, "agent-1", 3, false);
+        let (shell, host, cx) = mount_lead_with_agent(cx);
         settle_frames(cx);
-        let press_row = |cx: &mut VisualTestContext| {
-            let row = cx
-                .debug_bounds("rail-agent-agent-1")
-                .expect("the agent's row in the rail");
-            cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
-            draw(cx);
-            cx.simulate_click(row.center(), gpui::Modifiers::default());
-            draw(cx);
-            row
-        };
-        let row = press_row(cx);
+        let row = open_from_row(&shell, &host, cx);
         let growing = surface_frames("chat-side-card", 50, cx);
         let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
         assert!(
@@ -9047,57 +9231,27 @@ pub(crate) mod tests {
             growing[0]
         );
 
-        let close = cx.debug_bounds("side-close").expect("Close");
-        cx.simulate_mouse_move(close.center(), None, gpui::Modifiers::default());
-        draw(cx);
-        cx.simulate_click(close.center(), gpui::Modifiers::default());
-        draw(cx);
-        let shrinking = surface_until_gone("chat-side-card", cx);
-        let row = cx
-            .debug_bounds("rail-agent-agent-1")
-            .expect("the row is back in the rail");
-        let last = *shrinking.last().expect("the card shrinks");
-        assert!(
-            about(last.bounds, row, px(2.)),
-            "the card goes into {row:?}, last drawn at {last:?}"
-        );
-        assert!(
-            shrinking
-                .iter()
-                .any(|frame| strictly_between(frame.bounds, row, card)),
-            "the card shrinks from {card:?} to {row:?} through {shrinking:?}"
-        );
-        assert!(
-            about(shrinking[0].bounds, card, px(1.)),
-            "it closes from {card:?}, not from a place of its own: {shrinking:?}"
+        let shrinking = shrinks_into_row(
+            "chat-side-card",
+            |cx| {
+                press_side("side-close", cx);
+            },
+            cx,
         );
         assert!(
             shrinking[1].bounds.size.width < card.size.width,
             "it moves on the frame after the one it closed on: {shrinking:?}"
         );
-        assert!(
-            shrinking
-                .iter()
-                .any(|frame| frame.fill > rest.fill * 0.1 && frame.fill < rest.fill * 0.9),
-            "the surface turns translucent on its way: {shrinking:?}"
-        );
-        assert!(
-            last.fill < rest.fill * 0.05,
-            "nothing pops as it goes: {last:?} of {rest:?}"
-        );
-        assert!(
-            shrinking
-                .iter()
-                .filter(|frame| frame.fill < rest.fill)
-                .all(|frame| frame.row),
-            "the row is under the surface before it thins: {shrinking:?}"
-        );
+
+        open_from_row(&shell, &host, cx);
+        settle_frames(cx);
+        shrinks_into_row("chat-side-card", escape_then_frame, cx);
 
         // A lead too narrow for the card beside it, with its rail.
         resize(cx, 1300.);
         settle_frames(cx);
         assert!(cx.debug_bounds("chat-rail").is_some(), "the rail fits");
-        let row = press_row(cx);
+        let row = open_from_row(&shell, &host, cx);
         let growing = frames_of("chat-side-sheet", 50, cx);
         let sheet = cx
             .debug_bounds("chat-side-sheet")
@@ -9111,19 +9265,24 @@ pub(crate) mod tests {
         );
         settle_frames(cx);
         assert_eq!(cx.debug_bounds("chat-side-sheet"), Some(sheet), "at rest");
+        shrinks_into_row(
+            "chat-side-sheet",
+            |cx| {
+                press_side("side-back", cx);
+            },
+            cx,
+        );
 
         // Narrower still, the rail is gone, and with it the row.
+        open_from_row(&shell, &host, cx);
+        settle_frames(cx);
         resize(cx, 1000.);
         settle_frames(cx);
         assert_eq!(cx.debug_bounds("chat-rail"), None, "no rail");
         let sheet = cx
             .debug_bounds("chat-side-sheet")
             .expect("the agent's sheet");
-        let back = cx.debug_bounds("side-back").expect("Back");
-        cx.simulate_mouse_move(back.center(), None, gpui::Modifiers::default());
-        draw(cx);
-        cx.simulate_click(back.center(), gpui::Modifiers::default());
-        draw(cx);
+        press_side("side-back", cx);
         let leaving = frames_until_gone("chat-side-sheet", cx);
         assert!(
             leaving
@@ -9168,8 +9327,7 @@ pub(crate) mod tests {
             );
         };
 
-        cx.simulate_keystrokes("escape");
-        draw(cx);
+        escape_then_frame(cx);
         for _ in 0..6 {
             display_frame(cx);
         }
@@ -9204,8 +9362,7 @@ pub(crate) mod tests {
             growing.bounds.size.width < rest.bounds.size.width,
             "partway: {growing:?}"
         );
-        cx.simulate_keystrokes("escape");
-        draw(cx);
+        escape_then_frame(cx);
         goes_on(
             growing,
             surface_frame("chat-side-card", cx).expect("the card, closed again"),

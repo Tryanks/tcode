@@ -68,11 +68,9 @@ const OPEN_SURFACE: f32 = 0.4;
 /// The share of its way over which what it holds fades in, growing.
 const OPEN_CONTENT: (f32, f32) = (0.3, 0.8);
 
-/// The share of its way by which what it holds has gone, shrinking, and
-/// from which the surface fades: the one starts before the other ends, so
-/// the surface is never opaque and empty.
-const BACK_CONTENT: f32 = 0.55;
-const BACK_SURFACE: f32 = 0.45;
+/// The share of its way from which the surface and what it holds fade
+/// together, shrinking: the surface is never an empty block.
+const BACK_FADE: f32 = 0.45;
 
 /// How long what it holds takes to fade out as it leaves with no origin on
 /// screen.
@@ -178,11 +176,12 @@ enum ExpandPhase {
         shown: Shown,
     },
     /// Shrinking since `at` from `grown` of the way out of the origin, as
-    /// `shown` was then.
+    /// `shown` was then; `drawn` once a frame has been drawn since.
     Closing {
         at: Instant,
         grown: f32,
         shown: Shown,
+        drawn: bool,
     },
     /// With its origin nowhere on screen as it closed at `at`: fading and
     /// sliding away as it does with no origin.
@@ -253,13 +252,16 @@ impl Expand {
                 };
                 (1. - (1. - grown) * left, Shown { surface, content })
             }
-            ExpandPhase::Closing { grown, shown, .. } => (
-                grown * left,
-                Shown {
-                    surface: shown.surface * (1. - ramp(way, BACK_SURFACE, 1.)),
-                    content: shown.content * (1. - ramp(way, 0., BACK_CONTENT)),
-                },
-            ),
+            ExpandPhase::Closing { grown, shown, .. } => {
+                let fade = 1. - ramp(way, BACK_FADE, 1.);
+                (
+                    grown * left,
+                    Shown {
+                        surface: shown.surface * fade,
+                        content: shown.content * fade,
+                    },
+                )
+            }
             ExpandPhase::Leaving { at, shown } => {
                 let since = now.saturating_duration_since(at).as_secs_f32();
                 let out = (since / LEAVE_FADE.as_secs_f32()).min(1.);
@@ -729,6 +731,7 @@ impl ChatView {
                 at: now,
                 grown,
                 shown,
+                drawn: false,
             },
         });
         if had_keyboard {
@@ -937,10 +940,15 @@ impl ChatView {
                 shown,
             };
         }
-        // The frame it closed on drew the origin if it is on screen, so by
-        // the next one it is known, and otherwise there is none to go into.
-        if let ExpandPhase::Closing { at, grown, .. } = expand.phase
-            && now > at
+        // The first frame after it closed lays out what it goes back into,
+        // so from the second that is known; not on screen then, there is
+        // none. Counted in frames, not by the clock: the first frame is
+        // drawn some time after the close.
+        if let ExpandPhase::Closing { drawn, .. } = &mut expand.phase
+            && !*drawn
+        {
+            *drawn = true;
+        } else if let ExpandPhase::Closing { grown, .. } = expand.phase
             && on_screen.is_none()
         {
             let shown = expand.at(now).1;
