@@ -334,6 +334,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     })
 }
 
+const USAGE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Ask a short-lived Claude Code process for its subscription usage.
 pub async fn read_usage(
     binary_path: Option<PathBuf>,
@@ -424,9 +426,21 @@ pub async fn read_usage(
         ))
     });
 
+    // End of input lets the CLI leave: only then is the read in its config
+    // directory, where the next read is answered from it if the usage endpoint
+    // refuses that one. Killed here, a profile without a long-running session
+    // would keep nothing.
     let _ = stdin.close().await;
-    let _ = child.kill();
-    let _ = child.status().await;
+    drop(stdin);
+    let exited = smol::future::or(async { child.status().await.is_ok() }, async {
+        smol::Timer::after(USAGE_EXIT_GRACE).await;
+        false
+    })
+    .await;
+    if !exited {
+        let _ = child.kill();
+        let _ = child.status().await;
+    }
     result
 }
 
@@ -3855,6 +3869,48 @@ mod tests {
             home: None,
         };
         assert_eq!(config_dir(&launch_env), Some(PathBuf::from("/configured")));
+    }
+
+    /// claude 2.1.317 records a usage read in its config directory on its way
+    /// out, and that record is all it has to answer from when the usage
+    /// endpoint refuses a later read. A CLI that never leaves costs the read
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_usage_read_lets_the_cli_leave_on_its_own() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const ANSWER: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"usage-1","response":{"rate_limits_available":true,"rate_limits":{}}}}"#;
+        let dir = std::env::temp_dir().join(format!("tcode-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let read = |name: &str, after_answer: &str| {
+            let binary = dir.join(name);
+            std::fs::write(
+                &binary,
+                format!("#!/bin/sh\nread request\necho '{ANSWER}'\n{after_answer}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            smol::block_on(read_usage(
+                Some(binary),
+                LaunchEnv {
+                    env: Vec::new(),
+                    home: Some(dir.clone()),
+                },
+            ))
+            .unwrap()
+        };
+
+        let leaves = read(
+            "leaves",
+            "while read line; do :; done\ntouch \"$CLAUDE_CONFIG_DIR/recorded\"",
+        );
+        assert_eq!(leaves["rate_limits_available"], true);
+        assert!(dir.join("recorded").exists());
+
+        let stays = read("stays", "exec sleep 30");
+        assert_eq!(stays["rate_limits_available"], true);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

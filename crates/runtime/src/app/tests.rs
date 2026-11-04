@@ -1265,7 +1265,7 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
 
 /// A Claude Code stand-in that keeps its sign-in in `CLAUDE_CONFIG_DIR` and
 /// answers `auth status` and, without a terminal, `auth login` the way
-/// claude 2.1.314 does.
+/// claude 2.1.314 does, and `get_usage` the way 2.1.317 does.
 #[cfg(unix)]
 #[test]
 fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
@@ -1291,6 +1291,11 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
            if [ \"$code\" = good ]; then touch \"$CLAUDE_CONFIG_DIR/signed-in\"; echo 'Login successful.'; exit 0; fi\n\
            echo 'Invalid code' >&2; exit 1 ;;\n\
          'auth logout') rm -f \"$CLAUDE_CONFIG_DIR/signed-in\" ;;\n\
+         '--print --input-format stream-json --output-format stream-json --verbose')\n\
+           read request\n\
+           if [ -f \"$CLAUDE_CONFIG_DIR/signed-in\" ]; then\n\
+             echo '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage-1\",\"response\":{\"subscription_type\":\"max\",\"rate_limits_available\":true,\"rate_limits\":{\"five_hour\":{\"utilization\":12,\"resets_at\":\"2026-11-04T21:20:00+00:00\"}}}}}'\n\
+           else echo '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"usage-1\",\"response\":{\"subscription_type\":null,\"rate_limits_available\":false,\"rate_limits\":null}}}'; fi ;;\n\
          *) exit 2 ;;\n\
          esac\n",
     )
@@ -1366,6 +1371,13 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
         state.read(|state| snapshot(state, "claude").auth.unwrap().email),
         Some("dev@example.com".into())
     );
+    cx.run_until(|state| {
+        state
+            .providers_status_snapshot()
+            .provider_usage
+            .get("claude")
+            .is_some_and(|usage| usage.error.is_none() && usage.windows.len() == 1)
+    });
 
     state.dispatch_command(
         cx,
