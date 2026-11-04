@@ -149,7 +149,7 @@ fn child_id(id: &ElementId, channel: impl Into<gpui::SharedString>) -> ElementId
 
 /// Something a page shows only some of the time, sampled by [`shown`]: what
 /// to draw, and how far in it is.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct Shown<T> {
     id: ElementId,
     pub value: T,

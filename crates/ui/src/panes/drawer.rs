@@ -116,7 +116,9 @@ pub(crate) struct Drawer {
     /// The attachment's panel, which owns the pages this pane's shows.
     browser: Entity<PreviewPanel>,
     tabs: Option<Entity<DiffPanel>>,
-    preview: Option<Entity<PreviewPanel>>,
+    /// The Preview tab once made, shared with the pane, which syncs its
+    /// page as the window renders without reading the drawer.
+    preview: Rc<std::cell::RefCell<Option<Entity<PreviewPanel>>>>,
     /// The thread the pane shows: another one, or the drawer taking its
     /// content down, starts a new scene, so what is put up starts at rest.
     scene: crate::motion::Epoch,
@@ -130,6 +132,10 @@ pub(crate) struct Drawer {
     glide: ResizeGlide,
     /// The thread the panel showed last frame.
     subject: Option<String>,
+    /// The pane's width as last handed to the chat it holds, kept here: a
+    /// read of the chat would draw the pane again with every frame the chat
+    /// draws.
+    handed_width: Option<(gpui::EntityId, Pixels)>,
     /// The panel's room in the group last frame, while it is drawn.
     laid_out: Option<Pixels>,
     /// Where the panel's content holds the keyboard.
@@ -157,6 +163,11 @@ struct PanelFrame {
 }
 
 impl Drawer {
+    /// Where the drawer keeps its Preview tab once made.
+    pub(super) fn preview(&self) -> Rc<std::cell::RefCell<Option<Entity<PreviewPanel>>>> {
+        self.preview.clone()
+    }
+
     pub(crate) fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
@@ -171,12 +182,13 @@ impl Drawer {
             window_state,
             browser,
             tabs: None,
-            preview: None,
+            preview: Rc::default(),
             motion: crate::motion::owned::Owned::in_scene(&scene),
             glide: ResizeGlide::new("right-panel-split", Axis::Horizontal).in_scene(&scene),
             scene,
             split: cx.new(|_| ResizableState::default()),
             subject: None,
+            handed_width: None,
             laid_out: None,
             focus: cx.focus_handle(),
             return_to: None,
@@ -247,7 +259,7 @@ impl ThreadPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !selected && self.drawer.read(cx).preview.is_none() {
+        if !selected && self.preview.borrow().is_none() {
             return;
         }
         self.drawer_preview(window, cx).update(cx, |preview, cx| {
@@ -257,7 +269,8 @@ impl ThreadPanel {
 
     /// Let go of the page the pane's Preview tab shows, and of its chrome.
     pub(crate) fn release_preview(&mut self, cx: &mut Context<Self>) {
-        if let Some(preview) = self.drawer.read(cx).preview.clone() {
+        let preview = self.preview.borrow().clone();
+        if let Some(preview) = preview {
             preview.update(cx, |preview, cx| preview.release_preview(cx));
         }
     }
@@ -265,14 +278,16 @@ impl ThreadPanel {
     /// Hide the pane's page before the layout it sits in goes: a native view
     /// outlives its element.
     pub(crate) fn sync_preview(this: &Entity<Self>, cx: &mut App) {
-        if let Some(preview) = this.read(cx).drawer.read(cx).preview.clone() {
+        let preview = this.read(cx).preview.borrow().clone();
+        if let Some(preview) = preview {
             preview.update(cx, |preview, cx| preview.sync_visibility(cx));
         }
     }
 
     /// Another pane is drawn over this one, or no longer.
     pub(super) fn set_preview_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
-        if let Some(preview) = self.drawer.read(cx).preview.clone() {
+        let preview = self.preview.borrow().clone();
+        if let Some(preview) = preview {
             PreviewPanel::set_covered(&preview, covered, cx);
         }
     }
@@ -329,14 +344,15 @@ impl Drawer {
     ) -> Entity<PreviewPanel> {
         let subject = host.subject(cx);
         let at_corner = host.chat.read(cx).at_window_corner();
-        let preview = match &self.preview {
-            Some(preview) => preview.clone(),
+        let existing = self.preview.borrow().clone();
+        let preview = match existing {
+            Some(preview) => preview,
             None => {
                 let preview = self.browser.clone().update(cx, |browser, cx| {
                     browser.for_pane(subject.clone(), window, cx)
                 });
                 preview.update(cx, |preview, _| preview.share_scene(&self.scene));
-                self.preview = Some(preview.clone());
+                *self.preview.borrow_mut() = Some(preview.clone());
                 preview
             }
         };
@@ -371,10 +387,13 @@ impl Drawer {
         if let Some(tabs) = &self.tabs {
             DiffPanel::set_session(tabs, subject.clone(), cx);
         }
-        if self.preview.is_some() {
+        if self.preview.borrow().is_some() {
             self.preview_for(host, window, cx);
         }
-        ChatView::set_pane_width(&host.chat, pane_width, cx);
+        let handed = (host.chat.entity_id(), pane_width);
+        if self.handed_width.replace(handed) != Some(handed) {
+            ChatView::set_pane_width(&host.chat, pane_width, cx);
+        }
         let store = self.store.clone();
         let panel = store.read(cx).panel_state_for(subject.as_deref());
         let panel_open = panel.right_panel_open;
@@ -482,7 +501,8 @@ impl Drawer {
                 // A frame in the new scene, so the panel's next opening
                 // glides from where this one left it.
                 window.request_animation_frame();
-                if let Some(preview) = &self.preview {
+                let preview = self.preview.borrow().clone();
+                if let Some(preview) = preview {
                     preview.update(cx, |preview, cx| preview.release_page(cx));
                 }
             }

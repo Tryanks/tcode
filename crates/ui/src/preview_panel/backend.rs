@@ -180,11 +180,16 @@ impl PreviewPanel {
 
     /// The pages' fades, which the window draws every frame whether or not
     /// this panel is mounted: a page outlives the panel and leaves where it
-    /// was.
-    pub(crate) fn native_fade(&self) -> Option<AnyElement> {
+    /// was. None while there is no page: a deferred draw makes the window
+    /// build its whole shell again for any change inside it (gpui-fast
+    /// splices no view around a deferred draw outside the views it builds).
+    pub(crate) fn native_fade(&self, cx: &App) -> Option<AnyElement> {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             let lifecycle = self.backend.lifecycle.clone();
+            if !lifecycle.read(cx).has_pages() {
+                return None;
+            }
             Some(
                 crate::motion::native_fade::NativeFade::new("preview-pages", move |cx| {
                     lifecycle.read(cx).native_pages()
@@ -193,7 +198,10 @@ impl PreviewPanel {
             )
         }
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-        None
+        {
+            let _ = cx;
+            None
+        }
     }
 
     /// Redraw the window that draws [`Self::native_fade`] whenever a fade

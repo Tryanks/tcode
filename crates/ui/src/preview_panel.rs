@@ -776,7 +776,7 @@ mod portable {
 
         pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
 
-        pub(crate) fn native_fade(&self) -> Option<AnyElement> {
+        pub(crate) fn native_fade(&self, _cx: &App) -> Option<AnyElement> {
             None
         }
 

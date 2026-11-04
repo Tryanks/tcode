@@ -473,6 +473,12 @@ impl BrowserLifecycle {
         }
     }
 
+    /// Whether any page is held, made or on its way.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(super) fn has_pages(&self) -> bool {
+        !self.slots.is_empty()
+    }
+
     /// Every ready page and whether the panel wants it on screen.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub(super) fn native_pages(

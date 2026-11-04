@@ -592,12 +592,10 @@ impl ChatView {
     /// How wide the pane drawing this view is, its right panel's room
     /// included.
     pub(crate) fn set_pane_width(this: &Entity<Self>, width: gpui::Pixels, cx: &mut App) {
-        if this.read(cx).pane_width != width {
-            this.update(cx, |chat, cx| {
-                chat.pane_width = width;
-                cx.notify();
-            });
-        }
+        this.update(cx, |chat, cx| {
+            chat.pane_width = width;
+            cx.notify();
+        });
     }
 
     /// Whether the pane's right panel lies over this view rather than beside
@@ -651,23 +649,19 @@ impl ChatView {
     }
 
     pub(crate) fn set_edges(this: &Entity<Self>, edges: WindowEdges, cx: &mut App) {
-        if this.read(cx).edges != edges {
-            this.update(cx, |chat, cx| {
-                chat.edges = edges;
-                cx.notify();
-            });
-        }
+        this.update(cx, |chat, cx| {
+            chat.edges = edges;
+            cx.notify();
+        });
     }
 
     /// Whether the header's title recedes, its pane not being the current one
     /// among several.
     pub(crate) fn set_title_recedes(this: &Entity<Self>, recedes: bool, cx: &mut App) {
-        if this.read(cx).title_recedes != recedes {
-            this.update(cx, |chat, cx| {
-                chat.title_recedes = recedes;
-                cx.notify();
-            });
-        }
+        this.update(cx, |chat, cx| {
+            chat.title_recedes = recedes;
+            cx.notify();
+        });
     }
 
     /// What the pane drawing the view hands its header: the close button,
@@ -678,14 +672,11 @@ impl ChatView {
         controls: Option<crate::shell::PaneControls>,
         cx: &mut App,
     ) {
-        let chat = this.read(cx);
-        if chat.pane_close != close || chat.pane_controls != controls {
-            this.update(cx, |chat, cx| {
-                chat.pane_close = close;
-                chat.pane_controls = controls;
-                cx.notify();
-            });
-        }
+        this.update(cx, |chat, cx| {
+            chat.pane_close = close;
+            chat.pane_controls = controls;
+            cx.notify();
+        });
     }
 
     /// Show `session_id`'s thread, or none; the next sync finds the thread
