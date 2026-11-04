@@ -503,26 +503,26 @@ impl ChatView {
         is_draft: bool,
         cwd: Option<PathBuf>,
         agents: Option<&crate::agents_panel::Agents>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let agents_cue = agents.map(|agents| agents.cue(cx));
-        let header = cx.processor(move |this, width: gpui::Pixels, window, cx| {
-            this.render_header_bar(
-                title.clone(),
-                is_draft,
-                cwd.clone(),
-                agents_cue,
-                f32::from(width),
-                window,
-                cx,
-            )
-        });
-        gpui::container_query(move |size, window, cx| header(size.width, window, cx))
+        div()
+            .w_full()
             .flex_none()
             .h(px(crate::material::bar_height(
                 crate::material::Bar::Strip,
                 false,
             )))
+            .child(self.render_header_bar(
+                title,
+                is_draft,
+                cwd,
+                agents_cue,
+                f32::from(self.width),
+                window,
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -1539,7 +1539,7 @@ mod tests {
     fn header_labels_follow_the_width_of_the_frame(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
         let (store, window_state, session_id) = seed_chat(cx, synthetic_markdown_timeline(1));
-        let (_view, cx) = cx.add_window_view(|window, cx| {
+        let (_view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(session_id), window, cx)
         });
         let cx: &mut VisualTestContext = cx;
@@ -1573,10 +1573,10 @@ mod tests {
         fn render(
             &mut self,
             _: &mut gpui::Window,
-            _: &mut gpui::Context<Self>,
+            cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
-            let chat = self.chat.clone();
+            let chat = self.chat.read(cx).frame();
             if self.moved {
                 gpui::div()
                     .size_full()

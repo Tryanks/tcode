@@ -218,6 +218,10 @@ type Entered = Rc<dyn Fn(Entity<ThreadPanel>, &mut Window, &mut App)>;
 /// One thread shown in one pane.
 pub(crate) struct ThreadPanel {
     chat: Entity<ChatView>,
+    /// What draws the chat, taken as the chat is: reading the chat as the
+    /// pane renders would draw the pane again with every frame the chat
+    /// draws.
+    frame: Entity<crate::chat::ChatFrame>,
     drawer: Entity<Drawer>,
     /// The drawer's Preview tab once made: the window syncs its page on
     /// every frame, and a read of the drawer, which writes itself as it lays
@@ -300,12 +304,14 @@ impl ThreadPanel {
             }
         });
         let session_id = chat.read(cx).session_id().map(str::to_owned);
+        let frame = chat.read(cx).frame();
         // A pane taken down mid-fade, or with its glide never landing,
         // lets its lease go with it.
         let release = cx.on_release(|panel: &mut Self, cx| panel.hold(None, cx));
         let mut panel = Self {
             session_id: None,
             chat,
+            frame,
             preview: drawer.preview(),
             drawer: cx.new(|_| drawer),
             conversation: Rc::default(),
@@ -355,6 +361,11 @@ impl ThreadPanel {
         self.chat.clone()
     }
 
+    /// What draws the pane's chat.
+    pub(crate) fn frame(&self) -> Entity<crate::chat::ChatFrame> {
+        self.frame.clone()
+    }
+
     /// The thread the pane shows.
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
@@ -378,6 +389,7 @@ impl ThreadPanel {
         cx: &mut Context<Self>,
     ) -> Entity<ChatView> {
         let session_id = chat.read(cx).session_id().map(str::to_owned);
+        self.frame = chat.read(cx).frame();
         self.fading_out = false;
         self.await_chat(false, cx);
         let replaced = std::mem::replace(&mut self.chat, chat);
@@ -543,7 +555,7 @@ impl ThreadPanel {
                             .bg(crate::material::opaque_canvas(cx)
                                 .blend(crate::material::content_surface(cx)))
                             .shadow_sm()
-                            .child(div().w(size.width).h(size.height).child(self.chat.clone())),
+                            .child(div().w(size.width).h(size.height).child(self.frame.clone())),
                     ),
             ))
             .into_any_element()
@@ -632,7 +644,7 @@ impl Render for ThreadPanel {
                 self.flying_chat(cx)
             } else {
                 self.flight = None;
-                self.chat.clone().into_any_element()
+                self.frame.clone().into_any_element()
             };
             layers.push((CHAT, chat));
         } else if self.fading_out {

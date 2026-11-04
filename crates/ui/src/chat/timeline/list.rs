@@ -409,10 +409,16 @@ mod tests {
     }
 
     impl Render for Panes {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             h_flex()
                 .size_full()
-                .child(div().flex_1().min_w_0().h_full().child(self.chat.clone()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.chat.read(cx).frame()),
+                )
                 .child(
                     div()
                         .id("other-pane")

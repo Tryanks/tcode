@@ -372,7 +372,7 @@ mod tests {
         cx.update(|cx| cx.set_reduce_motion(true));
         let window_state = cx.new(|_| WindowState::new(false));
         let store = threads.store.clone();
-        let (view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
                 window_state,
