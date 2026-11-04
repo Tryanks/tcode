@@ -17,10 +17,7 @@ const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 impl Composer {
     /// The active session's pending user-input request, if any.
     pub(in super::super) fn pending_user_input(&self, cx: &App) -> Option<PendingUserInput> {
-        self.workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .pending_user_input
+        self.composer_state(cx).pending_user_input.clone()
     }
 
     /// Keep the per-request question state in sync: reset the index/selections
@@ -30,11 +27,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let current = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .pending_user_input;
+        let current = self.composer_state(cx).pending_user_input.clone();
         let current_id = current.as_ref().map(|pending| pending.request_id.clone());
         if current_id != self.ui_request_id {
             self.ui_request_id = current_id;

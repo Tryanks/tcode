@@ -133,9 +133,7 @@ impl Composer {
         }
         let store = self.workspace_store.read(cx);
         let session_id = self.session_id.clone();
-        let attachments_dir = store
-            .composer_state_for(self.session_id.as_deref())
-            .attachments_dir;
+        let attachments_dir = self.composer_state(cx).attachments_dir.clone();
         let link = store.attachment_link();
         let remote_limit = store.client_remote_attachment_limit_bytes();
         self.pending_image_loads += 1;

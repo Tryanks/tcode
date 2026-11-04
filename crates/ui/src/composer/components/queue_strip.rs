@@ -50,11 +50,7 @@ impl Composer {
         crate::store::ComposerQueue,
         Vec<tcode_protocol::QueuedMessageStatus>,
     )> {
-        let mut queue = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref())
-            .queue?;
+        let mut queue = self.composer_state(cx).queue.clone()?;
         let deliveries = self
             .workspace_store
             .read(cx)

@@ -77,10 +77,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let state = self
-            .workspace_store
-            .read(cx)
-            .composer_state_for(self.session_id.as_deref());
+        let state = self.composer_state(cx);
         let goal = goal.clone();
         let control = state.provider.and_then(|provider| provider.caps().goals);
         let enabled = self.interactive(cx) && goal_offered(&state).is_some();

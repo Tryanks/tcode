@@ -244,12 +244,9 @@ impl ChatView {
                         } => {
                             let resets_at = *resets_at;
                             let store = self.workspace_store.read(cx);
-                            let queued: Vec<_> = store
-                                .composer_state_for(self.session_id.as_deref())
-                                .queue
-                                .into_iter()
-                                .flat_map(|queue| queue.messages)
-                                .collect();
+                            let queued = store
+                                .session_status_for(self.session_id.as_deref())
+                                .map_or(&[][..], |status| &status.queued_messages);
                             let queued_id = queued
                                 .iter()
                                 .find(|message| message.fire_at_unix_secs == Some(resets_at))
