@@ -147,8 +147,8 @@ mod jni_exports {
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeFrame(
         _env: EnvUnowned<'_>,
         _activity: JObject<'_>,
-    ) {
-        gpui_android::jni_frame();
+    ) -> jboolean {
+        gpui_android::jni_frame()
     }
 
     #[unsafe(no_mangle)]
