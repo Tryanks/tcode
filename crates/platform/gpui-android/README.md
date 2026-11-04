@@ -11,8 +11,8 @@ panic instead of pulling Android libraries into host builds.
 `android_activity::AndroidApp`, and constructs `gpui::Application` with the
 process-local platform. Android's native activity loop remains the GPUI
 foreground executor. Work submitted to the background executor is distributed
-over a small Rust worker pool; delayed work uses timer threads and foreground
-continuations wake the Android looper. GPUI's `frame_waker` and
+over a small Rust worker pool; delayed work waits on one timer thread, in
+deadline order, and foreground continuations wake the Android looper. GPUI's `frame_waker` and
 `schedule_frame` request a coalesced Java `Choreographer` callback; unrelated
 looper wakes do not render. [FramePacer](../frame-pacing/src/lib.rs) owns demand
 and activity grace, shared with iOS. Isolated invalidations return to pause;
