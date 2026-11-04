@@ -122,20 +122,32 @@ impl AgentRow {
 
     fn elapsed(&self) -> Option<String> {
         let started = self.started_at?;
-        // A start no later than the last end belongs to a finished run: a
-        // running agent whose next run has not started yet has no elapsed time.
-        let run_ended = self.ended_at.filter(|ended| *ended >= started);
-        let ended = match (
-            self.execution.is_some_and(AgentExecution::running),
-            run_ended,
-        ) {
-            (true, None) => tcode_core::project::now_secs() * 1000,
-            (false, Some(ended)) => ended,
-            _ => return None,
+        let ended = if self.clock_runs() {
+            tcode_core::project::now_secs() * 1000
+        } else if !self.execution.is_some_and(AgentExecution::running) {
+            self.run_ended()?
+        } else {
+            return None;
         };
         Some(crate::chat::format_elapsed_seconds(
             ended.saturating_sub(started),
         ))
+    }
+
+    /// Whether its elapsed time counts up with the clock: it runs, and its
+    /// run started after the last one ended.
+    fn clock_runs(&self) -> bool {
+        self.execution.is_some_and(AgentExecution::running)
+            && self.started_at.is_some()
+            && self.run_ended().is_none()
+    }
+
+    /// When its last run ended. A start no later than the last end belongs to
+    /// a finished run: a running agent whose next run has not started yet
+    /// has no elapsed time.
+    fn run_ended(&self) -> Option<u64> {
+        let started = self.started_at?;
+        self.ended_at.filter(|ended| *ended >= started)
     }
 }
 
@@ -751,9 +763,11 @@ pub struct AgentsPanel {
     /// The phone sheet this panel fills, dismissed when an agent opens.
     sheet: Option<WeakEntity<PopoverState>>,
     vscroll: ScrollHandle,
-    /// Whether the last frame showed a running agent, whose elapsed time
-    /// the tick advances.
-    live: bool,
+    /// Whether a row drawn this render shows a running clock.
+    clock_shown: std::cell::Cell<bool>,
+    /// Whether the panel was drawn since the clock last ticked.
+    drawn: bool,
+    /// Ticks the running clocks while the panel is drawn with one.
     tick: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -783,7 +797,8 @@ impl AgentsPanel {
             hover: crate::motion::ListHover::new(crate::material::HOVER),
             sheet: None,
             vscroll: ScrollHandle::new(),
-            live: false,
+            clock_shown: Default::default(),
+            drawn: false,
             tick: None,
             _subscriptions: subscriptions,
         }
@@ -808,21 +823,38 @@ impl AgentsPanel {
                 store.release_archived_sessions();
             }
         });
-        self.tick = shown.then(|| {
-            cx.spawn(async move |this, cx| {
+        if !shown {
+            self.tick = None;
+        }
+    }
+
+    /// Tick once a second only while the panel is drawn with a running
+    /// clock: a tick that finds the panel not drawn since the last one ends
+    /// the ticking, and the panel's next render starts it again.
+    fn sync_tick(&mut self, cx: &mut Context<Self>) {
+        if !self.clock_shown.replace(false) {
+            self.tick = None;
+            return;
+        }
+        self.drawn = true;
+        if self.tick.is_none() {
+            self.tick = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(1)).await;
                     let ticked = this.update(cx, |this, cx| {
-                        if this.live {
-                            cx.notify();
+                        if !std::mem::take(&mut this.drawn) {
+                            this.tick = None;
+                            return false;
                         }
+                        cx.notify();
+                        true
                     });
-                    if ticked.is_err() {
+                    if !ticked.unwrap_or(false) {
                         break;
                     }
                 }
-            })
-        });
+            }));
+        }
     }
 
     pub(crate) fn in_sheet(&mut self, sheet: WeakEntity<PopoverState>) {
@@ -989,6 +1021,9 @@ impl AgentsPanel {
         let coarse = crate::window_seam::is_mobile(cx);
         let inline_actions = !compact && !actions.is_empty();
         let elapsed = row.elapsed().filter(|_| !(inline_actions && coarse));
+        if elapsed.is_some() && row.clock_runs() {
+            self.clock_shown.set(true);
+        }
         // The actions fade in over the time as the pointer comes onto the
         // row, and the time fades out under them.
         // Each action button tracks a handle kept here, so the actions also
@@ -1270,7 +1305,6 @@ impl Render for AgentsPanel {
                 .map(|id| Agents::of(store, id).with_results(store, id))
                 .unwrap_or_default()
         };
-        self.live = agents.any_running();
         let root = v_flex()
             .id("agents-panel")
             .size_full()
@@ -1300,7 +1334,9 @@ impl Render for AgentsPanel {
         if fade.shows(1) {
             layers.push((1, self.render_list(&agents, compact, window, cx)));
         }
-        root.child(fade.render(layers).flex_1().min_h_0().w_full())
+        let panel = root.child(fade.render(layers).flex_1().min_h_0().w_full());
+        self.sync_tick(cx);
+        panel
     }
 }
 
