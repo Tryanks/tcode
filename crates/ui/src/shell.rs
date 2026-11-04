@@ -2195,26 +2195,44 @@ impl AppShell {
         attachment.zoom.sample(window, cx);
     }
 
-    /// The chat column: the dock of panes, faded while a layout goes in,
-    /// under the pane zoomed over it. The panes fading out to be replaced
-    /// take no pointer.
-    fn render_chat_column(&self, cx: &App) -> AnyElement {
+    /// The chat column: the dock of panes on the reading surface, faded
+    /// while a layout goes in, under the pane zoomed over it. The panes
+    /// fading out to be replaced take no pointer. The column runs along the
+    /// window's top, bottom and right, and its left once the sidebar is
+    /// collapsed; the zoomed pane covers the dock, not the seam around it.
+    fn render_chat_column(&self, collapsed: bool, window: &mut Window, cx: &mut App) -> AnyElement {
         let Some(attachment) = self.attachment.as_ref() else {
             return gpui::Empty.into_any_element();
         };
         let area = attachment.thread_panes.read(cx).bounds();
-        div()
-            .relative()
+        let column = div()
             .size_full()
-            .when_some(attachment.layout_swap.opacity(), |column, opacity| {
-                column.opacity(opacity)
-            })
-            .child(attachment.thread_panes.clone())
-            .children(attachment.zoom.render(area, cx))
-            .when(attachment.layout_swap.leaving(), |column| {
-                column.child(crate::motion::shield())
-            })
-            .into_any_element()
+            .bg(crate::material::content_surface(cx))
+            .shadow_sm();
+        crate::window_seam::inset_from_seam(
+            column,
+            "chat-column-seam",
+            gpui::Edges {
+                left: collapsed,
+                ..gpui::Edges::all(true)
+            },
+            window,
+            cx,
+        )
+        .when_some(attachment.layout_swap.opacity(), |column, opacity| {
+            column.opacity(opacity)
+        })
+        .child(
+            div()
+                .relative()
+                .size_full()
+                .child(attachment.thread_panes.clone())
+                .children(attachment.zoom.render(area, cx))
+                .when(attachment.layout_swap.leaving(), |column| {
+                    column.child(crate::motion::shield())
+                }),
+        )
+        .into_any_element()
     }
 
     /// Spatial moves go to the nearest pane painted on that side; Next and
@@ -3545,20 +3563,20 @@ impl AppShell {
 const NAV_CONTROL_WIDTH: f32 = 104.;
 
 /// A page that is the whole window: one of the compact stack, or the Hosts
-/// page a tablet shows before it attaches. Its background reaches the
-/// window's edges, under the status bar, the home indicator, a landscape
-/// phone's sides and the keyboard, and what it holds is inset from them. The
-/// page paints there rather than the shell, so those edges show whichever
-/// page covers them and slide with it as it is pushed or dragged back.
+/// page a tablet shows before it attaches. It is inset from the seam on
+/// every side ([`crate::window_seam::inset_from_seam`]). The page paints
+/// there rather than the shell, so those edges show whichever page covers
+/// them and slide with it as it is pushed or dragged back.
 fn page_surface(window: &mut Window, cx: &mut App) -> Div {
-    let seam = crate::window_seam::content_insets_gliding("page-seam", None, window, cx);
-    v_flex()
-        .size_full()
-        .bg(crate::material::content_surface(cx))
-        .pt(seam.top)
-        .pb(seam.bottom)
-        .pl(seam.left)
-        .pr(seam.right)
+    crate::window_seam::inset_from_seam(
+        v_flex()
+            .size_full()
+            .bg(crate::material::content_surface(cx)),
+        "page-seam",
+        gpui::Edges::all(true),
+        window,
+        cx,
+    )
 }
 
 /// Navigation header with a centered title and at most two trailing actions.
@@ -5206,37 +5224,7 @@ impl AppShell {
                 }
             })
             .collect();
-        let workspace = scene.render(layers).into_any_element();
-        self.within_seam(workspace, window, cx)
-    }
-
-    /// An attached workspace inset from the window's seam. Unlike a page
-    /// ([`page_surface`]), its columns — the sidebar, the thread panes,
-    /// Settings — do not lay themselves out against the seam, so they are
-    /// inset together and the window's canvas shows behind the system's
-    /// edges. A window the system does not occlude gets no wrapper at all.
-    /// The insets glide to each new value (a software keyboard sliding up, a
-    /// rotation) on gpui-base's default curve, not the keyboard's own
-    /// (`content_insets_gliding` names why).
-    fn within_seam(
-        &self,
-        body: AnyElement,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let seam = crate::window_seam::content_insets_gliding("shell-seam", None, window, cx);
-        if seam == gpui::Edges::default() {
-            return body;
-        }
-        div()
-            .size_full()
-            .bg(crate::material::canvas(cx))
-            .pt(seam.top)
-            .pb(seam.bottom)
-            .pl(seam.left)
-            .pr(seam.right)
-            .child(body)
-            .into_any_element()
+        scene.render(layers).into_any_element()
     }
 
     /// The Settings route, its rail at `rail` opacity.
@@ -5318,6 +5306,24 @@ impl AppShell {
         // because the feature area that leads here is meant to be persistent.
         let body = self.hosts_body(window, cx);
         let header = self.render_hosts_header(window, cx);
+        let column = crate::window_seam::inset_from_seam(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .debug_selector(|| "hosts-route".into())
+                .bg(crate::material::content_surface(cx))
+                .shadow_sm(),
+            "hosts-column-seam",
+            gpui::Edges {
+                left: collapsed,
+                ..gpui::Edges::all(true)
+            },
+            window,
+            cx,
+        )
+        .child(header)
+        .child(body);
         div()
             .id("app-shell")
             .size_full()
@@ -5347,17 +5353,7 @@ impl AppShell {
                                 .child(div().flex_none().w(sidebar_width).h_full().child(sidebar)),
                         )
                     })
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .debug_selector(|| "hosts-route".into())
-                            .bg(crate::material::content_surface(cx))
-                            .shadow_sm()
-                            .child(header)
-                            .child(body),
-                    ),
+                    .child(column),
             )
             .into_any_element()
     }
@@ -5395,7 +5391,10 @@ impl AppShell {
         // The chat's reading surface sits above the translucent canvas.
         let chat_panel = resizable_panel()
             .size_range(glide.range(1, gpui_base::PANEL_MIN_SIZE..Pixels::MAX))
-            .child(glide.hold(1, self.layout_part("chat", self.render_chat_column(cx))));
+            .child(glide.hold(
+                1,
+                self.layout_part("chat", self.render_chat_column(collapsed, window, cx)),
+            ));
         let attachment = self.attachment.as_ref().expect("attachment checked above");
         let remembered_sidebar = attachment.sidebar_width.clone();
         let sidebar = match draw_sidebar {
@@ -13797,10 +13796,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// What a phone's status bar, home indicator and landscape sides cover
-    /// is the page beneath them, painted to the window's edges in either
-    /// theme, not a band of another colour that leaves the page looking cut
-    /// off above the screen's bottom.
+    /// What a phone's or a tablet's status bar, home indicator and side
+    /// insets cover is the surface beneath them, painted to the window's
+    /// edges in either theme: a phone's page, a tablet's sidebar or reading
+    /// column. Never a band of another colour, which leaves the page
+    /// looking cut off above the screen's bottom.
     #[gpui::test]
     fn the_safe_areas_show_the_page_they_cover(cx: &mut TestAppContext) {
         use tcode_core::settings::ThemeMode;
@@ -13833,28 +13833,61 @@ pub(crate) mod tests {
             bottom: px(21.),
             ..Default::default()
         };
+        let tablet = gpui::Edges {
+            top: px(24.),
+            bottom: px(20.),
+            ..Default::default()
+        };
+        // Each point covered, and whether the sidebar (or Settings' rail),
+        // which is clear over the window's canvas, is the surface there
+        // rather than the page or reading column.
+        let geometries = [
+            (
+                (393., 852.),
+                portrait,
+                vec![((196., 20.), false), ((196., 840.), false)],
+            ),
+            (
+                (852., 393.),
+                landscape,
+                vec![
+                    ((20., 196.), false),
+                    ((832., 196.), false),
+                    ((426., 385.), false),
+                ],
+            ),
+            (
+                (1024., 1366.),
+                tablet,
+                vec![
+                    ((40., 10.), true),
+                    ((40., 1356.), true),
+                    ((700., 10.), false),
+                    ((700., 1356.), false),
+                ],
+            ),
+        ];
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
             cx.update(|window, cx| {
                 crate::settings_page::apply_theme(mode, window, cx);
             });
-            for destination in [Destination::Thread, Destination::Hosts] {
+            for destination in [
+                Destination::Thread,
+                Destination::Hosts,
+                Destination::Settings,
+            ] {
                 state.update(cx, |state, cx| state.go(destination, cx));
-                for ((width, height), insets, covered) in [
-                    ((393., 852.), portrait, vec![(196., 20.), (196., 840.)]),
-                    (
-                        (852., 393.),
-                        landscape,
-                        vec![(20., 196.), (832., 196.), (426., 385.)],
-                    ),
-                ] {
-                    cx.simulate_resize(size(px(width), px(height)));
-                    crate::window_seam::occlude_for_test(cx, insets);
+                for ((width, height), insets, covered) in &geometries {
+                    cx.simulate_resize(size(px(*width), px(*height)));
+                    crate::window_seam::occlude_for_test(cx, *insets);
                     crate::test_frames::draw_settled(cx);
-                    let page = cx.update(|_, cx| crate::material::content_surface(cx));
-                    for (x, y) in covered {
+                    let (page, sidebar) = cx.update(|_, cx| {
+                        (crate::material::content_surface(cx), cx.theme().background)
+                    });
+                    for ((x, y), beside) in covered {
                         assert_eq!(
-                            topmost(gpui::point(px(x), px(y)), cx),
-                            Some(page),
+                            topmost(gpui::point(px(*x), px(*y)), cx),
+                            Some(if *beside { sidebar } else { page }),
                             "{mode:?} {destination:?} at ({x}, {y}) of {width}x{height}"
                         );
                     }

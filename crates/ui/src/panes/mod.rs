@@ -765,13 +765,12 @@ impl ThreadPanes {
 
 impl DockAreaRenderer for ThreadPanes {
     /// The area draws the one placeholder of a dragged thread's drop, over
-    /// every pane; see [`drop_placeholder`].
-    fn frame(&self, _: &mut Window, cx: &mut App) -> Stateful<Div> {
+    /// every pane; see [`drop_placeholder`]. The reading surface beneath the
+    /// panes is the chat column's, which runs on under the window's seam.
+    fn frame(&self, _: &mut Window, _: &mut App) -> Stateful<Div> {
         let drop_target = self.drop_target.clone();
         div()
             .id("thread-panes")
-            .bg(crate::material::content_surface(cx))
-            .shadow_sm()
             .child(crate::motion::Sampled::new(move |window, cx| {
                 let target = drop_target(window, cx);
                 drop_placeholder(target, window, cx)
