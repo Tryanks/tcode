@@ -2114,10 +2114,13 @@ impl Mapper {
                 .and_then(Value::as_str)
                 .unwrap_or("completed"),
         );
-        let summary = msg
-            .get("summary")
-            .and_then(Value::as_str)
-            .map(one_line_summary);
+        let summary = handback_summary(
+            msg.get("handback"),
+            msg.get("handback_report"),
+            msg.get("summary")
+                .and_then(Value::as_str)
+                .map(one_line_summary),
+        );
         // A Command still held here is a background Bash: foreground ones
         // leave `tool_items` with their tool_result.
         if matches!(
@@ -2241,9 +2244,22 @@ impl Mapper {
                             Some(ToolItem::Subagent { .. })
                         ) =>
                 {
+                    let mut item = item.clone();
                     let id = item.id.clone();
-                    self.tool_items.remove(&id);
-                    out.extend(self.gate_subagent_terminal(&id, event));
+                    // A task_notification outranks the tool_result's text
+                    // here as at the top level: this record never says
+                    // whether that text is a report.
+                    if let (
+                        Some(ToolItem::Subagent {
+                            summary: Some(notified),
+                            ..
+                        }),
+                        ItemContent::Subagent { summary, .. },
+                    ) = (self.tool_items.remove(&id), &mut item.content)
+                    {
+                        *summary = Some(notified);
+                    }
+                    out.extend(self.gate_subagent_terminal(&id, AgentEvent::ItemCompleted(item)));
                 }
                 _ => out.push(event),
             }
@@ -2812,13 +2828,18 @@ impl Mapper {
                     ..
                 } => {
                     parent_item_id = parent;
+                    let result = msg.get("tool_use_result");
                     ItemContent::Subagent {
                         agent_type,
                         description,
                         status,
-                        summary: summary.or_else(|| {
-                            (!output.trim().is_empty()).then(|| one_line_summary(&output))
-                        }),
+                        summary: handback_summary(
+                            result.and_then(|result| result.get("handback")),
+                            result.and_then(|result| result.get("handbackReport")),
+                            summary.or_else(|| {
+                                (!output.trim().is_empty()).then(|| one_line_summary(&output))
+                            }),
+                        ),
                         model,
                         effort,
                     }
@@ -3326,6 +3347,47 @@ fn subagent_status(status: &str) -> ItemStatus {
 
 pub(crate) fn one_line_summary(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What a finished subagent's record leaves to show. A `handback` outcome
+/// means its text is a note to the model and the report comes beside it, the
+/// warning auto mode raised above the report's text; `withheld` has no report.
+/// With no outcome the agent did not report through `SubagentHandback`, and
+/// `text` is what it ended with.
+fn handback_summary(
+    handback: Option<&Value>,
+    report: Option<&Value>,
+    text: Option<String>,
+) -> Option<String> {
+    if handback.is_none() {
+        return text.filter(|text| !is_handback_note(text));
+    }
+    let report = report?;
+    let text = report
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())?;
+    Some(match report.get("warning").and_then(Value::as_str) {
+        Some(warning) => format!("{warning}\n\n{text}"),
+        None => text.to_owned(),
+    })
+}
+
+/// Whether a subagent's result is Claude Code's note to the model about a
+/// `SubagentHandback` rather than a report. Only the sentence tells: an Agent
+/// tool_result inside a subagent has no `tool_use_result`, and a
+/// task_notification for an agent waiting on its own work has no `handback`
+/// (`subagent_handback_nested_trace.jsonl`, `subagent_withheld_nested_trace.jsonl`;
+/// the waiting sentence is from the 2.1.317 bundle).
+pub(crate) fn is_handback_note(text: &str) -> bool {
+    let text = text.trim_start();
+    [
+        "This agent's report was delivered to you",
+        "This agent has not reported yet",
+        "The subagent ended without delivering a report",
+    ]
+    .iter()
+    .any(|note| text.starts_with(note))
 }
 
 /// Approval categories; tools without a dedicated category use `ToolUse`.
@@ -6445,6 +6507,173 @@ mod tests {
             "{events:?}"
         );
         assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    /// A recorded stdout trace driven as the actor drives it: every line, then
+    /// the acknowledgement of each tail the trace stopped.
+    fn replay_subagent_trace<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<AgentEvent> {
+        let mut mapper = Mapper::new();
+        let mut events = Vec::new();
+        for line in lines {
+            events.extend(feed(&mut mapper, line));
+        }
+        for request in mapper.take_tail_requests() {
+            if let TailRequest::Stop { parent_id } = request {
+                events.extend(mapper.on_tail_notice(SubagentTailNotice {
+                    parent_id,
+                    events: Vec::new(),
+                    model: None,
+                    stopped: true,
+                }));
+            }
+        }
+        assert!(mapper.take_pending_subagent_terminals().is_empty());
+        events
+    }
+
+    /// The summary a thread shows for `id` once it has settled: a snapshot
+    /// without one leaves the last one standing.
+    #[track_caller]
+    fn settled_summary(events: &[AgentEvent], id: &str) -> Option<String> {
+        let mut shown = None;
+        let mut settled = false;
+        for event in events {
+            if let AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item) = event
+                && item.id == id
+                && let ItemContent::Subagent {
+                    status, summary, ..
+                } = &item.content
+            {
+                shown = summary.clone().or(shown);
+                settled |= *status == ItemStatus::Completed;
+            }
+        }
+        assert!(settled, "{id} never settled: {events:?}");
+        shown
+    }
+
+    #[track_caller]
+    fn assert_no_handback_note(events: &[AgentEvent]) {
+        for event in events {
+            if let AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item) = event
+                && let ItemContent::Subagent {
+                    summary: Some(summary),
+                    ..
+                } = &item.content
+            {
+                assert!(!is_handback_note(summary), "{event:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_foreground_subagent_that_hands_back_shows_its_report_whole() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_018ti8UQiJ6xqBmKf5gTsp1d").as_deref(),
+            Some("PONG-FG-REPORT\nsecond-line")
+        );
+        assert_no_handback_note(&events);
+    }
+
+    #[test]
+    fn a_background_subagent_that_hands_back_shows_its_report() {
+        let trace =
+            include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_01BXJLqzyGgqst9idkvgU4Mw").as_deref(),
+            Some("PONG-BG-REPORT")
+        );
+        assert_no_handback_note(&events);
+    }
+
+    /// The tool_result of a nested Agent carries only the note, so the
+    /// nested agent's report is the one its task_notification brought.
+    #[test]
+    fn a_nested_subagent_that_hands_back_shows_its_report() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_nested_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_016TdmuRUJr9k29RQGwWCy15").as_deref(),
+            Some("PONG-INNER-REPORT")
+        );
+        assert_eq!(
+            settled_summary(&events, "toolu_013VQTQyj7vJ4uRuHAC4KupS").as_deref(),
+            Some("PONG-OUTER-REPORT")
+        );
+        assert_no_handback_note(&events);
+    }
+
+    /// The child's transcript tail can reach the nested tool_result before
+    /// stdout reaches the task_notification.
+    #[test]
+    fn a_nested_result_ahead_of_its_notification_shows_no_note() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_nested_trace.jsonl");
+        let notification = "\"task_notification\",\"task_id\":\"acaf13a689ed20a44\"";
+        let events =
+            replay_subagent_trace(trace.lines().filter(|line| !line.contains(notification)));
+        assert_eq!(
+            settled_summary(&events, "toolu_016TdmuRUJr9k29RQGwWCy15"),
+            None
+        );
+        assert_no_handback_note(&events);
+    }
+
+    #[test]
+    fn a_subagent_that_delivered_no_report_has_no_summary() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_withheld_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_01EV4e7BpxB6KFymEFQVWcYf"),
+            None
+        );
+        assert_no_handback_note(&events);
+    }
+
+    #[test]
+    fn a_nested_subagent_that_delivered_no_report_has_no_summary() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_withheld_nested_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_015Cfy34pCnu1nyFgoJWpV6c"),
+            None
+        );
+        assert_eq!(
+            settled_summary(&events, "toolu_019EPWayHRRkcGs1fKMrydKv").as_deref(),
+            Some("OUTER-REPORT")
+        );
+        assert_no_handback_note(&events);
+    }
+
+    /// Outside auto mode a subagent has no `SubagentHandback`: it ends with
+    /// text, and the task_notification's `summary` is that text.
+    #[test]
+    fn a_subagent_that_ends_with_text_keeps_it() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_text_end_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_01Y1QieQFWmLquSD4EMDRfdg").as_deref(),
+            Some("PONG-FG-REPORT")
+        );
+    }
+
+    /// No recording: auto mode has to block the report. The fields are those
+    /// of the CLI's own schema, which has a client show `warning` above `text`.
+    #[test]
+    fn a_flagged_report_keeps_its_warning_above_it() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl")
+            .replace("\"handback\":\"send\"", "\"handback\":\"flagged\"")
+            .replace(
+                "{\"text\":\"PONG-FG-REPORT",
+                "{\"warning\":\"SECURITY WARNING\",\"text\":\"PONG-FG-REPORT",
+            );
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_018ti8UQiJ6xqBmKf5gTsp1d").as_deref(),
+            Some("SECURITY WARNING\n\nPONG-FG-REPORT\nsecond-line")
+        );
     }
 
     #[test]
