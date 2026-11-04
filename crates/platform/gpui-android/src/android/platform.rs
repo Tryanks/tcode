@@ -63,6 +63,7 @@ pub(crate) struct AndroidPlatform {
     active_handle: Cell<Option<AnyWindowHandle>>,
     callbacks: RefCell<PlatformCallbacks>,
     clipboard: RefCell<Option<ClipboardItem>>,
+    thermal_state: Cell<ThermalState>,
     quit_pending: Cell<bool>,
     quitting: Cell<bool>,
 }
@@ -90,6 +91,7 @@ impl AndroidPlatform {
             active_handle: Cell::new(None),
             callbacks: RefCell::new(PlatformCallbacks::default()),
             clipboard: RefCell::new(None),
+            thermal_state: Cell::new(ThermalState::Nominal),
             quit_pending: Cell::new(false),
             quitting: Cell::new(false),
         }
@@ -197,6 +199,25 @@ impl AndroidPlatform {
         }
     }
 
+    fn update_thermal_state(&self, status: i32) {
+        // MODERATE is throttling the platform says leaves the UX unimpaired;
+        // SEVERE is the first status at which it is impaired.
+        let thermal_state = match status {
+            0 => ThermalState::Nominal,
+            1 | 2 => ThermalState::Fair,
+            3 => ThermalState::Serious,
+            _ => ThermalState::Critical,
+        };
+        if self.thermal_state.replace(thermal_state) == thermal_state {
+            return;
+        }
+        let callback = self.callbacks.borrow_mut().thermal.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.callbacks.borrow_mut().thermal = Some(callback);
+        }
+    }
+
     fn emit_process_back(&self) {
         let callback = self.callbacks.borrow_mut().process_back.take();
         if let Some(mut callback) = callback {
@@ -255,6 +276,10 @@ impl AndroidPlatform {
                     }
                     self.emit_displays_changed();
                 }
+                continue;
+            }
+            if let HostEvent::ThermalStatus(status) = event {
+                self.update_thermal_state(status);
                 continue;
             }
             let Some(window) = self.window() else {
@@ -600,7 +625,7 @@ impl Platform for AndroidPlatform {
     }
 
     fn thermal_state(&self) -> ThermalState {
-        ThermalState::Nominal
+        self.thermal_state.get()
     }
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {

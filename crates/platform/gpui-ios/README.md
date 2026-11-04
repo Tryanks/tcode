@@ -45,6 +45,8 @@ next-frame animations sustain the source. The host requests the screen's
 maximum refresh rate with a permissive minimum, so system power and thermal
 policy can clamp it. `gpui_ios_display_changed` reports that screen's maximum
 rate to GPUI and screen/scene changes recreate the native display link.
+`gpui_ios_thermal_state_changed` reports `ProcessInfo.thermalState` at start
+and on each change, so GPUI's own thermal frame cap applies.
 
 The host is a universal iPhone/iPad app. iPhone supports portrait and both
 landscapes; iPad additionally supports upside-down portrait. During rotation,

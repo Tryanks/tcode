@@ -601,6 +601,18 @@ pub extern "C" fn gpui_ios_memory_warning() {
     super::with_platform(super::IosPlatform::notify_memory_warning);
 }
 
+/// Takes `ProcessInfo.ThermalState`'s raw value.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_thermal_state_changed(state: u8) {
+    let state = match state {
+        1 => gpui::ThermalState::Fair,
+        2 => gpui::ThermalState::Serious,
+        3 => gpui::ThermalState::Critical,
+        _ => gpui::ThermalState::Nominal,
+    };
+    super::with_platform(|platform| platform.update_thermal_state(state));
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_text_range(kind: u32) -> TextRange {
     let mut result = None;

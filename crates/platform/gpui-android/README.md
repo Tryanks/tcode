@@ -22,7 +22,9 @@ animations keep callbacks scheduled. Pausing the activity or losing its surface
 suspends pacing without losing invalidation. The Java host reports the display's
 maximum refresh capability and uses `Surface.setFrameRate` on API 30+, with
 seamless-only switching on API 31+. Idle clears the frame-rate vote, leaving
-system power and thermal policy in control.
+system power and thermal policy in control. On API 29+ the host also reports
+`PowerManager`'s thermal status and its changes, so GPUI's own thermal frame
+cap applies; below that the state stays nominal.
 
 The platform exposes one full-screen `PlatformWindow`. It owns the current
 `ANativeWindow`, a `gpui_wgpu::WgpuRenderer`, and the shared `WgpuContext`.

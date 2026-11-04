@@ -17,6 +17,8 @@ use std::{
 pub(crate) enum HostEvent {
     Frame,
     RefreshRate(f32),
+    /// `PowerManager.THERMAL_STATUS_*`.
+    ThermalStatus(i32),
     CommitText(String),
     SetComposingText(String),
     FinishComposing,
@@ -96,6 +98,10 @@ pub fn refresh_rate(rate: f32) {
     if rate.is_finite() && rate > 0.0 {
         enqueue(HostEvent::RefreshRate(rate));
     }
+}
+
+pub fn thermal_status(status: i32) {
+    enqueue(HostEvent::ThermalStatus(status));
 }
 
 pub(crate) fn request_frame() {

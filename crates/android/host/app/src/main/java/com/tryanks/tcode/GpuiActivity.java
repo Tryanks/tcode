@@ -15,6 +15,7 @@ import android.graphics.Color;
 import android.hardware.display.DisplayManager;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.view.Choreographer;
 import android.view.Display;
 import android.view.Surface;
@@ -53,6 +54,8 @@ public final class GpuiActivity extends NativeActivity {
     private Surface renderSurface;
     private float maximumFrameRate;
     private DisplayManager displayManager;
+    /** API 29 and later only; below, the thermal state stays nominal. */
+    private PowerManager.OnThermalStatusChangedListener thermalListener;
     private final Choreographer.FrameCallback frameCallback = frameTimeNanos -> {
         framePosted = false;
         if (renderSurface == null || !renderSurface.isValid()) return;
@@ -67,6 +70,7 @@ public final class GpuiActivity extends NativeActivity {
     /** Returns whether frames should continue on the next vsync. */
     private native boolean nativeFrame();
     private native void nativeRefreshRate(float rate);
+    private native void nativeThermalStatus(int status);
 
     private void updateDisplayRate() {
         Display display = getWindow().getDecorView().getDisplay();
@@ -286,11 +290,25 @@ public final class GpuiActivity extends NativeActivity {
         displayManager.registerDisplayListener(displayListener, new Handler(Looper.getMainLooper()));
         updateDisplayRate();
         watchDefaultNetwork();
+        watchThermalStatus();
+    }
+
+    private void watchThermalStatus() {
+        if (Build.VERSION.SDK_INT < 29) return;
+        PowerManager power = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (power == null) return;
+        nativeThermalStatus(power.getCurrentThermalStatus());
+        thermalListener = this::nativeThermalStatus;
+        power.addThermalStatusListener(getMainExecutor(), thermalListener);
     }
 
     @Override
     protected void onDestroy() {
         if (displayManager != null) displayManager.unregisterDisplayListener(displayListener);
+        if (thermalListener != null) {
+            ((PowerManager) getSystemService(Context.POWER_SERVICE))
+                    .removeThermalStatusListener(thermalListener);
+        }
         gpuiPauseFrames();
         unwatchDefaultNetwork();
         super.onDestroy();
