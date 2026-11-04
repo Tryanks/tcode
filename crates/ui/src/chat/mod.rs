@@ -569,10 +569,12 @@ impl ChatView {
 
     /// How wide the pane drawing this view is, its right panel's room
     /// included.
-    pub(crate) fn set_pane_width(&mut self, width: gpui::Pixels, cx: &mut Context<Self>) {
-        if self.pane_width != width {
-            self.pane_width = width;
-            cx.notify();
+    pub(crate) fn set_pane_width(this: &Entity<Self>, width: gpui::Pixels, cx: &mut App) {
+        if this.read(cx).pane_width != width {
+            this.update(cx, |chat, cx| {
+                chat.pane_width = width;
+                cx.notify();
+            });
         }
     }
 
@@ -626,32 +628,42 @@ impl ChatView {
         }
     }
 
-    pub(crate) fn set_edges(&mut self, edges: WindowEdges, cx: &mut Context<Self>) {
-        if self.edges != edges {
-            self.edges = edges;
-            cx.notify();
+    pub(crate) fn set_edges(this: &Entity<Self>, edges: WindowEdges, cx: &mut App) {
+        if this.read(cx).edges != edges {
+            this.update(cx, |chat, cx| {
+                chat.edges = edges;
+                cx.notify();
+            });
         }
     }
 
     /// Whether the header's title recedes, its pane not being the current one
     /// among several.
-    pub(crate) fn set_title_recedes(&mut self, recedes: bool, cx: &mut Context<Self>) {
-        if self.title_recedes != recedes {
-            self.title_recedes = recedes;
-            cx.notify();
+    pub(crate) fn set_title_recedes(this: &Entity<Self>, recedes: bool, cx: &mut App) {
+        if this.read(cx).title_recedes != recedes {
+            this.update(cx, |chat, cx| {
+                chat.title_recedes = recedes;
+                cx.notify();
+            });
         }
     }
 
     pub(crate) fn set_pane(
-        &mut self,
+        this: &Entity<Self>,
         pane: gpui::WeakEntity<crate::panes::ThreadPanel>,
         close: Option<crate::motion::Shown<gpui::WeakEntity<crate::panes::ThreadPanel>>>,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) {
-        self.pane = Some(pane);
-        if self.pane_close != close {
-            self.pane_close = close;
-            cx.notify();
+        let chat = this.read(cx);
+        let (moved, closes) = (chat.pane.as_ref() != Some(&pane), chat.pane_close != close);
+        if moved || closes {
+            this.update(cx, |chat, cx| {
+                chat.pane = Some(pane);
+                if closes {
+                    chat.pane_close = close;
+                    cx.notify();
+                }
+            });
         }
     }
 
@@ -948,10 +960,12 @@ impl ChatView {
     }
 
     /// Whether a host holds the view unseen, to fade it in itself.
-    pub(crate) fn set_held(&mut self, held: bool, cx: &mut Context<Self>) {
-        if self.held != held {
-            self.held = held;
-            cx.notify();
+    pub(crate) fn set_held(this: &Entity<Self>, held: bool, cx: &mut App) {
+        if this.read(cx).held != held {
+            this.update(cx, |chat, cx| {
+                chat.held = held;
+                cx.notify();
+            });
         }
     }
 
