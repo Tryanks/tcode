@@ -445,7 +445,7 @@ mod tests {
     fn jump(threads: &TwoThreads, turn: usize, cx: &mut VisualTestContext) {
         let thread = threads.first.clone();
         threads.store.update(cx, |store, cx| {
-            store.select_session_at_turn(thread, turn, cx);
+            store.show_thread_at_turn(thread, turn, cx);
         });
         draw_settled(cx);
     }
@@ -690,7 +690,7 @@ mod tests {
         let turn = first_held(cx) + 1;
 
         store.update(cx, |store, cx| {
-            store.select_session_at_turn(THREAD.into(), turn, cx);
+            store.show_thread_at_turn(THREAD.into(), turn, cx);
         });
         let marked =
             |cx: &mut VisualTestContext| view.read_with(cx, |chat, _| chat.highlighted_turn);

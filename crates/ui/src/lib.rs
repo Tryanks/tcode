@@ -99,7 +99,7 @@ pub use shell::{
 };
 pub use thread_export::format_size;
 pub use window_seam::force_mobile_layout;
-pub use window_state::{OpenThread, WindowState};
+pub use window_state::WindowState;
 
 /// Where this client may keep its own files (the WebView2 profile is the only
 /// current user). Bootstrap owns the location; the UI never resolves it, so a

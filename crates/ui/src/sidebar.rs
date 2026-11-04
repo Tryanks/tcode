@@ -873,10 +873,8 @@ impl SessionsSidebar {
         if let Some(id) = threads.get(index) {
             self.compact_model_dirty = true;
             self.store.update(cx, |store, cx| {
-                store.select_session(id.clone(), cx);
+                store.show_thread(id.clone(), cx);
             });
-            self.window_state
-                .update(cx, |state, cx| state.open_thread(cx));
             cx.notify();
             return true;
         }
@@ -1149,8 +1147,6 @@ impl SessionsSidebar {
     fn on_quick_chat(&mut self, _: &QuickChat, _window: &mut Window, cx: &mut Context<Self>) {
         self.store
             .update(cx, |store, cx| store.start_scratch_draft(cx));
-        self.window_state
-            .update(cx, |state, cx| state.open_thread(cx));
     }
 
     fn on_start_draft_for_project(
@@ -1171,8 +1167,6 @@ impl SessionsSidebar {
         self.store.update(cx, |store, cx| {
             store.start_draft(project.id, project.root, cx);
         });
-        self.window_state
-            .update(cx, |state, cx| state.open_thread(cx));
     }
 
     fn on_link_pull_request(
@@ -1561,7 +1555,7 @@ impl SessionsSidebar {
                     }
                 }
                 if let Some(id) = entry.reopen {
-                    store.update(cx, |store, cx| store.select_session(id, cx));
+                    store.update(cx, |store, cx| store.put_back_thread(id, cx));
                 }
             }
         })
@@ -2391,8 +2385,6 @@ impl SessionsSidebar {
                     this.store.update(cx, |store, cx| {
                         store.start_draft(project_id.clone(), cwd.clone(), cx);
                     });
-                    this.window_state
-                        .update(cx, |state, cx| state.open_thread(cx));
                 }))
                 .into_any_element()
         } else {
@@ -2572,8 +2564,6 @@ impl SessionsSidebar {
                             store.start_draft(project_id, cwd, cx);
                         }
                     });
-                    this.window_state
-                        .update(cx, |state, cx| state.open_thread(cx));
                 })),
         );
         let header = self.track_hover(header, &group_key);
@@ -2857,10 +2847,8 @@ impl SessionsSidebar {
                 }
                 this.compact_model_dirty = true;
                 this.store.update(cx, |store, cx| {
-                    store.select_session(session_id.clone(), cx);
+                    store.show_thread(session_id.clone(), cx);
                 });
-                this.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
                 cx.notify();
             }),
         );
@@ -4251,10 +4239,8 @@ impl SessionsSidebar {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.store.update(cx, |store, cx| {
-                        store.select_session(id.clone(), cx);
+                        store.show_thread(id.clone(), cx);
                     });
-                    this.window_state
-                        .update(cx, |state, cx| state.open_thread(cx));
                 }))
                 .into_any_element()
             },
@@ -4664,10 +4650,8 @@ impl SessionsSidebar {
                     return;
                 }
                 this.store.update(cx, |store, cx| {
-                    store.select_session(click_id.clone(), cx);
+                    store.show_thread(click_id.clone(), cx);
                 });
-                this.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
             }))
             .child(compact_status_glyph(
                 &session_id,
@@ -5965,6 +5949,7 @@ mod tests {
 
         let (sidebar, store, _, mut driver, host, root) =
             sidebar_over_host(cx, "sidebar-time-click", &["newest", "middle", "oldest"]);
+        crate::store::tests::show_asked_threads(&store, cx);
         let opacity = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view(|window, cx| {
             let drawn = cx.new(|_| Drawn {
@@ -6453,6 +6438,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::show_asked_threads(&store, cx);
         driver.wait_until(cx, &store, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
@@ -6572,6 +6558,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::show_asked_threads(&store, cx);
         driver.wait_until(cx, &store, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
@@ -7709,6 +7696,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::show_asked_threads(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // The open thread is settled, so the closed shelf shows its row.
         store.update(cx, |store, cx| {

@@ -658,9 +658,15 @@ pub(crate) fn open_agent(
     }
 }
 
-/// Go back from a thread opened in its lead's place to the lead.
-pub(crate) fn back_to_lead(store: &Entity<WorkspaceStore>, lead: String, cx: &mut App) {
-    store.update(cx, |store, cx| store.select_session(lead, cx));
+/// Go back from `agent`, opened in its lead's place, to the lead, in the
+/// pane it was drawn in, wherever the keyboard is.
+pub(crate) fn back_to_lead(
+    store: &Entity<WorkspaceStore>,
+    lead: String,
+    agent: Option<String>,
+    cx: &mut App,
+) {
+    store.update(cx, |store, cx| store.show_thread_replacing(lead, agent, cx));
 }
 
 #[derive(Clone, Copy)]

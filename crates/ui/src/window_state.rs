@@ -333,13 +333,6 @@ impl WindowState {
         cx.notify();
     }
 
-    /// "Show me this thread." It is a navigation intent, not a layout decision:
-    /// every width emits it and the shell decides how to present it — a wide
-    /// window already shows the thread beside the list, a compact one pushes it.
-    pub fn open_thread(&mut self, cx: &mut Context<Self>) {
-        cx.emit(OpenThread);
-    }
-
     /// Sidebar-driven conversation navigation replaces the wide Hosts visit
     /// with Chat. Compact keeps the visit on its stack so Back still returns
     /// through every page exactly as it did before.
@@ -452,10 +445,6 @@ pub enum Route {
     Hosts,
     Settings,
 }
-
-#[derive(Clone, Copy)]
-pub struct OpenThread;
-impl EventEmitter<OpenThread> for WindowState {}
 
 #[derive(Clone, Copy)]
 pub(crate) struct OpenPanel(pub NavigationPanel);

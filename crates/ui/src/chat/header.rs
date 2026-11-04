@@ -396,12 +396,13 @@ impl ChatView {
                 .on_click({
                     let store = self.workspace_store.clone();
                     let agent = self.session_id.clone();
-                    move |_, window, cx| {
-                        // In the pane it was drawn in, wherever the keyboard is.
-                        if let Some(agent) = &agent {
-                            crate::shell::act_in_pane_of(agent, window, cx);
-                        }
-                        crate::agents_panel::back_to_lead(&store, parent_id.clone(), cx);
+                    move |_, _, cx| {
+                        crate::agents_panel::back_to_lead(
+                            &store,
+                            parent_id.clone(),
+                            agent.clone(),
+                            cx,
+                        );
                     }
                 })
                 .into_any_element(),

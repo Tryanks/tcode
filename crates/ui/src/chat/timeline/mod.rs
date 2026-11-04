@@ -949,6 +949,7 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(1_024.), px(700.)));
+        crate::store::tests::show_asked_threads(&store, cx);
         // The shell binds its pane to the thread the link opens.
         chat.update(cx, |chat, cx| {
             chat.set_session(Some(session_id.clone()), cx)
@@ -991,7 +992,7 @@ mod tests {
             let expected = format!("user-{turn}");
             store.update(cx, |store, cx| {
                 let position = turn * (DELTAS + 5) + 1;
-                store.select_session_at_position(session_id.clone(), position, cx);
+                store.show_thread_at_position(session_id.clone(), position, cx);
             });
             let deadline = Instant::now() + Duration::from_secs(5);
             while opened(cx).as_deref() != Some(expected.as_str()) {
