@@ -543,14 +543,26 @@ impl TerminalDrawer {
         self.current_size == Some((width, height))
     }
 
+    /// The drawer is laid out `width` by `height`: a height the thread does
+    /// not hold yet is the thread's, and the host's, from now on. Each render
+    /// hands the drawer the height the thread holds, which it does not send
+    /// back.
     pub fn resize(&mut self, width: f32, height: f32, cx: &mut Context<Self>) {
         if self.is_size(width, height) {
             return;
         }
         self.current_size = Some((width, height));
-        self.workspace_store.update(cx, |store, cx| {
-            store.set_terminal_height_for(self.session_id.clone().unwrap_or_default(), height, cx)
-        });
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let held = self
+            .workspace_store
+            .read(cx)
+            .panel_state_for(Some(&session_id))
+            .terminal_height;
+        if held != height {
+            self.workspace_store.update(cx, |store, cx| {
+                store.set_terminal_height_for(session_id, height, cx)
+            });
+        }
     }
 
     fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&crate::store::ClientTerminal)) {
@@ -2192,8 +2204,7 @@ impl Render for TerminalDrawer {
                 // Resize every pane's PTY from this element's bounds. This is
                 // the innermost element whose laid-out height reliably tracks
                 // the drawer; the panes themselves hug their grid content
-                // (percentage heights fail to resolve below this point), which
-                // previously froze the row count at its initial value.
+                // (percentage heights fail to resolve below this point).
                 .on_prepaint({
                     let workspace_store = self.workspace_store.clone();
                     let (cell_width, cell_height) = (self.cell_width, self.cell_height);
@@ -2204,39 +2215,9 @@ impl Render for TerminalDrawer {
                         body_size.set(bounds.size);
                         let width = f32::from(bounds.size.width);
                         let height = f32::from(bounds.size.height);
-                        let scale_factor = window.scale_factor();
-                        let resize =
-                            |cx: &App, terminal_id: u64, pane_width: f32, pane_height: f32| {
-                                let cols = ((pane_width - 2. * PANE_PADDING) / cell_width)
-                                    .floor()
-                                    .max(2.) as usize;
-                                let rows = ((pane_height - 2. * PANE_PADDING) / cell_height)
-                                    .floor()
-                                    .max(2.) as usize;
-                                let cell_width_px =
-                                    (cell_width * scale_factor).round().max(1.) as u32;
-                                let cell_height_px =
-                                    (cell_height * scale_factor).round().max(1.) as u32;
-                                workspace_store.read(cx).with_terminal_workspace_for(
-                                    session_id.as_deref(),
-                                    |workspace| {
-                                        if let Some(entry) = workspace.terminal(terminal_id) {
-                                            entry.terminal.resize_with_cell_size(
-                                                cols,
-                                                rows,
-                                                cell_width_px,
-                                                cell_height_px,
-                                            );
-                                        }
-                                    },
-                                );
-                            };
-                        match active_split {
-                            None => {
-                                if let Some(id) = active_id {
-                                    resize(cx, id, width, height);
-                                }
-                            }
+                        // Each pane shown, with the room it has.
+                        let panes: [Option<(u64, f32, f32)>; 2] = match active_split {
+                            None => [active_id.map(|id| (id, width, height)), None],
                             Some(split) => {
                                 // Panel sizes from the resize handle; before any
                                 // drag the group splits the axis evenly (1px
@@ -2252,17 +2233,46 @@ impl Render for TerminalDrawer {
                                     _ => ((axis - 1.) / 2., (axis - 1.) / 2.),
                                 };
                                 match split.direction {
-                                    TerminalSplitDirection::Horizontal => {
-                                        resize(cx, split.first, first - 2., height);
-                                        resize(cx, split.second, second - 2., height);
-                                    }
-                                    TerminalSplitDirection::Vertical => {
-                                        resize(cx, split.first, width, first - 2.);
-                                        resize(cx, split.second, width, second - 2.);
-                                    }
+                                    TerminalSplitDirection::Horizontal => [
+                                        Some((split.first, first - 2., height)),
+                                        Some((split.second, second - 2., height)),
+                                    ],
+                                    TerminalSplitDirection::Vertical => [
+                                        Some((split.first, width, first - 2.)),
+                                        Some((split.second, width, second - 2.)),
+                                    ],
                                 }
                             }
-                        }
+                        };
+                        let scale_factor = window.scale_factor();
+                        let cell_width_px = (cell_width * scale_factor).round().max(1.) as u32;
+                        let cell_height_px = (cell_height * scale_factor).round().max(1.) as u32;
+                        workspace_store.read(cx).with_terminal_workspace_for(
+                            session_id.as_deref(),
+                            |workspace| {
+                                for (terminal_id, pane_width, pane_height) in
+                                    panes.into_iter().flatten()
+                                {
+                                    let Some(entry) = workspace.terminal(terminal_id) else {
+                                        continue;
+                                    };
+                                    let cols = ((pane_width - 2. * PANE_PADDING) / cell_width)
+                                        .floor()
+                                        .max(2.)
+                                        as usize;
+                                    let rows = ((pane_height - 2. * PANE_PADDING) / cell_height)
+                                        .floor()
+                                        .max(2.)
+                                        as usize;
+                                    entry.terminal.resize_with_cell_size(
+                                        cols,
+                                        rows,
+                                        cell_width_px,
+                                        cell_height_px,
+                                    );
+                                }
+                            },
+                        );
                     }
                 })
                 .child(body),
