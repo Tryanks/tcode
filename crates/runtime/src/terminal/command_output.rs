@@ -6,9 +6,14 @@
 
 use tcode_protocol::{
     STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
-    terminal::{HISTORY_LIMIT, TerminalFrame},
+    terminal::{
+        HISTORY_LIMIT, TerminalDelta, TerminalExit, TerminalFrame, TerminalHistoryUpdate,
+        TerminalRow, TerminalRowUpdate,
+    },
 };
 use term::{GridEmulator, Projector};
+
+use super::projection::same_row;
 
 /// A command still running is pushed again as it grows, so its frame is a
 /// window onto the end of its output.
@@ -57,6 +62,92 @@ pub fn render(output: &str, cols: u16, running: bool) -> TerminalFrame {
     }
 }
 
+/// What a subscriber holding `previous` is sent to hold `next`, two renders
+/// of one output at one width: the history rows that scrolled in after what
+/// it holds, when `next` keeps that, and the screen's rows that differ once
+/// it has moved up by as many.
+pub fn delta(previous: &TerminalFrame, next: &TerminalFrame) -> TerminalDelta {
+    let same =
+        |held: &TerminalRow, row: &TerminalRow| same_row(held, &previous.styles, row, &next.styles);
+    let (history, scrolled) = match kept_history(previous, next, same) {
+        Some(kept) if kept == next.history.len() => (None, 0),
+        Some(kept) => (
+            Some(TerminalHistoryUpdate::Appended(
+                next.history[kept..].to_vec(),
+            )),
+            next.history.len() - kept,
+        ),
+        None => (
+            Some(TerminalHistoryUpdate::Replaced(next.history.clone())),
+            0,
+        ),
+    };
+    let scrolled = scrolled.min(previous.visible.len());
+    let blank = TerminalRow::default();
+    let rows_replaced = next
+        .visible
+        .iter()
+        .enumerate()
+        .filter(|(index, row)| {
+            !same(
+                previous.visible.get(index + scrolled).unwrap_or(&blank),
+                row,
+            )
+        })
+        .map(|(index, row)| TerminalRowUpdate {
+            index: index.min(u16::MAX as usize) as u16,
+            row: row.clone(),
+        })
+        .collect();
+    let exit = (next.exited, next.exit_code) != (previous.exited, previous.exit_code);
+    TerminalDelta {
+        cols: next.cols,
+        rows: next.rows,
+        modes: next.modes,
+        cursor: next.cursor,
+        lines_evicted: next.lines_evicted,
+        styles: next.styles.clone(),
+        scrolled: scrolled.min(u16::MAX as usize) as u16,
+        rows_replaced,
+        history,
+        title: (next.title != previous.title).then(|| next.title.clone()),
+        working_directory: next
+            .working_directory
+            .clone()
+            .filter(|_| next.working_directory != previous.working_directory),
+        exit: exit.then_some(TerminalExit {
+            exited: next.exited,
+            code: next.exit_code,
+        }),
+        bell: false,
+        clipboard: None,
+    }
+}
+
+/// How many rows at the start of `next`'s history are `previous`'s, once
+/// what `next` left out before them is dropped, when appending the rest
+/// to `previous`'s history makes `next`'s: a delta's history trims its front
+/// only at [`HISTORY_LIMIT`].
+fn kept_history(
+    previous: &TerminalFrame,
+    next: &TerminalFrame,
+    same: impl Fn(&TerminalRow, &TerminalRow) -> bool,
+) -> Option<usize> {
+    if next.history.len() > HISTORY_LIMIT {
+        return None;
+    }
+    let dropped = usize::try_from(next.lines_evicted.checked_sub(previous.lines_evicted)?).ok()?;
+    let kept = previous.history.len().checked_sub(dropped)?;
+    if next.history.len() < kept || (dropped > 0 && next.history.len() != HISTORY_LIMIT) {
+        return None;
+    }
+    previous.history[dropped..]
+        .iter()
+        .zip(&next.history)
+        .all(|(held, row)| same(held, row))
+        .then_some(kept)
+}
+
 /// The last `limit` bytes of `bytes`, from the start of a line, and how many
 /// lines come before them.
 fn tail(bytes: &[u8], limit: usize) -> (&[u8], u64) {
@@ -89,7 +180,7 @@ fn normalized(bytes: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use tcode_protocol::terminal::TerminalRow;
+    use tcode_protocol::terminal::{TerminalHistoryUpdate, TerminalRow};
 
     fn text(row: &TerminalRow) -> String {
         let text: String = row
@@ -164,6 +255,43 @@ mod tests {
             .expect("a frame serializes")
             .len();
         assert!(bytes < 12 * 1024 * 1024, "{bytes} bytes");
+    }
+
+    /// A subscriber holding one push of a growing output is sent what makes
+    /// it the next: the rows that came in, not the whole screen again, as the
+    /// output grows on its screen, scrolls it, rewrites its last line, and
+    /// scrolls past what the running window keeps.
+    #[test]
+    fn a_push_of_a_growing_output_sends_only_what_came_in() {
+        let lines =
+            |count: usize| -> String { (1..=count).map(|line| format!("line {line}\n")).collect() };
+        for (before, after, appended, replaced) in [
+            (lines(3), lines(4), None, 1),
+            (lines(40), lines(41), Some(1), 1),
+            (
+                format!("{}10%\r", lines(40)),
+                format!("{}20%\r", lines(40)),
+                None,
+                1,
+            ),
+            (lines(2_000), lines(2_002), Some(2), 2),
+        ] {
+            let previous = super::render(&before, 80, true);
+            let next = super::render(&after, 80, true);
+            let delta = super::delta(&previous, &next);
+            match (&delta.history, appended) {
+                (None, None) => {}
+                (Some(TerminalHistoryUpdate::Appended(rows)), Some(count)) => {
+                    assert_eq!(rows.len(), count)
+                }
+                (history, _) => panic!("history sent as {history:?}"),
+            }
+            assert_eq!(delta.rows_replaced.len(), replaced);
+            let mut held = previous;
+            held.apply(&delta);
+            assert_eq!(rows(&held), rows(&next));
+            assert_eq!(held.lines_evicted, next.lines_evicted);
+        }
     }
 
     /// An output longer than a screen keeps what scrolled off it while the

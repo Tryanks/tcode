@@ -812,6 +812,65 @@ fn command_output_subscription_uses_its_documented_wire_shape() {
         decode_host_line(&encode_line(&pushed).unwrap()).unwrap(),
         pushed
     );
+
+    // A push to a subscriber holding a screen: a row that scrolled into the
+    // history and the screen's last row.
+    let changed = HostMessage::Event(EventEnvelope {
+        request_id: None,
+        topic: Topic::CommandOutput {
+            session_id: "session-1".into(),
+            item_id: "cmd-1".into(),
+            cols: 40,
+        },
+        event: ServerEvent::CommandOutputDelta(Box::new(crate::terminal::TerminalDelta {
+            cols: 40,
+            rows: 16,
+            styles: vec![TerminalStyle::default()],
+            scrolled: 1,
+            rows_replaced: vec![crate::terminal::TerminalRowUpdate {
+                index: 15,
+                row: TerminalRow {
+                    cells: vec![TerminalCell {
+                        text: "y".into(),
+                        ..TerminalCell::default()
+                    }],
+                    wrapped: false,
+                },
+            }],
+            history: Some(crate::terminal::TerminalHistoryUpdate::Appended(vec![
+                TerminalRow::default(),
+            ])),
+            ..crate::terminal::TerminalDelta::default()
+        })),
+    });
+    assert_eq!(
+        serde_json::to_value(&changed).unwrap(),
+        json!({
+            "type": "event",
+            "content": {
+                "topic": {
+                    "type": "command_output",
+                    "content": {"session_id": "session-1", "item_id": "cmd-1", "cols": 40},
+                },
+                "event": {
+                    "type": "command_output_delta",
+                    "content": {
+                        "cols": 40,
+                        "rows": 16,
+                        "modes": {"mode": 0, "keyboard": 0},
+                        "styles": [{"fg": {"type": "foreground"}, "bg": {"type": "background"}}],
+                        "scrolled": 1,
+                        "rows_replaced": [{"index": 15, "row": {"cells": [{"text": "y"}]}}],
+                        "history": {"type": "appended", "content": [{}]},
+                    },
+                },
+            },
+        })
+    );
+    assert_eq!(
+        decode_host_line(&encode_line(&changed).unwrap()).unwrap(),
+        changed
+    );
 }
 
 /// Rendering an export and registering a project both moved a decision to the

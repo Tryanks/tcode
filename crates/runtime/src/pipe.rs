@@ -1868,7 +1868,8 @@ mod tests {
             },
         })]);
         let running = topic("run-1", 40);
-        assert_eq!(reply(&running).rows, 0);
+        let mut held = reply(&running);
+        assert_eq!(held.rows, 0);
 
         // A progress bar redrawn in place, then a green verdict.
         let mut growth = (1..=9)
@@ -1877,12 +1878,16 @@ mod tests {
         growth.push(delta("100%\n\u{1b}[32mok\u{1b}[0m\n"));
         let deltas = growth.len();
         record(growth);
+        // The subscriber holds the answer, so each push is what changed.
         let mut pushes = 0;
         let latest = loop {
-            let frame = frame_of(next_event(&events, |event| event.topic == running));
+            match next_event(&events, |event| event.topic == running).event {
+                ServerEvent::CommandOutputDelta(delta) => held.apply(&delta),
+                other => panic!("a push after the answer sent {other:?}"),
+            }
             pushes += 1;
-            if frame.rows == 2 {
-                break frame;
+            if held.rows == 2 {
+                break held;
             }
         };
         assert!(pushes < deltas, "{pushes} pushes for {deltas} deltas");

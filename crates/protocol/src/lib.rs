@@ -258,7 +258,9 @@ pub use wire::{
 // turn last started. Settings' favorite_models holds {provider, profile_id,
 // model} rows beside the bare ids older settings stored, which still read, and
 // ToggleFavoriteModel carries provider and profile_id. TerminalDelta carries
-// scrolled, the rows its screen moved up before rows_replaced applies.
+// scrolled, the rows its screen moved up before rows_replaced applies. A
+// command output topic pushes CommandOutputDelta, what changed since the
+// screen or change last sent on it, after the screen a subscriber holds.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

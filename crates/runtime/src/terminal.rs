@@ -11,7 +11,7 @@ pub use tcode_protocol::{
 
 mod command_output;
 mod projection;
-pub(crate) use command_output::render as render_command_output;
+pub(crate) use command_output::{delta as command_output_delta, render as render_command_output};
 pub(crate) use projection::{FRAME_INTERVAL, TerminalProjection, TerminalUpdate};
 
 /// `TerminalDrawer` is a shared UI entity that swaps between conversations.

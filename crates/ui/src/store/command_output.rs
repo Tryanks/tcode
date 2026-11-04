@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use tcode_protocol::{Subscription, TerminalFrame, Topic};
+use tcode_protocol::{Subscription, TerminalFrame, Topic, terminal::TerminalDelta};
 
 use super::WorkspaceStore;
 
@@ -14,6 +14,9 @@ pub(crate) struct CommandOutputReplica {
     /// The latest screen, kept across width changes and while unwatched so
     /// the panel never goes blank waiting for the next one.
     frame: Option<Rc<TerminalFrame>>,
+    /// A whole screen arrived since the width was last subscribed to, which
+    /// the host's changes on it continue from.
+    synced: bool,
 }
 
 impl CommandOutputReplica {
@@ -58,6 +61,7 @@ impl WorkspaceStore {
             return;
         }
         let previous = replica.watched.replace(cols);
+        replica.synced = false;
         if let Some(previous) = previous {
             let _ = host.unsubscribe(command_output_subscription(session_id, item_id, previous));
         }
@@ -111,6 +115,29 @@ impl WorkspaceStore {
             .filter(|replica| replica.watched == Some(cols))
         {
             replica.frame = Some(Rc::new(frame.clone()));
+            replica.synced = true;
+        }
+    }
+
+    pub(super) fn apply_command_output_delta(
+        &mut self,
+        session_id: &str,
+        item_id: &str,
+        cols: u16,
+        delta: &TerminalDelta,
+    ) {
+        let Some(thread) = self.open_thread_mut(session_id) else {
+            return;
+        };
+        if let Some(frame) = thread
+            .command_outputs
+            .get_mut(item_id)
+            .filter(|replica| replica.watched == Some(cols) && replica.synced)
+            .and_then(|replica| replica.frame.as_mut())
+        {
+            // The panel holds the screen only weakly, so this is the only
+            // holder and the screen changes in place.
+            Rc::make_mut(frame).apply(delta);
         }
     }
 }
