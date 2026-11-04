@@ -193,6 +193,12 @@ pub struct ChatView {
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
+    /// The composer's layout as this view last handed it, and where the
+    /// composer reports its card's bottom. The view never reads the composer
+    /// as it renders: a read would build the whole chat again every time the
+    /// composer changes, on every keystroke.
+    composer_layout: (bool, gpui::Pixels),
+    composer_below_card: Rc<Cell<gpui::Pixels>>,
     terminal_drawer: Entity<TerminalDrawer>,
     /// The conversation and terminal drawer's split, and the drawer gliding
     /// in and out of it.
@@ -497,6 +503,8 @@ impl ChatView {
             title_recedes: false,
             scene_at: cx.background_executor().now(),
             window_state,
+            composer_layout: (compact, px(0.)),
+            composer_below_card: composer.read(cx).below_card(),
             composer,
             terminal_drawer,
             agents,
@@ -829,8 +837,11 @@ impl Render for ChatView {
         // The composer follows the layout in place. Rebuilding it here would
         // throw away the draft, its selection and its pending attachments every
         // time the window crossed the breakpoint.
-        self.composer
-            .update(cx, |composer, cx| composer.set_compact(compact, cx));
+        if self.composer_layout.0 != compact {
+            self.composer_layout.0 = compact;
+            self.composer
+                .update(cx, |composer, cx| composer.set_compact(compact, cx));
+        }
         // The phone reads on T1 paper; the desktop keeps the glass canvas,
         // but for an agent beside its lead, which reads on its card or sheet.
         // The header's title menu dispatches these, and the header is a sibling of `main`.
@@ -1079,8 +1090,11 @@ impl ChatView {
         self.overhang = self.list_overhang(width);
         let overhang = self.overhang;
         let shift = self.body.shift();
-        self.composer
-            .update(cx, |composer, cx| composer.set_column_shift(shift, cx));
+        if self.composer_layout.1 != shift {
+            self.composer_layout.1 = shift;
+            self.composer
+                .update(cx, |composer, cx| composer.set_column_shift(shift, cx));
+        }
         let rail = self.render_rail(rail_cards, window, cx);
         let mut side = self.render_side(window, cx);
         let track_inset = self.track_inset();
@@ -1294,7 +1308,7 @@ impl ChatView {
 
         let delivery_inset = gpui::rems(1.).to_pixels(window.rem_size());
         let slots = rail::Slots {
-            below_card: self.composer.read(cx).below_card(),
+            below_card: self.composer_below_card.clone(),
             slots: rail.into_iter().chain(side.card.take()).collect(),
         };
         let main = v_flex()

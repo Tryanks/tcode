@@ -867,7 +867,7 @@ impl ChatView {
             slide,
             opacity,
             scrim,
-            below_card: self.composer.read(cx).below_card(),
+            below_card: self.composer_below_card.clone(),
         }
     }
 
