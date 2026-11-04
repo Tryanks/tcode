@@ -319,6 +319,33 @@ pub(super) fn render_root(
         .into_any_element()
 }
 
+/// The item that draws the text at render `path`, `line`: a long code block's
+/// items hold its lines, a long list's its items.
+pub(super) fn item_at(items: &[RootItem], path: &[u32], line: u32) -> usize {
+    let block = path[0] as usize;
+    let first = items.partition_point(|item| item.block < block);
+    let place = path.get(1).copied().unwrap_or(line) as usize;
+    items[first..]
+        .iter()
+        .position(|item| {
+            item.block == block && item.span.as_ref().is_some_and(|s| s.contains(&place))
+        })
+        .map_or(first, |offset| first + offset)
+}
+
+/// Whether `item` of `root` is drawn as a picture rather than as lines of
+/// text, whatever its source says.
+pub(super) fn draws_no_text(root: &BlockNode, item: &RootItem) -> bool {
+    let BlockNode::Root { children } = root else {
+        return false;
+    };
+    matches!(
+        &children[item.block],
+        BlockNode::CodeBlock(code)
+            if mermaid::is_mermaid(code.lang.as_deref()) || super::math::is_math(code.lang.as_deref())
+    )
+}
+
 /// The root block a render path such as `root-3-1/image/0` lies in.
 pub(super) fn root_block_of(path: &str) -> Option<usize> {
     let rest = path.strip_prefix("root-")?;
@@ -362,8 +389,13 @@ impl ItemHeights {
         self.splice(0, count);
     }
 
-    fn total(&self) -> Pixels {
-        self.heights
+    pub(super) fn total(&self) -> Pixels {
+        self.top_of(self.heights.len())
+    }
+
+    /// Where item `ix` starts: the height of the items before it.
+    pub(super) fn top_of(&self, ix: usize) -> Pixels {
+        self.heights[..ix]
             .iter()
             .flatten()
             .fold(px(0.), |sum, h| sum + *h)

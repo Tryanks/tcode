@@ -488,45 +488,6 @@ mod tests {
         assert_eq!(frames_requested(cx), 0, "a played fade asks for frames");
     }
 
-    /// A delta too large to have been written while the reader watched
-    /// fades in as one document: on every frame its parts -- paragraphs and
-    /// list items alike -- share one opacity, rather than lighting up one
-    /// line after another.
-    #[gpui::test]
-    fn a_one_shot_block_fades_in_as_one_document(cx: &mut TestAppContext) {
-        init(cx);
-        let seed = "A first line.\n\n";
-        let mut md = cx.update(|cx| MdState::new(seed, cx));
-        let cx = streaming(&md, cx);
-        let rest = cx.update(|_, cx| cx.theme().tokens.colors.muted.a);
-        let block = format!(
-            "{}`one` and on.\n\n- `two` in a list\n- and `three`\n\n{}`four` 结束。",
-            "A paragraph that arrived whole with the rest of its block. ".repeat(8),
-            "中文的一段话也一起到达，不逐字出现。".repeat(8),
-        );
-        cx.update(|_, cx| md.sync(format!("{seed}{block}"), cx));
-        draw(cx);
-        let mut partial = false;
-        for _ in 0..80 {
-            let chips = chips_in_reading_order(cx);
-            assert_eq!(chips.len(), 4, "every chip is painted: {chips:?}");
-            assert!(
-                chips.iter().all(|alpha| (alpha - chips[0]).abs() < 1e-4),
-                "the block's parts fade apart: {chips:?}"
-            );
-            partial |= chips[0] > 0. && chips[0] < rest;
-            if chips[0] == rest {
-                break;
-            }
-            next_frame(cx);
-        }
-        assert!(partial, "the block fades in");
-        assert_eq!(chips_in_reading_order(cx), [rest; 4]);
-        draw_settled(cx);
-        draw(cx);
-        assert_eq!(frames_requested(cx), 0);
-    }
-
     /// Markup a delta completes never fades the text the reader has seen
     /// again: `~~bo` becoming struck `bold` keeps its glyphs, and the link
     /// before it, at full colour on every frame while the words the delta

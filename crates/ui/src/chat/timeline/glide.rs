@@ -136,6 +136,7 @@ mod tests {
     use crate::chat::ChatView;
     use crate::chat::tests::{ScriptedThread, answer_event, user_event};
     use crate::test_frames::{draw, draw_settled};
+    use crate::theme::ActiveTheme as _;
 
     fn turn(turn: usize) -> [agent::AgentEvent; 4] {
         [
@@ -426,6 +427,308 @@ mod tests {
             list.item_count() > rows,
             "the rows arrived below the reader"
         );
+    }
+
+    const SEED: &str = "`seed` opens the reply.\n\n";
+
+    /// A running turn answering in a row the reader follows to its end.
+    fn following_a_reply(
+        cx: &mut TestAppContext,
+    ) -> (ScriptedThread, Entity<ChatView>, &mut VisualTestContext) {
+        let mut events = earlier_turns_and_a_running_one(4);
+        events.push(agent::AgentEvent::ItemStarted(agent::ThreadItem {
+            id: "streaming".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::AssistantMessage {
+                text: SEED.into(),
+                summarized: false,
+            },
+        }));
+        let thread = ScriptedThread::new(cx, events, 0, true);
+        let (chat, cx) = thread.open(cx);
+        thread.deliver(cx);
+        for _ in 0..20 {
+            frame(cx);
+        }
+        (thread, chat, cx)
+    }
+
+    /// `count` one-line paragraphs of six words, each opening on a chip.
+    fn paragraphs(count: usize) -> String {
+        (0..count)
+            .map(|index| format!("`{index}` is one short line of it.\n\n"))
+            .collect()
+    }
+
+    /// The bottom edge and alpha of each inline code chip painted last frame,
+    /// as far down as the list shows text, top to bottom. A chip is several
+    /// quads on one line.
+    fn chips(limit: gpui::Pixels, cx: &mut VisualTestContext) -> Vec<(gpui::Pixels, f32)> {
+        cx.update(|window, cx| {
+            let muted = cx.theme().tokens.colors.muted;
+            let scale = window.scale_factor();
+            let mut quads: Vec<_> = crate::test_frames::painted_quads(window)
+                .into_iter()
+                .filter_map(|quad| {
+                    let color = quad.background.as_solid()?;
+                    let (top, bottom) = (quad.bounds.top().0, quad.bounds.bottom().0);
+                    ((color.h, color.s, color.l) == (muted.h, muted.s, muted.l)
+                        && (bottom - top) / scale < 40.)
+                        .then(|| (px(bottom / scale), color.a))
+                })
+                .filter(|(bottom, _)| *bottom <= limit)
+                .collect();
+            quads.sort_by(|(a, _), (b, _)| a.as_f32().total_cmp(&b.as_f32()));
+            let mut chips: Vec<(gpui::Pixels, f32)> = Vec::new();
+            for (bottom, alpha) in quads {
+                match chips.last_mut() {
+                    Some(chip) if (bottom - chip.0).abs() < px(8.) => {
+                        chip.0 = chip.0.max(bottom);
+                        chip.1 = chip.1.max(alpha);
+                    }
+                    _ => chips.push((bottom, alpha)),
+                }
+            }
+            chips
+        })
+    }
+
+    /// Where the followed text ends at rest, above the end's padding and the
+    /// turn's status, and a chip's resting alpha.
+    fn text_edge(chat: &Entity<ChatView>, cx: &mut VisualTestContext) -> (gpui::Pixels, f32) {
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        let chips = chips(list.viewport_bounds().bottom(), cx);
+        let &(bottom, rest) = chips.last().expect("the reply's last chip is on screen");
+        (bottom, rest)
+    }
+
+    /// How far above `edge` the lowest chip the reveal has reached ends: the
+    /// blank under the text. A chip past the edge is still under the row's clip.
+    fn blank(edge: gpui::Pixels, rest: f32, cx: &mut VisualTestContext) -> gpui::Pixels {
+        chips(edge + px(1.), cx)
+            .iter()
+            .rev()
+            .find(|(_, alpha)| *alpha >= rest * 0.2)
+            .map_or(px(1_000.), |(bottom, _)| edge - *bottom)
+    }
+
+    fn scrolled(list: &gpui::ListState) -> gpui::Pixels {
+        -list.scroll_px_offset_for_scrollbar().y
+    }
+
+    /// The height the row is laid out at, measured afresh.
+    fn measured_again(list: &gpui::ListState, cx: &mut VisualTestContext) -> gpui::Pixels {
+        let row = format!("timeline-row-{}", list.item_count() - 1);
+        list.remeasure();
+        draw(cx);
+        cx.debug_bounds(row.leak())
+            .expect("the last row")
+            .size
+            .height
+    }
+
+    /// A large block delivered in one piece reveals as the list scrolls to
+    /// it, as one motion: on every frame the text reaches the bottom edge of
+    /// the followed list, the list only moves on, and the block is whole
+    /// within a second; the row lands on its measurement, at the tail. Code,
+    /// a table and a list among the prose come as they are reached.
+    #[gpui::test]
+    fn a_large_block_reveals_as_the_followed_tail_scrolls_to_it(cx: &mut TestAppContext) {
+        let code = format!("```rust\n{}```\n\n", "let line = 1;\n".repeat(8));
+        let table = "| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\n";
+        let mixed = format!("{}{code}{table}- one\n- two\n\n", paragraphs(1)).repeat(16);
+        for (block, bound) in [(paragraphs(120), px(48.)), (mixed, px(260.))] {
+            let (mut thread, chat, cx) = following_a_reply(cx);
+            let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+            let (edge, rest) = text_edge(&chat, cx);
+            let last = format!("timeline-row-{}", list.item_count() - 1).leak() as &'static str;
+            let start = scrolled(&list);
+
+            thread.live(streamed("streaming", &block));
+            thread.deliver(cx);
+            let mut positions = Vec::new();
+            let mut heights = Vec::new();
+            for index in 0..96 {
+                frame(cx);
+                assert!(list.is_following_tail(), "frame {index}: the follow paused");
+                positions.push(scrolled(&list));
+                heights.push(cx.debug_bounds(last).expect("the last row").size.height);
+                let gap = blank(edge, rest, cx);
+                assert!(
+                    gap <= bound,
+                    "frame {index}: {gap:?} blank under the revealed text"
+                );
+            }
+            assert!(
+                positions
+                    .windows(2)
+                    .all(|pair| pair[1] >= pair[0] - px(0.5)),
+                "the list moved back: {positions:?}"
+            );
+            assert!(
+                heights.windows(2).all(|pair| pair[1] >= pair[0] - px(0.5)),
+                "the row shrank: {heights:?}"
+            );
+            let end = *positions.last().unwrap();
+            assert!(
+                end > start + px(1_000.),
+                "the block has height: {positions:?}"
+            );
+            let arrived = positions
+                .iter()
+                .position(|at| *at >= end - px(0.5))
+                .unwrap();
+            assert!(
+                (30..=75).contains(&arrived),
+                "the list reached the block's end after {arrived} frames: {positions:?}"
+            );
+            let row = cx.debug_bounds(last).expect("the last row");
+            assert!(
+                (list.viewport_bounds().bottom() - row.bottom()).abs() <= px(1.),
+                "the list came to rest away from the tail"
+            );
+            assert_eq!(
+                measured_again(&list, cx),
+                *heights.last().unwrap(),
+                "the row landed off its measurement"
+            );
+        }
+    }
+
+    /// A block too small to need hurrying comes at the word-by-word pace,
+    /// and the row opens with it, not ahead of it.
+    #[gpui::test]
+    fn a_small_block_keeps_the_word_by_word_pace(cx: &mut TestAppContext) {
+        let (mut thread, chat, cx) = following_a_reply(cx);
+        let (edge, rest) = text_edge(&chat, cx);
+        thread.live(streamed("streaming", "`a`\n\n`b`\n\n`c`\n\n`d`\n\n`e`"));
+        thread.deliver(cx);
+        let mut revealed = Vec::new();
+        for index in 0..30 {
+            frame(cx);
+            let gap = blank(edge, rest, cx);
+            assert!(
+                gap <= px(40.),
+                "frame {index}: {gap:?} blank under the text"
+            );
+            let chips = chips(edge + px(400.), cx);
+            revealed.push(chips.iter().filter(|(_, a)| *a >= rest * 0.2).count());
+        }
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        assert!(list.is_following_tail());
+        assert_eq!(revealed[29], revealed[0] + 5, "{revealed:?}");
+        // Display frames come faster than words: none brings two, and the
+        // five are in within their steps.
+        assert!(
+            revealed.windows(2).all(|pair| pair[1] <= pair[0] + 1),
+            "words came together: {revealed:?}"
+        );
+        let last = revealed.iter().position(|count| *count == revealed[29]);
+        assert!(
+            last.is_some_and(|last| last <= 12),
+            "five words took too long: {revealed:?}"
+        );
+    }
+
+    /// The turn ending with a block still revealing, or with the block
+    /// itself, leaves the reveal to finish: the row opens with it rather than
+    /// taking its height at once.
+    #[gpui::test]
+    fn a_reveal_outlives_the_message_that_brought_it(cx: &mut TestAppContext) {
+        for frames_before_the_end in [0, 2] {
+            let (mut thread, chat, cx) = following_a_reply(cx);
+            let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+            let start = scrolled(&list);
+            thread.live(streamed("streaming", &paragraphs(120)));
+            if frames_before_the_end > 0 {
+                thread.deliver(cx);
+            }
+            for _ in 0..frames_before_the_end {
+                frame(cx);
+                assert!(
+                    scrolled(&list) < start + px(1_000.),
+                    "the block came at once"
+                );
+            }
+            thread.live(agent::AgentEvent::TurnCompleted {
+                turn_id: "4".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            });
+            thread.set_running(false);
+            thread.deliver(cx);
+            let mut position = start;
+            let mut steps = vec![scrolled(&list) - start];
+            position += steps[0];
+            for _ in 0..90 {
+                frame(cx);
+                let now = scrolled(&list);
+                assert!(now >= position - px(0.5), "the list moved back");
+                steps.push(now - position);
+                position = now;
+            }
+            let travel = position - start;
+            assert!(travel > px(1_000.), "the block has height: {travel:?}");
+            let largest = steps.iter().copied().fold(px(0.), gpui::Pixels::max);
+            assert!(
+                largest < travel / 4.,
+                "the row took its height at once as the turn ended: {steps:?}"
+            );
+            assert_eq!(steps[steps.len() - 1], px(0.), "the row came to rest");
+        }
+    }
+
+    /// A reader who scrolled up is not moved as a block arrives below them,
+    /// and the list holds it at its real height: coming back to the tail
+    /// nothing folds up, and the next words do not take the height back.
+    #[gpui::test]
+    fn a_reader_who_paused_finds_the_block_at_its_height_on_return(cx: &mut TestAppContext) {
+        let (mut thread, chat, cx) = following_a_reply(cx);
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        let wheel = |pixels: f32, cx: &mut VisualTestContext| {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: list.viewport_bounds().center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(pixels))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+        };
+        // Not so far that the reply leaves the screen: a row drawn all along.
+        wheel(30., cx);
+        for _ in 0..4 {
+            frame(cx);
+        }
+        assert!(!list.is_following_tail(), "the wheel paused the follow");
+        let reading = scrolled(&list);
+
+        thread.live(streamed("streaming", &paragraphs(120)));
+        thread.deliver(cx);
+        for step in 0..6 {
+            frame(cx);
+            assert_eq!(
+                scrolled(&list),
+                reading,
+                "step {step}: the reader was moved"
+            );
+        }
+        let whole = list.max_offset_for_scrollbar().y;
+        assert!(whole > reading + px(1_000.), "the block has its height");
+
+        wheel(-100_000., cx);
+        frame(cx);
+        assert!(list.is_following_tail(), "the reader is back at the tail");
+        let mut height = list.max_offset_for_scrollbar().y;
+        assert!(height >= whole - px(0.5), "the block folded up on return");
+        for step in 0..40 {
+            if step == 4 {
+                thread.live(streamed("streaming", "One more line.\n\n"));
+                thread.deliver(cx);
+            }
+            frame(cx);
+            let now = list.max_offset_for_scrollbar().y;
+            assert!(now >= height - px(0.5), "step {step}: the list shrank");
+            height = now;
+        }
     }
 
     /// Rows a fold brings were already in the thread; they are in place at

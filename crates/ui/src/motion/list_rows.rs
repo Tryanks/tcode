@@ -32,7 +32,9 @@
 //!    [`ListRows::entering`] progress as [`Glide::Enter`], and the rows that
 //!    left against it ([`ListRows::leaving`]) above or below its content, each
 //!    rebuilt from its value through [`RowGlide::leaving`], which takes no
-//!    input. While either moves it asks for frames.
+//!    input. While either moves it asks for frames. A row whose content opens
+//!    from the top over time keeps the rest out ([`RowGlide::withheld`]) and
+//!    says until when ([`ListRows::hold`]).
 //! 3. Each render the owner calls [`ListRows::settle`] and remeasures the
 //!    rows it names, whose motion has ended: `list` measures only the rows
 //!    in and near its view, so a row its motion moved out of view would keep,
@@ -142,6 +144,8 @@ pub(crate) struct Left<'a, V> {
 pub(crate) struct ListRows<A, V> {
     arrivals: HashMap<u64, Arrived<A>>,
     leaving: Vec<Leaving<V>>,
+    /// Rows laid out short of their content, and when that ends.
+    held: HashMap<u64, Instant>,
     /// Rows whose motion was let go of before it ended, which the next
     /// [`Self::settle`] names.
     ended: Vec<u64>,
@@ -160,6 +164,7 @@ impl<A, V> ListRows<A, V> {
         Self {
             arrivals: HashMap::new(),
             leaving: Vec::new(),
+            held: HashMap::new(),
             ended: Vec::new(),
             duration,
             scene: Default::default(),
@@ -183,8 +188,15 @@ impl<A, V> ListRows<A, V> {
     /// [`Self::settle`].
     fn let_go(&mut self) {
         self.ended.extend(self.arrivals.drain().map(|(key, _)| key));
+        self.ended.extend(self.held.drain().map(|(key, _)| key));
         self.ended
             .extend(self.leaving.drain(..).map(|left| left.attach.key()));
+    }
+
+    /// Row `key` is laid out short of its content until `until`: a row moved
+    /// out of view meanwhile is measured again then, as an arrival is.
+    pub(crate) fn hold(&mut self, key: u64, until: Instant) {
+        self.held.insert(key, until);
     }
 }
 
@@ -288,7 +300,14 @@ impl<A: Copy, V> ListRows<A, V> {
             }
             !gone
         });
-        if !self.arrivals.is_empty() || !self.leaving.is_empty() {
+        self.held.retain(|key, until| {
+            let released = now >= *until;
+            if released {
+                ended.push(*key);
+            }
+            !released
+        });
+        if !self.arrivals.is_empty() || !self.leaving.is_empty() || !self.held.is_empty() {
             window.request_animation_frame();
         }
         ended
@@ -561,6 +580,8 @@ pub(crate) struct RowGlide {
     /// Where its measurement and its tail's glide are kept when an owner
     /// keeps them; in element state otherwise.
     owner: Option<Owner>,
+    /// How much of its content's height, from the bottom, it keeps out.
+    withheld: Pixels,
     child: AnyElement,
 }
 
@@ -591,8 +612,19 @@ impl RowGlide {
             id: id.into(),
             glide,
             owner: None,
+            withheld: px(0.),
             child,
         }
+    }
+
+    /// The row short by `withheld` of its content's height, while it arrives
+    /// and on [`Glide::Tail`]: as `withheld` falls the row opens, gliding as
+    /// it does to a new measurement. It only opens: a row shown taller stays
+    /// so until its content's height has caught up, and it never stands
+    /// taller than its content.
+    pub(crate) fn withheld(mut self, withheld: Pixels) -> Self {
+        self.withheld = withheld;
+        self
     }
 
     /// The row with its measurement and its glide kept by `motion`, so a
@@ -666,8 +698,10 @@ struct Measured {
     /// The tail's content when the glide last took aim.
     content: Option<u64>,
     /// The measurement the tail glides to: the one taken after its content
-    /// last changed.
+    /// last changed, or the latest while part of it is withheld.
     target: Option<Pixels>,
+    /// The height the tail is on its way to: `target` less what is withheld.
+    aim: Pixels,
     /// The content changed; the next measurement is the new target.
     retarget: bool,
     /// The height is on its way to `target`.
@@ -744,21 +778,28 @@ impl Element for RowGlide {
                 })
             }
             Glide::Enter(progress) | Glide::Leave(progress) => {
-                let measured = self.measured(global_id, window, |state| state.height);
+                let withheld = self.withheld;
+                let measured = self.measured(global_id, window, |state| {
+                    let shown = state.height.unwrap_or_default() - withheld;
+                    state.aim = shown.max(px(0.)) * progress;
+                    state.height.map(|_| state.aim)
+                });
                 match (measured, self.glide) {
                     (None, Glide::Leave(_)) => None,
-                    (measured, _) => Some((
-                        measured.unwrap_or_default() * progress,
-                        super::lift(progress),
-                    )),
+                    (height, _) => Some((height.unwrap_or_default(), super::lift(progress))),
                 }
             }
             Glide::Tail { content } => {
+                let withheld = self.withheld;
+                let held = withheld > px(0.);
                 let state = self.measured(global_id, window, |state| {
                     if state.content.is_some_and(|seen| seen != content) {
                         state.retarget = true;
                     }
                     state.content = Some(content);
+                    if held {
+                        state.target = state.target.or(state.height);
+                    }
                     *state
                 });
                 match (state.height, state.target) {
@@ -766,13 +807,16 @@ impl Element for RowGlide {
                     // had; its measurement becomes the target the next frame
                     // glides to. Height that changes during a glide rides on
                     // it, a frame late.
-                    (Some(measured), Some(target)) if state.retarget || state.gliding => {
+                    (Some(measured), Some(target)) if state.retarget || state.gliding || held => {
+                        let aim = (target - withheld).max(state.aim).min(target);
                         let clock =
                             super::Clock::from(self.owner.as_ref().map(|owner| &owner.motion));
                         let (glided, settled) =
-                            clock.glide("tail", target, &super::Curve::new(GLIDE), window, cx);
-                        let gliding = !settled;
-                        self.measured(global_id, window, |state| state.gliding = gliding);
+                            clock.glide("tail", aim, &super::Curve::new(GLIDE), window, cx);
+                        self.measured(global_id, window, |state| {
+                            state.aim = aim;
+                            state.gliding = !settled || held;
+                        });
                         Some(((glided + measured - target).max(px(0.)), px(0.)))
                     }
                     _ => None,
@@ -805,14 +849,21 @@ impl Element for RowGlide {
         let lift = match layout {
             GlideLayout::Plain => {
                 self.child.prepaint(window, cx);
-                if matches!(
-                    self.glide,
-                    Glide::Tail { .. } | Glide::Leave(_) | Glide::Height { .. }
-                ) {
+                // A row an owner keeps may take up a glide after any rest,
+                // and takes it up from the height it shows.
+                if self.owner.is_some()
+                    || matches!(
+                        self.glide,
+                        Glide::Tail { .. } | Glide::Leave(_) | Glide::Height { .. }
+                    )
+                {
                     let size = bounds.size;
                     self.measured(global_id.expect("RowGlide has an id"), window, |state| {
                         state.height = Some(size.height);
                         state.target = Some(size.height);
+                        state.aim = size.height;
+                        state.retarget = false;
+                        state.gliding = false;
                     });
                 }
                 return;
@@ -832,13 +883,14 @@ impl Element for RowGlide {
             .height;
         let now = cx.background_executor().now();
         let height_glide = matches!(self.glide, Glide::Height { .. });
+        let held = self.withheld > px(0.);
         let moved = self.measured(global_id.expect("RowGlide has an id"), window, |state| {
             let mut moved = state.height != Some(measured);
             if height_glide && moved && state.height.is_some() {
                 state.run = Some((bounds.size.height, now));
             }
             state.height = Some(measured);
-            if state.retarget {
+            if state.retarget || held {
                 moved |= state.target != Some(measured);
                 state.target = Some(measured);
                 state.retarget = false;

@@ -2,7 +2,7 @@
 //! Apache-2.0 `text/state.rs` implementation.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::HashMap,
     ops::Range,
     path::{Path, PathBuf},
@@ -17,6 +17,11 @@ use gpui::{
     Styled as _, Window, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
+
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use super::{
     link_target::{LinkTarget, LinkTargetCache},
@@ -86,8 +91,7 @@ pub struct MarkdownState {
     pub(super) diagrams: mermaid::Diagrams,
     /// The text is still arriving: an open fence is not yet its whole source.
     pub(super) streaming: bool,
-    /// The latest append was not watched arriving word by word: it appears
-    /// at once, or fades in as one document.
+    /// The latest append was not watched arriving word by word.
     last_append_burst: bool,
     /// Window position of the last left mouse-down that landed on a link;
     /// a mouse-up nearby is a click, anything farther is a drag-selection.
@@ -125,6 +129,9 @@ pub struct MarkdownState {
     stream_fade: StreamFade,
     /// The fades this frame paints, sampled when the document renders.
     fade_frame: Option<Rc<FadeFrame>>,
+    /// The document's height below the bottom of the line the reveal has
+    /// reached, as last placed.
+    unrevealed: Cell<Pixels>,
     #[cfg(test)]
     last_reparse_bytes: usize,
 }
@@ -187,6 +194,7 @@ impl MarkdownState {
             drawn: false,
             stream_fade: StreamFade::default(),
             fade_frame: None,
+            unrevealed: Cell::new(px(0.)),
             #[cfg(test)]
             last_reparse_bytes: text.len(),
         }
@@ -697,6 +705,46 @@ impl MarkdownState {
         self.fade_frame.as_ref().map_or_else(Vec::new, |frame| {
             frame.run(&origin.path, origin.line, origin.base, len)
         })
+    }
+
+    /// While the reveal has words waiting: the document's height it has not
+    /// reached, as of the last frame, and when it will have.
+    pub(crate) fn unrevealed(&self, now: Instant) -> Option<(Pixels, Instant)> {
+        let drains_at = self.stream_fade.drains_at().filter(|at| *at > now)?;
+        Some((self.unrevealed.get(), drains_at))
+    }
+
+    /// Note, once the frame's text is placed, how far below the reveal the
+    /// document ends. The frontier's run gives the bottom of its line; the
+    /// reveal overtakes what is painted only for a frame or two, when the
+    /// top of its item still bounds it from above, so its row never opens
+    /// past the text. A diagram or a formula has no line: it comes whole.
+    pub(super) fn measure_unrevealed(&self) {
+        let unrevealed = self
+            .fade_frame
+            .as_ref()
+            .and_then(|frame| frame.frontier())
+            .map_or(px(0.), |(path, line, offset)| {
+                let heights = self.item_heights.borrow();
+                let runs = self.runs.borrow();
+                let painted = runs
+                    .iter()
+                    .filter(|run| *run.origin.path == *path && run.origin.line == line)
+                    .filter(|run| {
+                        (run.origin.base..=run.origin.base + run.text.len()).contains(&offset)
+                    })
+                    .find_map(|run| {
+                        let top = run.layout.position_for_index(offset - run.origin.base)?.y;
+                        Some(top + run.layout.line_height() - self.bounds.top())
+                    });
+                let item = render::item_at(&self.items, path, line);
+                let bottom = painted.unwrap_or_else(|| {
+                    let whole = render::draws_no_text(&self.parsed, &self.items[item]);
+                    heights.top_of(item + usize::from(whole))
+                });
+                (heights.total() - bottom).max(px(0.))
+            });
+        self.unrevealed.set(unrevealed);
     }
 
     pub(super) fn begin_frame(&self) {

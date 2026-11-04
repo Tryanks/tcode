@@ -155,6 +155,12 @@ impl ChatView {
                         .flatten()
                 };
                 let entering = arrival(&row);
+                // The reader follows the reveal: the row opens with its text,
+                // and nothing stands below the text yet to show.
+                let revealing = (moving && following)
+                    .then(|| own.last().and_then(|entry| this.md_states.get(&entry.id)))
+                    .flatten()
+                    .and_then(|md| md.state.read(cx).unrevealed(now));
                 // The row below took the end's padding from this one; this
                 // one gives it up as that one rises.
                 let below_arrival = this
@@ -169,13 +175,15 @@ impl ChatView {
                 // The followed end of a running turn glides, and so does the
                 // end the row now rising below took over from: the record that
                 // brings a row often reshapes the one before it, as prose ends
-                // a run of tool calls.
+                // a run of tool calls. So does a row still revealing, whatever
+                // came after it or ended its turn.
                 let glide = match entering {
                     Some((_, progress)) => Glide::Enter(progress),
-                    None if moving
-                        && turn.running
-                        && following
-                        && (index + 1 == item_count || below_arrival.is_some()) =>
+                    None if revealing.is_some()
+                        || moving
+                            && turn.running
+                            && following
+                            && (index + 1 == item_count || below_arrival.is_some()) =>
                     {
                         Glide::Tail {
                             content: row.content,
@@ -219,6 +227,9 @@ impl ChatView {
                             .find(|row| inserted(row).is_none()),
                     );
                     edge = before + (edge - before) * progress;
+                }
+                if let Some((_, until)) = revealing {
+                    this.rows_motion.hold(row.identity, until);
                 }
                 // A row that opens its turn brings the turn's trailer with it;
                 // otherwise the trailer was on screen, and moves down to it.
@@ -344,6 +355,7 @@ impl ChatView {
                                     glide,
                                     rendered.content,
                                 )
+                                .withheld(revealing.map_or(px(0.), |(height, _)| height))
                                 .owned(&this.motion),
                             )
                             .children(below)
