@@ -30,6 +30,7 @@ impl WorkspaceStore {
         self.focused_status()
     }
 
+    #[cfg(test)]
     pub(crate) fn session_loading(&self) -> bool {
         self.focus().is_some_and(|id| self.session_loading_for(id))
     }

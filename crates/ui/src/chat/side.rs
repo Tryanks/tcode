@@ -672,6 +672,14 @@ impl ChatView {
         self.focus_side(window, cx);
     }
 
+    /// Whether the keyboard is in the composer of the agent beside the thread.
+    pub(crate) fn side_composer_has_keyboard(&self, window: &Window, cx: &App) -> bool {
+        self.side
+            .host
+            .as_ref()
+            .is_some_and(|host| host.chat.read(cx).composer_has_keyboard(window, cx))
+    }
+
     /// The agent beside the thread takes the keyboard, through the view's own
     /// focus, which it hands on to its composer: drawn from the first frame,
     /// where the composer is not until the thread loads.

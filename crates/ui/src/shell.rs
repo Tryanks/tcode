@@ -522,37 +522,38 @@ pub(crate) fn pane_colour(session_id: &str, cx: &App) -> Option<gpui::Hsla> {
     Some(crate::material::pane_colour(slot, cx))
 }
 
-/// Whether the threads list marks the store's focused thread selected now.
-/// While the panes wear their colours, a conversation is selected only while
-/// the keyboard is in its pane's composer, which shows it too; with focus
-/// anywhere else (a timeline, a header, a panel, the palette) no row is.
-/// A single or zoomed pane, and the compact layout, keep the store's
-/// selection as it is.
+/// The thread of the conversation holding the keyboard: in its composer, the
+/// card of an agent beside it, or its drawer. With the keyboard anywhere else
+/// (a timeline, a header, the terminal, the palette) there is none.
 ///
 /// Read from the window's focus at render time: every focus change redraws
 /// the window (`Window::focus` and `Window::blur` refresh it), and the
 /// composer's own hairline reads the same focus, so the two never disagree.
 /// Like that hairline, and a gpui-base field's focus style, it stays while
 /// the window is inactive.
-pub(crate) fn shows_selection(window: &Window, cx: &App) -> bool {
-    let Some(shell) = current_shell(cx) else {
-        return true;
-    };
-    let shell = shell.read(cx);
-    let Some(attachment) = shell.attachment.as_ref() else {
-        return true;
-    };
-    let panes = attachment.panes(cx);
-    if shell.compact(cx) || attachment.zoom.is_zoomed() || panes.len() < 2 {
-        return true;
-    }
-    let focused = attachment.link.store.read(cx).legacy_focus();
-    panes.iter().any(|pane| {
-        let pane = pane.read(cx);
-        pane.session_id().is_some()
-            && pane.session_id() == focused.as_deref()
-            && pane.chat().read(cx).composer_has_keyboard(window, cx)
-    })
+pub(crate) fn selected_input(window: &Window, cx: &App) -> Option<String> {
+    let shell = current_shell(cx)?;
+    let panes = shell.read(cx).attachment.as_ref()?.panes(cx);
+    panes
+        .iter()
+        .map(|pane| pane.read(cx))
+        .find(|pane| pane.holds_input(window, cx))?
+        .session_id()
+        .map(str::to_owned)
+}
+
+/// The thread of the pane last entered or placed into, for what acts on the
+/// whole window: it is the selected input's whenever there is one.
+pub(crate) fn last_input_thread(cx: &App) -> Option<String> {
+    let shell = current_shell(cx)?;
+    let pane = &shell.read(cx).attachment.as_ref()?.last_input;
+    pane.read(cx).session_id().map(str::to_owned)
+}
+
+/// Whether a pane of this window shows `session_id`, the compact page
+/// included.
+pub(crate) fn pane_shows(session_id: &str, cx: &App) -> bool {
+    current_shell(cx).is_some_and(|shell| shell.read(cx).pane_showing(session_id, cx).is_some())
 }
 
 /// The chat that shows an agent opened from `lead` beside it, for what
@@ -2979,11 +2980,12 @@ pub(crate) fn navigate_thread(action: &crate::shortcut::NavigateThread, cx: &mut
     let Some(shell) = current_shell(cx) else {
         return;
     };
+    let current = last_input_thread(cx);
     shell.update(cx, |shell, cx| {
         if let Some(attachment) = &shell.attachment
-            && attachment
-                .sidebar
-                .update(cx, |sidebar, cx| sidebar.navigate_thread(action, cx))
+            && attachment.sidebar.update(cx, |sidebar, cx| {
+                sidebar.navigate_thread(action, current.as_deref(), cx)
+            })
         {
             shell.window_state.update(cx, |state, cx| {
                 state.close_palette(cx);
@@ -5562,7 +5564,7 @@ impl Render for AppShell {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::RefCell;
 
     use gpui::{TestAppContext, VisualTestContext, size};
@@ -11761,6 +11763,77 @@ mod tests {
         assert_eq!(row("sidebar-thread-thread-3", cx), Some(right));
     }
 
+    /// How far the selected fill has come on `row`.
+    fn row_fill(row: &'static str, cx: &mut VisualTestContext) -> f32 {
+        let row = cx.debug_bounds(row).expect("the thread's row");
+        cx.update(|window, cx| {
+            let active = cx.theme().list_active;
+            let row = row.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .filter(|quad| quad.bounds == row)
+                .filter_map(|quad| quad.background.as_solid())
+                .filter(|fill| (fill.h, fill.s, fill.l) == (active.h, active.s, active.l))
+                .map(|fill| fill.a)
+                .fold(0., f32::max)
+        })
+    }
+
+    /// In a single pane too, a conversation lights up while the keyboard is
+    /// in its composer, an agent's beside it, or its drawer, and only then.
+    #[gpui::test]
+    fn a_conversation_lights_up_while_it_holds_the_keyboard(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_lead_with_agent(cx);
+        let store = store_of(&shell, cx);
+        let row = "sidebar-thread-thread-1";
+        let lit = cx.update(|_, cx| cx.theme().list_active.a);
+        let settled = |cx: &mut VisualTestContext| {
+            settle_panes(cx);
+            row_fill(row, cx)
+        };
+        assert_eq!(settled(cx), lit, "the composer");
+
+        cx.update(|window, cx| window.blur(cx));
+        assert_eq!(settled(cx), 0., "nothing holds the keyboard");
+
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
+        });
+        draw(cx);
+        assert_eq!(settled(cx), lit, "its drawer");
+        store.update(cx, |store, cx| {
+            store.toggle_tab_panel_for("thread-1", RightTab::Diff, cx)
+        });
+        settle_panes(cx);
+
+        let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                Some(chat.clone()),
+                None,
+                window,
+                cx,
+            );
+        });
+        draw(cx);
+        serve_thread(&host, "agent-1");
+        await_restore_update(&shell, cx, |store| store.timeline_settled_for("agent-1"));
+        // Its composer takes the keyboard as it is drawn, and the fill then
+        // glides in.
+        settle_panes(cx);
+        assert_eq!(settled(cx), lit, "the agent beside it lights its lead");
+
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_palette(cx));
+        draw(cx);
+        assert_eq!(settled(cx), 0., "the palette belongs to no conversation");
+    }
+
     /// Among several panes a conversation is selected only while the
     /// keyboard is in its pane's composer: the composer's hairline and the
     /// fill of its thread's row say so, and the fill glides to the row of
@@ -11773,24 +11846,10 @@ mod tests {
         let (shell, host, cx) = mount_panes(cx);
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         let active = cx.update(|_, cx| cx.theme().list_active);
-        let fill = |row: &'static str, cx: &mut VisualTestContext| -> f32 {
-            let row = cx.debug_bounds(row).expect("the thread's row");
-            cx.update(|window, _| {
-                let row = row.scale(window.scale_factor());
-                window
-                    .painted_quads()
-                    .iter()
-                    .filter(|quad| quad.bounds == row)
-                    .filter_map(|quad| quad.background.as_solid())
-                    .filter(|fill| (fill.h, fill.s, fill.l) == (active.h, active.s, active.l))
-                    .map(|fill| fill.a)
-                    .fold(0., f32::max)
-            })
-        };
         let fills = |cx: &mut VisualTestContext| {
             [
-                fill("sidebar-thread-thread-1", cx),
-                fill("sidebar-thread-thread-2", cx),
+                row_fill("sidebar-thread-thread-1", cx),
+                row_fill("sidebar-thread-thread-2", cx),
             ]
         };
         // The composers drawn with the hairline of the one holding the
@@ -12526,6 +12585,21 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// A real shell behind a threads list tested on its own: what `store`
+    /// shows lands in the pane the list reads the last input from.
+    pub(crate) fn shell_behind(store: &Entity<WorkspaceStore>, cx: &mut TestAppContext) {
+        let (shell, host, cx) = mount(cx);
+        cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
+        let own = store_of(&shell, cx);
+        cx.update(|_, cx| {
+            cx.subscribe(store, move |_, shown: &ShowThread, cx| {
+                let _ = &host;
+                own.update(cx, |own, cx| own.show_thread(shown.session_id.clone(), cx));
+            })
+            .detach();
+        });
     }
 
     fn mount(cx: &mut TestAppContext) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {

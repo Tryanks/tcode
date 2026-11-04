@@ -853,6 +853,7 @@ impl SessionsSidebar {
     pub(crate) fn navigate_thread(
         &mut self,
         action: &crate::shortcut::NavigateThread,
+        current: Option<&str>,
         cx: &mut Context<Self>,
     ) -> bool {
         use crate::shortcut::NavigateThread;
@@ -861,7 +862,7 @@ impl SessionsSidebar {
         if threads.is_empty() {
             return false;
         }
-        let active = self.store.read(cx).roster_session_id();
+        let active = current.map(|id| self.store.read(cx).roster_row(id));
         let current = threads.iter().position(|id| Some(id) == active.as_ref());
         let index = match action {
             NavigateThread::Index(index) => *index,
@@ -1416,7 +1417,7 @@ impl SessionsSidebar {
     ) {
         let reopen = match commands.first() {
             Some(Command::ArchiveSession { session_id })
-                if self.store.read(cx).legacy_focus().as_ref() == Some(session_id) =>
+                if crate::shell::pane_shows(session_id, cx) =>
             {
                 Some(session_id.clone())
             }
@@ -1573,7 +1574,7 @@ impl SessionsSidebar {
     }
 
     fn reveal_selected_settled(&mut self, cx: &mut Context<Self>) {
-        let selected = self.store.read(cx).roster_session_id();
+        let selected = self.last_input_row(cx);
         if selected == self.last_selected {
             return;
         }
@@ -2762,13 +2763,17 @@ impl SessionsSidebar {
         )
     }
 
-    /// The thread whose row is drawn selected: the store's focused one, or
-    /// its lead, as far as the panes let it show (`shell::shows_selection`).
+    /// The thread whose row is drawn selected: the selected input's, or its
+    /// lead's.
     fn selected_row(&self, window: &Window, cx: &App) -> Option<String> {
-        self.store
-            .read(cx)
-            .roster_session_id()
-            .filter(|_| crate::shell::shows_selection(window, cx))
+        let selected = crate::shell::selected_input(window, cx)?;
+        Some(self.store.read(cx).roster_row(&selected))
+    }
+
+    /// The row of the thread in the pane last in use.
+    fn last_input_row(&self, cx: &App) -> Option<String> {
+        let thread = crate::shell::last_input_thread(cx)?;
+        Some(self.store.read(cx).roster_row(&thread))
     }
 
     /// `base` carries the row's selectable surface, selected when `is_active`.
@@ -4321,7 +4326,7 @@ impl SessionsSidebar {
                 } else {
                     let reveal = std::mem::take(&mut this.compact_reveal_active)
                         .then(|| {
-                            let active = this.store.read(cx).roster_session_id();
+                            let active = this.last_input_row(cx);
                             model.rows.iter().position(|row| {
                                 matches!(row, CompactListRow::Thread(row) if Some(&row.meta.id) == active.as_ref())
                             })
@@ -4601,17 +4606,13 @@ impl SessionsSidebar {
             cx,
         );
 
-        let selected =
-            self.store.read(cx).roster_session_id().as_deref() == Some(session_id.as_str());
-        // Rows needing the user carry a 6% semantic wash over the selected
-        // fill; everything else sits on the paper with only hover and pressed
-        // tints. The fill glides between them.
+        // Rows needing the user carry a 6% semantic wash; everything else
+        // sits on the paper with only hover and pressed tints. The fill
+        // glides between them.
         let fill = if state.waiting_for_approval {
             cx.theme().warning.opacity(0.06)
         } else if state.waiting_for_input {
             cx.theme().primary.opacity(0.06)
-        } else if selected {
-            cx.theme().list_active
         } else {
             cx.theme().list_active.opacity(0.)
         };
@@ -4634,7 +4635,6 @@ impl SessionsSidebar {
             // First child so the row's content paints over the mark.
             .relative()
             .children(mark)
-            .when(selected, |row| row.aria_selected(true))
             .bg(fill)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this
@@ -4644,9 +4644,8 @@ impl SessionsSidebar {
                 {
                     return;
                 }
-                if this.store.read(cx).session_loading()
-                    && this.store.read(cx).legacy_focus().as_deref() == Some(click_id.as_str())
-                {
+                let store = this.store.read(cx);
+                if store.is_thread_open(&click_id) && store.session_loading_for(&click_id) {
                     return;
                 }
                 this.store.update(cx, |store, cx| {
@@ -6375,29 +6374,15 @@ mod tests {
             );
         }
         draw_settled(cx);
-        let list_active = cx.update(|_, cx| cx.theme().list_active);
-        let painted_active = |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
-            cx.update(|window, _| {
-                window.painted_quads().iter().any(|quad| {
-                    quad.bounds == bounds.scale(window.scale_factor())
-                        && quad.background == gpui::Background::from(list_active)
-                })
-            })
-        };
-        assert!(
-            painted_active(cx, rows[0]),
-            "the active row keeps the neutral selected surface"
-        );
 
         set_marks(cx, false, &mut driver);
-        let rows = wait_for_rows(cx, &mut driver);
+        wait_for_rows(cx, &mut driver);
         for (_, mark_selector) in selectors {
             assert!(
                 cx.debug_bounds(mark_selector).is_none(),
                 "with marks off again no mark is drawn"
             );
         }
-        assert!(painted_active(cx, rows[0]));
         driver.shutdown(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -6518,7 +6503,10 @@ mod tests {
             Some("menu-10")
         );
         assert!(!selected_surface(cx, a));
-        assert!(selected_surface(cx, b), "selected surface follows B");
+        assert!(
+            !selected_surface(cx, b),
+            "a phone's list selects no row, the thread being another page"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -7244,7 +7232,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn agents_are_not_listed_and_an_open_agent_selects_its_lead(cx: &mut TestAppContext) {
+    fn agents_are_not_listed(cx: &mut TestAppContext) {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
         };
@@ -7314,7 +7302,7 @@ mod tests {
         // this fake transport never answers.
         store.update(cx, |store, cx| store.select_session("other".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
-        let (sidebar, cx) = cx
+        let (_, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.run_until_parked();
@@ -7323,21 +7311,6 @@ mod tests {
         assert!(cx.debug_bounds("compact-row-parent").is_some());
         assert!(cx.debug_bounds("compact-row-child").is_none());
         assert!(cx.debug_bounds("compact-row-mirror").is_none());
-
-        store.update(cx, |store, cx| store.select_session("child".into(), cx));
-        sidebar.update(cx, |_, cx| cx.notify());
-        draw_settled(cx);
-        let lead = cx.debug_bounds("compact-row-parent").unwrap();
-        let selected = cx.update(|window, cx| {
-            window.painted_quads().iter().any(|quad| {
-                quad.bounds == lead.scale(window.scale_factor())
-                    && quad.background == gpui::Background::from(cx.theme().list_active)
-            })
-        });
-        assert!(
-            selected,
-            "the lead's row is drawn selected for its open agent"
-        );
     }
 
     #[cfg(feature = "remote-hosting")]
@@ -7525,6 +7498,7 @@ mod tests {
                 cx,
             )
         });
+        crate::shell::tests::shell_behind(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| {
             store.select_session("settled-39".into(), cx)
@@ -7697,6 +7671,7 @@ mod tests {
             )
         });
         crate::store::tests::place_shown_threads(&store, cx);
+        crate::shell::tests::shell_behind(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // The open thread is settled, so the closed shelf shows its row.
         store.update(cx, |store, cx| {
@@ -7897,6 +7872,7 @@ mod tests {
                 cx,
             )
         });
+        crate::shell::tests::shell_behind(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.select_session("mixed-a".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
