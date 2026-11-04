@@ -257,7 +257,8 @@ pub use wire::{
 // server; SessionActivity carries latest_activity, what the thread's running
 // turn last started. Settings' favorite_models holds {provider, profile_id,
 // model} rows beside the bare ids older settings stored, which still read, and
-// ToggleFavoriteModel carries provider and profile_id.
+// ToggleFavoriteModel carries provider and profile_id. TerminalDelta carries
+// scrolled, the rows its screen moved up before rows_replaced applies.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

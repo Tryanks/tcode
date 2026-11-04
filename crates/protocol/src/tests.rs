@@ -587,6 +587,7 @@ fn terminal_delta_wire_shape_carries_only_what_changed() {
         cursor: None,
         lines_evicted: 0,
         styles: vec![TerminalStyle::default()],
+        scrolled: 1,
         rows_replaced: vec![TerminalRowUpdate {
             index: 5,
             row: TerminalRow {
@@ -621,6 +622,7 @@ fn terminal_delta_wire_shape_carries_only_what_changed() {
                     "rows": 24,
                     "modes": {"mode": 0, "keyboard": 0},
                     "styles": [{"fg": {"type": "foreground"}, "bg": {"type": "background"}}],
+                    "scrolled": 1,
                     "rows_replaced": [{"index": 5, "row": {"cells": [{"text": "y"}]}}],
                     "history": {"type": "appended", "content": [{}]},
                     "bell": true,

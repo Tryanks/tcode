@@ -2484,6 +2484,10 @@ fn layout_grid_cached(
     if cache.key != grid_key || state.fully_damaged() {
         cache.key = grid_key;
         cache.rows = vec![None; state.rows()];
+    } else {
+        let scrolled = state.scrolled_rows().min(cache.rows.len());
+        cache.rows.drain(..scrolled);
+        cache.rows.resize(state.rows(), None);
     }
 
     let mut rows = Vec::with_capacity(state.rows());
@@ -3313,6 +3317,61 @@ mod tests {
         state.apply_delta(&delta);
         let rebuilt = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
         assert_eq!(rebuilt.rows[0].text_runs[0].text, "b");
+    }
+
+    /// A screen that scrolls keeps each row's text with the row as it moves
+    /// up, and lays out only the row that comes in.
+    #[test]
+    fn cached_grid_paint_follows_rows_the_screen_scrolls() {
+        let palette = TerminalPalette {
+            foreground: rgb(0xffffff).into(),
+            background: rgb(0x000000).into(),
+            selection: rgb(0x336699).into(),
+        };
+        let row = |ch| TerminalRow {
+            cells: vec![cell(ch, CellWidth::Narrow)],
+            wrapped: false,
+        };
+        let mut state = TerminalModel::new(String::new());
+        state.apply_frame(TerminalFrame {
+            cols: 1,
+            rows: 3,
+            styles: vec![TerminalStyle::default()],
+            visible: vec![row('a'), row('b'), row('c')],
+            ..TerminalFrame::default()
+        });
+        let mut caches = HashMap::new();
+        let text = |paint: &GridPaintData| {
+            paint
+                .rows
+                .iter()
+                .map(|row| {
+                    row.text_runs
+                        .iter()
+                        .map(|run| run.text.to_string())
+                        .collect()
+                })
+                .collect::<Vec<String>>()
+        };
+        let first = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
+        assert_eq!(text(&first), ["a", "b", "c"]);
+
+        state.clear_damage();
+        let mut delta = idle_delta(1, 3);
+        delta.styles = vec![TerminalStyle::default()];
+        delta.scrolled = 1;
+        delta.rows_replaced = vec![tcode_protocol::terminal::TerminalRowUpdate {
+            index: 2,
+            row: row('d'),
+        }];
+        delta.history = Some(tcode_protocol::terminal::TerminalHistoryUpdate::Appended(
+            vec![row('a')],
+        ));
+        state.apply_delta(&delta);
+        let scrolled = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
+        assert_eq!(text(&scrolled), ["b", "c", "d"]);
+        assert!(Rc::ptr_eq(&first.rows[1], &scrolled.rows[0]));
+        assert!(Rc::ptr_eq(&first.rows[2], &scrolled.rows[1]));
     }
 
     fn idle_delta(cols: u16, rows: u16) -> tcode_protocol::terminal::TerminalDelta {
