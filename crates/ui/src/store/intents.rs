@@ -17,7 +17,7 @@ use tcode_protocol::{
     SettingsPatch,
 };
 
-use super::{ArchivedDeletion, KEPT_THREADS, StoreChange, TopicKind, WorkspaceStore};
+use super::{ArchivedDeletion, KEPT_THREADS, ShowThread, StoreChange, TopicKind, WorkspaceStore};
 
 impl WorkspaceStore {
     pub(crate) fn local_settings_changed(&self, cx: &mut Context<Self>) {
@@ -209,6 +209,16 @@ impl WorkspaceStore {
         }
         self.settings_replica.last_project_id = Some(project_id.clone());
         self.patch_settings(SettingsPatch::LastProject(Some(project_id)));
+    }
+
+    pub(super) fn remember_project_of(&mut self, session_id: &str) {
+        let project_id = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .and_then(|meta| meta.project_id.clone());
+        self.remember_project(project_id);
     }
 
     pub fn set_word_wrap_diffs(&mut self, value: bool) {
@@ -655,6 +665,31 @@ impl WorkspaceStore {
         self.sync_terminal_topics();
         self.sync_conversation_ui(session_id);
     }
+    /// Show a thread where the user is: the shell places it, opens it and
+    /// gives it the keyboard.
+    pub fn show_thread(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.show_thread_replacing(session_id, None, cx);
+    }
+
+    /// Show a thread in the pane showing `replacing`, for a control of that
+    /// pane.
+    pub fn show_thread_replacing(
+        &mut self,
+        session_id: String,
+        replacing: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
+        self.draft_fallback_pending = false;
+        self.remember_project_of(&session_id);
+        cx.emit(ShowThread {
+            session_id,
+            replacing,
+            asked: true,
+        });
+    }
+
     pub fn select_session_at_turn(
         &mut self,
         session_id: String,

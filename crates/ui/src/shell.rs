@@ -62,7 +62,7 @@ use crate::runtime_event::{
 };
 use crate::settings_page::SettingsPage;
 use crate::sidebar::SessionsSidebar;
-use crate::store::{StoreChange, TopicKind, WorkspaceStore};
+use crate::store::{ShowThread, StoreChange, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
 use crate::window_state::{Destination, OpenPanel, OpenThread, Route, WindowState};
@@ -219,9 +219,11 @@ struct ShellAttachment {
     drop_landing: Rc<Cell<Option<gpui::Bounds<Pixels>>>>,
     /// The split whose handle the pointer holds, found as the hold began.
     held_split: Option<gpui_base::dock::NodeId>,
-    /// The pane showing the store's focused thread, or waiting for it; the
-    /// compact layout's conversation is its chat.
-    focused_pane: Entity<ThreadPanel>,
+    /// The pane last entered by the keyboard or last placed into. A hint:
+    /// where the next thread lands, what a pane command acts on with the
+    /// keyboard elsewhere, and the compact layout's page. No view draws from
+    /// it.
+    last_input: Entity<ThreadPanel>,
     /// The attachment's preview panel: it answers the preview tools and owns
     /// the pages each pane's drawer shows.
     preview: Entity<PreviewPanel>,
@@ -331,12 +333,17 @@ impl ShellAttachment {
         Some(tree)
     }
 
-    /// The focused pane's conversation.
-    fn chat(&self, cx: &App) -> Entity<ChatView> {
-        self.focused_pane.read(cx).chat()
+    /// The pane the compact layout draws.
+    fn page(&self) -> &Entity<ThreadPanel> {
+        &self.last_input
     }
 
-    /// What the page `page` draws in place of the focused pane's conversation.
+    /// The compact page's conversation.
+    fn chat(&self, cx: &App) -> Entity<ChatView> {
+        self.page().read(cx).chat()
+    }
+
+    /// What the page `page` draws in place of the page pane's conversation.
     fn thread_page(&self, page: EntityId) -> Option<&ThreadPage> {
         self.leads
             .iter()
@@ -353,7 +360,7 @@ enum ThreadBody {
 }
 
 /// A conversation drawn on a page of the compact stack instead of the
-/// focused pane's, whose timeline it leases for as long as it is kept.
+/// page pane's, whose timeline it leases for as long as it is kept.
 #[derive(Clone)]
 struct ThreadPage {
     page: EntityId,
@@ -387,7 +394,7 @@ impl PaneControls {
 }
 
 /// This window's [`PaneControls`] for the pane showing `session_id`, or the
-/// focused pane; `None` where there are no panes.
+/// last input's; `None` where there are no panes.
 pub(crate) fn pane_controls(
     session_id: Option<&str>,
     window: &Window,
@@ -406,7 +413,7 @@ pub(crate) fn pane_controls(
                 .iter()
                 .find(|pane| pane.read(cx).session_id() == Some(session_id))
         })
-        .unwrap_or(&attachment.focused_pane);
+        .unwrap_or(&attachment.last_input);
     let closable = pane
         .read(cx)
         .group()
@@ -443,7 +450,7 @@ pub(crate) fn focus_focused_pane(window: &mut Window, cx: &mut App) {
     let Some(handle) = shell
         .attachment
         .as_ref()
-        .map(|attachment| attachment.focused_pane.focus_handle(cx))
+        .map(|attachment| attachment.last_input.focus_handle(cx))
     else {
         return;
     };
@@ -512,7 +519,7 @@ pub(crate) fn act_in_pane_of(session_id: &str, window: &mut Window, cx: &mut App
             return;
         };
         window.focus(&pane.focus_handle(cx), cx);
-        shell.pane_focused(pane, window, cx);
+        shell.pane_entered(pane, cx);
     });
 }
 
@@ -1229,7 +1236,7 @@ impl AppShell {
             cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
         let mut subscriptions = vec![
             cx.observe_in(&store, window, move |this, store, window, cx| {
-                this.reconcile_panes(window, cx);
+                this.reconcile_panes(cx);
                 this.stamp_connected(cx);
                 let selected = store.read(cx).legacy_focus();
                 if let Some(attachment) = &mut this.attachment
@@ -1248,6 +1255,9 @@ impl AppShell {
             }),
             cx.subscribe_in(&store, window, |this, _, event: &RuntimeEvent, w, cx| {
                 this.present_app_event(event, w, cx);
+            }),
+            cx.subscribe_in(&store, window, |this, _, shown: &ShowThread, w, cx| {
+                this.show_thread(shown, w, cx);
             }),
             cx.subscribe_in(
                 &store,
@@ -1347,7 +1357,7 @@ impl AppShell {
             split_handle_held,
             drop_landing,
             held_split: None,
-            focused_pane: thread_panel,
+            last_input: thread_panel,
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
             palette: cx.new(|cx| {
@@ -1415,8 +1425,8 @@ impl AppShell {
             ThreadPanel::new(
                 chat,
                 drawer,
-                move |pane, window, cx| {
-                    _ = shell.update(cx, |shell, cx| shell.pane_focused(pane, window, cx));
+                move |pane, _, cx| {
+                    _ = shell.update(cx, |shell, cx| shell.pane_entered(pane, cx));
                 },
                 window,
                 cx,
@@ -1424,64 +1434,23 @@ impl AppShell {
         })
     }
 
-    /// Keep the panes and the store's focus telling one story. The store's
-    /// focused thread is shown by the pane already showing it, which takes
-    /// the keyboard, or else by the focused pane. A pane whose thread the
-    /// store closed leaves the column; the focused pane, and the last one,
-    /// stay and show nothing until the store focuses something for them.
-    fn reconcile_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let compact = self.compact(cx);
-        if compact {
+    /// A pane whose thread the store closed leaves the column; the last
+    /// input's, and the last one, stay and show nothing until a thread is
+    /// placed there.
+    fn reconcile_panes(&mut self, cx: &mut Context<Self>) {
+        if self.compact(cx) {
             self.reconcile_leads(cx);
         }
         let Some(attachment) = &mut self.attachment else {
             return;
         };
         let panes = attachment.panes(cx);
-        if !panes.contains(&attachment.focused_pane)
+        if !panes.contains(&attachment.last_input)
             && let Some(first) = panes.first()
         {
-            attachment.focused_pane = first.clone();
+            attachment.last_input = first.clone();
         }
-        let store = attachment.link.store.clone();
-        let focused = store.read(cx).legacy_focus();
-        if let Some(session_id) = focused {
-            let showing = panes
-                .iter()
-                .find(|pane| pane.read(cx).session_id() == Some(session_id.as_str()))
-                .cloned();
-            match showing {
-                Some(pane) if pane != attachment.focused_pane => {
-                    attachment.focused_pane = pane.clone();
-                    if !compact {
-                        if attachment.zoom.pane().is_some_and(|zoomed| *zoomed != pane) {
-                            attachment.zoom.zoom_out();
-                        }
-                        window.focus(&pane.focus_handle(cx), cx);
-                    }
-                }
-                Some(_) => {}
-                None => {
-                    let pane = attachment.focused_pane.clone();
-                    let left = pane.read(cx).session_id().map(str::to_owned);
-                    pane.update(cx, |pane, cx| pane.set_session(Some(session_id), cx));
-                    // A pane that waited with the keyboard had no composer to
-                    // give it to until now.
-                    if left.is_none() && pane.focus_handle(cx).is_focused(window) {
-                        pane.read(cx)
-                            .chat()
-                            .update(cx, |chat, cx| chat.focus_composer(window, cx));
-                    }
-                    if let Some(left) = left
-                        && store.read(cx).is_thread_open(&left)
-                        && !drawn_beside(&panes, &left, cx)
-                    {
-                        store.update(cx, |store, cx| store.close_thread(&left, cx));
-                    }
-                }
-            }
-        }
-        let store = store.read(cx);
+        let store = attachment.link.store.read(cx);
         let closed: Vec<_> = panes
             .iter()
             .filter(|pane| {
@@ -1491,10 +1460,10 @@ impl AppShell {
             })
             .cloned()
             .collect();
-        let focused_pane = attachment.focused_pane.clone();
+        let last_input = attachment.last_input.clone();
         let mut remaining = panes.len();
         for pane in closed {
-            if pane == focused_pane || remaining == 1 {
+            if pane == last_input || remaining == 1 {
                 pane.update(cx, |pane, cx| pane.set_session(None, cx));
             } else {
                 self.glide_out(&pane, cx);
@@ -1503,15 +1472,16 @@ impl AppShell {
         }
     }
 
-    /// The keyboard entered `pane`: the store acts on its thread.
-    fn pane_focused(&mut self, pane: Entity<ThreadPanel>, _: &mut Window, cx: &mut Context<Self>) {
+    /// The keyboard entered `pane`, its drawer included: the next thread
+    /// lands there, and the store acts on its thread.
+    fn pane_entered(&mut self, pane: Entity<ThreadPanel>, cx: &mut Context<Self>) {
         let Some(attachment) = &mut self.attachment else {
             return;
         };
         if !attachment.panes(cx).contains(&pane) {
             return;
         }
-        attachment.focused_pane = pane.clone();
+        attachment.last_input = pane.clone();
         let session_id = pane.read(cx).session_id().map(str::to_owned);
         attachment
             .link
@@ -1521,6 +1491,127 @@ impl AppShell {
                 None if store.legacy_focus().is_some() => store.release_focus(cx),
                 None => {}
             });
+        cx.notify();
+    }
+
+    /// The only rebind of a pane: it shows `session_id`, open from here on,
+    /// and the thread it showed closes unless a side card shows that too.
+    fn bind_pane(
+        &mut self,
+        pane: &Entity<ThreadPanel>,
+        session_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(attachment) = &self.attachment else {
+            return;
+        };
+        let store = attachment.link.store.clone();
+        let panes = attachment.panes(cx);
+        store.update(cx, |store, _| {
+            if !store.is_thread_open(session_id) {
+                store.open_thread(session_id);
+            }
+        });
+        let left = pane.read(cx).session_id().map(str::to_owned);
+        if left.as_deref() != Some(session_id) {
+            pane.update(cx, |pane, cx| {
+                pane.set_session(Some(session_id.to_owned()), cx)
+            });
+            // A pane that waited with the keyboard had no composer to give it
+            // to until now.
+            if left.is_none() && pane.focus_handle(cx).is_focused(window) {
+                pane.read(cx)
+                    .chat()
+                    .update(cx, |chat, cx| chat.focus_composer(window, cx));
+            }
+            if let Some(left) = left
+                && store.read(cx).is_thread_open(&left)
+                && !drawn_beside(&panes, &left, cx)
+            {
+                store.update(cx, |store, cx| store.close_thread(&left, cx));
+            }
+        }
+        store.update(cx, |store, cx| store.focus_thread(session_id, cx));
+    }
+
+    /// Where a thread shown without naming a pane goes: the pane showing it,
+    /// or beside its lead; else `replacing`'s pane, the last input, or the
+    /// first pane.
+    fn place(
+        &self,
+        session_id: &str,
+        replacing: Option<&str>,
+        cx: &App,
+    ) -> Option<Entity<ThreadPanel>> {
+        let attachment = self.attachment.as_ref()?;
+        let panes = attachment.panes(cx);
+        self.pane_showing(session_id, cx)
+            .or_else(|| {
+                panes
+                    .iter()
+                    .find(|pane| {
+                        pane.read(cx).chat().read(cx).side_session_id() == Some(session_id)
+                    })
+                    .cloned()
+            })
+            .or_else(|| self.pane_showing(replacing?, cx))
+            .or_else(|| {
+                panes
+                    .contains(&attachment.last_input)
+                    .then(|| attachment.last_input.clone())
+            })
+            .or_else(|| panes.first().cloned())
+    }
+
+    /// Put `shown` in its pane. A thread the user asked for takes the
+    /// compact stack and the keyboard; one the workspace fell back on leaves
+    /// them, unless it moves the last input to another pane.
+    fn show_thread(&mut self, shown: &ShowThread, window: &mut Window, cx: &mut Context<Self>) {
+        let session_id = shown.session_id.as_str();
+        if self
+            .pending_navigation_restore
+            .as_ref()
+            .is_some_and(|pending| pending.session_id != session_id)
+        {
+            self.pending_navigation_restore = None;
+        }
+        let compact = self.compact(cx);
+        if compact {
+            self.unwind_leads(session_id, cx);
+        }
+        let Some(pane) = self.place(session_id, shown.replacing.as_deref(), cx) else {
+            return;
+        };
+        let chat = pane.read(cx).chat();
+        let beside = chat.read(cx).side_session_id() == Some(session_id);
+        if !beside {
+            self.bind_pane(&pane, session_id, window, cx);
+        }
+        let Some(attachment) = self.attachment.as_mut() else {
+            return;
+        };
+        if attachment.zoom.pane().is_some_and(|zoomed| *zoomed != pane) {
+            attachment.zoom.zoom_out();
+        }
+        let moved = attachment.last_input != pane;
+        attachment.last_input = pane.clone();
+        self.blur_navigation(window, cx);
+        self.window_state
+            .update(cx, |state, cx| state.leave_route_for_chat(cx));
+        if shown.asked && compact {
+            self.go(Destination::Thread, cx);
+        }
+        if beside {
+            chat.update(cx, |chat, cx| chat.focus_side(window, cx));
+        } else if shown.asked {
+            chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+        } else if moved && !compact {
+            window.focus(&pane.focus_handle(cx), cx);
+        }
+        // Showing another thread can leave the destination unchanged. Its
+        // checkpoint must not depend on the host delivering a notification.
+        self.schedule_navigation_save(cx);
         cx.notify();
     }
 
@@ -1583,14 +1674,14 @@ impl AppShell {
 
 impl AppShell {
     /// The pane a command acts on: the one holding the keyboard, or the
-    /// focused one while the keyboard is elsewhere.
+    /// last input while the keyboard is elsewhere.
     fn acting_pane(&self, window: &Window, cx: &App) -> Option<Entity<ThreadPanel>> {
         let attachment = self.attachment.as_ref()?;
         attachment
             .panes(cx)
             .into_iter()
             .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))
-            .or_else(|| Some(attachment.focused_pane.clone()))
+            .or_else(|| Some(attachment.last_input.clone()))
     }
 
     /// The pane showing `session_id`.
@@ -1602,8 +1693,8 @@ impl AppShell {
             .find(|pane| pane.read(cx).session_id() == Some(session_id))
     }
 
-    /// A pane on `placement`'s side of `from`, focused and waiting for a
-    /// thread.
+    /// A pane on `placement`'s side of `from`, with the keyboard and waiting
+    /// for a thread.
     fn add_pane(
         &mut self,
         from: &Entity<ThreadPanel>,
@@ -1640,7 +1731,7 @@ impl AppShell {
             );
         });
         self.glide_after_edit(before, cx);
-        self.attachment.as_mut()?.focused_pane = pane.clone();
+        self.attachment.as_mut()?.last_input = pane.clone();
         window.focus(&pane.focus_handle(cx), cx);
         cx.notify();
         Some((pane, beside))
@@ -1689,22 +1780,11 @@ impl AppShell {
         }
         let added = placements
             .iter()
-            .any(|placement| self.add_pane(from, *placement, window, cx).is_some());
-        if added {
-            self.show_in_focused_pane(&session_id, cx);
+            .find_map(|placement| self.add_pane(from, *placement, window, cx));
+        if let Some((pane, _)) = &added {
+            self.bind_pane(pane, &session_id, window, cx);
         }
-        added
-    }
-
-    /// Open `session_id` for the focused pane, which shows it once the panes
-    /// reconcile.
-    fn show_in_focused_pane(&self, session_id: &str, cx: &mut Context<Self>) {
-        if let Some(store) = self.store() {
-            store.update(cx, |store, cx| {
-                store.open_thread(session_id);
-                store.focus_thread(session_id, cx);
-            });
-        }
+        added.is_some()
     }
 
     /// A thread dragged from the threads list landed on a pane: an edge opens
@@ -1719,7 +1799,6 @@ impl AppShell {
         let Some(attachment) = self.attachment.as_ref() else {
             return;
         };
-        let store = attachment.link.store.clone();
         let Some(pane) = attachment.panes(cx).into_iter().find(|pane| {
             pane.read(cx)
                 .group()
@@ -1737,10 +1816,9 @@ impl AppShell {
                 }
             }
             None => {
-                if self.pane_showing(&session_id, cx).is_none() {
-                    self.pane_focused(pane, window, cx);
-                }
-                store.update(cx, |store, cx| store.select_session(session_id, cx));
+                let pane = self.pane_showing(&session_id, cx).unwrap_or(pane);
+                self.bind_pane(&pane, &session_id, window, cx);
+                self.pane_entered(pane, cx);
             }
         }
         if let Some(into) = into {
@@ -1850,7 +1928,7 @@ impl AppShell {
         self.glide_out(pane, cx);
         if let Some(next) = next {
             window.focus(&next.focus_handle(cx), cx);
-            self.pane_focused(next, window, cx);
+            self.pane_entered(next, cx);
         }
         true
     }
@@ -2190,7 +2268,7 @@ impl AppShell {
             }
         }
         window.focus(&pane.focus_handle(cx), cx);
-        self.pane_focused(pane, window, cx);
+        self.pane_entered(pane, cx);
     }
 
     /// The acting pane and its neighbour on `side` exchange their
@@ -2226,11 +2304,8 @@ impl AppShell {
         let theirs = to.update(cx, |to, cx| to.replace_chat(chat, ours_at, cx));
         from.update(cx, |from, cx| from.replace_chat(theirs, theirs_at, cx));
         let focused = if follow { to } else { from };
-        if let Some(attachment) = self.attachment.as_mut() {
-            attachment.focused_pane = focused.clone();
-        }
         window.focus(&focused.focus_handle(cx), cx);
-        self.pane_focused(focused, window, cx);
+        self.pane_entered(focused, cx);
     }
 
     /// The acting pane's thread trades places with its neighbour's on
@@ -2360,7 +2435,7 @@ impl AppShell {
             return None;
         }
         let attachment = self.attachment.as_ref()?;
-        let focused = attachment.focused_pane.clone();
+        let focused = attachment.last_input.clone();
         let panes = attachment.panes(cx);
         let first = std::iter::once(Slot::Pane(focused.clone()));
         let (fills, fewest): (Vec<_>, _) = match layout {
@@ -2453,8 +2528,8 @@ impl AppShell {
         if !(unchanged && attachment.zoom.pane().is_none() && attachment.layout_swap.is_idle()) {
             attachment.layout_swap.choose(layout);
         }
-        let focused = attachment.focused_pane.clone();
-        self.pane_focused(focused.clone(), window, cx);
+        let focused = attachment.last_input.clone();
+        self.pane_entered(focused.clone(), cx);
         window.focus(&focused.focus_handle(cx), cx);
         cx.notify();
     }
@@ -2532,7 +2607,7 @@ impl AppShell {
         let store = attachment.link.store.clone();
         let preview = attachment.preview.clone();
         let area = attachment.thread_panes.clone();
-        let focused = attachment.focused_pane.clone();
+        let focused = attachment.last_input.clone();
         let before = attachment.panes(cx);
         let mut panes = HashMap::new();
         let mut threads = Vec::new();
@@ -2566,13 +2641,9 @@ impl AppShell {
             }
         }
         for (pane, session_id) in threads {
-            if let Some(attachment) = self.attachment.as_mut() {
-                attachment.focused_pane = pane;
-            }
-            self.show_in_focused_pane(&session_id, cx);
-            self.reconcile_panes(window, cx);
+            self.bind_pane(&pane, &session_id, window, cx);
         }
-        self.pane_focused(focused.clone(), window, cx);
+        self.pane_entered(focused.clone(), cx);
         window.focus(&focused.focus_handle(cx), cx);
         cx.notify();
     }
@@ -2811,7 +2882,7 @@ impl AppShell {
             self.window_state
                 .update(cx, |state, cx| state.leave_route_for_chat(cx));
         }
-        self.reconcile_panes(window, cx);
+        self.reconcile_panes(cx);
         if let Some(attachment) = &self.attachment {
             attachment
                 .chat(cx)
@@ -2873,7 +2944,7 @@ impl AppShell {
             && let Some(attachment) = &self.attachment
         {
             attachment
-                .focused_pane
+                .page()
                 .update(cx, |pane, cx| pane.release_preview(cx));
         }
         consumed
@@ -3580,7 +3651,7 @@ impl AppShell {
             return false;
         };
         let store = attachment.link.store.clone();
-        let pane = attachment.focused_pane.clone();
+        let pane = attachment.page().clone();
         let Some(lead) = pane.read(cx).session_id().map(str::to_owned) else {
             return false;
         };
@@ -3652,7 +3723,7 @@ impl AppShell {
     }
 
     /// Back to the thread under the compact page's agent, whose page comes
-    /// back to the focused pane, as it was left. The agent closes, as
+    /// back to the page pane, as it was left. The agent closes, as
     /// selecting another thread would, and stays drawn, leased, on its page
     /// until that has slid off.
     fn pop_lead(&mut self, cx: &mut Context<Self>) {
@@ -3665,7 +3736,7 @@ impl AppShell {
             return;
         };
         let store = attachment.link.store.clone();
-        let pane = attachment.focused_pane.clone();
+        let pane = attachment.page().clone();
         let agent = pane.read(cx).session_id().map(str::to_owned);
         if let Some(agent) = &agent {
             store.update(cx, |store, _| store.lease_timeline(agent));
@@ -3691,7 +3762,7 @@ impl AppShell {
     }
 
     /// Let go of the leads from the `at`th on, each closing unless it is
-    /// still shown. The page of the `at`th takes the focused pane's
+    /// still shown. The page of the `at`th takes the page pane's
     /// conversation again and the thread pages above it go, at once: the
     /// conversation is what it was, whichever page it is on.
     fn drop_leads(&mut self, at: usize, cx: &mut Context<Self>) {
@@ -3706,10 +3777,7 @@ impl AppShell {
         for lead in &dropped {
             let shown = self.pane_showing(&lead.session_id, cx).is_some();
             store.update(cx, |store, cx| {
-                if !shown
-                    && store.is_thread_open(&lead.session_id)
-                    && store.legacy_focus().as_ref() != Some(&lead.session_id)
-                {
+                if !shown && store.is_thread_open(&lead.session_id) {
                     store.close_thread(&lead.session_id, cx);
                 }
                 store.release_timeline(&lead.session_id, cx);
@@ -3720,11 +3788,8 @@ impl AppShell {
         self.sync_nav(NavMotion::Immediate, cx);
     }
 
-    /// Follow the store when what is under the compact page's agent stops
-    /// being what the page is over: a lead that closed goes, with the pages
-    /// above it; the focus coming to a lead is Back to it (an agent archived
-    /// falls back to its lead); the focus going anywhere else leaves them
-    /// all.
+    /// A lead that closed goes, with the pages above it; the page's own
+    /// thread closing leaves nothing for the leads to stand under.
     fn reconcile_leads(&mut self, cx: &mut Context<Self>) {
         let Some(attachment) = &self.attachment else {
             return;
@@ -3733,24 +3798,44 @@ impl AppShell {
             return;
         }
         let store = attachment.link.store.read(cx);
-        let focused = store.legacy_focus();
-        let shown = focused.as_deref() == attachment.focused_pane.read(cx).session_id();
+        let page_open = attachment
+            .page()
+            .read(cx)
+            .session_id()
+            .is_some_and(|session_id| store.is_thread_open(session_id));
         let closed = attachment
             .leads
             .iter()
             .position(|lead| !store.is_thread_open(&lead.session_id));
-        let focused_lead = attachment
+        match (page_open, closed) {
+            (false, _) => self.drop_leads(0, cx),
+            (true, Some(closed)) => self.drop_leads(closed, cx),
+            (true, None) => {}
+        }
+    }
+
+    /// Going to `session_id` from the compact stack: a lead is Back to it,
+    /// as an agent archived falls back to its lead; anywhere else leaves
+    /// them all.
+    fn unwind_leads(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let Some(attachment) = &self.attachment else {
+            return;
+        };
+        if attachment.leads.is_empty()
+            || attachment.page().read(cx).session_id() == Some(session_id)
+        {
+            return;
+        }
+        match attachment
             .leads
             .iter()
-            .rposition(|lead| Some(&lead.session_id) == focused.as_ref());
-        match (shown, closed, focused_lead) {
-            (true, None, _) => {}
-            (true, Some(closed), _) => self.drop_leads(closed, cx),
-            (false, _, Some(at)) => {
+            .rposition(|lead| lead.session_id == session_id)
+        {
+            Some(at) => {
                 self.drop_leads(at + 1, cx);
                 self.pop_lead(cx);
             }
-            (false, _, None) => self.drop_leads(0, cx),
+            None => self.drop_leads(0, cx),
         }
     }
 
@@ -4208,7 +4293,7 @@ impl AppShell {
                 || selected_panel == Some("agents")
         });
         let show_preview = store.offers_preview();
-        let page_pane = attachment.focused_pane.clone();
+        let page_pane = attachment.page().clone();
         page_pane.update(cx, |pane, cx| {
             pane.select_compact_preview(
                 self.pending_navigation_restore.is_none()
@@ -10172,7 +10257,7 @@ mod tests {
     fn acting_on_pane(shell: &Entity<AppShell>, index: usize, cx: &VisualTestContext) -> bool {
         shell.read_with(cx, |shell, cx| {
             let attachment = shell.attachment.as_ref().expect("attached");
-            attachment.focused_pane == attachment.all_panes(cx)[index]
+            attachment.last_input == attachment.all_panes(cx)[index]
         })
     }
 
@@ -12011,6 +12096,85 @@ mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
     }
 
+    /// A thread goes to the pane showing it, or else to the pane of the
+    /// control that asked, or else to the pane last in use, whichever pane
+    /// the keyboard has left it in, and takes the keyboard there.
+    #[gpui::test]
+    fn a_shown_thread_lands_by_the_placement_order(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount_panes(cx);
+        let store = store_of(&shell, cx);
+        open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
+
+        store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())],
+            "a thread a pane shows stays there"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+
+        store.update(cx, |store, cx| {
+            store.show_thread_replacing("thread-3".into(), Some("thread-2".into()), cx)
+        });
+        serve_thread(&host, "thread-3");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-3".into())],
+            "the asking control's pane, with the keyboard in the other"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(1));
+        store.read_with(cx, |store, _| {
+            assert!(!store.is_thread_open("thread-2"), "the thread it replaced");
+        });
+
+        store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+        draw(cx);
+        cx.update(|window, cx| window.blur(cx));
+        store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
+        serve_thread(&host, "thread-2");
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-2".into()), Some("thread-3".into())],
+            "the last input, with the keyboard nowhere"
+        );
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+    }
+
+    /// An agent shown beside its lead is chosen where it is: its card takes
+    /// the keyboard and no pane takes the agent in the lead's place.
+    #[gpui::test]
+    fn choosing_an_agent_shown_beside_its_lead_selects_its_card(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_lead_with_agent(cx);
+        let store = store_of(&shell, cx);
+        let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
+        cx.update(|window, cx| {
+            crate::agents_panel::open_agent(
+                &store,
+                "agent-1".into(),
+                Some(chat.clone()),
+                None,
+                window,
+                cx,
+            );
+        });
+        settle_panes(cx);
+        cx.update(|window, cx| chat.update(cx, |chat, cx| chat.focus_composer(window, cx)));
+        draw(cx);
+
+        store.update(cx, |store, cx| store.show_thread("agent-1".into(), cx));
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert_eq!(keyboard_pane(&shell, cx), Some(0));
+        cx.update(|window, cx| assert!(!chat.read(cx).composer_has_keyboard(window, cx)));
+    }
+
     #[gpui::test]
     fn project_choice_reuses_drafts_and_focuses_only_on_desktop(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -13697,7 +13861,7 @@ mod tests {
             )
         });
         let page_pane = shell.read_with(cx, |shell, _| {
-            shell.attachment.as_ref().unwrap().focused_pane.clone()
+            shell.attachment.as_ref().unwrap().last_input.clone()
         });
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
         let key = store.read_with(cx, |store, _| store.preview_active_identity().unwrap().1);
@@ -14072,7 +14236,7 @@ mod tests {
                 .attachment
                 .as_ref()
                 .expect("attached")
-                .focused_pane
+                .last_input
                 .downgrade()
         });
         shell.update(cx, |shell, cx| shell.detach(cx));

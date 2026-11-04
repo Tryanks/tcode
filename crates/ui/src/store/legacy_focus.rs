@@ -11,7 +11,7 @@ use tcode_core::{
 };
 use tcode_protocol::{SessionStatus, Topic};
 
-use super::{ComposerState, PanelState, WorkspaceStore};
+use super::{ComposerState, PanelState, ShowThread, WorkspaceStore};
 
 impl WorkspaceStore {
     pub fn legacy_focus(&self) -> Option<String> {
@@ -183,6 +183,11 @@ impl WorkspaceStore {
     /// Act on a thread: one another surface shows only takes the focus,
     /// any other replaces the focused thread.
     pub fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        cx.emit(ShowThread {
+            session_id: session_id.clone(),
+            replacing: None,
+            asked: false,
+        });
         let shown = self.is_thread_open(&session_id);
         self.select(session_id, shown, cx);
     }
@@ -201,13 +206,7 @@ impl WorkspaceStore {
         if self.focused_session_id.as_ref() == Some(&session_id) {
             return;
         }
-        let project_id = self
-            .index_replica
-            .0
-            .iter()
-            .find(|meta| meta.id == session_id)
-            .and_then(|meta| meta.project_id.clone());
-        self.remember_project(project_id);
+        self.remember_project_of(&session_id);
         if shown {
             self.focus_thread(&session_id, cx);
             return;
