@@ -807,6 +807,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::show_asked_threads(&store, cx);
         fn wait_until(
             cx: &mut TestAppContext,
             store: &Entity<WorkspaceStore>,

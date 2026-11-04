@@ -1696,7 +1696,7 @@ impl WorkspaceStore {
         else {
             return;
         };
-        self.start_draft(project.id, project.root, cx);
+        self.fall_back_to_draft(project.id, project.root, cx);
     }
 
     fn apply_conversation_event(&mut self, session_id: &str, event: &agent::AgentEvent) {
@@ -6171,6 +6171,24 @@ pub(crate) mod tests {
         };
     }
 
+    /// What the shell does with a thread the user asks for, for a test
+    /// without one.
+    pub(crate) fn show_asked_threads(
+        store: &gpui::Entity<WorkspaceStore>,
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.subscribe(store, |store, shown: &super::ShowThread, cx| {
+                if shown.asked {
+                    store.update(cx, |store, cx| {
+                        store.select_session(shown.session_id.clone(), cx)
+                    });
+                }
+            })
+            .detach();
+        });
+    }
+
     pub(crate) struct LocalHostDriver {
         pub(crate) link: tcode_client::HostLink,
         pump: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
@@ -6201,6 +6219,7 @@ pub(crate) mod tests {
                     cx,
                 )
             });
+            show_asked_threads(&workspace, cx);
             self.wait_until(cx, &workspace, "workspace baseline", |cx| {
                 workspace.read_with(cx, |store, _| store.baseline_ready())
             });
@@ -7321,6 +7340,7 @@ pub(crate) mod tests {
                 cx,
             )
         });
+        crate::store::tests::show_asked_threads(&workspace, cx);
 
         // Let the launch fallback settle on the first project before the user
         // navigates into "p" themselves.
@@ -7404,6 +7424,7 @@ pub(crate) mod tests {
                 cx,
             )
         });
+        crate::store::tests::show_asked_threads(&workspace, cx);
         driver.wait_until(cx, &workspace, "launch draft", |cx| {
             workspace.read_with(cx, |store, _| store.legacy_focus().is_some())
         });

@@ -65,7 +65,7 @@ use crate::sidebar::SessionsSidebar;
 use crate::store::{ShowThread, StoreChange, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
-use crate::window_state::{Destination, OpenPanel, OpenThread, Route, WindowState};
+use crate::window_state::{Destination, OpenPanel, Route, WindowState};
 use gpui_base::dock::{DockArea, DockEvent, DockLayout, DockPlacement, InsertTarget, PanelId};
 
 /// How long a value drawn here takes to glide to a new one.
@@ -241,10 +241,6 @@ struct ShellAttachment {
     /// Collapsed-only overlay visibility. Purely transient and never persisted;
     /// expanded/non-workspace renders clear it synchronously.
     sidebar_overlay_visible: bool,
-    /// Last store selection seen by the shell, so selections made outside the
-    /// sidebar's `OpenThread` event (notably an async draft) still switch the
-    /// wide content column back from Hosts.
-    observed_session_id: Option<String>,
     /// Whether this attachment's host settings have been adopted once.
     adopted: bool,
     /// Whether this attachment's saved record has been stamped with the time
@@ -504,25 +500,6 @@ pub(crate) fn shown_in_pane(session_id: &str, cx: &App) -> bool {
     })
 }
 
-/// The pane showing `session_id` takes the keyboard and the store's focus at
-/// once, for a control of that pane replacing its thread. The compact layout
-/// draws no panes: its pages are one stack.
-pub(crate) fn act_in_pane_of(session_id: &str, window: &mut Window, cx: &mut App) {
-    let Some(shell) = current_shell(cx) else {
-        return;
-    };
-    shell.update(cx, |shell, cx| {
-        let Some(pane) = shell
-            .pane_showing(session_id, cx)
-            .filter(|_| !shell.compact(cx))
-        else {
-            return;
-        };
-        window.focus(&pane.focus_handle(cx), cx);
-        shell.pane_entered(pane, cx);
-    });
-}
-
 /// The outline colour of the pane of this window showing `session_id`,
 /// while the column shows more than one pane: none in a single or zoomed
 /// pane, nor in the compact layout.
@@ -607,7 +584,7 @@ pub(crate) fn side_host_for(lead: &str, cx: &App) -> Option<Entity<ChatView>> {
 }
 
 /// Show the agent `session_id` on a page over its lead in a compact window;
-/// otherwise, and with no thread page to stand on, select it.
+/// otherwise, and with no thread page to stand on, show it where it lands.
 pub(crate) fn open_agent_page(
     store: &Entity<WorkspaceStore>,
     session_id: String,
@@ -619,7 +596,7 @@ pub(crate) fn open_agent_page(
         shell.update(cx, |shell, cx| shell.open_over_lead(session_id, window, cx))
     });
     if !opened {
-        store.update(cx, |store, cx| store.select_session(selected, cx));
+        store.update(cx, |store, cx| store.show_thread(selected, cx));
     }
 }
 
@@ -865,9 +842,6 @@ impl AppShell {
                 this.schedule_navigation_save(cx);
                 cx.notify();
             }),
-            cx.subscribe_in(&window_state, window, |this, _, _: &OpenThread, w, cx| {
-                this.open_thread(w, cx);
-            }),
             cx.subscribe(&window_state, |this, _, event: &OpenPanel, cx| {
                 this.show_panel(event.0.id(), cx);
                 if this.window_state.read(cx).compact {
@@ -930,14 +904,14 @@ impl AppShell {
                 .update(cx, |state, cx| state.restore(&snapshot, cx));
             shell.panel_shows_terminal = snapshot.panel == NavigationPanel::Terminal;
             if let Some(session_id) = snapshot.session_id
-                && let Some(store) = shell.store()
+                && let Some(pane) = shell
+                    .attachment
+                    .as_ref()
+                    .map(|attachment| attachment.last_input.clone())
             {
-                // Select once, before the baseline can trigger an empty-workspace
-                // draft fallback. Validation below never selects it again.
-                store.update(cx, |store, cx| store.select_session(session_id.clone(), cx));
-                if let Some(attachment) = &mut shell.attachment {
-                    attachment.observed_session_id = Some(session_id.clone());
-                }
+                // Bind once, before the baseline can trigger an empty-workspace
+                // draft fallback. Validation below never binds it again.
+                shell.bind_pane(&pane, &session_id, window, cx);
                 shell.pending_navigation_restore = Some(PendingNavigationRestore {
                     session_id,
                     panel: snapshot.panel,
@@ -1227,28 +1201,14 @@ impl AppShell {
             .pending_sessions()
             .first()
             .map(|(id, _)| id.clone());
-        if let Some(id) = &pending_session {
-            store.update(cx, |store, cx| store.select_session(id.clone(), cx));
-        }
         let preview =
             cx.new(|cx| PreviewPanel::new(store.clone(), self.window_state.clone(), window, cx));
         let sidebar =
             cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
         let mut subscriptions = vec![
-            cx.observe_in(&store, window, move |this, store, window, cx| {
+            cx.observe(&store, |this, _, cx| {
                 this.reconcile_panes(cx);
                 this.stamp_connected(cx);
-                let selected = store.read(cx).legacy_focus();
-                if let Some(attachment) = &mut this.attachment
-                    && attachment.observed_session_id != selected
-                {
-                    attachment.observed_session_id = selected.clone();
-                    this.blur_navigation(window, cx);
-                    if selected.is_some() {
-                        this.window_state
-                            .update(cx, |state, cx| state.leave_route_for_chat(cx));
-                    }
-                }
                 this.reconcile_navigation_restore(cx);
                 this.schedule_navigation_save(cx);
                 cx.notify();
@@ -1311,8 +1271,7 @@ impl AppShell {
             })
         };
 
-        let observed_session_id = store.read(cx).legacy_focus();
-        let thread_panel = self.new_pane(&store, &preview, observed_session_id.clone(), window, cx);
+        let thread_panel = self.new_pane(&store, &preview, None, window, cx);
         let shell = cx.entity().downgrade();
         let drop_landing = Rc::new(Cell::new(None));
         let drop_target: crate::panes::DropTarget = Rc::new({
@@ -1372,7 +1331,6 @@ impl AppShell {
             ),
             sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             sidebar_overlay_visible: false,
-            observed_session_id,
             adopted: false,
             stamped: false,
             link: Link {
@@ -1384,14 +1342,13 @@ impl AppShell {
             _subscriptions: subscriptions,
         });
         self.hosts
-            .update(cx, |hosts, cx| hosts.set_store(Some(store), cx));
+            .update(cx, |hosts, cx| hosts.set_store(Some(store.clone()), cx));
         self.adopt_host_settings(window, cx);
         // The previous host's pages are not this host's: land on its threads.
         self.window_state
             .update(cx, |state, cx| state.enter_workspace(cx));
-        if pending_session.is_some() {
-            self.window_state
-                .update(cx, |state, cx| state.open_thread(cx));
+        if let Some(id) = pending_session {
+            store.update(cx, |store, cx| store.show_thread(id, cx));
         }
         cx.notify();
     }
@@ -1564,11 +1521,29 @@ impl AppShell {
             .or_else(|| panes.first().cloned())
     }
 
-    /// Put `shown` in its pane. A thread the user asked for takes the
-    /// compact stack and the keyboard; one the workspace fell back on leaves
-    /// them, unless it moves the last input to another pane.
+    /// Put `shown` in its pane.
     fn show_thread(&mut self, shown: &ShowThread, window: &mut Window, cx: &mut Context<Self>) {
         let session_id = shown.session_id.as_str();
+        if self.compact(cx) {
+            self.unwind_leads(session_id, cx);
+        }
+        if let Some(pane) = self.place(session_id, shown.replacing.as_deref(), cx) {
+            self.show_in_pane(&pane, session_id, shown.asked, window, cx);
+        }
+    }
+
+    /// `pane` shows `session_id` and is the last input. A thread the user
+    /// `asked` for takes the compact stack and the keyboard; one the
+    /// workspace fell back on leaves them, unless it moves the last input to
+    /// another pane.
+    fn show_in_pane(
+        &mut self,
+        pane: &Entity<ThreadPanel>,
+        session_id: &str,
+        asked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self
             .pending_navigation_restore
             .as_ref()
@@ -1577,34 +1552,28 @@ impl AppShell {
             self.pending_navigation_restore = None;
         }
         let compact = self.compact(cx);
-        if compact {
-            self.unwind_leads(session_id, cx);
-        }
-        let Some(pane) = self.place(session_id, shown.replacing.as_deref(), cx) else {
-            return;
-        };
         let chat = pane.read(cx).chat();
         let beside = chat.read(cx).side_session_id() == Some(session_id);
         if !beside {
-            self.bind_pane(&pane, session_id, window, cx);
+            self.bind_pane(pane, session_id, window, cx);
         }
         let Some(attachment) = self.attachment.as_mut() else {
             return;
         };
-        if attachment.zoom.pane().is_some_and(|zoomed| *zoomed != pane) {
+        if attachment.zoom.pane().is_some_and(|zoomed| zoomed != pane) {
             attachment.zoom.zoom_out();
         }
-        let moved = attachment.last_input != pane;
+        let moved = attachment.last_input != *pane;
         attachment.last_input = pane.clone();
         self.blur_navigation(window, cx);
         self.window_state
             .update(cx, |state, cx| state.leave_route_for_chat(cx));
-        if shown.asked && compact {
+        if asked && compact {
             self.go(Destination::Thread, cx);
         }
         if beside {
             chat.update(cx, |chat, cx| chat.focus_side(window, cx));
-        } else if shown.asked {
+        } else if asked {
             chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
         } else if moved && !compact {
             window.focus(&pane.focus_handle(cx), cx);
@@ -1761,7 +1730,7 @@ impl AppShell {
 
     /// Show `session_id` in a pane of its own, on the first of `placements`
     /// beside `from` that the column has room for; the pane already showing
-    /// it takes the focus instead. False when no pane shows it: there was no
+    /// it takes the keyboard instead. False when no pane shows it: there was no
     /// room, or the layout has no panes.
     fn open_in_new_pane(
         &mut self,
@@ -1775,14 +1744,14 @@ impl AppShell {
             return false;
         };
         if self.pane_showing(&session_id, cx).is_some() {
-            store.update(cx, |store, cx| store.select_session(session_id, cx));
+            store.update(cx, |store, cx| store.show_thread(session_id, cx));
             return true;
         }
         let added = placements
             .iter()
             .find_map(|placement| self.add_pane(from, *placement, window, cx));
         if let Some((pane, _)) = &added {
-            self.bind_pane(pane, &session_id, window, cx);
+            self.show_in_pane(pane, &session_id, true, window, cx);
         }
         added.is_some()
     }
@@ -1817,14 +1786,12 @@ impl AppShell {
             }
             None => {
                 let pane = self.pane_showing(&session_id, cx).unwrap_or(pane);
-                self.bind_pane(&pane, &session_id, window, cx);
-                self.pane_entered(pane, cx);
+                self.show_in_pane(&pane, &session_id, true, window, cx);
             }
         }
         if let Some(into) = into {
             crate::motion::drag_ghost::land_in(into, window, cx);
         }
-        self.open_thread(window, cx);
     }
 
     /// Where a thread dragged over the column would land, in window
@@ -2865,34 +2832,6 @@ impl AppShell {
             .update(cx, |state, cx| state.go(destination, cx));
     }
 
-    /// "Show me this thread." Compact pushes; wide switches the content route.
-    fn open_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.store().and_then(|store| store.read(cx).legacy_focus());
-        if self
-            .pending_navigation_restore
-            .as_ref()
-            .is_some_and(|pending| selected.as_deref() != Some(pending.session_id.as_str()))
-        {
-            self.pending_navigation_restore = None;
-        }
-        self.blur_navigation(window, cx);
-        if self.compact(cx) {
-            self.go(Destination::Thread, cx);
-        } else {
-            self.window_state
-                .update(cx, |state, cx| state.leave_route_for_chat(cx));
-        }
-        self.reconcile_panes(cx);
-        if let Some(attachment) = &self.attachment {
-            attachment
-                .chat(cx)
-                .update(cx, |chat, cx| chat.focus_composer(window, cx));
-        }
-        // Selecting another thread can leave the destination unchanged. Its
-        // checkpoint must not depend on the host delivering a notification.
-        self.schedule_navigation_save(cx);
-    }
-
     /// Answer a platform Back gesture (or a Back control). `true` means it was
     /// consumed; `false` only at the root, where the platform closes the app.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -3054,16 +2993,14 @@ pub(crate) fn init_pane_actions(cx: &mut App) {
     cx.on_action(|action: &OpenInNewPane, cx| {
         let session_id = action.0.clone();
         act(cx, move |shell, window, cx| {
-            if let Some(from) = shell.acting_pane(window, cx)
-                && shell.open_in_new_pane(
+            if let Some(from) = shell.acting_pane(window, cx) {
+                shell.open_in_new_pane(
                     session_id,
                     &from,
                     &[gpui_base::Placement::Right],
                     window,
                     cx,
-                )
-            {
-                shell.open_thread(window, cx);
+                );
             }
         })
     });
@@ -3362,7 +3299,7 @@ impl AppShell {
                                 SharedString::from(id.clone()),
                                 cx,
                             );
-                            store.update(cx, |store, cx| store.select_session(id.clone(), cx));
+                            store.update(cx, |store, cx| store.show_thread(id.clone(), cx));
                         })
                 })
                 .autohide(true),
@@ -3440,15 +3377,10 @@ impl AppShell {
             return;
         }
         let anchor = anchor.clone();
-        store.update(cx, |store, cx| {
-            match anchor.position {
-                Some(position) => store.select_session_at_position(anchor.thread_id, position, cx),
-                None => store.select_session(anchor.thread_id, cx),
-            }
-            cx.notify();
+        store.update(cx, |store, cx| match anchor.position {
+            Some(position) => store.show_thread_at_position(anchor.thread_id, position, cx),
+            None => store.show_thread(anchor.thread_id, cx),
         });
-        self.window_state
-            .update(cx, |state, cx| state.open_thread(cx));
     }
 
     fn on_thread_undo(
@@ -3629,7 +3561,7 @@ impl AppShell {
     /// Open the agent `session_id` over the thread on the compact stack's
     /// thread page, or the panels page standing on it, which goes: the thread
     /// stays as it is on its page, open and held. False where no thread
-    /// page can take it, for the caller to select it.
+    /// page can take it, for the caller to show it.
     fn open_over_lead(
         &mut self,
         session_id: String,
@@ -3678,7 +3610,7 @@ impl AppShell {
             chat: lead_chat,
             session_id: lead,
         });
-        store.update(cx, |store, cx| store.select_session(session_id, cx));
+        store.update(cx, |store, cx| store.show_thread(session_id, cx));
         window_state.update(cx, |state, cx| state.stack_thread(cx));
         true
     }
@@ -3724,7 +3656,7 @@ impl AppShell {
 
     /// Back to the thread under the compact page's agent, whose page comes
     /// back to the page pane, as it was left. The agent closes, as
-    /// selecting another thread would, and stays drawn, leased, on its page
+    /// showing another thread would, and stays drawn, leased, on its page
     /// until that has slid off.
     fn pop_lead(&mut self, cx: &mut Context<Self>) {
         let top = self.nav.read(cx).current().map(AnyView::entity_id);
@@ -3743,7 +3675,7 @@ impl AppShell {
         }
         let chat = pane.update(cx, |pane, cx| pane.replace_chat(lead.chat, None, cx));
         store.update(cx, |store, cx| {
-            store.select_session(lead.session_id.clone(), cx);
+            store.focus_thread(&lead.session_id, cx);
             store.release_timeline(&lead.session_id, cx);
             if let Some(agent) = &agent
                 && store.is_thread_open(agent)
@@ -4110,8 +4042,8 @@ impl AppShell {
                 IconName::Plus,
             )
             .debug_selector(|| "compact-new-thread".into())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.start_thread(window, cx);
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.start_thread(cx);
             }))
             .into_any_element(),
             nav_icon_button(
@@ -4150,7 +4082,7 @@ impl AppShell {
     /// palette, which already owns "new thread in <project>" and can search.
     /// On a phone the palette opens without the keyboard: the projects are
     /// there to tap, and the search pill still raises it on demand.
-    fn start_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_thread(&mut self, cx: &mut Context<Self>) {
         let Some(attachment) = &self.attachment else {
             return;
         };
@@ -4169,7 +4101,6 @@ impl AppShell {
         attachment.link.store.update(cx, |store, cx| {
             store.start_draft(project.id.clone(), project.root.clone(), cx)
         });
-        self.open_thread(window, cx);
     }
 
     fn render_thread_page(
@@ -5989,7 +5920,7 @@ mod tests {
             cx.debug_bounds("pending-thread-row").is_some(),
             "compact Threads exposes the outbox without a cached index"
         );
-        navigation.update(cx, |state, cx| state.open_thread(cx));
+        navigation.update(cx, |state, cx| state.go(Destination::Thread, cx));
         draw(cx);
         assert!(cx.debug_bounds("pending-delivery-bubble").is_some());
     }
@@ -6552,12 +6483,9 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         let store = store_of(&shell, cx);
-        // An OpenThread intent on the existing page must checkpoint without
+        // Showing a thread on the existing page must checkpoint without
         // waiting for a host response or a changed history.
-        store.update(cx, |store, cx| store.select_session("thread-b".into(), cx));
-        shell
-            .read_with(cx, |shell, _| shell.window_state())
-            .update(cx, |state, cx| state.open_thread(cx));
+        store.update(cx, |store, cx| store.show_thread("thread-b".into(), cx));
         draw(cx);
         assert_eq!(client.saves.get(), 0);
         cx.executor().advance_clock(Duration::from_millis(151));
@@ -6571,7 +6499,7 @@ mod tests {
         );
 
         store.update(cx, |store, cx| {
-            store.select_session("thread-c".into(), cx);
+            store.show_thread("thread-c".into(), cx);
         });
         shell
             .read_with(cx, |shell, _| shell.window_state())
@@ -6647,12 +6575,11 @@ mod tests {
         });
         assert_locked_on_hosts(cx);
         let state = shell.read_with(cx, |shell, _| shell.window_state());
-        // Nothing leads away: Back is the root, a thread intent has no thread,
-        // and a stale destination still shows the hosts page.
+        // Nothing leads away: Back is the root, and a stale destination
+        // still shows the hosts page.
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| assert!(!shell.back(window, cx)));
         });
-        state.update(cx, |state, cx| state.open_thread(cx));
         assert_locked_on_hosts(cx);
         state.update(cx, |state, cx| state.go(Destination::Threads, cx));
         draw(cx);
@@ -6724,9 +6651,7 @@ mod tests {
                     if id == "thread-2" {
                         focus.focus(window, cx);
                     }
-                    store.update(cx, |store, cx| store.select_session(id.into(), cx));
-                    let state = shell.read(cx).window_state();
-                    state.update(cx, |_, cx| cx.emit(OpenThread));
+                    store.update(cx, |store, cx| store.show_thread(id.into(), cx));
                 });
                 draw(cx);
                 cx.update(|window, _| assert!(!focus.is_focused(window)));
@@ -6740,7 +6665,7 @@ mod tests {
             draw(cx);
             cx.update(|window, cx| {
                 assert!(!focus.is_focused(window));
-                shell.update(cx, |shell, cx| shell.open_thread(window, cx));
+                store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
             });
             draw(cx);
             cx.update(|window, _| assert!(!focus.is_focused(window)));
@@ -6756,7 +6681,7 @@ mod tests {
                 draw(cx);
                 cx.update(|window, cx| {
                     assert!(!focus.is_focused(window));
-                    shell.update(cx, |shell, cx| shell.open_thread(window, cx));
+                    store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
                 });
                 draw(cx);
                 cx.update(|window, _| assert!(!focus.is_focused(window)));
@@ -6770,7 +6695,7 @@ mod tests {
         }
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         resize(cx, 1024.);
-        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_thread(window, cx)));
+        store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
         draw(cx);
         cx.update(|window, _| assert!(focus.is_focused(window)));
     }
@@ -6806,14 +6731,13 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("thread-a".into(), cx);
+            store.show_thread("thread-a".into(), cx);
         });
         driver.wait_until(cx, &store, "selected conversation", |cx| {
             store.read_with(cx, |store, _| {
                 store.baseline_ready() && !store.threads_loading() && !store.chat_loading()
             })
         });
-        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_thread(window, cx)));
         draw(cx);
         let composer = shell.read_with(cx, |shell, cx| {
             shell
@@ -7041,7 +6965,7 @@ mod tests {
             id: "reasoningEffort".into(),
             value: serde_json::json!("high"),
         }];
-        store_of(shell, cx).update(cx, |store, cx| store.select_session(session.into(), cx));
+        store_of(shell, cx).update(cx, |store, cx| store.show_thread(session.into(), cx));
         for (topic, event) in [
             (
                 Topic::Settings,
@@ -7416,7 +7340,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.select_session(session.into(), cx));
+        store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         await_restore_update(&shell, cx, |store| !store.chat_loading());
         resize(cx, 1200.);
         let composer = shell.read_with(cx, |shell, cx| {
@@ -7519,11 +7443,8 @@ mod tests {
         );
         serve_thread(&host, "thread-1");
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
+        store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
         await_restore_update(&shell, cx, |store| !store.chat_loading());
-        shell
-            .read_with(cx, |shell, _| shell.window_state())
-            .update(cx, |state, cx| state.open_thread(cx));
         // The window settles before a pointer reaches it.
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
@@ -10729,7 +10650,7 @@ mod tests {
 
         cx.simulate_keystrokes("secondary-alt-right");
         settle_panes(cx);
-        store.update(cx, |store, cx| store.select_session("agent-1".into(), cx));
+        store.update(cx, |store, cx| store.show_thread("agent-1".into(), cx));
         settle_panes(cx);
         serve_thread(&host, "agent-1");
         await_restore_update(&shell, cx, |store| !store.chat_loading_for(Some("agent-1")));
@@ -12175,6 +12096,70 @@ mod tests {
         cx.update(|window, cx| assert!(!chat.read(cx).composer_has_keyboard(window, cx)));
     }
 
+    /// The draft an empty workspace falls back on comes up in its pane and
+    /// leaves a phone on its threads list: nobody asked to go there.
+    #[gpui::test]
+    fn a_fallback_draft_leaves_a_phone_on_its_threads(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        as_mobile(cx);
+        resize(cx, 393.);
+        let project = tcode_core::project::Project {
+            id: "project".into(),
+            name: "Project".into(),
+            root: PANES_CWD.into(),
+            quick_chat: false,
+            icon_path: None,
+            permission_defaults: Default::default(),
+            created_at: 0,
+        };
+        send_events(
+            &host,
+            vec![
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(Default::default()),
+                ),
+                (
+                    Topic::Index,
+                    ServerEvent::IndexSnapshot(IndexSnapshot {
+                        summary: Default::default(),
+                        sessions: Vec::new(),
+                        projects: vec![project],
+                    }),
+                ),
+            ],
+        );
+        await_restore_update(&shell, cx, |store| store.index_hydrated());
+        draw(cx);
+        let request = std::iter::from_fn(|| host.outgoing.try_recv().ok())
+            .map(|line| decode_client_line(&line).expect("client line"))
+            .find(|message| {
+                matches!(
+                    message.payload,
+                    ClientPayload::Command(Command::StartDraft { .. })
+                )
+            })
+            .expect("the workspace asks for a draft");
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Ack {
+                    id: request.id,
+                    result: Ok(tcode_protocol::CommandResponse::SessionId(Some(
+                        "draft-1".into(),
+                    ))),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        await_restore_update(&shell, cx, |store| store.is_thread_open("draft-1"));
+        draw(cx);
+        assert_eq!(pane_threads(&shell, cx), [Some("draft-1".into())]);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Threads);
+        });
+    }
+
     #[gpui::test]
     fn project_choice_reuses_drafts_and_focuses_only_on_desktop(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -12296,15 +12281,6 @@ mod tests {
             shell.read_with(cx, |shell, cx| {
                 let state = shell.window_state.read(cx);
                 assert!(!state.palette_open, "choosing a project closes the chooser");
-                if compact {
-                    assert_eq!(
-                        state.history().last(),
-                        Some(&Destination::Thread),
-                        "starting a draft navigates independently of session selection"
-                    );
-                } else {
-                    assert_eq!(state.route(), Route::Chat);
-                }
             });
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
@@ -12324,6 +12300,18 @@ mod tests {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
+            shell.read_with(cx, |shell, cx| {
+                let state = shell.window_state.read(cx);
+                if compact {
+                    assert_eq!(
+                        state.history().last(),
+                        Some(&Destination::Thread),
+                        "a draft reused or new navigates when the host answers"
+                    );
+                } else {
+                    assert_eq!(state.route(), Route::Chat);
+                }
+            });
             let focus = shell.read_with(cx, |shell, cx| {
                 shell
                     .attachment
@@ -12810,7 +12798,7 @@ mod tests {
                 shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
             });
             assert!(!state.read_with(cx, |state, _| state.palette_open));
-            state.update(cx, |state, cx| state.open_thread(cx));
+            state.update(cx, |state, cx| state.go(Destination::Thread, cx));
             cx.executor().advance_clock(Duration::from_millis(250));
             draw(cx);
         }
@@ -13368,7 +13356,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into(), cx);
+            store.show_thread("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -13427,7 +13415,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into(), cx);
+            store.show_thread("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -13521,7 +13509,7 @@ mod tests {
                 false,
                 cx,
             );
-            store.select_session("first".into(), cx);
+            store.show_thread("first".into(), cx);
         });
         driver.wait_until(cx, &store, "selected thread baseline", |cx| {
             store.read_with(cx, |store, _| {
@@ -13930,7 +13918,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
+        store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
         as_mobile(cx);
         resize(cx, 393.);
 
@@ -14103,7 +14091,7 @@ mod tests {
 
             let store = store_of(&shell, cx);
             store.update(cx, |store, cx| {
-                store.select_session(thread.into(), cx);
+                store.show_thread(thread.into(), cx);
             });
             crate::test_frames::draw_settled(cx);
 
@@ -14730,7 +14718,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
+        store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
         as_mobile(cx);
         resize(cx, 393.);
         let chat = shell.read_with(cx, |shell, cx| {
@@ -14923,7 +14911,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(shell, cx);
-        store.update(cx, |store, cx| store.select_session(session.into(), cx));
+        store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
     }
@@ -15035,7 +15023,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.select_session(session.into(), cx));
+        store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         await_restore_update(&shell, cx, |store| {
             store.composer_state().turn_running && !store.chat_loading()
         });
@@ -15103,7 +15091,7 @@ mod tests {
             )
             .unwrap();
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.select_session(session.into(), cx));
+        store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         crate::settings::assert_follows_language_switch(cx, "chat.new_thread", |cx| {
@@ -15263,7 +15251,7 @@ mod tests {
         );
         serve_thread(&host, "thread-1");
         let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.select_session("thread-1".into(), cx));
+        store.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
         await_restore_update(&shell, cx, |store| !store.chat_loading());
         resize(cx, 1200.);
         crate::test_frames::draw_settled(cx);
@@ -16164,7 +16152,7 @@ mod tests {
                 .unwrap();
         }
         let store = store_of(shell, cx);
-        store.update(cx, |store, cx| store.select_session(session.into(), cx));
+        store.update(cx, |store, cx| store.show_thread(session.into(), cx));
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         resize(cx, 1200.);

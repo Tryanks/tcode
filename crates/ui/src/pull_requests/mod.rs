@@ -149,14 +149,14 @@ pub(crate) fn review_appearance(
         ),
     }
 }
-/// Opens `key` in thread `id`'s Pull requests tab, with that thread focused.
+/// Opens `key` in thread `id`'s Pull requests tab, with that thread shown.
 pub(crate) fn open_in_thread(
     store: &mut WorkspaceStore,
     id: &str,
     key: PullRequestKey,
     cx: &mut Context<WorkspaceStore>,
 ) {
-    store.select_session(id.to_owned(), cx);
+    store.show_thread(id.to_owned(), cx);
     store.open_tab_for(id, RightTab::PullRequests, cx);
     store.set_open_pull_request(id, Some(key), cx);
 }
@@ -331,7 +331,7 @@ pub fn sidebar_badge(
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
             store.update(cx, |store, cx| {
-                store.select_session(id.clone(), cx);
+                store.show_thread(id.clone(), cx);
                 store.open_tab_for(&id, RightTab::PullRequests, cx);
             });
         })

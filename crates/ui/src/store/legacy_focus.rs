@@ -180,9 +180,16 @@ impl WorkspaceStore {
         cx.notify();
     }
 
-    /// Act on a thread: one another surface shows only takes the focus,
-    /// any other replaces the focused thread.
-    pub fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+    /// What store-only tests act on a thread with, there being no shell for
+    /// [`Self::show_thread`] to reach.
+    #[cfg(test)]
+    pub(crate) fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.fall_back_to(session_id, cx);
+    }
+
+    /// The workspace, not the user, goes to a thread: one another surface
+    /// shows only takes the focus, any other replaces the focused thread.
+    pub(super) fn fall_back_to(&mut self, session_id: String, cx: &mut Context<Self>) {
         cx.emit(ShowThread {
             session_id: session_id.clone(),
             replacing: None,
@@ -264,7 +271,7 @@ impl WorkspaceStore {
                     .and_then(|meta| meta.parent_session_id.clone())
                     .filter(|parent| self.session_visible(parent));
                 if let Some(parent) = parent {
-                    self.select_session(parent, cx);
+                    self.fall_back_to(parent, cx);
                     return;
                 }
                 self.leave_session(cx);

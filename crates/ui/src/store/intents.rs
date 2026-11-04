@@ -440,7 +440,7 @@ impl WorkspaceStore {
         self.dispatch(Command::RegenerateSessionTitle { session_id });
     }
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
-        self.create_and_select(Command::ForkThread { id }, cx);
+        self.create_and_select(Command::ForkThread { id }, true, cx);
     }
     pub fn merge_worktree(&mut self, session_id: String) {
         self.dispatch(Command::MergeWorktree { session_id });
@@ -668,7 +668,7 @@ impl WorkspaceStore {
     /// Show a thread where the user is: the shell places it, opens it and
     /// gives it the keyboard.
     pub fn show_thread(&mut self, session_id: String, cx: &mut Context<Self>) {
-        self.show_thread_replacing(session_id, None, cx);
+        self.place_thread(session_id, None, true, cx);
     }
 
     /// Show a thread in the pane showing `replacing`, for a control of that
@@ -679,41 +679,51 @@ impl WorkspaceStore {
         replacing: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        self.place_thread(session_id, replacing, true, cx);
+    }
+
+    /// Put back a thread that went from a pane, which takes neither the
+    /// compact stack nor the keyboard.
+    pub(crate) fn put_back_thread(&mut self, session_id: String, cx: &mut Context<Self>) {
+        self.place_thread(session_id, None, false, cx);
+    }
+
+    fn place_thread(
+        &mut self,
+        session_id: String,
+        replacing: Option<String>,
+        asked: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         self.draft_fallback_pending = false;
+        self.anchor_turn_task = None;
         self.remember_project_of(&session_id);
         cx.emit(ShowThread {
             session_id,
             replacing,
-            asked: true,
+            asked,
         });
     }
 
-    pub fn select_session_at_turn(
-        &mut self,
-        session_id: String,
-        turn: usize,
-        cx: &mut Context<Self>,
-    ) {
-        self.anchor_turn_task = None;
+    pub fn show_thread_at_turn(&mut self, session_id: String, turn: usize, cx: &mut Context<Self>) {
         self.pending_chat_turn = Some((session_id.clone(), turn));
-        self.select_session(session_id, cx);
-        // Selecting the thread already focused changes nothing else.
+        self.show_thread(session_id, cx);
+        // Showing the thread already shown changes nothing else.
         cx.notify();
     }
     /// Open a thread, then scroll it to the turn holding the entry at
     /// `position` once the host names that turn. Only the host can: the
     /// records a client holds are merged and carry no row.
-    pub fn select_session_at_position(
+    pub fn show_thread_at_position(
         &mut self,
         session_id: String,
         position: u64,
         cx: &mut Context<Self>,
     ) {
         self.pending_chat_turn = None;
-        self.select_session(session_id.clone(), cx);
-        let generation = self.selection_generation;
+        self.show_thread(session_id.clone(), cx);
         let host = self.host.clone();
         self.anchor_turn_task = Some(cx.spawn(async move |this, cx| {
             let response = host
@@ -723,9 +733,6 @@ impl WorkspaceStore {
                 })
                 .await;
             _ = this.update(cx, |store, cx| {
-                if store.selection_generation != generation {
-                    return;
-                }
                 store.anchor_turn_task = None;
                 match response {
                     Ok(QueryResponse::ThreadAnchorTurn(Some(turn))) => {
@@ -926,10 +933,21 @@ impl WorkspaceStore {
     }
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
         self.remember_project(Some(project_id.clone()));
-        self.create_and_select(Command::StartDraft { project_id, cwd }, cx);
+        self.create_and_select(Command::StartDraft { project_id, cwd }, true, cx);
     }
     pub fn start_scratch_draft(&mut self, cx: &mut Context<Self>) {
-        self.create_and_select(Command::StartScratchDraft, cx);
+        self.create_and_select(Command::StartScratchDraft, true, cx);
+    }
+    /// A project's draft for a workspace left with nothing to show, which
+    /// takes neither the compact stack nor the keyboard.
+    pub(super) fn fall_back_to_draft(
+        &mut self,
+        project_id: String,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.remember_project(Some(project_id.clone()));
+        self.create_and_select(Command::StartDraft { project_id, cwd }, false, cx);
     }
     /// Start a draft in the project `session_id` belongs to, or a scratch
     /// draft when it belongs to none. Beside a draft nothing starts: the host
@@ -959,7 +977,7 @@ impl WorkspaceStore {
             None => self.start_scratch_draft(cx),
         }
     }
-    fn create_and_select(&mut self, command: Command, cx: &mut Context<Self>) {
+    fn create_and_select(&mut self, command: Command, asked: bool, cx: &mut Context<Self>) {
         self.creation_request_generation = self.creation_request_generation.wrapping_add(1);
         let request_generation = self.creation_request_generation;
         let selection_generation = self.selection_generation;
@@ -975,7 +993,11 @@ impl WorkspaceStore {
                 if store.selection_generation == selection_generation
                     && let Ok(CommandResponse::SessionId(Some(id))) = response
                 {
-                    store.select_session(id, cx);
+                    if asked {
+                        store.show_thread(id, cx);
+                    } else {
+                        store.fall_back_to(id, cx);
+                    }
                 }
             });
         })

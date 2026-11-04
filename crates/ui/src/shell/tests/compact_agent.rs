@@ -372,7 +372,7 @@ fn a_lead_is_held_under_its_agent_until_the_reader_goes_elsewhere(cx: &mut TestA
     });
 
     serve_thread(&host, "thread-2");
-    store.update(cx, |store, cx| store.select_session("thread-2".into(), cx));
+    store.update(cx, |store, cx| store.show_thread("thread-2".into(), cx));
     await_restore_update(&shell, cx, |store| store.timeline_settled_for("thread-2"));
     settle_panes(cx);
     store.read_with(cx, |store, _| {
@@ -430,8 +430,7 @@ fn an_agent_not_opened_from_its_lead_has_it_beneath(cx: &mut TestAppContext) {
 
     let store = store_of(&shell, cx);
     serve_agent(&host, "agent-1");
-    store.update(cx, |store, cx| store.select_session("agent-1".into(), cx));
-    shell.update_in(cx, |shell, window, cx| shell.open_thread(window, cx));
+    store.update(cx, |store, cx| store.show_thread("agent-1".into(), cx));
     draw(cx);
     cx.executor().advance_clock(NAV_TRANSITION / 2);
     draw(cx);

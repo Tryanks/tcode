@@ -650,17 +650,11 @@ impl CommandPalette {
                 self.store.update(cx, |store, cx| {
                     store.start_draft(project_id, cwd, cx);
                 });
-                // Draft selection arrives asynchronously and can reuse an
-                // already selected draft. Navigation is a separate intent.
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
             }
             Action::QuickChat => {
                 self.close(cx);
                 self.store
                     .update(cx, |store, cx| store.start_scratch_draft(cx));
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
             }
             Action::OpenSettings => {
                 // open_settings also clears palette_open.
@@ -728,14 +722,12 @@ impl CommandPalette {
             Action::OpenThread { session_id, turn } => {
                 self.store.update(cx, |store, cx| {
                     if let Some(turn) = turn {
-                        store.select_session_at_turn(session_id, turn, cx);
+                        store.show_thread_at_turn(session_id, turn, cx);
                     } else {
-                        store.select_session(session_id, cx);
+                        store.show_thread(session_id, cx);
                     }
                 });
                 self.close(cx);
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
             }
         }
     }
