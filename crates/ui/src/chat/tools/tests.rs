@@ -956,7 +956,7 @@ fn a_shortened_output_loads_whole_when_asked(cx: &mut TestAppContext) {
     thread
         .driver
         .wait_until(cx, &store, "the whole output", |_| true);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = crate::store::tests::host_deadline();
     while shows(cx, "load-output-long") {
         assert!(
             std::time::Instant::now() < deadline,
@@ -1112,7 +1112,7 @@ fn a_shortened_commands_output_loads_into_its_grid(cx: &mut TestAppContext) {
     click(cx, "load-output-long");
     let store = thread.store.clone();
     // Loaded, the grid ends on the command's last line.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = crate::store::tests::host_deadline();
     loop {
         thread.driver.step(cx, &store);
         draw_settled(cx);
@@ -1142,7 +1142,7 @@ fn step_until(
     mut done: impl FnMut(&mut VisualTestContext) -> bool,
 ) {
     let store = thread.store.clone();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = crate::store::tests::host_deadline();
     loop {
         thread.driver.step(cx, &store);
         draw_settled(cx);

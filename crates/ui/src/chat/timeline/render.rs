@@ -2279,7 +2279,7 @@ mod tests {
         let mut settle = |cx: &mut VisualTestContext,
                           description: &str,
                           ready: &dyn Fn(&mut VisualTestContext) -> bool| {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             loop {
                 driver.step(cx, &store);
                 draw_settled(cx);
@@ -2497,7 +2497,7 @@ mod tests {
                        cx: &mut VisualTestContext,
                        what: &str| {
             let mut decision = None;
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             while decision.is_none() {
                 assert!(Instant::now() < deadline, "waiting for {what}");
                 driver.step(cx, &store);
@@ -2515,7 +2515,7 @@ mod tests {
         };
         let shown = |driver: &mut crate::store::tests::LocalHostDriver,
                      cx: &mut VisualTestContext| {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             while cx.debug_bounds("plan-decision").is_none() {
                 assert!(Instant::now() < deadline, "waiting for the plan's decision");
                 driver.step(cx, &store);

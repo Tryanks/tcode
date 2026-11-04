@@ -815,7 +815,7 @@ mod tests {
             description: &str,
             mut ready: impl FnMut(&TestAppContext) -> bool,
         ) {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
             loop {
                 // Host replies arrive on an OS thread. Decode them here so ACKs

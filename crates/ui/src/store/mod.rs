@@ -6442,6 +6442,18 @@ pub(crate) mod tests {
         });
     }
 
+    /// How long a test waits on a real host. The host answers from its own
+    /// threads, which a loaded machine can keep off the CPU for seconds, and
+    /// a test has no way to tell that from silence but time: so this is far
+    /// beyond any load, there to end a hang with the name of what it waited
+    /// for, not to measure the host.
+    const HOST_PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// When a test waiting on a real host from now gives up.
+    pub(crate) fn host_deadline() -> std::time::Instant {
+        std::time::Instant::now() + HOST_PATIENCE
+    }
+
     pub(crate) struct LocalHostDriver {
         pub(crate) link: tcode_client::HostLink,
         pump: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>,
@@ -6521,7 +6533,7 @@ pub(crate) mod tests {
             description: &str,
             mut ready: impl FnMut(&TestAppContext) -> bool,
         ) {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             loop {
                 self.step(cx, store);
                 if ready(cx) {
@@ -6566,7 +6578,7 @@ pub(crate) mod tests {
     ) -> T {
         let mut future = std::pin::pin!(future);
         let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = crate::store::tests::host_deadline();
         loop {
             workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             if let std::task::Poll::Ready(result) =
@@ -6595,14 +6607,14 @@ pub(crate) mod tests {
 
     /// Drain the host's events into `workspace` until `ready`. A host
     /// delivers from its own threads, so a test waits on the condition, never
-    /// unbounded: past the deadline it fails naming what it waited for.
+    /// unbounded: past [`HOST_PATIENCE`] it fails naming what it waited for.
     pub(crate) fn wait_until(
         cx: &mut TestAppContext,
         workspace: &gpui::Entity<WorkspaceStore>,
         description: &str,
         ready: impl Fn(&TestAppContext) -> bool,
     ) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = crate::store::tests::host_deadline();
         while std::time::Instant::now() < deadline {
             workspace.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             cx.run_until_parked();
@@ -6694,7 +6706,7 @@ pub(crate) mod tests {
         driver
             .link
             .set_connection_state(ConnectionState::Syncing { path: None });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = crate::store::tests::host_deadline();
         loop {
             driver.step(cx, &workspace);
             if workspace.read_with(cx, |store, _| store.baseline_ready()) {
@@ -7158,8 +7170,7 @@ pub(crate) mod tests {
                 bytes: b"exit\r".to_vec(),
             },
         );
-        // A login shell reads its startup files before it reads the input.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = crate::store::tests::host_deadline();
         while !terminals(cx)[0].exited {
             assert!(
                 std::time::Instant::now() < deadline,
