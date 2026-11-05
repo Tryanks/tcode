@@ -283,7 +283,7 @@ impl MarkdownState {
         window: &mut Window,
         cx: &mut gpui::App,
     ) {
-        if self.own_selection_focus_out.is_some() {
+        if !self.wants_focus_out_watch() {
             return;
         }
         let Some(document) = self.own_document() else {
@@ -296,6 +296,23 @@ impl MarkdownState {
         ));
     }
 
+    /// Whether the view selects on its own and does not yet clear that
+    /// selection when the focus leaves it.
+    pub(super) fn wants_focus_out_watch(&self) -> bool {
+        self.own_selection_focus_out.is_none() && self.owns_selection && self.selection.is_some()
+    }
+
+    /// Whether the view's text is entry `entry` of `document`'s selection.
+    pub(crate) fn is_selection_entry(
+        &self,
+        document: &gpui::Entity<SelectionDocument>,
+        entry: u64,
+    ) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|m| m.document == *document && m.entry == entry)
+    }
+
     /// Make this view's text entry `entry` of `document`'s selection.
     pub fn set_selection_entry(
         &mut self,
@@ -303,11 +320,7 @@ impl MarkdownState {
         entry: u64,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .selection
-            .as_ref()
-            .is_some_and(|m| m.document == *document && m.entry == entry)
-        {
+        if self.is_selection_entry(document, entry) {
             return;
         }
         self.selection = Some(Membership {
@@ -793,8 +806,31 @@ impl MarkdownState {
         self.unrevealed.set(unrevealed);
     }
 
-    pub(super) fn begin_frame(&self) {
+    /// Forget the runs painted when the view was last built: it is being
+    /// built again and paints them anew. A view drawn again from last frame
+    /// paints nothing, and its runs stand where they were painted.
+    fn begin_frame(&self) {
         self.runs.borrow_mut().clear();
+    }
+
+    /// Tell the selection's document where its ends are, in the runs the view
+    /// painted: each frame the view is drawn, built again or not.
+    pub(super) fn register_edges(&self, cx: &gpui::App) {
+        let Some(membership) = &self.selection else {
+            return;
+        };
+        let document = membership.document.read(cx);
+        for run in self.runs.borrow().iter() {
+            if let Some(selected) = self.selected_range(&run.origin, run.text.len(), cx) {
+                document.register_edge(
+                    membership.entry,
+                    &run.origin,
+                    &selected,
+                    &run.layout,
+                    run.visible,
+                );
+            }
+        }
     }
 
     pub(super) fn register_run(&self, run: PaintedRun) {
@@ -879,6 +915,7 @@ fn root_items(root: &BlockNode) -> Rc<[RootItem]> {
 
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.begin_frame();
         self.enter_scene();
         let first_draw = !self.drawn;
         self.drawn = true;
@@ -951,6 +988,8 @@ pub(super) struct PaintedRun {
     pub(super) text: SharedString,
     pub(super) layout: gpui::TextLayout,
     pub(super) bounds: Bounds<Pixels>,
+    /// The clip it was painted under, out of which an end gets no handle.
+    pub(super) visible: Bounds<Pixels>,
 }
 
 #[cfg(test)]
