@@ -1,4 +1,5 @@
 use super::*;
+use crate::markdown::SelectionGesture;
 use gpui::WeakEntity;
 
 #[cfg(test)]
@@ -106,6 +107,9 @@ pub(crate) struct TimelineView {
     /// message is the entry at its index in the timeline. It goes when the
     /// focus leaves the whole chat.
     pub(in crate::chat) selection: Entity<SelectionDocument>,
+    /// While a selection's gesture lasts, the list holds still; this is
+    /// whether it was following its tail when the gesture began.
+    selection_hold: Option<bool>,
     pub(in crate::chat) pending_md_builds: HashMap<String, PendingMarkdownBuild>,
     pub(in crate::chat) next_md_build_generation: u64,
     pub(in crate::chat) markdown_visible_rows: Range<usize>,
@@ -201,10 +205,15 @@ impl TimelineView {
             });
         });
         let selection = transcript_selection(cx.entity().downgrade(), cx);
-        let subscriptions = vec![cx.observe(&workspace_store, |this, _, cx| {
-            this.timeline_stale = true;
-            cx.notify();
-        })];
+        let subscriptions = vec![
+            cx.observe(&workspace_store, |this, _, cx| {
+                this.timeline_stale = true;
+                cx.notify();
+            }),
+            cx.subscribe(&selection, |this, _, gesture, cx| {
+                this.hold_still_for_selection(*gesture, cx)
+            }),
+        ];
         let mut this = Self {
             workspace_store,
             window_state,
@@ -232,6 +241,7 @@ impl TimelineView {
             deciding_plan: None,
             md_states: HashMap::new(),
             selection,
+            selection_hold: None,
             pending_md_builds: HashMap::new(),
             next_md_build_generation: 0,
             markdown_visible_rows: 0..0,
@@ -273,6 +283,41 @@ impl TimelineView {
     /// The timeline is an agent's shown beside `lead`.
     pub(in crate::chat) fn set_lead(&mut self, lead: WeakEntity<ChatView>) {
         self.lead = Some(lead);
+    }
+
+    /// Text being selected holds still under the pointer: while a selection's
+    /// gesture lasts, the list does not follow its tail, so a reply streaming
+    /// in does not move the text being selected. Afterwards a click that
+    /// selected nothing goes on following as before; a selection keeps the
+    /// reader where it is, the following paused as a scroll up pauses it, to
+    /// resume at the bottom. Pausing alone would not hold: the list resumes
+    /// at the next layout that finds it at its bottom, as a press there is.
+    fn hold_still_for_selection(&mut self, gesture: SelectionGesture, cx: &mut Context<Self>) {
+        match gesture {
+            SelectionGesture::Began => {
+                self.selection_hold = Some(self.list_state.is_following_tail());
+                // A bottom-aligned list at its end keeps the end in view
+                // whatever its mode, so the text is held by the row and
+                // offset at the top: what the list has scrolled, in pixels,
+                // which it reports at its end too, measured from the start.
+                let scrolled = -self.list_state.scroll_px_offset_for_scrollbar().y;
+                self.list_state.set_follow_mode(FollowMode::Normal);
+                self.list_state.scroll_to(ListOffset::default());
+                self.list_state.scroll_by(scrolled);
+            }
+            SelectionGesture::Ended => {
+                let Some(was_following) = self.selection_hold.take() else {
+                    return;
+                };
+                let here = self.list_state.logical_scroll_top();
+                self.list_state.set_follow_mode(FollowMode::Tail);
+                if !was_following || self.selection.read(cx).has_selection() {
+                    self.list_state.pause_following_tail();
+                    self.list_state.scroll_to(here);
+                }
+                cx.notify();
+            }
+        }
     }
 
     /// Where the chat lays the timeline out this frame.
