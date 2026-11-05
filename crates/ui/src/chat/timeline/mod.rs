@@ -164,8 +164,6 @@ pub(in crate::chat) struct TimelineLayout {
     /// How far the column's centre moves left, clear of the rail or the
     /// agent's card.
     pub(in crate::chat) shift: gpui::Pixels,
-    /// The right inset of the scrollbar's track.
-    pub(in crate::chat) track_inset: gpui::Pixels,
     /// Height of the phone row floating over the foot of the timeline, as
     /// far as it has risen in: zero while it is absent. The last row's
     /// padding holds it so the tail clears it.
@@ -519,13 +517,25 @@ impl Render for TimelineView {
 }
 
 impl TimelineView {
+    /// The padding left and right of the content column inside the list's
+    /// width: the page inset on both sides, and on the right also the shift
+    /// clear of the slot and the list's overhang under the panel. The rows
+    /// and the scrollbar's track are both framed by it.
+    pub(super) fn column_insets(&self, cx: &App) -> (gpui::Pixels, gpui::Pixels) {
+        let inset = px(if self.window_state.read(cx).compact {
+            crate::material::COMPACT_PAGE_INSET
+        } else {
+            CONTENT_MIN_PADDING
+        });
+        (inset, inset + self.layout.shift + self.layout.overhang)
+    }
+
     /// The list under its scrollbar, or a fresh phone draft's empty state.
     fn render_timeline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
         let TimelineLayout {
             width,
             overhang,
-            track_inset,
             ref cwd,
             is_draft,
             ..
@@ -569,26 +579,49 @@ impl TimelineView {
             )
             .when(!window.is_inspector_picking(cx), |timeline| {
                 let side = self.is_side();
+                let (left, right) = self.column_insets(cx);
+                // The track stands just right of the content column, framed
+                // as the rows frame theirs, so it moves with the column and
+                // with nothing else: not with what takes the slot beside it.
                 timeline.child(
-                    div()
-                        .debug_selector(move || {
-                            if side {
-                                "chat-side-track"
-                            } else {
-                                "chat-track"
-                            }
-                            .into()
-                        })
+                    v_flex()
                         .absolute()
                         .top_0()
+                        .left_0()
+                        .right_0()
                         .bottom(timeline_bottom_inset(cx))
-                        .right(track_inset + overhang)
-                        .w(TRACK)
+                        .items_center()
+                        .pl(left)
+                        .pr(right)
                         .child(
-                            Scrollbar::vertical(&self.list_state)
-                                .id("timeline-scrollbar")
-                                .motion(&self.motion)
-                                .viewport_from_layout(),
+                            div()
+                                .relative()
+                                .flex_1()
+                                .w_full()
+                                .min_w_0()
+                                .max_w(px(CONTENT_MAX_WIDTH))
+                                .child(
+                                    div()
+                                        .debug_selector(move || {
+                                            if side {
+                                                "chat-side-track"
+                                            } else {
+                                                "chat-track"
+                                            }
+                                            .into()
+                                        })
+                                        .absolute()
+                                        .top_0()
+                                        .bottom_0()
+                                        .left(gpui::relative(1.))
+                                        .w(TRACK)
+                                        .child(
+                                            Scrollbar::vertical(&self.list_state)
+                                                .id("timeline-scrollbar")
+                                                .motion(&self.motion)
+                                                .viewport_from_layout(),
+                                        ),
+                                ),
                         ),
                 )
             })
@@ -1690,7 +1723,8 @@ mod tests {
             assert!(list.is_following_tail());
             assert!(list.max_offset_for_scrollbar().y > viewport.size.height);
 
-            let thumb = point(viewport.right() - px(5.), viewport.bottom() - px(8.));
+            let track = cx.debug_bounds("chat-track").expect("the timeline's track");
+            let thumb = point(track.right() - px(5.), track.bottom() - px(8.));
             cx.simulate_mouse_move(thumb, None, Modifiers::default());
             draw_settled(cx);
             cx.simulate_event(MouseDownEvent {

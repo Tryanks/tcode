@@ -36,7 +36,8 @@ pub(crate) const CHAT_RAIL_NARROWEST: f32 = 220.;
 /// between the column and the rail, since card rows gain nothing past it.
 pub(crate) const CHAT_RAIL_WIDEST: f32 = 300.;
 /// Between the chat's content column and its side rail: the timeline
-/// scrollbar's track is this wide, and sits here.
+/// scrollbar's track, which stands just right of the column, is this wide,
+/// so beside a column moved clear of the rail it fills this gap.
 pub(crate) const CHAT_RAIL_GAP: f32 = 16.;
 /// Between the side rail and the chat's right edge.
 pub(crate) const CHAT_RAIL_EDGE: f32 = 16.;
