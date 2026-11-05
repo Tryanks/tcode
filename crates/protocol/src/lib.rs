@@ -270,7 +270,11 @@ pub use wire::{
 // renders, with PreviewRenderingReplaced naming those threads; the protocol
 // adds the ShowPreviewHere, ReportPreviewTabs and ReportPreviewInput
 // commands; and a status request's reply carries userActedSinceSnapshot and
-// renderedOn.
+// renderedOn. PreviewRequest's Click and Type take an optional selector and
+// an optional ref, and Scroll an optional ref; a snapshot's reply is the
+// page agent's outline (url, title, loading, generation, elements, outline,
+// omitted) instead of interactiveElements and visibleText; a status reply
+// adds generation, console and network.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

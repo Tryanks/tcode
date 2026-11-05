@@ -11278,6 +11278,7 @@ dependencies = [
  "gpui-fast",
  "gpui-fast-platform",
  "log",
+ "serde_json",
  "smol",
  "tcode-client",
  "tcode-protocol",

@@ -27,12 +27,22 @@ struct Url<'a> {
     url: Option<&'a str>,
 }
 
+/// The element a call acts on: a snapshot's ref, or a CSS selector, which
+/// older calls always gave.
 #[derive(Deserialize)]
-struct Selector<'a> {
-    #[serde(borrow)]
-    selector: &'a str,
+struct Target<'a> {
+    #[serde(default, borrow, rename = "ref")]
+    reference: Option<&'a str>,
+    #[serde(default, borrow)]
+    selector: Option<&'a str>,
     #[serde(default, borrow)]
     text: Option<&'a str>,
+}
+
+impl<'a> Target<'a> {
+    fn handle(&self) -> Option<&'a str> {
+        self.reference.or(self.selector)
+    }
 }
 
 #[derive(Deserialize)]
@@ -52,6 +62,8 @@ struct Scroll<'a> {
     delta_y: Option<f64>,
     #[serde(default, borrow)]
     selector: Option<&'a str>,
+    #[serde(default, borrow, rename = "ref")]
+    reference: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -111,11 +123,11 @@ pub(in crate::chat) fn tool_call<'a>(call: &Call<'a>) -> Option<Box<dyn ToolView
     } else if on("preview_screenshot") {
         Tool::Screenshot
     } else if on("preview_click") {
-        Tool::Click(call.input::<Selector<'a>>()?.selector)
+        Tool::Click(call.input::<Target<'a>>()?.handle()?)
     } else if on("preview_type") {
-        let input = call.input::<Selector<'a>>()?;
+        let input = call.input::<Target<'a>>()?;
         Tool::Type {
-            selector: input.selector,
+            selector: input.handle()?,
             text: input.text?,
         }
     } else if on("preview_press") {
@@ -172,8 +184,11 @@ impl ToolView for Preview<'_> {
             Tool::Snapshot => {
                 let count = page
                     .as_ref()
-                    .and_then(|page| page.get("interactiveElements")?.as_array())
-                    .map(|elements| Chip::Count(super::counted("tools.elements", elements.len())));
+                    .and_then(|page| match text_of(page, "outline") {
+                        Some(outline) => Some(outline::nodes(outline).len()),
+                        None => Some(page.get("interactiveElements")?.as_array()?.len()),
+                    })
+                    .map(|count| Chip::Count(super::counted("tools.elements", count)));
                 browser("snapshot")
                     .argument(page.as_ref().and_then(page_name).and_then(Argument::plain))
                     .chip(count)
@@ -205,10 +220,9 @@ impl ToolView for Preview<'_> {
                     .flatten()
                     .collect::<Vec<_>>()
                     .join(" ");
-                browser("scroll").argument(
-                    Argument::mono(deltas)
-                        .map(|argument| argument.detail(scroll.selector.map(str::to_owned))),
-                )
+                browser("scroll").argument(Argument::mono(deltas).map(|argument| {
+                    argument.detail(scroll.reference.or(scroll.selector).map(str::to_owned))
+                }))
             }
             Tool::Wait(wait) => {
                 let condition = [
@@ -260,11 +274,15 @@ impl ToolView for Preview<'_> {
                 let Some(page) = page(&text) else {
                     return super::body(output_section(call, Bound::OUTPUT, ctx));
                 };
-                let nodes: Vec<Node> = page
-                    .get("interactiveElements")
-                    .and_then(Value::as_array)
-                    .map(|elements| elements.iter().map(element_node).collect())
-                    .unwrap_or_default();
+                // The page agent's outline; an older build listed elements.
+                let nodes: Vec<Node> = match text_of(&page, "outline") {
+                    Some(outline) => outline::nodes(outline),
+                    None => page
+                        .get("interactiveElements")
+                        .and_then(Value::as_array)
+                        .map(|elements| elements.iter().map(element_node).collect())
+                        .unwrap_or_default(),
+                };
                 let elements = outline::section_of(
                     call,
                     &nodes,

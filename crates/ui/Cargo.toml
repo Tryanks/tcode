@@ -147,7 +147,7 @@ optional = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-web-kit]
 version = "0.3.2"
-features = ["WKNavigationDelegate", "WKNavigationAction", "WKFrameInfo", "WKSnapshotConfiguration", "WKWebView"]
+features = ["WKContentWorld", "WKNavigationDelegate", "WKNavigationAction", "WKFrameInfo", "WKScriptMessage", "WKScriptMessageHandler", "WKSnapshotConfiguration", "WKUserContentController", "WKUserScript", "WKWebView"]
 optional = true
 
 # The WebKitGTK load-failure signals behind `preview_status.load_error`. Pinned

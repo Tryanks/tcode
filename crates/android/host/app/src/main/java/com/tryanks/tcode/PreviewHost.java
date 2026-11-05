@@ -9,10 +9,13 @@ import android.net.http.SslError;
 import android.webkit.*;
 import androidx.webkit.ProxyConfig;
 import androidx.webkit.ProxyController;
+import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.Set;
 
 /** Activity-owned children. Every entry point and WebView callback runs on the Java UI thread. */
 public final class PreviewHost implements Application.ActivityLifecycleCallbacks {
@@ -29,6 +32,11 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
         activity.getApplication().registerActivityLifecycleCallbacks(this);
     }
 
+    /** Event numbers past the page events: a console message, a page agent message. */
+    private static final int CONSOLE = 8;
+    private static final int AGENT = 9;
+    private static final Set<String> EVERY_ORIGIN = Collections.singleton("*");
+
     private void event(long id, int kind, String url, int code, String message) {
         WebView view = views.get(id);
         if (view != null) nativeEvent(id, kind, url == null ? "" : url,
@@ -43,6 +51,7 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                 if (views.containsKey(id)) throw new IllegalStateException("duplicate preview");
                 JSONObject creation = new JSONObject(value);
                 String initialUrl = creation.optString("url", "about:blank");
+                String agent = creation.optString("agent", "");
                 JSONObject proxy = creation.optJSONObject("proxy");
                 String proxyOrigin = proxy == null ? null : proxy.getString("origin");
                 if (proxy != null && !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE))
@@ -79,7 +88,32 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                     @Override public void onReceivedTitle(WebView v, String title) {
                         event(id, 2, v.getUrl(), 0, "");
                     }
+                    @Override public boolean onConsoleMessage(ConsoleMessage m) {
+                        String level;
+                        switch (m.messageLevel()) {
+                            case ERROR: level = "error"; break;
+                            case WARNING: level = "warn"; break;
+                            case DEBUG: level = "debug"; break;
+                            case TIP: level = "info"; break;
+                            default: level = "log";
+                        }
+                        if (views.get(id) != null) nativeEvent(id, CONSOLE,
+                                m.sourceId() == null ? "" : m.sourceId(), level, m.lineNumber(), m.message());
+                        return false;
+                    }
                 });
+                // The page agent: Android WebView has no script world but the page's.
+                if (!agent.isEmpty()
+                        && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+                        && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                    WebViewCompat.addWebMessageListener(view, "tcodeAgent", EVERY_ORIGIN,
+                            (v, message, origin, mainFrame, reply) -> {
+                                String data = message.getData();
+                                if (mainFrame && data != null && views.get(id) != null)
+                                    nativeEvent(id, AGENT, "", "", 0, data);
+                            });
+                    WebViewCompat.addDocumentStartJavaScript(view, agent, EVERY_ORIGIN);
+                }
                 views.put(id, view);
                 Runnable ready = () -> {
                     if (views.get(id) != view) return;
@@ -119,6 +153,7 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                 case "evaluate":
                     view.evaluateJavascript(value, result -> nativeResult(request, result, null, null));
                     break;
+                case "run": view.evaluateJavascript(value, null); break;
                 case "screenshot":
                     if (!resumed || !view.isShown() || view.getWidth() <= 0 || view.getHeight() <= 0)
                         throw new IllegalStateException("preview browser has no visible area");

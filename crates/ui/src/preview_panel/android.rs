@@ -2,45 +2,51 @@
 //! entities; Java owns the actual views and only sends owned events/results.
 use super::{
     ReplyTx,
-    load_error::{self, LoadError},
+    events::{self, Event},
 };
 use futures::StreamExt as _;
 use gpui::{
     Context, IntoElement, ParentElement as _, Render, Styled as _, Window, canvas, div, point,
 };
-use gpui_android::webview::{Browser, Event, Reply};
+use gpui_android::webview::{Browser, Event as JniEvent, Reply};
+use preview_mcp::page::ConsoleEntry;
 use std::{cell::RefCell, rc::Rc, time::Duration};
+
+/// `PreviewHost`'s event numbers past the page events `events::android_event`
+/// reads: a console message, and a page agent message.
+const CONSOLE: i32 = 8;
+const AGENT: i32 = 9;
 
 pub struct RawWebView {
     browser: Browser,
-    error: RefCell<Option<LoadError>>,
     url: RefCell<String>,
     title: RefCell<String>,
 }
 impl RawWebView {
+    /// A page whose documents get `agent` at document start.
     pub(super) fn new(
         initial_url: &str,
+        agent: &str,
         proxy: Option<&tcode_traverse::preview::ProxyEntry>,
-    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<Event>), String> {
-        let (browser, events) = Browser::new(&serde_json::json!({"url": initial_url, "proxy": proxy.map(|host| serde_json::json!({"origin": host.origin}))}).to_string())?;
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<JniEvent>), String> {
+        let (browser, events) = Browser::new(
+            &serde_json::json!({
+                "url": initial_url,
+                "agent": agent,
+                "proxy": proxy.map(|host| serde_json::json!({"origin": host.origin})),
+            })
+            .to_string(),
+        )?;
         Ok((
             Self {
                 browser,
-                error: RefCell::new(None),
                 url: RefCell::new(initial_url.to_owned()),
                 title: RefCell::new(String::new()),
             },
             events,
         ))
     }
-    pub(super) fn load_error(&self) -> Option<LoadError> {
-        self.error.borrow().clone()
-    }
-    pub(super) fn clear_load_error(&self) {
-        self.error.borrow_mut().take();
-    }
     pub fn load_url(&self, url: &str) -> Result<(), String> {
-        self.clear_load_error();
         *self.url.borrow_mut() = url.to_owned();
         self.browser.command("navigate", url, [0; 4]);
         Ok(())
@@ -54,14 +60,16 @@ impl RawWebView {
         self.browser.command("blur", "", [0; 4]);
         Ok(())
     }
-    pub fn evaluate_script(&self, script: &str) -> Result<(), String> {
-        let operation = match script {
-            "history.forward();" => "forward",
-            "location.reload();" => "reload",
-            "history.back();" => "back",
-            _ => "evaluate",
-        };
-        self.browser.command(operation, script, [0; 4]);
+    /// Run a page agent call; its answer comes back as an agent message.
+    pub(super) fn run(&self, script: &str) {
+        self.browser.command("run", script, [0; 4]);
+    }
+    pub fn reload(&self) -> Result<(), String> {
+        self.browser.command("reload", "", [0; 4]);
+        Ok(())
+    }
+    pub fn forward(&self) -> Result<(), String> {
+        self.browser.command("forward", "", [0; 4]);
         Ok(())
     }
     pub(super) fn evaluate_json<T: 'static>(&self, script: &str, reply: ReplyTx, cx: &Context<T>) {
@@ -74,7 +82,7 @@ impl RawWebView {
             .await;
             let result = match result {
                 futures::future::Either::Left((Ok(Reply::Json(raw)), _)) => Ok(
-                    tcode_protocol::PreviewResponse::Json(preview_mcp::js::parse_result(&raw)),
+                    tcode_protocol::PreviewResponse::Json(preview_mcp::page::parse_result(&raw)),
                 ),
                 futures::future::Either::Left((Err(error), _)) => Err(error),
                 futures::future::Either::Left((Ok(Reply::Png(_)), _)) => {
@@ -98,24 +106,38 @@ pub struct WebView {
 impl WebView {
     pub(super) fn new(
         raw: RawWebView,
-        mut events: futures::channel::mpsc::UnboundedReceiver<Event>,
+        mut events: futures::channel::mpsc::UnboundedReceiver<JniEvent>,
+        page: super::page_agent::Events,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this
                     .update(cx, |view, cx| {
-                        if !event.url.is_empty() {
-                            *view.raw.url.borrow_mut() = event.url.clone();
+                        let forwarded = match event.kind {
+                            CONSOLE => Some(Event::Console(ConsoleEntry {
+                                level: event.title,
+                                text: event.message,
+                                location: (!event.url.is_empty())
+                                    .then(|| format!("{}:{}", event.url, event.code)),
+                            })),
+                            AGENT => Some(Event::Message(event.message)),
+                            _ => {
+                                if !event.url.is_empty() {
+                                    *view.raw.url.borrow_mut() = event.url.clone();
+                                }
+                                *view.raw.title.borrow_mut() = event.title;
+                                events::android_event(
+                                    event.kind,
+                                    event.url,
+                                    event.code,
+                                    event.message,
+                                )
+                            }
+                        };
+                        if let Some(forwarded) = forwarded {
+                            let _ = page.try_send(forwarded);
                         }
-                        *view.raw.title.borrow_mut() = event.title;
-                        load_error::android_event(
-                            &mut view.raw.error.borrow_mut(),
-                            event.kind,
-                            event.url,
-                            event.code,
-                            event.message,
-                        );
                         cx.notify();
                     })
                     .is_err()
@@ -144,7 +166,8 @@ impl WebView {
         let _ = self.raw.set_visible(false);
     }
     pub fn back(&mut self) -> Result<(), String> {
-        self.raw.evaluate_script("history.back();")
+        self.raw.browser.command("back", "", [0; 4]);
+        Ok(())
     }
     pub(super) fn metadata(&self) -> (String, String) {
         (self.url(), self.raw.title.borrow().clone())

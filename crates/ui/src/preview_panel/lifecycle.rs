@@ -1,7 +1,7 @@
 //! Session-keyed ownership of native preview browsers.
 //!
 //! This module is the lifecycle seam for native children: slots, platform
-//! creation, visibility, navigation warmth, key migration, pruning, and
+//! creation, visibility, page events, key migration, pruning, and
 //! teardown all live here. Callers must preserve two ordering facts:
 //!
 //! - Native children outlive GPUI layout nodes. Before a Preview panel can be
@@ -9,31 +9,33 @@
 //!   mounted (or `None` to let its page go). Only call
 //!   [`BrowserLifecycle::show_for`] after the owning WebView element has been
 //!   laid out for the current frame.
-//! - lb-wry drops value-operation callbacks until a first navigation has made a
-//!   view warm. [`BrowserLifecycle::evaluate_json`] enforces that cold-start
-//!   delay. The wait broker uses [`BrowserLifecycle::is_warm`],
-//!   [`BrowserLifecycle::mark_warm`], and
-//!   [`BrowserLifecycle::evaluate_ready`] to preserve the same ordering across
-//!   its repeated probes.
+//! - A page's calls wait on its events (`events::PageEvents`), not on time:
+//!   lb-wry drops evaluation callbacks before a first navigation commits, and
+//!   a page agent exists only once a document has started.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Weak;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "android")]
 use super::android::WebView;
 #[cfg(target_os = "windows")]
 use super::webview2::WebView;
-use gpui::{App, AppContext as _, Context, Entity, EntityId, Window};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, WeakEntity, Window};
 #[cfg(not(any(target_os = "android", target_os = "windows")))]
 use gpui_webview::WebView;
-#[cfg(not(target_os = "android"))]
-use preview_mcp::js;
+use serde_json::Value;
 #[cfg(not(target_os = "android"))]
 use tcode_protocol::PreviewResponse;
 
-use super::load_error::{self, LoadError};
+use super::events::{Answer, Event, LoadError, Outcome, PageEvents, WaitFor};
+use super::page_agent;
 use super::{ReplyTx, unavailable_message};
+use crate::store::WorkspaceStore;
+
+/// How long a call into a page agent may go unanswered: a page whose script
+/// is stuck, or blocked by a dialog, never answers.
+const CALL_BOUND: Duration = Duration::from_secs(15);
 
 const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
 const SMOKE_CREATION_QUEUED: &str = "preview creation is queued";
@@ -85,7 +87,15 @@ enum WebViewSlot {
         view: Entity<WebView>,
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         remote: Option<super::remote::RemoteBrowser>,
+        page: Box<Page>,
     },
+}
+
+/// One page's identity for its event stream, which outlives key
+/// migrations, and what it reported.
+struct Page {
+    id: u64,
+    events: PageEvents,
 }
 
 impl WebViewSlot {
@@ -101,6 +111,26 @@ impl WebViewSlot {
 
     fn is_ready(&self) -> bool {
         self.ready().is_some()
+    }
+
+    fn page(&self) -> Option<&Page> {
+        match self {
+            #[cfg(any(target_os = "windows", target_os = "android"))]
+            Self::Creating { .. } => None,
+            #[cfg(test)]
+            Self::Stub => None,
+            Self::Ready { page, .. } => Some(page),
+        }
+    }
+
+    fn page_mut(&mut self) -> Option<&mut Page> {
+        match self {
+            #[cfg(any(target_os = "windows", target_os = "android"))]
+            Self::Creating { .. } => None,
+            #[cfg(test)]
+            Self::Stub => None,
+            Self::Ready { page, .. } => Some(page),
+        }
     }
 
     fn availability(&self) -> Availability {
@@ -129,8 +159,10 @@ enum Creator {
 /// owning panel, the GPUI window, and its exact generation are all still live.
 pub struct BrowserLifecycle {
     owner: Weak<()>,
+    /// Where the user's own input in a page is reported.
+    store: WeakEntity<WorkspaceStore>,
     slots: HashMap<String, WebViewSlot>,
-    warm: HashSet<String>,
+    next_page: u64,
     /// The session and key each panel addresses.
     active_identity: HashMap<EntityId, (String, String)>,
     /// The key each panel last showed; one panel per pane can show a page.
@@ -158,6 +190,7 @@ pub(super) struct KeyReconciliation {
 impl BrowserLifecycle {
     pub(super) fn new(
         owner: Weak<()>,
+        store: WeakEntity<WorkspaceStore>,
         proxy: Result<Option<crate::store::PreviewTarget>, String>,
     ) -> Self {
         let endpoint = proxy.as_ref().ok().and_then(|target| {
@@ -214,8 +247,9 @@ impl BrowserLifecycle {
             endpoint,
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
             _native_proxy: native_proxy,
+            store,
             slots: HashMap::new(),
-            warm: HashSet::new(),
+            next_page: 0,
             active_identity: HashMap::new(),
             shown: HashMap::new(),
             #[cfg(not(target_os = "android"))]
@@ -264,7 +298,7 @@ impl BrowserLifecycle {
     /// Get or lazily create the browser for `key`.
     ///
     /// Windows and Android retain the newest URL while asynchronous creation runs.
-    /// The synchronous adapter starts at `about:blank`.
+    /// The synchronous adapter starts with no document.
     pub fn ensure(
         &mut self,
         key: &str,
@@ -281,7 +315,7 @@ impl BrowserLifecycle {
         platform::start(self, key, initial_url, window, cx)
     }
 
-    /// Navigate a session and mark it warm only if the native load was accepted.
+    /// Navigate a session; calls wait for the document it loads.
     /// An asynchronous creation in progress retains the newest requested URL instead.
     pub fn navigate(
         &mut self,
@@ -293,11 +327,15 @@ impl BrowserLifecycle {
         let availability = self.ensure(key, Some(url), window, cx);
         match &availability {
             Availability::Ready(webview) => {
+                // Calls wait for the next document now rather than from
+                // WebKit's asynchronous didStart, so a wait_for issued right
+                // after this navigation cannot read the old page or fail on
+                // its record.
+                if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
+                    let outcome = page.events.navigate();
+                    self.apply(key, outcome, cx);
+                }
                 let raw = webview.read(cx).raw();
-                // Clear the previous failure now rather than on WebKit's
-                // asynchronous didStart, so a wait_for issued right after
-                // this navigation cannot fail on the old record.
-                load_error::forget(raw);
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let mapped = match self
                     .remote_browser(key)
@@ -312,13 +350,26 @@ impl BrowserLifecycle {
                 };
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 let url = mapped.as_deref().unwrap_or(url);
-                match raw.load_url(url) {
-                    Ok(()) => {
-                        self.warm.insert(key.to_string());
+                // lb-wry unwraps `NSURL URLWithString:`, which is nil for a
+                // string WebKit cannot load: report it as the page would.
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                if objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(
+                    url,
+                ))
+                .is_none()
+                {
+                    if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
+                        let outcome = page.events.handle(Event::Failed(LoadError {
+                            url: url.to_owned(),
+                            code: "InvalidURL".into(),
+                            message: "this is not a URL the browser can load".into(),
+                        }));
+                        self.apply(key, outcome, cx);
                     }
-                    Err(error) => {
-                        log::warn!("preview: failed to navigate {key}: {error}");
-                    }
+                    return availability;
+                }
+                if let Err(error) = raw.load_url(url) {
+                    log::warn!("preview: failed to navigate {key}: {error}");
                 }
             }
             #[cfg(any(target_os = "windows", target_os = "android"))]
@@ -548,16 +599,12 @@ impl BrowserLifecycle {
                 self.slots.insert(key.to_string(), slot);
             }
         }
-        if self.warm.remove(old_key) {
-            self.warm.insert(key.to_string());
-        }
     }
 
     /// Tear down one ready or in-progress browser generation.
     pub fn drop_view(&mut self, key: &str, cx: &App) {
-        self.forget_load_error(key, cx);
+        self.close_page(key, cx);
         self.slots.remove(key);
-        self.warm.remove(key);
     }
 
     /// Tear down every browser whose session key is no longer live.
@@ -569,9 +616,8 @@ impl BrowserLifecycle {
             .cloned()
             .collect::<Vec<_>>();
         for key in deleted {
-            self.forget_load_error(&key, cx);
+            self.close_page(&key, cx);
             self.slots.remove(&key);
-            self.warm.remove(&key);
         }
     }
 
@@ -589,7 +635,8 @@ impl BrowserLifecycle {
                 });
             }
         }
-        let mut error = load_error::get(self.ready_view(key)?.read(cx).raw())?;
+        let _ = cx;
+        let mut error = self.slots.get(key)?.page()?.events.load_error()?.clone();
         error.url = self.logical_url(key, &error.url);
         Some(error)
     }
@@ -629,9 +676,14 @@ impl BrowserLifecycle {
         }
     }
 
-    fn forget_load_error(&self, key: &str, cx: &App) {
+    /// The page is going away: its callers hear so, and its engine stops
+    /// reporting.
+    fn close_page(&mut self, key: &str, cx: &App) {
         if let Some(view) = self.ready_view(key) {
-            load_error::forget(view.read(cx).raw());
+            page_agent::forget(view.read(cx).raw());
+        }
+        if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
+            page.events.close();
         }
     }
 
@@ -646,22 +698,210 @@ impl BrowserLifecycle {
         self.slots.get(key).and_then(WebViewSlot::ready).cloned()
     }
 
-    pub(super) fn eval_fire(&self, key: &str, script: &str, cx: &Context<Self>) {
+    /// A new page's event stream: what its engine and agent report, and the
+    /// nonce the agent signs with.
+    fn open_page(
+        &mut self,
+        nonce: String,
+        loading: bool,
+    ) -> (
+        Box<Page>,
+        page_agent::Events,
+        async_channel::Receiver<Event>,
+    ) {
+        self.next_page += 1;
+        let (events, receiver) = async_channel::unbounded();
+        (
+            Box::new(Page {
+                id: self.next_page,
+                events: PageEvents::new(nonce, loading),
+            }),
+            events,
+            receiver,
+        )
+    }
+
+    /// Feed a page's events to it for as long as its engine reports any.
+    fn watch_page(&self, id: u64, events: async_channel::Receiver<Event>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = events.recv().await {
+                if this
+                    .update(cx, |lifecycle, cx| lifecycle.page_event(id, event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn page_event(&mut self, id: u64, event: Event, cx: &mut Context<Self>) {
+        log::trace!("preview: page {id} {event:.300?}");
+        let Some((key, page)) = self.slots.iter_mut().find_map(|(key, slot)| {
+            let page = slot.page_mut()?;
+            (page.id == id).then_some((key.clone(), page))
+        }) else {
+            return;
+        };
+        let outcome = page.events.handle(event);
+        self.apply(&key, outcome, cx);
+    }
+
+    /// Carry out what a page's state change asks for.
+    fn apply(&mut self, key: &str, outcome: Outcome, cx: &mut Context<Self>) {
         if let Some(view) = self.ready_view(key) {
-            let _ = view.read(cx).raw().evaluate_script(script);
+            for script in &outcome.scripts {
+                page_agent::run(view.read(cx).raw(), script);
+            }
+            for (script, reply) in outcome.evaluations {
+                evaluate_in_page(&view, &script, reply, cx);
+            }
+        }
+        if outcome.user_acted {
+            log::debug!("preview: the user acted on {key}'s page");
+            let _ = self
+                .store
+                .update(cx, |store, _| store.report_page_input(key));
+        }
+        if outcome.changed {
+            cx.notify();
         }
     }
 
-    pub(super) fn is_warm(&self, key: &str) -> bool {
-        self.warm.contains(key)
+    /// Bound a call so a page that never answers does not hold its caller.
+    fn bound(&self, key: &str, call: u64, after: Duration, cx: &mut Context<Self>) {
+        let Some(page) = self
+            .slots
+            .get(key)
+            .and_then(WebViewSlot::page)
+            .map(|page| page.id)
+        else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(after).await;
+            let _ = this.update(cx, |lifecycle, _| {
+                if let Some(page) = lifecycle
+                    .slots
+                    .values_mut()
+                    .filter_map(WebViewSlot::page_mut)
+                    .find(|candidate| candidate.id == page)
+                {
+                    page.events.expire(call);
+                }
+            });
+        })
+        .detach();
     }
 
-    pub(super) fn mark_warm(&mut self, key: &str) {
-        self.warm.insert(key.to_string());
+    /// Ask `key`'s page agent to run `method`.
+    pub fn call(
+        &mut self,
+        key: &str,
+        method: &'static str,
+        args: Value,
+        cx: &mut Context<Self>,
+    ) -> async_channel::Receiver<Result<Value, String>> {
+        let (answer, answered): (Answer, _) = async_channel::bounded(1);
+        let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) else {
+            let _ = answer.try_send(Err("preview browser is not open".into()));
+            return answered;
+        };
+        let (id, outcome) = page.events.call(method, args, answer);
+        self.apply(key, outcome, cx);
+        self.bound(key, id, CALL_BOUND, cx);
+        answered
     }
 
-    /// Evaluate JSON against a ready, warm browser. Cold browsers wait for the
-    /// initial `about:blank` navigation to flush lb-wry's callback queue first.
+    /// Wait until `key`'s page meets every condition, or `timeout` passes.
+    pub fn wait(
+        &mut self,
+        key: &str,
+        selector: Option<String>,
+        text: Option<String>,
+        url_includes: Option<String>,
+        timeout: Duration,
+        cx: &mut Context<Self>,
+    ) -> async_channel::Receiver<Result<Value, String>> {
+        let (answer, answered): (Answer, _) = async_channel::bounded(1);
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let routes = self.remote_browser(key).map(|remote| remote.routes.clone());
+        let url = url_includes.map(|needle| -> super::events::UrlMatch {
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            if let Some(routes) = routes.clone() {
+                return Box::new(move |actual| {
+                    routes.borrow().logical_url(actual).contains(&needle)
+                });
+            }
+            Box::new(move |actual| actual.contains(&needle))
+        });
+        let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) else {
+            let _ = answer.try_send(Err("preview browser is not open".into()));
+            return answered;
+        };
+        let (id, outcome) = page.events.wait(
+            WaitFor {
+                selector,
+                text,
+                url,
+                deadline: Instant::now() + timeout,
+            },
+            answer,
+        );
+        self.apply(key, outcome, cx);
+        self.bound(key, id, timeout, cx);
+        answered
+    }
+
+    /// Tcode loads a document into `view` itself: calls wait for it.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub(super) fn loading(&mut self, view: &Entity<WebView>, cx: &mut Context<Self>) {
+        let Some((key, page)) = self.slots.iter_mut().find_map(|(key, slot)| match slot {
+            WebViewSlot::Ready {
+                view: candidate,
+                page,
+                ..
+            } if candidate == view => Some((key.clone(), page)),
+            _ => None,
+        }) else {
+            return;
+        };
+        let outcome = page.events.navigate();
+        self.apply(&key, outcome, cx);
+    }
+
+    /// Whether `key`'s page agent can answer now.
+    pub(super) fn page_settled(&self, key: &str) -> bool {
+        self.slots
+            .get(key)
+            .and_then(WebViewSlot::page)
+            .is_some_and(|page| page.events.settled())
+    }
+
+    /// Whether a navigation is replacing `key`'s document.
+    pub(super) fn page_loading(&self, key: &str) -> bool {
+        self.slots
+            .get(key)
+            .and_then(WebViewSlot::page)
+            .is_some_and(|page| page.events.navigating())
+    }
+
+    /// The console and network since `key`'s last navigation.
+    pub fn page_summary(&self, key: &str) -> Option<Value> {
+        Some(self.slots.get(key)?.page()?.events.summary())
+    }
+
+    pub(super) fn reload(&self, key: &str, cx: &App) {
+        if let Some(view) = self.ready_view(key)
+            && let Err(error) = view.read(cx).raw().reload()
+        {
+            log::debug!("preview: failed to reload: {error}");
+        }
+    }
+
+    /// Evaluate `script` in `key`'s page, in the page's own world, once no
+    /// navigation is replacing the document.
     pub(super) fn evaluate_json(
         &mut self,
         key: &str,
@@ -683,52 +923,12 @@ impl BrowserLifecycle {
                 return;
             }
         }
-        if self.is_warm(key) {
-            self.evaluate_ready(key, script, reply, cx);
-            return;
-        }
-
-        let key = key.to_string();
-        let script = script.to_string();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(700))
-                .await;
-            let _ = this.update(cx, |lifecycle, cx| {
-                lifecycle.mark_warm(&key);
-                lifecycle.evaluate_ready(&key, &script, reply, cx);
-            });
-        })
-        .detach();
-    }
-
-    /// Run a value operation after the caller has established warmth.
-    pub(super) fn evaluate_ready(
-        &self,
-        key: &str,
-        script: &str,
-        reply: ReplyTx,
-        cx: &Context<Self>,
-    ) {
-        let Some(view) = self.ready_view(key) else {
+        let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) else {
             let _ = reply.try_send(Err("preview browser is not open".into()));
             return;
         };
-        #[cfg(target_os = "android")]
-        view.read(cx).raw().evaluate_json(script, reply, cx);
-        #[cfg(not(target_os = "android"))]
-        {
-            let result = view.read(cx).raw().evaluate_script_with_callback(script, {
-                let reply = reply.clone();
-                move |raw: String| {
-                    let value = js::parse_result(&raw);
-                    let _ = reply.try_send(Ok(PreviewResponse::Json(value)));
-                }
-            });
-            if result.is_err() {
-                let _ = reply.try_send(Err("failed to evaluate script in preview".into()));
-            }
-        }
+        let outcome = page.events.evaluate(script.to_owned(), reply);
+        self.apply(key, outcome, cx);
     }
 
     fn record_unavailable(&mut self, error: String, cx: &mut Context<Self>) {
@@ -795,6 +995,7 @@ impl BrowserLifecycle {
         key: String,
         pending_url: Option<String>,
         controller: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController,
+        nonce: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -807,25 +1008,48 @@ impl BrowserLifecycle {
             }
         };
         let raw = prepared.raw();
-        load_error::install(raw);
-        let warm = if let Some(url) = &pending_url {
-            match raw.load_url(url) {
-                Ok(()) => true,
-                Err(error) => {
-                    log::warn!("preview: failed to replay URL for {key}: {error}");
-                    false
-                }
-            }
-        } else {
-            false
-        };
-        let webview = cx.new(|cx| WebView::new(prepared, window, cx));
-        self.slots
-            .insert(key.clone(), WebViewSlot::Ready { view: webview });
-        if warm {
-            self.warm.insert(key);
+        let (page, events, receiver) = self.open_page(nonce.clone(), pending_url.is_some());
+        page_agent::install(raw, events, &nonce);
+        if let Some(url) = &pending_url
+            && let Err(error) = raw.load_url(url)
+        {
+            log::warn!("preview: failed to replay URL for {key}: {error}");
         }
+        let id = page.id;
+        let webview = cx.new(|cx| WebView::new(prepared, window, cx));
+        self.slots.insert(
+            key,
+            WebViewSlot::Ready {
+                view: webview,
+                page,
+            },
+        );
+        self.watch_page(id, receiver, cx);
         cx.notify();
+    }
+}
+
+/// Evaluate `script` in the page's own world; `reply` gets its JSON value.
+fn evaluate_in_page(
+    view: &Entity<WebView>,
+    script: &str,
+    reply: ReplyTx,
+    cx: &Context<BrowserLifecycle>,
+) {
+    #[cfg(target_os = "android")]
+    view.read(cx).raw().evaluate_json(script, reply, cx);
+    #[cfg(not(target_os = "android"))]
+    {
+        let result = view.read(cx).raw().evaluate_script_with_callback(script, {
+            let reply = reply.clone();
+            move |raw: String| {
+                let value = preview_mcp::page::parse_result(&raw);
+                let _ = reply.try_send(Ok(PreviewResponse::Json(value)));
+            }
+        });
+        if result.is_err() {
+            let _ = reply.try_send(Err("failed to evaluate script in preview".into()));
+        }
     }
 }
 
@@ -935,11 +1159,13 @@ mod platform {
         window: &mut Window,
         cx: &mut Context<BrowserLifecycle>,
     ) -> Availability {
-        // Start on about:blank so lb-wry begins a navigation and flushes its
-        // pending-scripts buffer, making later evaluation callbacks fire.
+        // No first document: lb-wry holds evaluations back until a
+        // navigation commits, and the page's evaluations wait for its first
+        // document (`PageEvents`).
+        let (loads, on_load) = page_agent::page_loads();
         let builder = wry::WebViewBuilder::new()
             .with_devtools(true)
-            .with_url("about:blank");
+            .with_on_page_load_handler(on_load);
         let builder = match super::super::proxy::builder(builder, lifecycle.proxy.as_ref()) {
             Ok(builder) => builder,
             Err(error) => {
@@ -955,7 +1181,11 @@ mod platform {
                 return Availability::Unavailable;
             }
         };
-        load_error::install(webview.read(cx).raw());
+        let nonce = page_agent::nonce();
+        let (page, events, receiver) = lifecycle.open_page(nonce.clone(), false);
+        *loads.borrow_mut() = Some(events.clone());
+        page_agent::install(webview.read(cx).raw(), events, &nonce);
+        lifecycle.watch_page(page.id, receiver, cx);
         #[cfg(target_os = "linux")]
         trap_gdk_x_errors();
         #[cfg(target_os = "ios")]
@@ -972,6 +1202,7 @@ mod platform {
                 view: webview.clone(),
                 #[cfg(any(target_os = "macos", target_os = "ios"))]
                 remote,
+                page,
             },
         );
         Availability::Ready(webview)
@@ -1060,6 +1291,7 @@ mod platform {
                 pending_url: initial_url.map(str::to_string),
             },
         );
+        let nonce = page_agent::nonce();
 
         cx.spawn_in(window, async move |lifecycle, cx| {
             let slot_is_live = lifecycle
@@ -1104,6 +1336,13 @@ mod platform {
                 }
             };
 
+            if let Ok(controller) = &built
+                && let Ok(webview) = webview2::core_webview(controller)
+                && let Err(error) = page_agent::prepare(webview, nonce.clone()).await
+            {
+                log::warn!("preview: the page agent could not be installed: {error}");
+            }
+
             match built {
                 Ok(controller) => {
                     let mut controller = Some(controller);
@@ -1122,6 +1361,7 @@ mod platform {
                                     key,
                                     pending_url,
                                     controller.take().expect("controller already consumed"),
+                                    nonce.clone(),
                                     window,
                                     cx,
                                 );
@@ -1192,14 +1432,20 @@ mod platform {
         cx: &mut Context<BrowserLifecycle>,
     ) -> Availability {
         let initial_url = initial_url.unwrap_or("about:blank").to_owned();
-        let (raw, mut events) =
-            match super::super::android::RawWebView::new(&initial_url, lifecycle.proxy.as_ref()) {
-                Ok(created) => created,
-                Err(error) => {
-                    lifecycle.record_unavailable(error, cx);
-                    return Availability::Unavailable;
-                }
-            };
+        let nonce = page_agent::nonce();
+        let agent = page_agent::scripts(&nonce);
+        let (page, page_events, receiver) = lifecycle.open_page(nonce, true);
+        let (raw, mut events) = match super::super::android::RawWebView::new(
+            &initial_url,
+            &agent,
+            lifecycle.proxy.as_ref(),
+        ) {
+            Ok(created) => created,
+            Err(error) => {
+                lifecycle.record_unavailable(error, cx);
+                return Availability::Unavailable;
+            }
+        };
         let Creator::Available(adapter) = &mut lifecycle.creator else {
             return Availability::Unavailable;
         };
@@ -1239,9 +1485,13 @@ mod platform {
                         {
                             let _ = raw.load_url(&url);
                         }
-                        let view = cx.new(|cx| WebView::new(raw, events, cx));
+                        let id = page.id;
+                        let view = cx.new(|cx| WebView::new(raw, events, page_events, cx));
                         cx.observe(&view, |_, _, cx| cx.notify()).detach();
-                        lifecycle.slots.insert(key, WebViewSlot::Ready { view });
+                        lifecycle
+                            .slots
+                            .insert(key, WebViewSlot::Ready { view, page });
+                        lifecycle.watch_page(id, receiver, cx);
                         cx.notify();
                     }
                 }
@@ -1265,7 +1515,8 @@ mod tests {
     #[gpui::test]
     fn each_panel_keeps_the_page_it_shows(cx: &mut TestAppContext) {
         let (left, right) = (cx.new(|_| ()).entity_id(), cx.new(|_| ()).entity_id());
-        let lifecycle = cx.new(|_| BrowserLifecycle::new(Weak::new(), Ok(None)));
+        let lifecycle = cx
+            .new(|_| BrowserLifecycle::new(Weak::new(), gpui::WeakEntity::new_invalid(), Ok(None)));
         lifecycle.update(cx, |lifecycle, cx| {
             lifecycle.show_for(left, Some("thread-1"), cx);
             lifecycle.show_for(right, Some("thread-2"), cx);

@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-pub mod js;
+pub mod page;
 pub mod ports;
 mod tools;
 
