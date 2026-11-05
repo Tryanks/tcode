@@ -2,12 +2,14 @@
 //! never leave.
 //!
 //! Each card is its header and its body. When the bodies fit, every
-//! card is as tall as its content; when they do not, each body gives
-//! up height in proportion to its own, down to a few rows, and scrolls
-//! inside; when not even those few rows fit, the headers keep their height
-//! and the bodies share what is left. A card coming or going takes its
-//! share as it moves, so the others give way to it as it goes rather than
-//! at the end.
+//! card is as tall as its content; when they do not, each body that can
+//! scroll gives up height in proportion to its own, down to a few rows,
+//! and scrolls inside, while a body that cannot ([`StackCard::rigid`])
+//! keeps its whole content; when not even that fits, a part that scales
+//! gives up its height ([`Scale`]), and then the headers keep their height
+//! and the bodies share what is left in proportion to those heights. A card
+//! coming or going takes its share as it moves, so the others give way to
+//! it as it goes rather than at the end.
 //!
 //! Taffy cannot lay this out: a flex item's minimum height never gives way
 //! when the minimums overflow the column, and a fold (`motion::Reveal`)
@@ -21,8 +23,8 @@ use gpui::{
     InspectorElementId, IntoElement, LayoutId, Pixels, Window, point, px, size,
 };
 
-/// How tall a body stays, at least, while the cards share a rail too
-/// short for them all: about three rows.
+/// How tall a body that scrolls stays, at least, while the cards share a
+/// rail too short for them all: about three rows.
 pub(super) const MIN_BODY: Pixels = px(72.);
 
 /// One card of the stack.
@@ -32,16 +34,21 @@ pub(super) struct StackCard {
     pub(super) header: AnyElement,
     /// The body's scroll region, laid out at the height the card is given.
     pub(super) body: Option<AnyElement>,
+    /// Whether the body holds content of its own height rather than rows
+    /// to scroll through: it gives up none of it to the other cards.
+    pub(super) rigid: bool,
     /// How far in the card is, from absent to at rest.
     pub(super) presence: f32,
-    /// A part of the body that scales down before the body scrolls.
+    /// A part of the body that scales down before the bodies are cut below
+    /// their least.
     pub(super) scale: Option<Scale>,
 }
 
 /// A part of a card's body that gives up height by scaling rather than
-/// scrolling (a picture), from `full` down to `min`. The stack sets the
-/// height it is to take in `height`, which the body draws it at from the
-/// next frame on.
+/// scrolling (a picture), from `full` down to `min`, once the rail cannot
+/// hold every body at its least with the part at `full`. The stack sets
+/// the height it is to take in `height`, which the body draws it at from
+/// the next frame on.
 pub(super) struct Scale {
     pub(super) full: f32,
     pub(super) min: f32,
@@ -68,6 +75,16 @@ pub(super) struct RailStack {
 struct Demand {
     natural: f32,
     min: f32,
+}
+
+/// The least a body `natural` tall is given while the rail has room for
+/// every body's least: all of it when it is rigid, else a few rows of it.
+fn least(natural: f32, rigid: bool) -> f32 {
+    if rigid {
+        natural
+    } else {
+        natural.min(f32::from(MIN_BODY))
+    }
 }
 
 /// The height each body gets out of `room`: each its natural height when
@@ -199,7 +216,7 @@ impl gpui::Element for RailStack {
             headers.push(header);
             demands.push(Demand {
                 natural: body,
-                min: body.min(f32::from(MIN_BODY)),
+                min: least(body, card.rigid),
             });
         }
         let presences: Vec<f32> = self
@@ -207,9 +224,10 @@ impl gpui::Element for RailStack {
             .iter()
             .map(|card| card.presence.clamp(0., 1.))
             .collect();
-        // A part that scales gives up its height first: each body is
-        // measured as it would be with the part at full height, and the
-        // part takes as much less as the rail lacks, down to its minimum.
+        // A part that scales gives up its height once the bodies at their
+        // least do not fit: each body is measured as it would be with the
+        // part at full height, and the part takes as much less as the rail
+        // lacks, down to its minimum.
         let mut lacking = demands
             .iter()
             .zip(&self.cards)
@@ -219,7 +237,7 @@ impl gpui::Element for RailStack {
                     .scale
                     .as_ref()
                     .map_or(0., |scale| scale.full - scale.now());
-                (demand.natural + full) * presence
+                least(demand.natural + full, card.rigid) * presence
             })
             .sum::<f32>()
             - room;
@@ -235,7 +253,7 @@ impl gpui::Element for RailStack {
             lacking -= give * presence;
             let height = scale.full - give;
             demand.natural += height - scale.now();
-            demand.min = demand.natural.min(f32::from(MIN_BODY));
+            demand.min = least(demand.natural, card.rigid);
             if (height - scale.now()).abs() >= 0.5 {
                 scale.height.set(Some(height));
                 window.request_animation_frame();
