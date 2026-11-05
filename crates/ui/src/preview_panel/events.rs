@@ -1,6 +1,6 @@
 //! What happens in one preview page, as its engine and its page agent report
 //! it: navigations starting, finishing and failing, the agent's messages,
-//! and console and network entries. A page's calls into the agent wait on
+//! and console entries. A page's calls into the agent wait on
 //! these events rather than on time: a call made while a document loads goes
 //! to the next document's agent once it is ready, and a wait that spans a
 //! navigation follows the page to its next document.
@@ -11,7 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
-use preview_mcp::page::{self, ConsoleEntry, Envelope, Message, NetworkEntry};
+use preview_mcp::page::{self, ConsoleEntry, Envelope, Message};
 use serde_json::Value;
 
 use super::ReplyTx;
@@ -47,34 +47,6 @@ impl LoadError {
     }
 }
 
-/// A request the engine itself saw, in the order it reports its stages.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum EngineRequest {
-    Sent {
-        id: String,
-        method: String,
-        url: String,
-        kind: Option<String>,
-        /// Seconds on the engine's monotonic clock.
-        at: f64,
-    },
-    Response {
-        id: String,
-        status: u16,
-    },
-    Finished {
-        id: String,
-        at: f64,
-        bytes: Option<u64>,
-    },
-    Failed {
-        id: String,
-        at: f64,
-        error: String,
-    },
-}
-
 /// Something one page's engine reported.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Event {
@@ -90,11 +62,12 @@ pub(crate) enum Event {
         allow(dead_code)
     )]
     Console(ConsoleEntry),
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    Network(EngineRequest),
+    /// The page asked for a new window; it loads in this page instead.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    NewWindow(String),
 }
 
-/// Where a console or network entry came from.
+/// Where a console entry came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Source {
@@ -109,15 +82,11 @@ struct Logged<T> {
     #[serde(flatten)]
     entry: T,
     source: Source,
-    #[serde(skip)]
-    request: Option<String>,
-    #[serde(skip)]
-    started: Option<f64>,
 }
 
-/// How many entries of each kind a page keeps.
+/// How many console entries a page keeps.
 const RING: usize = 1000;
-/// How many recent problems a status lists.
+/// How many recent errors a status lists.
 const RECENT: usize = 5;
 
 pub(crate) type Answer = async_channel::Sender<Result<Value, String>>;
@@ -204,7 +173,6 @@ pub(crate) struct PageEvents {
     /// Page-world evaluations waiting for the navigation to settle.
     deferred: Vec<(String, ReplyTx)>,
     console: VecDeque<Logged<ConsoleEntry>>,
-    network: VecDeque<Logged<NetworkEntry>>,
 }
 
 impl PageEvents {
@@ -221,7 +189,6 @@ impl PageEvents {
             calls: HashMap::new(),
             deferred: Vec::new(),
             console: VecDeque::new(),
-            network: VecDeque::new(),
         }
     }
 
@@ -251,7 +218,6 @@ impl PageEvents {
                 self.navigating = true;
                 outcome.changed = self.load_error.take().is_some();
                 self.console.clear();
-                self.network.clear();
             }
             Event::Finished => {
                 self.navigating = false;
@@ -281,11 +247,10 @@ impl PageEvents {
                 Logged {
                     entry,
                     source: Source::Engine,
-                    request: None,
-                    started: None,
                 },
             ),
-            Event::Network(request) => self.engine_request(request),
+            // The lifecycle loads it.
+            Event::NewWindow(_) => {}
         }
         outcome
     }
@@ -328,17 +293,6 @@ impl PageEvents {
                 Logged {
                     entry,
                     source: Source::Script,
-                    request: None,
-                    started: None,
-                },
-            ),
-            Message::Network(entry) => push(
-                &mut self.network,
-                Logged {
-                    entry,
-                    source: Source::Script,
-                    request: None,
-                    started: None,
                 },
             ),
         }
@@ -582,8 +536,8 @@ impl PageEvents {
         }
     }
 
-    /// What `preview_status` adds of the console and the network since the
-    /// page's last navigation.
+    /// What `preview_status` adds of the console since the page's last
+    /// navigation.
     pub(crate) fn summary(&self) -> Value {
         let errors = self
             .console
@@ -592,12 +546,8 @@ impl PageEvents {
         let warnings = self
             .console
             .iter()
-            .filter(|logged| logged.entry.level == "warn" || logged.entry.level == "warning")
+            .filter(|logged| logged.entry.level == "warn")
             .count();
-        let failures = self
-            .network
-            .iter()
-            .filter(|logged| logged.entry.is_failure());
         serde_json::json!({
             "console": {
                 "entries": self.console.len(),
@@ -605,67 +555,7 @@ impl PageEvents {
                 "warnings": warnings,
                 "recentErrors": recent(errors),
             },
-            "network": {
-                "requests": self.network.len(),
-                "failed": failures.clone().count(),
-                "recentFailures": recent(failures),
-            },
         })
-    }
-
-    fn engine_request(&mut self, request: EngineRequest) {
-        let id = match request {
-            EngineRequest::Sent {
-                id,
-                method,
-                url,
-                kind,
-                at,
-            } => {
-                push(
-                    &mut self.network,
-                    Logged {
-                        entry: NetworkEntry {
-                            method,
-                            url,
-                            status: None,
-                            kind,
-                            ms: None,
-                            bytes: None,
-                            failed: None,
-                        },
-                        source: Source::Engine,
-                        request: Some(id),
-                        started: Some(at),
-                    },
-                );
-                return;
-            }
-            EngineRequest::Response { ref id, .. }
-            | EngineRequest::Finished { ref id, .. }
-            | EngineRequest::Failed { ref id, .. } => id.clone(),
-        };
-        let Some(logged) = self
-            .network
-            .iter_mut()
-            .rev()
-            .find(|logged| logged.request.as_deref() == Some(id.as_str()))
-        else {
-            return;
-        };
-        let elapsed = |at: f64| logged.started.map(|started| (at - started) * 1000.);
-        match request {
-            EngineRequest::Response { status, .. } => logged.entry.status = Some(status),
-            EngineRequest::Finished { at, bytes, .. } => {
-                logged.entry.ms = elapsed(at);
-                logged.entry.bytes = bytes;
-            }
-            EngineRequest::Failed { at, error, .. } => {
-                logged.entry.ms = elapsed(at);
-                logged.entry.failed = Some(error);
-            }
-            EngineRequest::Sent { .. } => {}
-        }
     }
 }
 

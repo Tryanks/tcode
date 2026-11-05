@@ -28,7 +28,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::*;
 use webview2_com::{
     CoreWebView2EnvironmentOptions, CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
-    ExecuteScriptCompletedHandler, FocusChangedEventHandler, NewWindowRequestedEventHandler,
+    ExecuteScriptCompletedHandler, FocusChangedEventHandler,
 };
 use windows::Win32::Foundation::{E_POINTER, HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
@@ -215,17 +215,6 @@ impl RawWebView {
             if let Ok(settings) = settings.cast::<ICoreWebView2Settings6>() {
                 settings.SetIsSwipeNavigationEnabled(false)?;
             }
-            // A page asking for a window gets none, as under wry.
-            let mut token = 0i64;
-            webview.add_NewWindowRequested(
-                &NewWindowRequestedEventHandler::create(Box::new(|_, args| {
-                    if let Some(args) = args {
-                        args.SetHandled(true)?;
-                    }
-                    Ok(())
-                })),
-                &mut token,
-            )?;
             controller.SetIsVisible(false)?;
         }
         Ok(Self {

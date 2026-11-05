@@ -1051,8 +1051,8 @@ impl PreviewPanel {
     }
 
     /// The page's URL, title and loading state, with this conversation's
-    /// canvas, the platform's load error and what the console and network
-    /// recorded since the page last navigated.
+    /// canvas, the platform's load error and what the console recorded
+    /// since the page last navigated.
     fn status(&mut self, key: &str, reply: ReplyTx, window: &mut Window, cx: &mut Context<Self>) {
         if !self.ready_or_reply(key, &reply, window, cx) {
             return;
