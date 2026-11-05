@@ -12,6 +12,7 @@ use gpui::{
 use gpui_base::{h_flex, v_flex};
 use tcode_core::settlement::AgentExecution;
 
+use super::RailView;
 use crate::agents_panel::{AgentLine, AgentState, Agents};
 use crate::chat::ChatView;
 use crate::theme::ActiveTheme as _;
@@ -24,20 +25,20 @@ const ROWS: Duration = Duration::from_millis(200);
 /// How long an agent's state word takes to cross-fade to its next.
 const CHANGE: Duration = Duration::from_millis(200);
 
-fn agents(chat: &ChatView, cx: &App) -> Option<Agents> {
-    let lead = chat.session_id.as_deref()?;
-    Some(Agents::of(chat.workspace_store.read(cx), lead, cx)).filter(|agents| !agents.is_empty())
+fn agents(rail: &RailView, cx: &App) -> Option<Agents> {
+    let lead = rail.session_id.as_deref()?;
+    Some(Agents::of(rail.workspace_store.read(cx), lead, cx)).filter(|agents| !agents.is_empty())
 }
 
-/// Whether the card has something to show for `chat`'s thread now.
-pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
-    agents(chat, cx).is_some()
+/// Whether the card has something to show for `rail`'s thread now.
+pub(super) fn present(rail: &RailView, cx: &App) -> bool {
+    agents(rail, cx).is_some()
 }
 
 /// The line the card's header shows beside its title: what
 /// is running or awaits settle, or else how many agents there are.
-pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
-    let agents = agents(chat, cx)?;
+pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
+    let agents = agents(rail, cx)?;
     Some(
         agents
             .summary()
@@ -56,25 +57,25 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
 /// runs or its result once it has one. Agents that leave the list fold away
 /// as they stood.
 pub(super) fn body(
-    chat: &ChatView,
+    rail: &RailView,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
-    let last = chat
+    let last = rail
         .motion
         .keep::<Rc<RefCell<Vec<AgentLine>>>>("rail-agents-lines");
-    if let Some(agents) = agents(chat, cx) {
-        let store = chat.workspace_store.read(cx);
-        let lead = chat.session_id.as_deref().unwrap_or_default();
+    if let Some(agents) = agents(rail, cx) {
+        let store = rail.workspace_store.read(cx);
+        let lead = rail.session_id.as_deref().unwrap_or_default();
         last.replace(agents.with_results(store, lead, cx).lines());
     }
     let lines = last.borrow().clone();
     if lines.is_empty() {
         return None;
     }
-    let store = chat.workspace_store.clone();
-    let host = chat.agent_host(cx);
-    let origins = chat.side_origins().clone();
+    let store = rail.workspace_store.clone();
+    let host = rail.agent_host(cx);
+    let origins = rail.origins.clone();
     let rows = lines
         .into_iter()
         .map(|line| (SharedString::from(line.key.clone()), line));

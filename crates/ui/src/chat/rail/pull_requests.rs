@@ -14,7 +14,7 @@ use tcode_core::pull_request::{
     PullRequestBadgeState, PullRequestKey, PullRequestState, ThreadPullRequestLink,
 };
 
-use crate::chat::ChatView;
+use super::RailView;
 use crate::icon::IconName;
 use crate::sizing::Size;
 use crate::theme::ActiveTheme as _;
@@ -27,18 +27,18 @@ const ROWS: Duration = Duration::from_millis(200);
 /// How long a row's glyph takes to cross-fade to another state's.
 const CHANGE: Duration = Duration::from_millis(200);
 
-fn links<'a>(chat: &ChatView, cx: &'a App) -> impl Iterator<Item = &'a ThreadPullRequestLink> {
-    chat.session_id
+fn links<'a>(rail: &RailView, cx: &'a App) -> impl Iterator<Item = &'a ThreadPullRequestLink> {
+    rail.session_id
         .as_deref()
-        .map(|id| chat.workspace_store.read(cx).pull_requests(id))
+        .map(|id| rail.workspace_store.read(cx).pull_requests(id))
         .unwrap_or_default()
         .iter()
         .filter(|link| link.visible())
 }
 
-/// Whether the card has something to show for `chat`'s thread now.
-pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
-    links(chat, cx).next().is_some()
+/// Whether the card has something to show for `rail`'s thread now.
+pub(super) fn present(rail: &RailView, cx: &App) -> bool {
+    links(rail, cx).next().is_some()
 }
 
 /// One linked pull request as its row shows it.
@@ -80,14 +80,14 @@ impl Line {
 /// for its state, checks and review, opening it in the Pull requests tab on a click. Pull requests that leave
 /// fold away as they stood.
 pub(super) fn body(
-    chat: &ChatView,
+    rail: &RailView,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
-    let last = chat
+    let last = rail
         .motion
         .keep::<Rc<RefCell<Vec<Line>>>>("rail-pull-request-lines");
-    let lines: Vec<Line> = links(chat, cx).map(Line::of).collect();
+    let lines: Vec<Line> = links(rail, cx).map(Line::of).collect();
     if !lines.is_empty() {
         last.replace(lines);
     }
@@ -95,7 +95,7 @@ pub(super) fn body(
     if lines.is_empty() {
         return None;
     }
-    let session = chat.session_id.clone()?;
+    let session = rail.session_id.clone()?;
     let rows = lines
         .into_iter()
         .map(|line| (SharedString::from(line.id()), line));
@@ -118,7 +118,7 @@ fn row(
     line: &Line,
     session: &str,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> AnyElement {
     let number = format!("#{}", line.key.number);
     let title = line
@@ -199,10 +199,10 @@ fn row(
     // The panel this opens replaces the rail, and the keyboard would go with
     // the row.
     .on_mouse_down(gpui::MouseButton::Left, crate::chat::header::stop_press)
-    .on_click(cx.listener(move |chat, _, _, cx| {
+    .on_click(cx.listener(move |rail, _, _, cx| {
         let key = key.clone();
         let session = session.clone();
-        chat.workspace_store.update(cx, |store, cx| {
+        rail.workspace_store.update(cx, |store, cx| {
             crate::pull_requests::open_in_thread(store, &session, key, cx)
         });
     }))

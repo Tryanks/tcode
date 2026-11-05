@@ -32,6 +32,27 @@ use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 
+/// The chat an agent opened from what `chat` draws shows beside its thread
+/// (an agent's row in its timeline or its rail): `chat` while it shows a
+/// thread, or for an agent's chat beside its `lead`, the lead's, where the
+/// agent opened takes its place. None in the compact layout, which shows
+/// one thread at a time.
+pub(crate) fn agent_host(
+    chat: &WeakEntity<ChatView>,
+    lead: Option<&WeakEntity<ChatView>>,
+    shows_thread: bool,
+    window_state: &Entity<crate::window_state::WindowState>,
+    cx: &App,
+) -> Option<Entity<ChatView>> {
+    if window_state.read(cx).compact {
+        return None;
+    }
+    match lead {
+        Some(lead) => lead.upgrade(),
+        None => shows_thread.then(|| chat.upgrade()).flatten(),
+    }
+}
+
 gpui::actions!(tcode_chat, [CloseSide]);
 
 /// The key context of an agent shown beside its lead, where Escape closes it.
@@ -411,6 +432,7 @@ impl ChatView {
         let mut chat = Self::new(workspace_store, window_state, Some(session_id), window, cx);
         chat.timeline
             .update(cx, |timeline, _| timeline.set_lead(lead.clone()));
+        chat.rail.update(cx, |rail, _| rail.set_lead(lead.clone()));
         chat.side_of = Some(SideOf {
             lead,
             lead_session,
@@ -445,20 +467,6 @@ impl ChatView {
                 store.close_right_panel_for(Some(&agent), cx)
             });
             cx.notify();
-        }
-    }
-
-    /// The chat an agent opened from what this view draws shows beside its
-    /// thread: this view, or for an agent beside its lead, the lead's,
-    /// where the agent opened takes its place. None in the compact layout,
-    /// which shows one thread at a time.
-    pub(crate) fn agent_host(&self, cx: &Context<Self>) -> Option<Entity<ChatView>> {
-        if self.window_state.read(cx).compact {
-            return None;
-        }
-        match &self.side_of {
-            Some(of) => of.lead.upgrade(),
-            None => self.session_id.is_some().then(|| cx.entity()),
         }
     }
 
@@ -624,6 +632,7 @@ impl ChatView {
         self.side_origins
             .resolve(origin)
             .or_else(|| self.timeline_origins.resolve(origin))
+            .or_else(|| self.rail_origins.resolve(origin))
     }
 
     /// Show `id` beside the thread, with the keyboard, opened from `origin`
@@ -929,6 +938,7 @@ impl ChatView {
             self.side_origins
                 .resolve(origin)
                 .or_else(|| self.timeline_origins.resolve(origin))
+                .or_else(|| self.rail_origins.resolve(origin))
         });
         if let Some(from) = on_screen {
             expand.from = Some(from);

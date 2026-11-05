@@ -13,7 +13,7 @@ use gpui::{
 use gpui_base::{h_flex, v_flex};
 use tcode_core::session::TimelineEntry;
 
-use crate::chat::ChatView;
+use super::RailView;
 use crate::chat::tools::{Call, desktop};
 use crate::icon::IconName;
 use crate::material::{CARD_INSET, CHAT_RAIL_WIDEST};
@@ -139,44 +139,44 @@ impl Screenshots {
     }
 }
 
-/// Whether the card has something to show for `chat`'s thread now.
-pub(super) fn present(chat: &ChatView, _cx: &App) -> bool {
-    !chat.screen.shots.is_empty()
+/// Whether the card has something to show for `rail`'s thread now.
+pub(super) fn present(rail: &RailView, _cx: &App) -> bool {
+    !rail.screen.shots.is_empty()
 }
 
 /// How tall the picture is drawn, as the rail last scaled it.
-fn scaled(chat: &ChatView) -> Rc<Cell<Option<f32>>> {
-    chat.motion.keep("rail-screen-scaled")
+fn scaled(rail: &RailView) -> Rc<Cell<Option<f32>>> {
+    rail.motion.keep("rail-screen-scaled")
 }
 
 /// The picture, which scales down in a rail too short for every card
 /// before the card scrolls.
-pub(super) fn scale(chat: &ChatView) -> super::stack::Scale {
-    let full = (f32::from(chat.body.width()) - 2. * CARD_INSET) * ASPECT;
+pub(super) fn scale(rail: &RailView) -> super::stack::Scale {
+    let full = (f32::from(rail.layout.body.width()) - 2. * CARD_INSET) * ASPECT;
     super::stack::Scale {
         full,
         min: MIN_PICTURE.min(full),
-        height: scaled(chat),
+        height: scaled(rail),
     }
 }
 
 /// What the card shows below its header, laid out at the rail's width.
 pub(super) fn body(
-    chat: &ChatView,
+    rail: &RailView,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
-    let screen = &chat.screen;
+    let screen = &rail.screen;
     let position = screen.position()?;
     let total = screen.shots.len();
-    let session_id = chat.session_id.clone()?;
+    let session_id = rail.session_id.clone()?;
     // The picture's box is the card's inner width. The cross-fade layers
     // have no size of their own, so the box and the rows beside it take it
     // explicitly.
-    let full = f32::from(chat.body.width()) - 2. * CARD_INSET;
+    let full = f32::from(rail.layout.body.width()) - 2. * CARD_INSET;
     // In a rail too short for every card the picture scales down, its
     // width following its height, before the card scrolls.
-    let height = scaled(chat).get().unwrap_or(full * ASPECT);
+    let height = scaled(rail).get().unwrap_or(full * ASPECT);
     let width = height / ASPECT;
     let preview = |shot: &Shot| {
         crate::store::item_image_preview(
@@ -191,7 +191,7 @@ pub(super) fn body(
     // The screenshot shown gives way to another only once that one has
     // decoded, so a new one cross-fades in over the last rather than over
     // an empty box. With none shown yet, the first fades in over the box.
-    let shown: Rc<RefCell<Option<Shot>>> = chat.motion.keep("rail-screen-shown");
+    let shown: Rc<RefCell<Option<Shot>>> = rail.motion.keep("rail-screen-shown");
     let ready = crate::motion::image_load(&preview(target), window, cx).settled();
     let current = {
         let mut shown = shown.borrow_mut();
@@ -206,7 +206,7 @@ pub(super) fn body(
     };
 
     let muted = cx.theme().muted_foreground;
-    let picture = chat.motion.cross_fade(
+    let picture = rail.motion.cross_fade(
         "rail-screen-picture",
         current.clone(),
         CHANGE,
@@ -215,7 +215,7 @@ pub(super) fn body(
         |shot, window, cx| {
             let source = preview(shot);
             let arrived = crate::motion::image_arrival(
-                crate::motion::Clock::from(&chat.motion),
+                crate::motion::Clock::from(&rail.motion),
                 SharedString::from(format!("rail-screen-{}-{}", shot.entry_id, shot.index)),
                 &source,
                 CHANGE,
@@ -231,7 +231,7 @@ pub(super) fn body(
                 .into_any_element()
         },
     );
-    let caption = chat.motion.cross_fade_part(
+    let caption = rail.motion.cross_fade_part(
         "rail-screen-caption",
         current.clone(),
         CHANGE,
@@ -296,7 +296,7 @@ pub(super) fn body(
     .debug_selector(|| "rail-screen-picture".into())
     .on_click(open);
 
-    let stepper = chat
+    let stepper = rail
         .motion
         .shown(
             "rail-screen-stepper",
@@ -307,7 +307,7 @@ pub(super) fn body(
         )
         .map(|fold| {
             let (position, total) = fold.value;
-            let count = chat.motion.cross_fade_part(
+            let count = rail.motion.cross_fade_part(
                 "rail-screen-count",
                 (position, total),
                 CHANGE,
@@ -333,28 +333,28 @@ pub(super) fn body(
                     .items_center()
                     .child(
                         Button::new("rail-screen-earlier")
-                            .motion(&chat.motion)
+                            .motion(&rail.motion)
                             .ghost()
                             .xsmall()
                             .icon(IconName::ChevronLeft)
                             .disabled(position == 0)
                             .tooltip(crate::tr!("chat.screen_earlier"))
-                            .on_click(cx.listener(|chat, _, _, cx| {
-                                chat.screen.step(-1);
+                            .on_click(cx.listener(|rail, _, _, cx| {
+                                rail.screen.step(-1);
                                 cx.notify();
                             })),
                     )
                     .child(count)
                     .child(
                         Button::new("rail-screen-later")
-                            .motion(&chat.motion)
+                            .motion(&rail.motion)
                             .ghost()
                             .xsmall()
                             .icon(IconName::ChevronRight)
                             .disabled(position + 1 >= total)
                             .tooltip(crate::tr!("chat.screen_later"))
-                            .on_click(cx.listener(|chat, _, _, cx| {
-                                chat.screen.step(1);
+                            .on_click(cx.listener(|rail, _, _, cx| {
+                                rail.screen.step(1);
                                 cx.notify();
                             })),
                     ),
