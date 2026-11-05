@@ -170,6 +170,22 @@ pub(crate) fn drag_region<E: InteractiveElement>(el: E) -> E {
     }
 }
 
+/// Where a page's own close goes on a strip that hosts the caption cluster:
+/// on a row of its own under the strip, a gap below the cluster, its right
+/// end as far from the window edge as on a strip without the cluster — over
+/// the cluster's Close. Beside the cluster it would read as a fourth window
+/// control.
+pub(crate) fn below_caption(close: impl IntoElement, cx: &App) -> gpui::Div {
+    let spacing = &cx.theme().tokens.spacing;
+    div()
+        .flex()
+        .justify_end()
+        .w_full()
+        .pt(spacing.md)
+        .pr(spacing.sm)
+        .child(close)
+}
+
 /// The caption cluster, in Windows order: minimize, maximize/restore, close.
 /// Call only when [`hosts_caption`] is true for the surface being rendered.
 pub(crate) fn caption_controls(window: &Window, cx: &App) -> impl IntoElement {
@@ -233,6 +249,7 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
         );
         div()
             .id(button.id())
+            .debug_selector(move || button.id().into())
             .flex()
             .flex_none()
             .h_full()
