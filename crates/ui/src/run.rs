@@ -57,9 +57,10 @@ pub struct ShellOptions {
     /// The user's first OS-configured language when the platform has a more
     /// authoritative API than `sys_locale`. Desktop leaves this as `None`.
     pub system_locale: Option<String>,
-    /// The platform whose application lifecycle can suspend this client. Its
-    /// foreground transitions wake the connection (see [`lifecycle_wake`]);
-    /// a desktop window is never suspended and leaves this as `None`.
+    /// The platform whose application lifecycle can suspend this client.
+    /// Leaving parks the connection and returning reconnects it (see
+    /// [`lifecycle_wakes`]); a desktop window is never suspended and leaves
+    /// this as `None`.
     pub lifecycle: Option<Rc<dyn gpui::Platform>>,
     pub setup: ShellSetup,
 }
@@ -233,44 +234,13 @@ pub fn run_shell(
         .take()
         .expect("the shell is built while the window opens");
     crate::shell::set_back_target(window, &shell, cx);
-    if let Some(phases) = options.lifecycle.as_deref().map(lifecycle_phases) {
+    if let Some(wakes) = options.lifecycle.as_deref().map(lifecycle_wakes) {
         let shell = shell.downgrade();
         cx.spawn(async move |cx| {
-            enum Event {
-                Phase(gpui::AppLifecyclePhase),
-                ParkDue,
-                Closed,
-            }
-            let mut lifecycle = tcode_client::recovery::Lifecycle::default();
-            loop {
-                let phase = async { phases.recv().await.map_or(Event::Closed, Event::Phase) };
-                let event = match lifecycle.park_in(wall_ms()) {
-                    Some(ms) => {
-                        let due = cx
-                            .background_executor()
-                            .timer(std::time::Duration::from_millis(ms));
-                        futures_lite::future::race(phase, async {
-                            due.await;
-                            Event::ParkDue
-                        })
-                        .await
-                    }
-                    None => phase.await,
-                };
-                let wake = match event {
-                    Event::Phase(phase) => lifecycle_wake(&mut lifecycle, phase, wall_ms()),
-                    // The timer runs on the monotonic clock, which stops while
-                    // the device sleeps; the absence is measured on the wall clock.
-                    Event::ParkDue => lifecycle
-                        .park_in(wall_ms())
-                        .is_some_and(|ms| ms == 0)
-                        .then(|| lifecycle.park()),
-                    Event::Closed => break,
-                };
-                if let Some(wake) = wake
-                    && shell
-                        .update(cx, |shell, _| shell.wake_connection(wake))
-                        .is_err()
+            while let Ok(wake) = wakes.recv().await {
+                if shell
+                    .update(cx, |shell, _| shell.wake_connection(wake))
+                    .is_err()
                 {
                     break;
                 }
@@ -286,46 +256,38 @@ pub fn run_shell(
     (window, shell)
 }
 
-/// Application recovery policy for a client the OS can suspend: every
-/// foreground transition probes or reconnects the attachment once, depending
-/// on how long the client was away, and an absence long enough to reconnect
-/// on return parks the link meanwhile. Android does not suspend a stopped
-/// app, which would otherwise keep its radio and CPU busy with a link it
-/// drops on return; iOS suspends first, so its park, if any, lands just
-/// before the return's reconnect.
-fn lifecycle_phases(
+/// Application recovery policy for a client the OS can suspend: leaving
+/// parks the attachment's link, which closes it and the device's endpoint at
+/// once, and the return reconnects it and syncs in full. Android keeps a
+/// stopped app running and iOS suspends it; neither keeps anything for the
+/// return.
+fn lifecycle_wakes(
     platform: &dyn gpui::Platform,
-) -> async_channel::Receiver<gpui::AppLifecyclePhase> {
+) -> async_channel::Receiver<tcode_client::recovery::Wake> {
     let (sender, receiver) = async_channel::unbounded();
+    let mut away = false;
     platform.on_app_lifecycle(Box::new(move |phase| {
-        let _ = sender.try_send(phase);
+        if let Some(wake) = lifecycle_wake(&mut away, phase) {
+            let _ = sender.try_send(wake);
+        }
     }));
     receiver
 }
 
-/// Wall time includes device sleep. A backward clock correction saturates
-/// to a short absence and still gets a bounded probe.
-fn wall_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
+/// Once per absence each way: Foreground followed by Active reconnects once.
 fn lifecycle_wake(
-    lifecycle: &mut tcode_client::recovery::Lifecycle,
+    away: &mut bool,
     phase: gpui::AppLifecyclePhase,
-    now_ms: u64,
 ) -> Option<tcode_client::recovery::Wake> {
+    use tcode_client::recovery::Wake;
     match phase {
         gpui::AppLifecyclePhase::Background => {
-            lifecycle.background(now_ms);
-            None
+            (!std::mem::replace(away, true)).then_some(Wake::Park)
         }
         gpui::AppLifecyclePhase::Foreground | gpui::AppLifecyclePhase::Active => {
-            lifecycle.foreground(now_ms)
+            std::mem::take(away).then_some(Wake::Reconnect)
         }
-        _ => None,
+        gpui::AppLifecyclePhase::Inactive | gpui::AppLifecyclePhase::Disconnected => None,
     }
 }
 
@@ -334,23 +296,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_lifecycle_phase_hook_probes_or_reconnects_once() {
+    fn leaving_parks_the_link_once_and_the_return_reconnects_it_once() {
         use gpui::AppLifecyclePhase as Phase;
-        use tcode_client::recovery::{Lifecycle, Wake};
-        let mut lifecycle = Lifecycle::default();
-        assert_eq!(lifecycle_wake(&mut lifecycle, Phase::Background, 0), None);
+        use tcode_client::recovery::Wake;
+        let mut away = false;
+        assert_eq!(lifecycle_wake(&mut away, Phase::Active), None);
+        assert_eq!(lifecycle_wake(&mut away, Phase::Inactive), None);
         assert_eq!(
-            lifecycle_wake(&mut lifecycle, Phase::Foreground, 9_999),
-            Some(Wake::Probe)
+            lifecycle_wake(&mut away, Phase::Background),
+            Some(Wake::Park)
         );
-        assert_eq!(lifecycle_wake(&mut lifecycle, Phase::Active, 10_000), None);
+        assert_eq!(lifecycle_wake(&mut away, Phase::Background), None);
         assert_eq!(
-            lifecycle_wake(&mut lifecycle, Phase::Background, 20_000),
-            None
-        );
-        assert_eq!(
-            lifecycle_wake(&mut lifecycle, Phase::Active, 30_000),
+            lifecycle_wake(&mut away, Phase::Foreground),
             Some(Wake::Reconnect)
         );
+        assert_eq!(lifecycle_wake(&mut away, Phase::Active), None);
     }
 }

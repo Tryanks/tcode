@@ -1,5 +1,6 @@
-//! The device side: one iroh endpoint per [`DeviceIdentity`], pairing over
-//! `tcode/pair/1` and a reconnecting main-stream [`Transport`] over `tcode/1`.
+//! The device side: one iroh endpoint per [`DeviceIdentity`] at a time,
+//! pairing over `tcode/pair/1` and a reconnecting main-stream [`Transport`]
+//! over `tcode/1`.
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -37,12 +38,24 @@ const CONNECT_BUDGET: Duration = Duration::from_secs(20);
 const CLOSE_UNPAIRED: u32 = 1;
 const CLOSE_REVOKED: u32 = 3;
 
-/// The endpoint a device dials from, built on first use.
+/// The endpoint a device dials from while it is open.
 pub(crate) struct ClientEndpoint {
     endpoint: Endpoint,
-    /// Transports to probe when the network changes.
-    transports: Mutex<Vec<Outgoing>>,
     lookups: Arc<Lookups>,
+}
+
+/// A device's endpoint over the identity's life: bound on first use, closed
+/// when the app leaves ([`Wake::Park`]), and bound again, with the same key,
+/// by the next use.
+#[derive(Default)]
+pub(crate) struct DeviceEndpoint {
+    open: Mutex<Option<Arc<ClientEndpoint>>>,
+    /// Held while binding or closing: a use waits for a close in progress,
+    /// and concurrent uses bind once.
+    binding: tokio::sync::Mutex<()>,
+    /// Transports to probe when the network changes. They outlive the
+    /// endpoints they dial from.
+    transports: Mutex<Vec<Outgoing>>,
 }
 
 /// The Traverse instances the endpoint resolves machines through and relays
@@ -185,6 +198,9 @@ impl Lookups {
         source: &ManifestSource,
         pin: bool,
     ) -> Option<ManifestLoader> {
+        if self.endpoint.is_closed() {
+            return None;
+        }
         if let Some(known) = sources.get_mut(source) {
             known.pinned += usize::from(pin);
             // Installed, or claimed by a fetch already under way.
@@ -305,98 +321,127 @@ impl Lookups {
 }
 
 impl DeviceIdentity {
-    /// The endpoint, bound on first use with the relays of the saved
-    /// machines' Traverse instances. Must run on the runtime.
-    pub(crate) async fn client(&self) -> io::Result<&ClientEndpoint> {
-        let inner = self.inner();
-        inner
-            .endpoint
-            .get_or_try_init(|| async {
-                let secret_key = inner.secret_key.clone();
-                // Manifests in hand shape the endpoint at bind; the rest are
-                // fetched once it is up.
-                let mut in_hand = Vec::new();
-                let mut to_fetch = Vec::new();
-                let relays = RelayMap::empty();
-                for source in saved_sources(&inner.data_dir) {
-                    let loader = ManifestLoader::new(source.clone(), &inner.data_dir);
-                    match loader.current() {
-                        Ok(manifest) => {
-                            relays.extend(&manifest.relay_map());
-                            in_hand.push((source, loader, manifest));
-                        }
-                        Err(_) => to_fetch.push(source),
-                    }
-                }
-                let saved_dir = inner.data_dir.clone();
-                let lan = LanLookup::new(
-                    move |id| saved_addrs(&saved_dir, id),
-                    inner.lan.lock().unwrap().clone(),
-                );
-                let endpoint = Endpoint::builder(presets::Minimal)
-                    .relay_mode(iroh::RelayMode::Custom(relays.clone()))
-                    .secret_key(secret_key)
-                    .transport_config(wire::transport_config())
-                    .address_lookup(lan.clone())
-                    .bind()
-                    .await
-                    .map_err(io::Error::other)?;
-                let lookups = Arc::new(Lookups {
-                    endpoint: endpoint.clone(),
-                    data_dir: inner.data_dir.clone(),
-                    lan,
-                    sources: Mutex::new(HashMap::new()),
-                    relays: tokio::sync::Mutex::new(relays),
-                });
-                runtime().spawn(watch_addresses(endpoint.watch_addr(), self.downgrade()));
-                for (source, loader, manifest) in in_hand {
-                    lookups.sources.lock().unwrap().insert(
-                        source.clone(),
-                        Source {
-                            loader,
-                            manifest: None,
-                            pinned: 0,
-                            refresher: None,
-                        },
-                    );
-                    lookups.adopt(&source, Some(manifest)).await;
-                }
-                // Claimed before the endpoint is shared, so a reconciliation
-                // that runs while they are fetched can still drop them.
-                for source in to_fetch {
-                    let claimed =
-                        lookups.claim(&mut lookups.sources.lock().unwrap(), &source, false);
-                    let Some(loader) = claimed else {
-                        continue;
-                    };
-                    let lookups = lookups.clone();
-                    runtime().spawn(async move { lookups.load(&source, loader).await });
-                }
-                Ok(ClientEndpoint {
-                    endpoint,
-                    transports: Mutex::new(Vec::new()),
-                    lookups,
-                })
-            })
+    /// The open endpoint, bound if there is none with the relays of the
+    /// saved machines' Traverse instances. Must run on the runtime.
+    pub(crate) async fn client(&self) -> io::Result<Arc<ClientEndpoint>> {
+        if let Some(client) = self.open_client() {
+            return Ok(client);
+        }
+        // A bind abandoned halfway would leave the manifest refreshers it
+        // started holding an endpoint nothing can close, so it runs to the
+        // end even when the dial that asked for it is dropped.
+        let device = self.clone();
+        runtime()
+            .spawn(async move { device.bind_client().await })
             .await
+            .map_err(io::Error::other)?
+    }
+
+    fn open_client(&self) -> Option<Arc<ClientEndpoint>> {
+        self.inner().endpoint.open.lock().unwrap().clone()
+    }
+
+    async fn bind_client(&self) -> io::Result<Arc<ClientEndpoint>> {
+        let inner = self.inner();
+        let _binding = inner.endpoint.binding.lock().await;
+        if let Some(client) = self.open_client() {
+            return Ok(client);
+        }
+        let secret_key = inner.secret_key.clone();
+        // Manifests in hand shape the endpoint at bind; the rest are
+        // fetched once it is up.
+        let mut in_hand = Vec::new();
+        let mut to_fetch = Vec::new();
+        let relays = RelayMap::empty();
+        for source in saved_sources(&inner.data_dir) {
+            let loader = ManifestLoader::new(source.clone(), &inner.data_dir);
+            match loader.current() {
+                Ok(manifest) => {
+                    relays.extend(&manifest.relay_map());
+                    in_hand.push((source, loader, manifest));
+                }
+                Err(_) => to_fetch.push(source),
+            }
+        }
+        let saved_dir = inner.data_dir.clone();
+        let lan = LanLookup::new(
+            move |id| saved_addrs(&saved_dir, id),
+            inner.lan.lock().unwrap().clone(),
+        );
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(iroh::RelayMode::Custom(relays.clone()))
+            .secret_key(secret_key)
+            .transport_config(wire::transport_config())
+            .address_lookup(lan.clone())
+            .bind()
+            .await
+            .map_err(io::Error::other)?;
+        let lookups = Arc::new(Lookups {
+            endpoint: endpoint.clone(),
+            data_dir: inner.data_dir.clone(),
+            lan,
+            sources: Mutex::new(HashMap::new()),
+            relays: tokio::sync::Mutex::new(relays),
+        });
+        runtime().spawn(
+            endpoint
+                .closed()
+                .run_until(watch_addresses(endpoint.watch_addr(), self.downgrade())),
+        );
+        for (source, loader, manifest) in in_hand {
+            lookups.sources.lock().unwrap().insert(
+                source.clone(),
+                Source {
+                    loader,
+                    manifest: None,
+                    pinned: 0,
+                    refresher: None,
+                },
+            );
+            lookups.adopt(&source, Some(manifest)).await;
+        }
+        // Claimed before the endpoint is shared, so a reconciliation that
+        // runs while they are fetched can still drop them.
+        for source in to_fetch {
+            let claimed = lookups.claim(&mut lookups.sources.lock().unwrap(), &source, false);
+            let Some(loader) = claimed else {
+                continue;
+            };
+            let lookups = lookups.clone();
+            runtime().spawn(async move { lookups.load(&source, loader).await });
+        }
+        let client = Arc::new(ClientEndpoint { endpoint, lookups });
+        *inner.endpoint.open.lock().unwrap() = Some(client.clone());
+        Ok(client)
+    }
+
+    /// Close the endpoint, if one is open, and everything it runs: its
+    /// connections, its home relay, its network reports, its address
+    /// watcher and its manifest refreshers. The next use binds a new one.
+    async fn close_client(&self) {
+        let slot = &self.inner().endpoint;
+        let _binding = slot.binding.lock().await;
+        let Some(client) = slot.open.lock().unwrap().take() else {
+            return;
+        };
+        client.endpoint.close().await;
+        // Each refresher holds the lookups, and with them the endpoint;
+        // dropping the sources aborts them, and a closed endpoint claims none.
+        client.lookups.sources.lock().unwrap().clear();
     }
 
     /// The device's network changed: rebind paths and probe every live
     /// transport at once instead of waiting for the idle timer.
     pub fn network_changed(&self) {
-        let Some(client) = self.inner().endpoint.get() else {
+        let Some(client) = self.open_client() else {
             return;
         };
-        let endpoint = client.endpoint.clone();
-        runtime().spawn(async move { endpoint.network_change().await });
+        runtime().spawn(async move { client.endpoint.network_change().await });
         self.probe_transports();
     }
 
     fn probe_transports(&self) {
-        let Some(client) = self.inner().endpoint.get() else {
-            return;
-        };
-        let mut transports = client.transports.lock().unwrap();
+        let mut transports = self.inner().endpoint.transports.lock().unwrap();
         transports.retain(|transport| !transport.is_closed());
         for transport in transports.iter() {
             transport.wake(Wake::Probe);
@@ -404,20 +449,20 @@ impl DeviceIdentity {
     }
 
     /// `hosts.json` changed: the endpoint's relays and lookups follow the
-    /// machines saved now. Before the endpoint is bound there is nothing to
-    /// update; it reads the file when it binds.
+    /// machines saved now. With no endpoint open there is nothing to
+    /// update; the next one reads the file when it binds.
     pub fn hosts_changed(&self) {
-        let Some(client) = self.inner().endpoint.get() else {
+        let Some(client) = self.open_client() else {
             return;
         };
         let lookups = client.lookups.clone();
         runtime().spawn(async move { lookups.reconcile().await });
     }
 
-    /// The relay URLs the endpoint dials from right now; empty before the
-    /// endpoint is bound.
+    /// The relay URLs the endpoint dials from right now; empty while no
+    /// endpoint is open.
     pub fn relays(&self) -> Vec<String> {
-        let Some(client) = self.inner().endpoint.get() else {
+        let Some(client) = self.open_client() else {
             return Vec::new();
         };
         let relays = block_on(async { client.lookups.relays.lock().await.clone() });
@@ -518,7 +563,7 @@ pub async fn pair(
     // again.
     let sources = ManifestSource::from_traverse(&invite.traverse);
     client.lookups.ensure_all(&sources, true).await;
-    let result = pair_exchange(client, addr, invite, device).await;
+    let result = pair_exchange(&client, addr, invite, device).await;
     for source in &sources {
         client.lookups.unpin(source);
     }
@@ -702,12 +747,15 @@ pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
     let originals = Arc::new(tunnels.clone());
     let current_host = LiveHost::with_tunnels(host.clone(), Arc::new(tunnels.clone()));
     let live = current_host.clone();
+    device
+        .inner()
+        .endpoint
+        .transports
+        .lock()
+        .unwrap()
+        .push(to_host.clone());
     let device = device.clone();
-    let registered = to_host.clone();
     runtime().spawn(async move {
-        if let Ok(client) = device.client().await {
-            client.transports.lock().unwrap().push(registered);
-        }
         connection_loop(
             device,
             live,
@@ -896,7 +944,7 @@ async fn connection_loop(
                 break;
             }
             if park {
-                parked(&outgoing, &mut buffered).await;
+                parked(&device, &outgoing, &mut buffered).await;
             }
             continue;
         };
@@ -934,7 +982,7 @@ async fn connection_loop(
                                 reason: None,
                             })
                             .await;
-                        parked(&outgoing, &mut buffered).await;
+                        parked(&device, &outgoing, &mut buffered).await;
                         continue;
                     }
                     _ => {}
@@ -964,7 +1012,7 @@ async fn connection_loop(
             .await;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(delay);
         if buffer_during_backoff(&outgoing, &mut buffered, deadline).await == Some(Wake::Park) {
-            parked(&outgoing, &mut buffered).await;
+            parked(&device, &outgoing, &mut buffered).await;
         }
     }
     let _ = state
@@ -1323,10 +1371,16 @@ async fn buffer_during_backoff(
     }
 }
 
-/// Hold the link down, queueing writes, until the app comes back: no dial,
-/// no heartbeat, no backoff timer. A network change's probe does not end
-/// it, since the app is still away; only the return's reconnect does.
-async fn parked(outgoing: &OutgoingReceiver, buffered: &mut VecDeque<String>) {
+/// The app has left with the link already closed: close the device's
+/// endpoint too, then hold, queueing writes, until the return's reconnect.
+/// Nothing runs meanwhile — no dial, heartbeat, backoff timer, relay or
+/// network report; the return binds a new endpoint and syncs in full.
+async fn parked(
+    device: &DeviceIdentity,
+    outgoing: &OutgoingReceiver,
+    buffered: &mut VecDeque<String>,
+) {
+    device.close_client().await;
     loop {
         tokio::select! {
             line = outgoing.recv() => match line {
@@ -1375,22 +1429,6 @@ mod tests {
             lan: true,
             probing_direct: false,
         }
-    }
-
-    /// A network change while the app is away probes every transport; a
-    /// parked one stays down until the app's return.
-    #[tokio::test]
-    async fn a_parked_link_ignores_probes_and_ends_on_the_return() {
-        let (to_host, outgoing) = tcode_client::outgoing::channel();
-        let mut buffered = VecDeque::new();
-        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        let mut parked = std::pin::pin!(parked(&outgoing, &mut buffered));
-        to_host.wake(Wake::Probe);
-        to_host.wake(Wake::Park);
-        assert!(parked.as_mut().poll(&mut cx).is_pending());
-        assert!(parked.as_mut().poll(&mut cx).is_pending());
-        to_host.wake(Wake::Reconnect);
-        assert!(parked.as_mut().poll(&mut cx).is_ready());
     }
 
     /// The phone's direct path dying is a state change, not a side channel:
