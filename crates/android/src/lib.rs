@@ -15,16 +15,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
     use tcode_client::host::ClientHost;
     use tcode_ui::{ShellOptions, ShellSetup};
 
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Debug)
-            .with_filter(
-                android_logger::FilterBuilder::new()
-                    .parse("info,tcode_ui::store::history=debug")
-                    .build(),
-            )
-            .with_tag("Tcode-GPUI"),
-    );
+    logger::init();
     std::panic::set_hook(Box::new(|panic| {
         log::error!("GPUI Android panic: {panic}");
         log::error!("{}", std::backtrace::Backtrace::force_capture());
@@ -120,6 +111,66 @@ pub fn android_main(app: android_activity::AndroidApp) {
             })
             .detach();
         });
+}
+
+#[cfg(target_os = "android")]
+mod logger {
+    use log::{Log, Metadata, Record};
+    use std::sync::OnceLock;
+
+    /// android-activity 0.6.1's `poll_events` logs this at error level each
+    /// time `ALooper_pollOnce` returns `ALOOPER_POLL_CALLBACK`, which it
+    /// takes for impossible; the looper returns it after running any
+    /// callback, so gpui-android's AChoreographer path gets it every vsync.
+    const POLL_CALLBACK_SOURCE: &str = "android_activity::native_activity";
+    const POLL_CALLBACK_MESSAGE: &str =
+        "Spurious ALOOPER_POLL_CALLBACK from ALooper_pollOnce() (ignored)";
+
+    struct Logger(OnceLock<android_logger::AndroidLogger>);
+
+    static LOGGER: Logger = Logger(OnceLock::new());
+
+    impl Logger {
+        fn inner(&self) -> &android_logger::AndroidLogger {
+            self.0.get_or_init(|| {
+                android_logger::AndroidLogger::new(
+                    android_logger::Config::default()
+                        .with_max_level(log::LevelFilter::Debug)
+                        .with_filter(
+                            android_logger::FilterBuilder::new()
+                                .parse("info,tcode_ui::store::history=debug")
+                                .build(),
+                        )
+                        .with_tag("Tcode-GPUI"),
+                )
+            })
+        }
+    }
+
+    impl Log for Logger {
+        fn enabled(&self, metadata: &Metadata) -> bool {
+            self.inner().enabled(metadata)
+        }
+
+        fn log(&self, record: &Record) {
+            if record.target() == POLL_CALLBACK_SOURCE
+                && record.args().as_str() == Some(POLL_CALLBACK_MESSAGE)
+            {
+                return;
+            }
+            self.inner().log(record);
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Each activity start runs `android_main` again in the same process;
+    /// only the first installs the logger.
+    pub(super) fn init() {
+        if log::set_logger(&LOGGER).is_ok() {
+            log::set_max_level(log::LevelFilter::Debug);
+        }
+    }
 }
 
 #[cfg(target_os = "android")]

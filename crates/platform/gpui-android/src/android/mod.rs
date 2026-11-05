@@ -3,6 +3,7 @@ mod display;
 mod host;
 mod platform;
 mod text;
+mod vsync;
 pub mod webview;
 mod window;
 
