@@ -52,10 +52,12 @@ impl Ripple {
 
 /// One click-through panel covering the display the cursor is on. The pointer
 /// and its ripples are layers on it, so a drag's ripples stay where they were
-/// emitted while the pointer moves on.
+/// emitted while the pointer moves on. Everything it draws sits in `feedback`,
+/// the one layer the cursor's fade is applied to, so no element can stay
+/// visible while the target window does not show the cursor.
 pub(super) struct CursorUi {
     window: Id,
-    root: Id,
+    feedback: Id,
     pointer: Id,
     glow: Id,
     accent: Id,
@@ -118,11 +120,12 @@ impl CursorUi {
         let black = send_id(class(c"NSColor")?, c"blackColor")?;
         let disc = rect(0.0, 0.0, POINTER_RADIUS * 2.0, POINTER_RADIUS * 2.0);
 
+        let feedback = send_id(class(c"CALayer")?, c"layer")?;
         let pointer = send_id(class(c"CALayer")?, c"layer")?;
         let glow = send_id(class(c"CAShapeLayer")?, c"layer")?;
         let body = send_id(class(c"CAShapeLayer")?, c"layer")?;
-        let configured = send_void_rect(pointer, c"setBounds:", disc)
-            && send_void_f32(pointer, c"setOpacity:", 0.0)
+        let configured = send_void_f32(feedback, c"setOpacity:", 0.0)
+            && send_void_rect(pointer, c"setBounds:", disc)
             && send_void_rect(glow, c"setFrame:", disc)
             && send_void_id(
                 glow,
@@ -150,14 +153,15 @@ impl CursorUi {
             && send_void_size(body, c"setShadowOffset:", CGSize::new(0.0, -1.0))
             && send_void_id(pointer, c"addSublayer:", glow)
             && send_void_id(pointer, c"addSublayer:", body)
-            && send_void_id(root, c"addSublayer:", pointer);
+            && send_void_id(feedback, c"addSublayer:", pointer)
+            && send_void_id(root, c"addSublayer:", feedback);
         if !configured {
             return None;
         }
 
         Some(Self {
             window,
-            root,
+            feedback,
             pointer,
             glow,
             accent,
@@ -226,11 +230,11 @@ impl CursorUi {
         let fading = self.fade.step(step, shown);
         if self.fade.opacity() != before {
             without_implicit_animation(|| {
-                let _ = send_void_f32(self.pointer, c"setOpacity:", self.fade.opacity() as f32);
+                let _ = send_void_f32(self.feedback, c"setOpacity:", self.fade.opacity() as f32);
             });
         }
         let rippling = self.ripples.iter().any(|(_, until)| now < *until);
-        let needed = shown || self.fade.opacity() > 0.0 || rippling;
+        let needed = shown || self.fade.opacity() > 0.0;
         if needed && !self.ordered {
             let _ = send_void(self.window, c"orderFrontRegardless");
             self.ordered = true;
@@ -320,7 +324,7 @@ impl CursorUi {
         let layer = match self.ripples.iter().position(|(_, until)| now >= *until) {
             Some(free) => Some(free),
             None if self.ripples.len() < RIPPLE_POOL => new_ripple(self.accent).map(|layer| {
-                let _ = send_void_id(self.root, c"addSublayer:", layer);
+                let _ = send_void_id(self.feedback, c"addSublayer:", layer);
                 self.ripples.push((layer, now));
                 self.ripples.len() - 1
             }),
@@ -449,7 +453,10 @@ fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
 pub(super) fn verify_native() -> u32 {
     use super::ffi::{layer_position, native_panel_state, window_shows_point};
     fn pump(cursor: &mut CursorUi) {
-        let end = Instant::now() + Duration::from_millis(2_000);
+        pump_checking(cursor, Duration::from_millis(2_000), |_| {});
+    }
+    fn pump_checking(cursor: &mut CursorUi, period: Duration, check: impl Fn(&CursorUi)) {
+        let end = Instant::now() + period;
         while Instant::now() < end {
             // SAFETY: this runner owns the process main thread and its run loop.
             unsafe {
@@ -460,6 +467,7 @@ pub(super) fn verify_native() -> u32 {
                 );
             }
             cursor.advance(Instant::now());
+            check(cursor);
         }
     }
     fn assert_moved(cursor: &CursorUi, initial: CGPoint, by: (f64, f64), what: &str) {
@@ -503,6 +511,16 @@ pub(super) fn verify_native() -> u32 {
         !native_panel_state(cursor.window).1,
         "a hidden cursor fades out and leaves the screen"
     );
+    cursor.push(
+        Instant::now(),
+        vec![Waypoint::new((400.0, 300.0), Some(Effect::Click))],
+    );
+    pump_checking(&mut cursor, Duration::from_millis(2_000), |cursor| {
+        assert!(
+            !native_panel_state(cursor.window).1,
+            "a click on a target that does not show the cursor draws no ripple either"
+        );
+    });
     cursor.set_shown(true);
     cursor.push(
         Instant::now(),
