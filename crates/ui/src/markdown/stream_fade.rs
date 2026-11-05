@@ -324,6 +324,36 @@ impl FadeFrame {
     }
 }
 
+/// `fades` widened to whole characters of `text`, the run they paint, a
+/// character two fades share taking the fainter. A formula is laid out anew
+/// as its source grows, but its words were cut from the glyphs of its last
+/// layout (`FormulaSelection::text`), so a fade can end inside the UTF-8 of
+/// a glyph drawn now, and `StyledText` panics on a run that splits one.
+pub(super) fn on_chars(text: &str, fades: Fades) -> Fades {
+    let mut whole: Fades = Vec::with_capacity(fades.len());
+    for (range, fade) in fades {
+        let mut start = range.start.min(text.len());
+        while !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = range.end.min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        if start == end {
+            continue;
+        }
+        match whole.last_mut() {
+            Some((last, last_fade)) if start < last.end => {
+                last.end = last.end.max(end);
+                *last_fade = last_fade.max(fade);
+            }
+            _ => whole.push((start..end, fade)),
+        }
+    }
+    whole
+}
+
 /// `highlights` with `fades` layered over them. GPUI fades only the glyph
 /// colour, so an explicit background or decoration colour fades here with
 /// its text, or an inline code chip or a strikethrough would show first.

@@ -266,7 +266,10 @@ impl Element for Inline {
         let fades = self
             .origin
             .as_ref()
-            .map(|origin| self.view.read(cx).fades(origin, self.text.len()))
+            .map(|origin| {
+                let fades = self.view.read(cx).fades(origin, self.text.len());
+                super::stream_fade::on_chars(&self.text, fades)
+            })
             .unwrap_or_default();
         let faded;
         let highlights = if fades.is_empty() {

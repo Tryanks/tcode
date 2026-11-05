@@ -1156,6 +1156,19 @@ mod tests {
     /// A code block streaming in fades in what each append adds and
     /// nothing it held already, however long the block: the rest of a line
     /// being written, then the lines after it.
+    /// A formula streaming into a reply is laid out anew as its source
+    /// grows, while the words fading in were measured on its last layout.
+    #[gpui::test]
+    fn a_formula_streaming_in_draws_while_its_words_fade(cx: &mut TestAppContext) {
+        let (view, cx) = open("", cx);
+        let markdown = view.read_with(cx, |root, _| root.markdown.clone());
+        markdown.update(cx, |state, cx| state.set_streaming(true, cx));
+        for piece in ["Tower: $e^{e^{e^{x}}}", "$ and $\\sqrt{1+x}$ done.\n"] {
+            markdown.update(cx, |state, cx| state.push_str(piece, cx));
+            crate::test_frames::draw(cx);
+        }
+    }
+
     #[gpui::test]
     fn a_streaming_code_block_fades_in_only_what_an_append_adds(cx: &mut TestAppContext) {
         let (view, cx) = open("", cx);
