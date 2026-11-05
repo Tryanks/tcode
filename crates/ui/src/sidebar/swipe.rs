@@ -1,5 +1,9 @@
 //! Swiping a phone thread row left settles it, or makes a settled one active
-//! again: the long-press menu's Settle / Unsettle, one gesture away.
+//! again: the long-press menu's Settle / Unsettle, one gesture away. A thread
+//! whose turn runs, or that waits on the user, has neither: its row follows
+//! the finger all the same, shows what the thread is busy with, and comes
+//! back. What the row shows follows the thread while the finger is down, and
+//! the release does what it shows.
 //!
 //! gpui-base has no swipe-action row, so the row claims GPUI's touch pan
 //! itself. GPUI locks a pan to one axis and reports it as `ScrollEvent`s
@@ -159,6 +163,8 @@ struct Drag {
     reach: Pixels,
     moved: Pixels,
     speed: FingerSpeed,
+    /// Whether the last haptic said the release acts.
+    felt: bool,
 }
 
 impl Drag {
@@ -172,6 +178,7 @@ impl Drag {
             reach: action_width(width).max(offset).min(width),
             moved: px(0.),
             speed: FingerSpeed::default(),
+            felt: false,
         }
     }
 
@@ -272,8 +279,8 @@ enum Motion {
 pub(super) struct RowSwipe {
     session_id: String,
     width: Pixels,
-    /// Whether the thread was settled when the row was taken up.
-    settled: bool,
+    /// What the release does, as the row shows it: nothing for a busy thread.
+    action: Option<DragAction>,
     /// Where the pan or the touch on the row began, while it lasts. A swipe
     /// ended under a finger keeps it, so that the rest of the pan is spent.
     finger: Option<Point<Pixels>>,
@@ -314,6 +321,10 @@ impl RowSwipe {
         matches!(self.motion, Motion::Off { sent: true, .. })
     }
 
+    fn unsettles(&self) -> bool {
+        self.action == Some(DragAction::Unsettle)
+    }
+
     fn send_home(&mut self, now: Instant, cx: &App) {
         self.motion = Motion::Home(Flight::new(self.state(now), 0., self.width, now, cx));
     }
@@ -321,24 +332,54 @@ impl RowSwipe {
     fn take(&mut self, finger: Point<Pixels>, now: Instant) {
         let offset = self.offset(now);
         self.finger = Some(finger);
-        self.motion = Motion::Dragged(Drag::from(offset, self.width));
+        let mut drag = Drag::from(offset, self.width);
+        drag.felt = self.action.is_some() && drag.offset(self.width) >= action_width(self.width);
+        self.motion = Motion::Dragged(drag);
     }
 
     /// The finger is `moved` leftward of where it took the row; a report the
-    /// finger's speed counts `sampled`. Passing the point at which the release
-    /// acts, either way, is felt.
+    /// finger's speed counts `sampled`.
     fn follow(&mut self, moved: Pixels, sampled: bool, now: Instant) {
-        let width = self.width;
         let Motion::Dragged(drag) = &mut self.motion else {
             return;
         };
-        let was_past = drag.offset(width) >= action_width(width);
         drag.moved = moved;
         if sampled {
             drag.speed.push(now, moved);
         }
-        if (drag.offset(width) >= action_width(width)) != was_past {
+        self.feel();
+    }
+
+    /// The thread now shows `action`. A row on its way off for another is
+    /// called back.
+    fn shows(&mut self, action: Option<DragAction>, now: Instant, cx: &App) {
+        let was = std::mem::replace(&mut self.action, action);
+        match self.motion {
+            Motion::Off { sent: false, .. } if was != action => self.send_home(now, cx),
+            Motion::Dragged(_) => self.feel(),
+            _ => {}
+        }
+    }
+
+    /// The release coming to act is felt, whether the finger takes the row
+    /// past the point at which it acts or the thread lets it act there, and
+    /// so is the finger taking it back. A thread turning busy under the
+    /// finger is only seen, so one flipping under a still finger is felt
+    /// once.
+    fn feel(&mut self) {
+        let (width, acts) = (self.width, self.action.is_some());
+        let Motion::Dragged(drag) = &mut self.motion else {
+            return;
+        };
+        let past = drag.offset(width) >= action_width(width);
+        if past && acts && !drag.felt {
             crate::haptics::threshold();
+            drag.felt = true;
+        } else if !past && drag.felt {
+            if acts {
+                crate::haptics::threshold();
+            }
+            drag.felt = false;
         }
     }
 
@@ -399,67 +440,132 @@ impl RowSwipes {
 #[derive(Clone)]
 struct SwipeRow {
     id: String,
-    settled: bool,
+    action: Option<DragAction>,
     can_swipe: bool,
     bounds: Bounds<Pixels>,
 }
 
-/// The long-press menu's rule for enabling Settle / Unsettle.
 fn can_swipe(row: &CompactThreadRow, renaming: Option<&str>) -> bool {
     renaming != Some(row.meta.id.as_str())
-        && (row.meta.is_settled() || (!row.working && !row.state.waiting()))
+}
+
+/// The long-press menu's rule for enabling Settle / Unsettle.
+fn action(row: &CompactThreadRow) -> Option<DragAction> {
+    if row.meta.is_settled() {
+        Some(DragAction::Unsettle)
+    } else if row.working || row.state.waiting() {
+        None
+    } else {
+        Some(DragAction::Settle)
+    }
+}
+
+/// What a swiped row uncovers: what its release does, or what keeps its
+/// thread from anything, as the row's status line words it.
+#[derive(Clone, PartialEq)]
+enum Uncovered {
+    Action(DragAction),
+    Busy(SharedString, gpui::Hsla),
+}
+
+impl Uncovered {
+    fn of(row: &CompactThreadRow, cx: &App) -> Self {
+        action(row).map_or_else(
+            || {
+                let (label, color) = busy_status(&row.state, cx);
+                Self::Busy(label.into(), color)
+            },
+            Self::Action,
+        )
+    }
+
+    fn label(&self) -> SharedString {
+        match self {
+            Self::Action(action) => action.label().into(),
+            Self::Busy(label, _) => label.clone(),
+        }
+    }
+
+    fn icon(&self) -> Option<IconName> {
+        match self {
+            Self::Action(action) => Some(action.icon()),
+            Self::Busy(..) => None,
+        }
+    }
+
+    /// The wash it is shown on, and the colour it is shown in.
+    fn colors(&self, cx: &App) -> (gpui::Hsla, gpui::Hsla) {
+        match self {
+            Self::Action(DragAction::Settle) => (
+                cx.theme().success.opacity(0.12),
+                cx.theme().success_foreground,
+            ),
+            Self::Action(_) => (cx.theme().primary.opacity(0.12), cx.theme().primary),
+            Self::Busy(_, color) => (color.opacity(0.12), *color),
+        }
+    }
 }
 
 /// The row's content at `offset` left of its place, in `container`, with what
-/// the swipe does showing behind it as it is uncovered.
+/// the swipe does showing behind it as it is uncovered, changing to what it
+/// does next as its thread changes.
+#[allow(clippy::too_many_arguments)]
 fn swiped_surface(
     container: gpui::Div,
-    settled: bool,
+    id: &str,
+    uncovered: Uncovered,
     offset: Pixels,
     width: Pixels,
     content: gpui::AnyElement,
-    cx: &App,
+    window: &mut Window,
+    cx: &mut App,
 ) -> gpui::AnyElement {
-    let action = if settled {
-        DragAction::Unsettle
-    } else {
-        DragAction::Settle
-    };
-    let (fill, on_fill) = if settled {
-        (cx.theme().primary.opacity(0.12), cx.theme().primary)
-    } else {
-        (
-            cx.theme().success.opacity(0.12),
-            cx.theme().success_foreground,
-        )
-    };
     let reveal = (offset / action_width(width).max(px(1.))).clamp(0., 1.);
     let scale = 0.6 + 0.4 * reveal;
-    container
-        .when(offset > px(0.), |row| {
-            row.child(
+    let under = (offset > px(0.)).then(|| {
+        let key = SharedString::from(format!("row-swipe-{id}"));
+        let fill = transition(
+            (key.clone(), "fill"),
+            uncovered.colors(cx).0,
+            gpui_base::motion::Transition::new(CHANGE),
+            window,
+            cx,
+        );
+        let id = id.to_owned();
+        let shown = crate::motion::cross_fade_part(
+            (gpui::ElementId::from(key), "uncovered"),
+            uncovered,
+            CHANGE,
+            window,
+            cx,
+            move |uncovered, _, cx| {
+                let label = uncovered.label();
                 h_flex()
-                    .absolute()
-                    .inset_0()
-                    .justify_end()
+                    .debug_selector(|| format!("row-swipe-shows-{label}-{id}"))
                     .items_center()
-                    .px(px(COMPACT_PAGE_INSET))
-                    .bg(fill)
-                    .text_color(on_fill)
-                    .text_body(true, cx)
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(cx.theme().tokens.spacing.xs)
-                            .opacity(reveal)
-                            .child(
-                                Icon::new(action.icon())
-                                    .transform(Transformation::scale(size(scale, scale))),
-                            )
-                            .child(action.label()),
-                    ),
-            )
-        })
+                    .gap(cx.theme().tokens.spacing.xs)
+                    .text_color(uncovered.colors(cx).1)
+                    .when_some(uncovered.icon(), |part, icon| {
+                        part.child(
+                            Icon::new(icon).transform(Transformation::scale(size(scale, scale))),
+                        )
+                    })
+                    .child(label)
+                    .into_any_element()
+            },
+        );
+        h_flex()
+            .absolute()
+            .inset_0()
+            .justify_end()
+            .items_center()
+            .px(px(COMPACT_PAGE_INSET))
+            .bg(fill)
+            .text_body(true, cx)
+            .child(div().opacity(reveal).child(shown))
+    });
+    container
+        .children(under)
         .child(
             div()
                 .relative()
@@ -479,7 +585,8 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let id = row.meta.id.clone();
-        let settled = row.meta.is_settled();
+        let uncovered = Uncovered::of(row, cx);
+        let action = action(row);
         let renaming = self
             .renaming
             .as_ref()
@@ -496,6 +603,7 @@ impl SessionsSidebar {
             window.request_animation_frame();
         }
         let sidebar = cx.entity().downgrade();
+        let surface_id = id.clone();
         swiped_surface(
             div().relative().w_full().overflow_hidden().child(
                 canvas(
@@ -503,7 +611,7 @@ impl SessionsSidebar {
                     move |bounds, hitbox, window, _| {
                         let row = SwipeRow {
                             id,
-                            settled,
+                            action,
                             can_swipe,
                             bounds,
                         };
@@ -545,10 +653,12 @@ impl SessionsSidebar {
                 .absolute()
                 .inset_0(),
             ),
-            settled,
+            &surface_id,
+            uncovered,
             offset,
             width,
             content,
+            window,
             cx,
         )
     }
@@ -565,12 +675,15 @@ impl SessionsSidebar {
         match (row, flight) {
             (CompactListRow::Thread(thread), Some(flight)) => {
                 let content = self.compact_thread_content(thread, window, cx);
+                let offset = flight.offset(cx.background_executor().now());
                 swiped_surface(
                     div().relative().w_full().overflow_hidden(),
-                    thread.meta.is_settled(),
-                    flight.offset(cx.background_executor().now()),
+                    &thread.meta.id,
+                    Uncovered::of(thread, cx),
+                    offset,
                     flight.width,
                     content,
+                    window,
                     cx,
                 )
             }
@@ -700,12 +813,13 @@ impl SessionsSidebar {
             swipes.rows.push(RowSwipe {
                 session_id: row.id.clone(),
                 width: row.bounds.size.width,
-                settled: row.settled,
+                action: row.action,
                 finger: None,
                 motion: Motion::Dragged(Drag::from(px(0.), row.bounds.size.width)),
             });
         }
         if let Some(swipe) = swipes.row(&row.id) {
+            swipe.action = row.action;
             swipe.take(finger, now);
         }
     }
@@ -724,7 +838,10 @@ impl SessionsSidebar {
         let Motion::Dragged(drag) = &swipe.motion else {
             return;
         };
-        if !ended || !commits(drag.offset(swipe.width), drag.speed.at(now), swipe.width) {
+        if !ended
+            || swipe.action.is_none()
+            || !commits(drag.offset(swipe.width), drag.speed.at(now), swipe.width)
+        {
             swipe.send_home(now, cx);
             return;
         }
@@ -766,13 +883,13 @@ impl SessionsSidebar {
         let Some(swipe) = self.row_swipes.row(id) else {
             return;
         };
-        let settled = swipe.settled;
+        let unsettles = swipe.unsettles();
         match &mut swipe.motion {
             Motion::Off { flight, sent } if !*sent && flight.at == flown_at => *sent = true,
             _ => return,
         }
         self.compact_model_dirty = true;
-        if settled {
+        if unsettles {
             self.perform_lifecycle(
                 vec![Command::UnsettleSession {
                     session_id: id.to_owned(),
@@ -820,15 +937,16 @@ impl SessionsSidebar {
                 swipe.sent()
                     && store
                         .thread_meta(&swipe.session_id)
-                        .is_some_and(|meta| meta.is_settled() == swipe.settled)
+                        .is_some_and(|meta| meta.is_settled() == swipe.unsettles())
             })
             .map(|swipe| swipe.session_id.clone())
             .collect()
     }
 
     /// The list is now `rows`. A row it has lost is at rest whenever it
-    /// comes back, a row that can no longer swipe goes home, and a thread
-    /// that has moved has finished its swipe.
+    /// comes back, a row that can no longer swipe goes home, a row shows
+    /// what its thread now lets it do, and a thread that has moved has
+    /// finished its swipe.
     pub(super) fn reconcile_row_swipes(&mut self, rows: &[CompactListRow], cx: &App) {
         let now = cx.background_executor().now();
         let store = self.store.read(cx);
@@ -841,7 +959,7 @@ impl SessionsSidebar {
             if swipe.sent() {
                 return store
                     .thread_meta(&swipe.session_id)
-                    .is_some_and(|meta| meta.is_settled() == swipe.settled);
+                    .is_some_and(|meta| meta.is_settled() == swipe.unsettles());
             }
             let row = rows.iter().find_map(|row| match row {
                 CompactListRow::Thread(row) if row.meta.id == swipe.session_id => Some(row),
@@ -850,7 +968,7 @@ impl SessionsSidebar {
             match row.filter(|_| !loading) {
                 None => swipe.motion = Motion::Home(Flight::resting(px(0.), swipe.width, now)),
                 Some(row) if !can_swipe(row, renaming) => swipe.send_home(now, cx),
-                Some(_) => {}
+                Some(row) => swipe.shows(action(row), now, cx),
             }
             swipe.finger.is_some() || !swipe.at_rest(now)
         });

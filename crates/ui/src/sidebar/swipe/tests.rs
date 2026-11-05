@@ -168,6 +168,68 @@ impl Phone {
         });
     }
 
+    /// `swipe-0` opened, so that the host runs turns for it.
+    fn open_first(&mut self, cx: &mut VisualTestContext) {
+        self.store
+            .update(cx, |store, cx| store.show_thread("swipe-0".into(), cx));
+        self.until(cx, "the thread to open", |phone, cx| {
+            phone
+                .store
+                .read_with(cx, |store, cx| !store.chat_loading_for(Some("swipe-0"), cx))
+        });
+    }
+
+    /// `swipe-0`'s agent starts a turn, or ends it, as its provider reports
+    /// it, and the list hears of it.
+    fn turn(&mut self, cx: &mut VisualTestContext, running: bool) {
+        let event = if running {
+            agent::AgentEvent::TurnStarted {
+                turn_id: "busy".into(),
+            }
+        } else {
+            agent::AgentEvent::TurnCompleted {
+                turn_id: "busy".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            }
+        };
+        smol::block_on(self.host.update_state_for_test(move |state, cx| {
+            state.provider_event_for_test("swipe-0", event, cx);
+        }))
+        .unwrap();
+        self.until(cx, "the turn to reach the list", |phone, cx| {
+            phone
+                .store
+                .read_with(cx, |store, _| store.turn_running_for("swipe-0"))
+                == running
+        });
+    }
+
+    /// The released row back home without ever leaving the list, and the
+    /// host's answer to anything it was sent. A running turn's indicator
+    /// never rests, so this waits for the row rather than for the window.
+    fn home(&mut self, cx: &mut VisualTestContext, rest: Bounds<Pixels>) {
+        self.until(cx, "the row to come home", |phone, cx| {
+            let row = phone.try_row(cx, 0).expect("the row stays in the list");
+            assert!(row.left() > rest.left() - px(WIDTH / 2.), "it goes nowhere");
+            row == rest
+        });
+        self.round_trip(cx);
+        frame(cx);
+        assert_eq!(self.row(cx, 0), rest, "it stays home");
+    }
+
+    /// What `swipe-0`'s swiped row has uncovered, by its words, once it is
+    /// the only thing there.
+    fn uncovers(&mut self, cx: &mut VisualTestContext, shown: &str, not: &str) {
+        let what = format!("the row to show {shown}");
+        let at = |label: &str| &*format!("row-swipe-shows-{label}-swipe-0").leak();
+        let (shown, not) = (at(shown), at(not));
+        self.until(cx, &what, |_, cx| {
+            cx.debug_bounds(shown).is_some() && cx.debug_bounds(not).is_none()
+        });
+    }
+
     fn close(mut self, cx: &mut VisualTestContext) {
         self.driver.shutdown(cx, &self.store, &self.host);
         let _ = std::fs::remove_dir_all(self.root);
@@ -329,20 +391,77 @@ fn a_row_refreshed_away_returns_at_rest_under_the_same_finger(cx: &mut TestAppCo
     refreshed_mid_swipe(cx, "swipe-refresh-held", false);
 }
 
+/// A thread whose turn runs has nothing to settle: its row follows the
+/// finger as any row does, past the settle point too, shows that the thread
+/// works, and comes back home whatever the release.
+#[gpui::test]
+fn a_running_row_swipes_shows_that_it_works_and_comes_back(cx: &mut TestAppContext) {
+    let (mut phone, cx) = phone(cx, "swipe-running", 3);
+    let rest = phone.row(cx, 0);
+    let action = px(WIDTH / 3.);
+    phone.open_first(cx);
+    phone.turn(cx, true);
+
+    for (name, quick) in [
+        ("a drag held past the settle point", false),
+        ("a flick", true),
+    ] {
+        let mut finger = Finger::down(cx, 1, rest.center());
+        finger.stroke(cx, -20., 3, FRAME);
+        assert_eq!(phone.row(cx, 0).left(), rest.left() - px(60.), "{name}");
+        if quick {
+            finger.stroke(cx, -20., 4, ms(8));
+        } else {
+            finger.stroke(cx, -20., 5, FRAME);
+            let shown = rest.left() - phone.row(cx, 0).left();
+            assert!(shown > action && shown < px(160.), "{name}: {shown:?}");
+            phone.uncovers(cx, "Working", "Settle");
+        }
+        finger.lift(cx);
+        phone.home(cx, rest);
+        assert!(!phone.settled(cx, 0), "{name}");
+    }
+    phone.close(cx);
+}
+
+/// The release does what the row shows as the finger lifts, and what it
+/// shows follows the thread under the finger: a turn that ends lets the row
+/// settle, and one that starts takes that away.
+#[gpui::test]
+fn a_row_does_what_its_thread_lets_it_when_the_finger_lifts(cx: &mut TestAppContext) {
+    let (mut phone, cx) = phone(cx, "swipe-turns", 3);
+    let rest = phone.row(cx, 0);
+    phone.open_first(cx);
+
+    let mut finger = Finger::down(cx, 1, rest.center());
+    finger.stroke(cx, -25., 8, FRAME);
+    phone.uncovers(cx, "Settle", "Working");
+    phone.turn(cx, true);
+    phone.uncovers(cx, "Working", "Settle");
+    finger.lift(cx);
+    phone.home(cx, rest);
+    assert!(
+        !phone.settled(cx, 0),
+        "a turn begun under it leaves it active"
+    );
+
+    let mut finger = Finger::down(cx, 2, rest.center());
+    finger.stroke(cx, -25., 8, FRAME);
+    phone.uncovers(cx, "Working", "Settle");
+    phone.turn(cx, false);
+    phone.uncovers(cx, "Settle", "Working");
+    finger.lift(cx);
+    phone.until(cx, "the thread to settle", |phone, cx| phone.settled(cx, 0));
+    phone.close(cx);
+}
+
 /// A thread that began working as it was swiped is refused by the host,
 /// which stays where it was: the row is back in the list, at rest.
 #[gpui::test]
 fn a_refused_settle_leaves_the_row_at_rest(cx: &mut TestAppContext) {
     let (mut phone, cx) = phone(cx, "swipe-refused", 3);
     let rest = phone.row(cx, 0);
-    phone
-        .store
-        .update(cx, |store, cx| store.show_thread("swipe-0".into(), cx));
-    phone.until(cx, "the thread to open", |phone, cx| {
-        phone
-            .store
-            .read_with(cx, |store, cx| !store.chat_loading_for(Some("swipe-0"), cx))
-    });
+    phone.open_first(cx);
     // The host hears of the turn before the store does.
     smol::block_on(phone.host.update_state_for_test(|state, cx| {
         let event = agent::AgentEvent::TurnStarted {
