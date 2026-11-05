@@ -36,6 +36,14 @@ struct RunningLogin {
     url: Option<String>,
 }
 
+/// A new profile's config directory, made for it in `profile-homes`.
+struct PreparedHome {
+    id: String,
+    home: PathBuf,
+    /// Writing its `.claude.json` or copying the user's configuration in.
+    seeded: Result<(), String>,
+}
+
 type SecretWrites = HashMap<String, HashMap<String, Arc<smol::lock::Mutex<SecretWrite>>>>;
 
 /// How long a running session has to answer a usage read before a process
@@ -513,8 +521,6 @@ impl AppState {
     ) {
         let name = name.trim();
         let name = if name.is_empty() { "Third-party" } else { name };
-        let id = self.settings.allocate_profile_id(name);
-        let home = self.store.root().join("profile-homes").join(&id);
 
         let mut env = vec![EnvVar {
             name: "ANTHROPIC_BASE_URL".into(),
@@ -538,21 +544,16 @@ impl AppState {
             .filter(|m| !m.is_empty())
             .map(|m| vec![m.to_string()])
             .unwrap_or_default();
-
-        let profile = ProviderProfile {
-            kind: ProviderKind::ClaudeCode,
-            settings: ProviderSettings {
-                display_name: Some(name.to_string()),
-                env,
-                custom_models,
-                home_path: Some(home.clone()),
-                ..ProviderSettings::default()
-            },
+        let settings = ProviderSettings {
+            display_name: Some(name.to_string()),
+            env,
+            custom_models,
+            ..ProviderSettings::default()
         };
         let api_key = api_key.trim().to_string();
         // Seeding onboarding starts the CLI straight into API-key mode.
         let prepared = self.prepare_claude_home(
-            home,
+            name,
             r#"{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true}"#,
             inherit_config,
             cx,
@@ -561,12 +562,25 @@ impl AppState {
         HostCx::spawn_detached(cx, async move {
             let prepared = prepared.await;
             host_cx.enqueue(move |state, cx| {
+                let PreparedHome { id, home, seeded } = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        return state.report_error(RuntimeError::ProfileConfig { error }, cx);
+                    }
+                };
                 if state.settings.profiles.contains_key(&id) {
                     return;
                 }
-                if let Err(error) = prepared {
+                if let Err(error) = seeded {
                     state.report_error(RuntimeError::ProfileConfig { error }, cx);
                 }
+                let profile = ProviderProfile {
+                    kind: ProviderKind::ClaudeCode,
+                    settings: ProviderSettings {
+                        home_path: Some(home),
+                        ..settings
+                    },
+                };
                 let mut settings = state.settings.clone();
                 settings.profiles.insert(id.clone(), profile);
                 state.update_settings(settings, cx);
@@ -590,20 +604,14 @@ impl AppState {
         } else {
             name
         };
-        let id = self.settings.allocate_profile_id(name);
-        let home = self.store.root().join("profile-homes").join(&id);
-        let profile = ProviderProfile {
-            kind: provider,
-            settings: ProviderSettings {
-                display_name: Some(name.to_string()),
-                home_path: Some(home.clone()),
-                // Another account runs the same CLI the default one does.
-                binary_path: self.settings.provider(provider).binary_path,
-                ..ProviderSettings::default()
-            },
+        let settings = ProviderSettings {
+            display_name: Some(name.to_string()),
+            // Another account runs the same CLI the default one does.
+            binary_path: self.settings.provider(provider).binary_path,
+            ..ProviderSettings::default()
         };
         let prepared = self.prepare_claude_home(
-            home,
+            name,
             r#"{"hasCompletedOnboarding":true}"#,
             inherit_config,
             cx,
@@ -613,15 +621,27 @@ impl AppState {
             let prepared = prepared.await;
             host_cx
                 .enqueue_and_wait(move |state, cx| {
+                    let PreparedHome { id, home, seeded } =
+                        prepared.map_err(|message| ProtocolError {
+                            code: "profile_config".into(),
+                            message,
+                        })?;
                     if state.settings.profiles.contains_key(&id) {
                         return Err(ProtocolError {
                             code: "profile_exists".into(),
                             message: "A profile with this name was just added.".into(),
                         });
                     }
-                    if let Err(error) = prepared {
+                    if let Err(error) = seeded {
                         state.report_error(RuntimeError::ProfileConfig { error }, cx);
                     }
+                    let profile = ProviderProfile {
+                        kind: provider,
+                        settings: ProviderSettings {
+                            home_path: Some(home),
+                            ..settings
+                        },
+                    };
                     let mut settings = state.settings.clone();
                     settings.profiles.insert(id.clone(), profile);
                     state.update_settings(settings, cx);
@@ -636,35 +656,57 @@ impl AppState {
         })
     }
 
-    /// Create a new Claude profile's config directory with `seed` as its
-    /// `.claude.json`, and with `inherit` the user's configuration from the
-    /// built-in profile's config directory.
+    /// Make a new Claude profile's config directory in `profile-homes`, named
+    /// for the first id `name` may take that no directory there already has:
+    /// one that is there is the config directory of an account whose profile
+    /// the settings no longer hold, and stays that account's. The directory
+    /// gets `seed` as its `.claude.json` and, with `inherit`, the user's
+    /// configuration from the built-in profile's config directory. Fails only
+    /// when no directory could be made.
     fn prepare_claude_home(
         &self,
-        home: PathBuf,
+        name: &str,
         seed: &'static str,
         inherit: bool,
         cx: &HostCx,
-    ) -> impl std::future::Future<Output = Result<(), String>> + use<> {
+    ) -> impl std::future::Future<Output = Result<PreparedHome, String>> + use<> {
+        let mut ids = self.settings.profile_id_candidates(name);
+        let homes = self.store.root().join("profile-homes");
         let builtin = inherit.then(|| {
             self.prepare_profile_env(Settings::builtin_profile_id(ProviderKind::ClaudeCode), cx)
         });
         let host_cx = cx.clone();
         async move {
             let source = match builtin {
-                Some(launch_env) => agent::claude::config_dir(&launch_env.await?),
-                None => None,
+                Some(launch_env) => launch_env
+                    .await
+                    .map(|launch_env| agent::claude::config_dir(&launch_env)),
+                None => Ok(None),
             };
             host_cx
                 .unblock(move || {
-                    std::fs::create_dir_all(&home)?;
-                    std::fs::write(home.join(".claude.json"), seed)?;
-                    source.map_or(Ok(()), |source| {
-                        agent::claude::inherit_config(&source, &home)
-                    })
+                    std::fs::create_dir_all(&homes).map_err(|error| error.to_string())?;
+                    let (id, home) = loop {
+                        let id = ids.next().expect("profile ids never run out");
+                        let home = homes.join(&id);
+                        match std::fs::create_dir(&home) {
+                            Ok(()) => break (id, home),
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    };
+                    let seeded = std::fs::write(home.join(".claude.json"), seed)
+                        .map_err(|error| error.to_string())
+                        .and(source)
+                        .and_then(|source| {
+                            source.map_or(Ok(()), |source| {
+                                agent::claude::inherit_config(&source, &home)
+                                    .map_err(|error| error.to_string())
+                            })
+                        });
+                    Ok(PreparedHome { id, home, seeded })
                 })
                 .await
-                .map_err(|error: std::io::Error| error.to_string())
         }
     }
 

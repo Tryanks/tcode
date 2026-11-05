@@ -279,7 +279,8 @@ pub use wire::{
 // adds generation and console. PreviewRequest::Screenshot is a
 // struct variant with an optional ref and full_page. The DevServers topic
 // carries the host's dev servers for one thread (DevServersReplaced with
-// DevServer port, pid, process and cwd).
+// DevServer port, pid, process and cwd). The settings_unreadable runtime
+// error.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

@@ -42,6 +42,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::PersistSettings { error } => {
                     crate::tr!("errors.persist_settings", error = error).into_owned()
                 }
+                RuntimeError::SettingsUnreadable { error } => {
+                    crate::tr!("errors.settings_unreadable", error = error).into_owned()
+                }
                 RuntimeError::TerminalStart { error } => {
                     crate::tr!("errors.terminal_start", error = error).into_owned()
                 }

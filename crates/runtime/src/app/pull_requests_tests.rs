@@ -545,7 +545,7 @@ fn mcp_child_linking_is_bound_to_its_token_and_rejects_a_thread_override() {
         ],
     );
     let settings_store = SettingsStore::new(store.root().clone());
-    let mut settings = settings_store.load();
+    let mut settings = settings_store.try_load().unwrap();
     settings.source_control.hosts.insert(
         "github.com".into(),
         tcode_core::settings::HostSettings {
