@@ -301,6 +301,13 @@ impl WorkspaceStore {
         }
     }
 
+    /// The user acted inside the page `key` names.
+    #[cfg(preview_backend)]
+    pub(crate) fn report_page_input(&mut self, key: &str) {
+        let session_id = self.preview_session_of(key);
+        self.report_preview_input(&session_id);
+    }
+
     /// The thread whose preview `key` names: a project draft's is its
     /// open draft thread's.
     fn preview_session_of(&self, key: &str) -> String {

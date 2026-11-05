@@ -145,7 +145,7 @@ impl RemoteBrowser {
                 })
                 .await
             {
-                let result = this.update(cx, |_, cx| {
+                let result = this.update(cx, |lifecycle, cx| {
                     let Some(navigation) = navigation else {
                         cx.notify();
                         return;
@@ -156,8 +156,8 @@ impl RemoteBrowser {
                     if let Some(view) = weak_view.upgrade()
                         && let Some(request) = navigation.request
                     {
+                        lifecycle.loading(&view, cx);
                         let raw = view.read(cx).raw();
-                        super::load_error::forget(raw);
                         unsafe {
                             raw.webview().loadRequest(&request);
                         }

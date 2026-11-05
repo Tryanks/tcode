@@ -15,7 +15,7 @@ use gpui::{
 #[cfg(not(target_os = "android"))]
 use gpui::{Bounds, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, canvas};
 use gpui_base::v_flex;
-use preview_mcp::{js, ports};
+use preview_mcp::ports;
 use tcode_protocol::{PreviewRequest, PreviewResponse};
 
 use super::lifecycle::{Availability, BrowserLifecycle};
@@ -87,13 +87,6 @@ fn on_page_seam(page: Bounds<Pixels>, position: Point<Pixels>, cx: &App) -> bool
         && distance <= page_margin(cx) + px(1.) + HANDLE_BAND_REACH
 }
 
-fn wait_timeout_message(pending: &[String]) -> String {
-    format!(
-        "preview_wait_for timed out; unmet conditions: {}",
-        pending.join(", ")
-    )
-}
-
 pub(super) struct Backend {
     lifecycle: gpui::Entity<BrowserLifecycle>,
     /// The lifecycle holds this only weakly so an async Windows completion
@@ -103,65 +96,35 @@ pub(super) struct Backend {
     /// The left button went down beside the page, where a resize handle
     /// sits, and has not come up yet.
     seam_pressed: bool,
-    #[cfg(not(target_os = "android"))]
-    _load_errors: gpui::Task<()>,
 }
 
 impl Backend {
     pub(super) fn new(
+        store: gpui::WeakEntity<crate::store::WorkspaceStore>,
         proxy: Result<Option<crate::store::PreviewTarget>, String>,
         cx: &mut Context<PreviewPanel>,
     ) -> Self {
         let owner = Rc::new(());
-        let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&owner), proxy));
-        #[cfg(not(target_os = "android"))]
-        let load_errors = watch_load_errors(cx);
+        let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&owner), store, proxy));
         Self {
             lifecycle,
             _owner: owner,
             compact_panel_selected: false,
             seam_pressed: false,
-            #[cfg(not(target_os = "android"))]
-            _load_errors: load_errors,
         }
     }
 }
 
 impl Backend {
     /// A backend for another panel on `self`'s pages.
-    pub(super) fn sharing(
-        &self,
-        #[cfg_attr(
-            target_os = "android",
-            expect(
-                unused_variables,
-                reason = "Android's webview reports no load errors to watch"
-            )
-        )]
-        cx: &mut Context<PreviewPanel>,
-    ) -> Self {
+    pub(super) fn sharing(&self) -> Self {
         Self {
             lifecycle: self.lifecycle.clone(),
             _owner: self._owner.clone(),
             compact_panel_selected: false,
             seam_pressed: false,
-            #[cfg(not(target_os = "android"))]
-            _load_errors: watch_load_errors(cx),
         }
     }
-}
-
-/// Redraw the panel whenever a page's load error changes.
-#[cfg(not(target_os = "android"))]
-fn watch_load_errors(cx: &mut Context<PreviewPanel>) -> gpui::Task<()> {
-    let changes = super::load_error::watch();
-    cx.spawn(async move |panel, cx| {
-        while changes.recv().await.is_ok() {
-            if panel.update(cx, |_, cx| cx.notify()).is_err() {
-                break;
-            }
-        }
-    })
 }
 
 impl PreviewPanel {
@@ -472,12 +435,6 @@ impl PreviewPanel {
         });
     }
 
-    /// Run raw JS on the active WebView via history/reload (fire-and-forget).
-    fn eval_fire(&mut self, key: &str, script: &str, cx: &mut Context<Self>) {
-        self.lifecycle_entity()
-            .update(cx, |lifecycle, cx| lifecycle.eval_fire(key, script, cx));
-    }
-
     pub(super) fn history_controls(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         use crate::material::toolbar_icon_button;
         let compact = self.window_state.read(cx).compact;
@@ -524,16 +481,15 @@ impl PreviewPanel {
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
         self.user_acted(cx);
-        if let Some(id) = self.active_key(cx) {
+        if let Some(id) = self.active_key(cx)
+            && let Some(view) = self.lifecycle_entity().read(cx).ready_view(&id)
+        {
             #[cfg(target_os = "android")]
-            self.eval_fire(&id, "history.forward();", cx);
+            let forward = view.read(cx).raw().forward();
             #[cfg(not(target_os = "android"))]
-            if let Some(view) = self.lifecycle_entity().read(cx).ready_view(&id) {
-                view.update(cx, |view, _| {
-                    if let Err(error) = view.forward() {
-                        log::debug!("preview: failed to navigate forward: {error}");
-                    }
-                });
+            let forward = view.update(cx, |view, _| view.forward());
+            if let Err(error) = forward {
+                log::debug!("preview: failed to navigate forward: {error}");
             }
         }
     }
@@ -541,7 +497,7 @@ impl PreviewPanel {
     fn reload(&mut self, cx: &mut Context<Self>) {
         self.user_acted(cx);
         if let Some(id) = self.active_key(cx) {
-            self.eval_fire(&id, "location.reload();", cx);
+            self.lifecycle_entity().read(cx).reload(&id, cx);
         }
     }
 
@@ -822,8 +778,8 @@ impl PreviewPanel {
     }
 
     /// Resolve one automation op from the MCP server against the active WebView.
-    /// Answers `reply` immediately for actions, or from the JS callback for
-    /// value-returning ops.
+    /// Answers `reply` immediately for actions, or once the page agent or the
+    /// engine has answered.
     pub fn handle_op(
         &mut self,
         session_id: String,
@@ -876,56 +832,42 @@ impl PreviewPanel {
                     self.ensure_webview(&key, window, cx);
                     self.sync_visibility(cx);
                 }
-                if let Some(error) = self
-                    .lifecycle_entity()
-                    .read(cx)
-                    .unavailable_error()
-                    .map(str::to_string)
-                {
-                    let _ = reply.try_send(Err(unavailable_message(&error)));
-                    return;
-                }
-                let payload = serde_json::json!({
-                    "ok": true,
-                    "url": self.store.read(cx).preview_url(&key),
-                    "note": "call preview_status for live page state once loaded; \
-                             it reports load_error when the page failed to load",
-                });
-                let _ = reply.try_send(Ok(PreviewResponse::Json(payload)));
+                self.loading_reply(&key, reply, cx);
             }
             PreviewRequest::Navigate { url } => {
                 self.store.update(cx, |store, cx| {
                     store.open_tab_for(&session_id, tcode_core::ui::RightTab::Preview, cx);
                 });
                 self.navigate(&key, &url, window, cx);
-                if let Some(error) = self
-                    .lifecycle_entity()
-                    .read(cx)
-                    .unavailable_error()
-                    .map(str::to_string)
-                {
-                    let _ = reply.try_send(Err(unavailable_message(&error)));
-                    return;
-                }
-                let payload = serde_json::json!({
-                    "ok": true,
-                    "url": self.store.read(cx).preview_url(&key),
-                    "note": "page is loading; call preview_status for live state, \
-                             which reports load_error when the page failed to load",
-                });
-                let _ = reply.try_send(Ok(PreviewResponse::Json(payload)));
+                self.loading_reply(&key, reply, cx);
             }
             PreviewRequest::Status => self.status(&key, reply, window, cx),
-            PreviewRequest::Snapshot => self.eval_json(&key, js::SNAPSHOT, reply, window, cx),
+            PreviewRequest::Snapshot => {
+                self.agent_op(&key, "snapshot", serde_json::json!({}), reply, window, cx)
+            }
             PreviewRequest::Evaluate { js: expr } => {
-                self.eval_json(&key, &js::evaluate(&expr), reply, window, cx)
+                self.eval_json(&key, &preview_mcp::page::evaluate(&expr), reply, window, cx)
             }
-            PreviewRequest::Click { selector } => {
-                self.eval_json(&key, &js::click(&selector), reply, window, cx)
-            }
-            PreviewRequest::Type { selector, text } => {
-                self.eval_json(&key, &js::type_text(&selector, &text), reply, window, cx)
-            }
+            PreviewRequest::Click { selector, r#ref } => self.agent_op(
+                &key,
+                "click",
+                serde_json::json!({ "selector": selector, "ref": r#ref }),
+                reply,
+                window,
+                cx,
+            ),
+            PreviewRequest::Type {
+                selector,
+                r#ref,
+                text,
+            } => self.agent_op(
+                &key,
+                "type",
+                serde_json::json!({ "selector": selector, "ref": r#ref, "text": text }),
+                reply,
+                window,
+                cx,
+            ),
             PreviewRequest::Resize { width, height } => {
                 self.store.update(cx, |store, cx| {
                     store.open_tab_for(&session_id, tcode_core::ui::RightTab::Preview, cx);
@@ -960,18 +902,32 @@ impl PreviewPanel {
                 let _ = reply.try_send(Ok(PreviewResponse::Json(payload)));
             }
             // `key` is the routed conversation key; bind the keyboard key
-            // apart so it cannot shadow it into `eval_json`'s session slot.
+            // apart so it cannot shadow it.
             PreviewRequest::Press {
                 key: pressed,
                 modifiers,
-            } => self.eval_json(&key, &js::press(&pressed, &modifiers), reply, window, cx),
+            } => self.agent_op(
+                &key,
+                "press",
+                serde_json::json!({ "key": pressed, "modifiers": modifiers }),
+                reply,
+                window,
+                cx,
+            ),
             PreviewRequest::Scroll {
                 delta_x,
                 delta_y,
                 selector,
-            } => self.eval_json(
+                r#ref,
+            } => self.agent_op(
                 &key,
-                &js::scroll(delta_x, delta_y, selector.as_deref()),
+                "scroll",
+                serde_json::json!({
+                    "deltaX": delta_x,
+                    "deltaY": delta_y,
+                    "selector": selector,
+                    "ref": r#ref,
+                }),
                 reply,
                 window,
                 cx,
@@ -995,9 +951,119 @@ impl PreviewPanel {
         }
     }
 
-    /// Add this conversation's canvas setting to the otherwise opaque page
-    /// status object returned by JavaScript.
+    /// Open and navigate answer once the load has begun; the next call that
+    /// reads or acts on the page waits for its document.
+    fn loading_reply(&mut self, key: &str, reply: ReplyTx, cx: &mut Context<Self>) {
+        if let Some(error) = self
+            .lifecycle_entity()
+            .read(cx)
+            .unavailable_error()
+            .map(str::to_string)
+        {
+            let _ = reply.try_send(Err(unavailable_message(&error)));
+            return;
+        }
+        let payload = serde_json::json!({
+            "ok": true,
+            "url": self.store.read(cx).preview_url(key),
+            "note": "the page is loading; the next preview call waits for it, and \
+                     preview_status reports load_error when it failed to load",
+        });
+        let _ = reply.try_send(Ok(PreviewResponse::Json(payload)));
+    }
+
+    /// The browser for `key` exists, or `reply` has heard why not.
+    fn ready_or_reply(
+        &mut self,
+        key: &str,
+        reply: &ReplyTx,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match self.ensure_webview(key, window, cx) {
+            Availability::Ready(_) => true,
+            Availability::Starting(_) => {
+                let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
+                false
+            }
+            Availability::Unavailable => {
+                let error = self
+                    .lifecycle_entity()
+                    .read(cx)
+                    .unavailable_error()
+                    .unwrap_or_default()
+                    .to_string();
+                let _ = reply.try_send(Err(unavailable_message(&error)));
+                false
+            }
+        }
+    }
+
+    /// Run a page agent method and answer with its value, URLs as the agent
+    /// asked for them.
+    fn agent_op(
+        &mut self,
+        key: &str,
+        method: &'static str,
+        args: serde_json::Value,
+        reply: ReplyTx,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.ready_or_reply(key, &reply, window, cx) {
+            return;
+        }
+        let answered = self
+            .lifecycle_entity()
+            .update(cx, |lifecycle, cx| lifecycle.call(key, method, args, cx));
+        self.answer_with(key, answered, reply, |_| {}, cx);
+    }
+
+    /// Forward a page's answer to `reply`, after `finish` adds to it.
+    fn answer_with(
+        &self,
+        key: &str,
+        answered: async_channel::Receiver<Result<serde_json::Value, String>>,
+        reply: ReplyTx,
+        finish: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let lifecycle = self.lifecycle_entity().downgrade();
+        let key = key.to_owned();
+        cx.spawn(async move |_, cx| {
+            let result = answered
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("preview browser was closed".into()))
+                .map(|mut value| {
+                    if let Some(object) = value.as_object_mut() {
+                        if let Some(actual) = object
+                            .get("url")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            && let Ok(logical) = lifecycle
+                                .update(cx, |lifecycle, _| lifecycle.logical_url(&key, &actual))
+                            && logical != actual
+                        {
+                            object.insert("actual_url".into(), actual.into());
+                            object.insert("url".into(), logical.into());
+                        }
+                        finish(object);
+                    }
+                    PreviewResponse::Json(value)
+                });
+            let _ = reply.send(result).await;
+        })
+        .detach();
+    }
+
+    /// The page's URL, title and loading state, with this conversation's
+    /// canvas, the platform's load error and what the console and network
+    /// recorded since the page last navigated.
     fn status(&mut self, key: &str, reply: ReplyTx, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ready_or_reply(key, &reply, window, cx) {
+            return;
+        }
         let canvas = self
             .store
             .read(cx)
@@ -1010,60 +1076,51 @@ impl PreviewPanel {
                 })
             })
             .unwrap_or_else(|| serde_json::json!({ "mode": "fill" }));
-        // The page cannot see a failed navigation, so the JS probe would
-        // keep describing whatever was on screen before it.
-        let load_error = self.lifecycle_entity().read(cx).load_error(key, cx);
+        let lifecycle = self.lifecycle_entity();
+        // The page cannot see a failed navigation, so the agent would keep
+        // describing whatever was on screen before it.
+        let load_error = lifecycle.read(cx).load_error(key, cx);
+        let summary = lifecycle.read(cx).page_summary(key);
         #[cfg(target_os = "android")]
-        let native_metadata = self
-            .lifecycle_entity()
+        let native_metadata = lifecycle
             .read(cx)
             .ready_view(key)
             .map(|view| view.read(cx).metadata());
-        let (status_reply, status_result) = async_channel::bounded(1);
-        let lifecycle = self.lifecycle_entity().downgrade();
-        let status_key = key.to_owned();
-        cx.spawn(async move |_, cx| {
-            let result = match status_result.recv().await {
-                Ok(Ok(PreviewResponse::Json(mut value))) => {
-                    if let Some(object) = value.as_object_mut() {
-                        object.insert("canvas".into(), canvas);
-                        if let Some(actual) = object
-                            .get("url")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                            && let Ok(logical) = lifecycle.update(cx, |lifecycle, _| {
-                                lifecycle.logical_url(&status_key, &actual)
-                            })
-                            && logical != actual
-                        {
-                            object.insert("actual_url".into(), actual.into());
-                            object.insert("url".into(), logical.into());
-                        }
-                        #[cfg(target_os = "android")]
-                        if let Some((url, title)) = native_metadata {
-                            object.insert("url".into(), url.into());
-                            object.insert("title".into(), title.into());
-                        }
-                        if let Some(load_error) = load_error {
-                            object.insert("load_error".into(), load_error.to_json());
-                        }
-                        Ok(PreviewResponse::Json(value))
-                    } else {
-                        Err("preview status returned a non-object value".into())
-                    }
-                }
-                Ok(result) => result,
-                Err(_) => Err("preview status evaluation was dropped".into()),
-            };
-            let _ = reply.send(result).await;
-        })
-        .detach();
-        self.eval_json(key, js::STATUS, status_reply, window, cx);
+        let finish = move |object: &mut serde_json::Map<String, serde_json::Value>| {
+            object.insert("canvas".into(), canvas);
+            #[cfg(target_os = "android")]
+            if let Some((url, title)) = native_metadata {
+                object.insert("url".into(), url.into());
+                object.insert("title".into(), title.into());
+            }
+            if let Some(load_error) = load_error {
+                object.insert("load_error".into(), load_error.to_json());
+            }
+            if let Some(serde_json::Value::Object(summary)) = summary {
+                object.extend(summary);
+            }
+        };
+        let answered = if lifecycle.read(cx).page_settled(key) {
+            lifecycle.update(cx, |lifecycle, cx| {
+                lifecycle.call(key, "status", serde_json::json!({}), cx)
+            })
+        } else {
+            // A document is on its way, or none has come: say so now rather
+            // than wait for it.
+            let (answer, answered) = async_channel::bounded(1);
+            let url = self.store.read(cx).preview_url(key);
+            let _ = answer.try_send(Ok(serde_json::json!({
+                "url": url.as_deref().unwrap_or("about:blank"),
+                "title": "",
+                "loading": lifecycle.read(cx).page_loading(key),
+            })));
+            answered
+        };
+        self.answer_with(key, answered, reply, finish, cx);
     }
 
-    /// Poll a one-shot page probe every 250ms until it matches or reaches
-    /// its deadline. Each evaluation has its own watchdog because native
-    /// WebViews can drop callbacks during navigation.
+    /// Wait until the page meets every condition: the agent watches the DOM
+    /// and the engine the navigations, and nothing polls.
     #[allow(clippy::too_many_arguments)]
     fn wait_for(
         &mut self,
@@ -1076,161 +1133,20 @@ impl PreviewPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.ensure_webview(key, window, cx) {
-            Availability::Ready(_) => {}
-            Availability::Starting(_) => {
-                let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
-                return;
-            }
-            Availability::Unavailable => {
-                let error = self
-                    .lifecycle_entity()
-                    .read(cx)
-                    .unavailable_error()
-                    .unwrap_or_default()
-                    .to_string();
-                let _ = reply.try_send(Err(unavailable_message(&error)));
-                return;
-            }
+        if !self.ready_or_reply(key, &reply, window, cx) {
+            return;
         }
-        let cold = !self.lifecycle_entity().read(cx).is_warm(key);
-        let key = key.to_string();
-        let probe = js::wait_for_probe(selector.as_deref(), text.as_deref(), None);
-        let mut pending = Vec::new();
-        if selector.is_some() {
-            pending.push("selector".to_string());
-        }
-        if text.is_some() {
-            pending.push("text".to_string());
-        }
-        if url_includes.is_some() {
-            pending.push("urlIncludes".to_string());
-        }
-        cx.spawn(async move |this, cx| {
-            let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
-            if cold {
-                cx.background_executor()
-                    .timer(Duration::from_millis(700))
-                    .await;
-                if this
-                    .update(cx, |panel, cx| {
-                        panel.lifecycle_entity().update(cx, |lifecycle, _| {
-                            lifecycle.mark_warm(&key);
-                        });
-                    })
-                    .is_err()
-                {
-                    let _ = reply
-                        .send(Err("preview panel was dropped while waiting".into()))
-                        .await;
-                    return;
-                }
-            }
-            loop {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    let _ = reply.send(Err(wait_timeout_message(&pending))).await;
-                    return;
-                }
-                let (probe_reply, probe_result) = async_channel::bounded(1);
-                // A failed navigation never changes the page, so waiting on
-                // it can only time out; report the platform error instead.
-                let Ok(failure) = this.update(cx, |panel, cx| {
-                    let failure = panel.lifecycle_entity().read(cx).load_error(&key, cx);
-                    if failure.is_none() {
-                        panel.lifecycle_entity().update(cx, |lifecycle, cx| {
-                            lifecycle.evaluate_ready(&key, &probe, probe_reply.clone(), cx);
-                        });
-                    }
-                    failure
-                }) else {
-                    let _ = reply
-                        .send(Err("preview panel was dropped while waiting".into()))
-                        .await;
-                    return;
-                };
-                if let Some(failure) = failure {
-                    let _ = reply.send(Err(failure.describe())).await;
-                    return;
-                }
-
-                let watchdog_delay = remaining.min(Duration::from_secs(5));
-                let watchdog_reply = probe_reply;
-                let watchdog_error = if remaining <= Duration::from_secs(5) {
-                    wait_timeout_message(&pending)
-                } else {
-                    "preview wait probe evaluation timed out".into()
-                };
-                let watchdog_timer = cx.background_executor().timer(watchdog_delay);
-                cx.background_executor()
-                    .spawn(async move {
-                        watchdog_timer.await;
-                        let _ = watchdog_reply.try_send(Err(watchdog_error));
-                    })
-                    .detach();
-
-                let mut value = match probe_result.recv().await {
-                    Ok(Ok(PreviewResponse::Json(value))) => value,
-                    Ok(Ok(PreviewResponse::Image { .. })) => {
-                        let _ = reply
-                            .send(Err("preview wait probe returned an image".into()))
-                            .await;
-                        return;
-                    }
-                    Ok(Err(error)) => {
-                        let _ = reply.send(Err(error)).await;
-                        return;
-                    }
-                    Err(_) => {
-                        let _ = reply
-                            .send(Err("preview wait probe evaluation was dropped".into()))
-                            .await;
-                        return;
-                    }
-                };
-                if let Some(actual) = value
-                    .get("url")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    && let Ok(logical) = this.update(cx, |panel, cx| {
-                        panel.lifecycle_entity().read(cx).logical_url(&key, &actual)
-                    })
-                {
-                    if logical != actual {
-                        value["actual_url"] = actual.into();
-                    }
-                    value["url"] = logical.clone().into();
-                    if url_includes
-                        .as_ref()
-                        .is_some_and(|needle| !logical.contains(needle))
-                    {
-                        value["matched"] = false.into();
-                        if let Some(pending) = value["pending"].as_array_mut() {
-                            pending.push("urlIncludes".into());
-                        }
-                    }
-                }
-                if value.get("matched").and_then(serde_json::Value::as_bool) == Some(true) {
-                    let _ = reply.send(Ok(PreviewResponse::Json(value))).await;
-                    return;
-                }
-                pending = value
-                    .get("pending")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(str::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_else(|| pending.clone());
-                cx.background_executor()
-                    .timer(Duration::from_millis(250))
-                    .await;
-            }
-        })
-        .detach();
+        let answered = self.lifecycle_entity().update(cx, |lifecycle, cx| {
+            lifecycle.wait(
+                key,
+                selector,
+                text,
+                url_includes,
+                Duration::from_millis(timeout_ms),
+                cx,
+            )
+        });
+        self.answer_with(key, answered, reply, |_| {}, cx);
     }
 
     fn stage_hidden(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1250,8 +1166,7 @@ impl PreviewPanel {
         let _ = (key, window, cx);
     }
 
-    /// Delegate value-returning evaluation to the lifecycle, which owns the
-    /// ready/warm ordering and native callback.
+    /// Evaluate in the page's own world once its document is settled.
     fn eval_json(
         &mut self,
         key: &str,

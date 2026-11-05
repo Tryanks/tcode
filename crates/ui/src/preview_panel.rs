@@ -91,9 +91,11 @@ pub fn preview_backend() -> bool {
 }
 
 #[cfg(preview_backend)]
+mod events;
+#[cfg(preview_backend)]
 pub(crate) mod lifecycle;
 #[cfg(preview_backend)]
-mod load_error;
+mod page_agent;
 /// The reply channel a broker request is answered on.
 #[cfg(preview_backend)]
 type ReplyTx = async_channel::Sender<Result<PreviewResponse, String>>;
@@ -138,7 +140,11 @@ pub(crate) enum PreviewAction {
 /// Add a scheme to a bare host/port (so `localhost:5173` becomes a real URL).
 fn normalize_url(input: &str) -> String {
     let trimmed = input.trim();
-    if trimmed.contains("://") || trimmed.starts_with("about:") {
+    if trimmed.contains("://")
+        || ["about:", "data:", "blob:"]
+            .iter()
+            .any(|scheme| trimmed.starts_with(scheme))
+    {
         trimmed.to_string()
     } else {
         format!("http://{trimmed}")
@@ -193,7 +199,7 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         #[cfg(preview_backend)]
-        let backend = backend::Backend::new(store.read(cx).preview_proxy(), cx);
+        let backend = backend::Backend::new(store.downgrade(), store.read(cx).preview_proxy(), cx);
         let mut panel = Self::with_backend(
             store.clone(),
             window_state,
@@ -229,7 +235,7 @@ impl PreviewPanel {
         let (store, window_state) = (self.store.clone(), self.window_state.clone());
         cx.new(|cx| {
             #[cfg(preview_backend)]
-            let backend = self.backend.sharing(cx);
+            let backend = self.backend.sharing();
             Self::with_backend(
                 store,
                 window_state,
@@ -967,6 +973,10 @@ mod tests {
         assert_eq!(normalize_url("localhost:5173"), "http://localhost:5173");
         assert_eq!(normalize_url(" https://x.dev "), "https://x.dev");
         assert_eq!(normalize_url("about:blank"), "about:blank");
+        assert_eq!(
+            normalize_url("data:text/html,%3Ch1%3E"),
+            "data:text/html,%3Ch1%3E"
+        );
     }
 
     #[test]

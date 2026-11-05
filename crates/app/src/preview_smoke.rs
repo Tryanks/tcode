@@ -122,6 +122,175 @@ fn create_once(
         .expect("preview smoke window closed during webview creation")
 }
 
+/// The page the page-agent phase drives: a field, a button whose click
+/// writes a line late and logs a console error, and a fetch that fails.
+const AGENT_PAGE: &str = r#"<!doctype html><title>Agent smoke</title>
+<h1>Preview smoke</h1>
+<label>Name <input id="name"></label>
+<button id="save" onclick="setTimeout(() => { document.getElementById('out').textContent = 'Saved ' + document.getElementById('name').value; console.error('smoke console error'); }, 50)">Save</button>
+<p id="out"></p>"#;
+const AGENT_KEY: &str = "preview-smoke-agent";
+
+/// Serve the page-agent phase's pages on loopback: `/` and `/two`.
+fn serve_agent_pages() -> String {
+    use std::io::{BufRead as _, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("preview-smoke: bind");
+    let address = listener.local_addr().expect("preview-smoke: address");
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut line = String::new();
+            let mut reader = BufReader::new(&stream);
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let body = if line.starts_with("GET /two") {
+                AGENT_PAGE.replace("Agent smoke", "Agent smoke two")
+            } else if line.starts_with("GET / ") {
+                AGENT_PAGE.to_owned()
+            } else {
+                String::new()
+            };
+            let status = if body.is_empty() {
+                "404 Not Found"
+            } else {
+                "200 OK"
+            };
+            let mut stream = &stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    format!("http://{address}")
+}
+
+async fn agent_call(
+    shell: &Entity<AppShell>,
+    method: &'static str,
+    args: serde_json::Value,
+    cx: &mut AsyncApp,
+) -> Result<serde_json::Value, String> {
+    let label = format!("{method} {args}");
+    let answered = shell.update(cx, |shell, cx| {
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .update(cx, |lifecycle, cx| {
+                lifecycle.call(AGENT_KEY, method, args, cx)
+            })
+    });
+    log_answer(&label, answered).await
+}
+
+async fn log_answer(
+    label: &str,
+    answered: async_channel::Receiver<Result<serde_json::Value, String>>,
+) -> Result<serde_json::Value, String> {
+    let started = Instant::now();
+    let result = answered
+        .recv()
+        .await
+        .unwrap_or_else(|_| Err("dropped".into()));
+    log_line(&format!(
+        "preview-smoke: page-agent {label:.80} -> {} in {} ms",
+        match &result {
+            Ok(value) => format!("{value:.900}"),
+            Err(error) => format!("error {error}"),
+        },
+        started.elapsed().as_millis()
+    ));
+    result
+}
+
+/// The ref the outline gives the first element with `role`.
+fn ref_of(outline: &str, role: &str) -> String {
+    outline
+        .lines()
+        .map(str::trim)
+        .find(|line| line.split(' ').nth(1) == Some(role))
+        .and_then(|line| line.split(' ').next())
+        .unwrap_or_else(|| panic!("preview-smoke: no {role} in {outline}"))
+        .trim_start_matches('@')
+        .to_owned()
+}
+
+/// Drive the page agent as an agent would: snapshot, act by ref, wait on
+/// what the click writes, and read back the console the page recorded; then
+/// navigate and snapshot at once, which must read the new document.
+async fn page_agent(shell: &Entity<AppShell>, window: AnyWindowHandle, cx: &mut AsyncApp) {
+    use serde_json::json;
+    let origin = serve_agent_pages();
+    create_and_wait(shell, window, AGENT_KEY, &format!("{origin}/"), cx).await;
+    let snapshot = agent_call(shell, "snapshot", json!({}), cx)
+        .await
+        .expect("preview-smoke: snapshot");
+    let outline = snapshot["outline"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        outline.contains("heading \"Preview smoke\" level=1"),
+        "{outline}"
+    );
+    let field = ref_of(&outline, "textbox");
+    let button = ref_of(&outline, "button");
+    agent_call(shell, "type", json!({ "ref": field, "text": "Ada" }), cx)
+        .await
+        .expect("preview-smoke: type");
+    agent_call(shell, "click", json!({ "ref": button }), cx)
+        .await
+        .expect("preview-smoke: click");
+    let waited = shell.update(cx, |shell, cx| {
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .update(cx, |lifecycle, cx| {
+                lifecycle.wait(
+                    AGENT_KEY,
+                    None,
+                    Some("Saved Ada".into()),
+                    None,
+                    Duration::from_secs(5),
+                    cx,
+                )
+            })
+    });
+    log_answer("wait Saved Ada", waited)
+        .await
+        .expect("preview-smoke: wait");
+    let summary = shell.update(cx, |shell, cx| {
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .read(cx)
+            .page_summary(AGENT_KEY)
+    });
+    log_line(&format!("preview-smoke: page-agent summary {summary:?}"));
+    let summary = summary.expect("preview-smoke: summary").to_string();
+    assert!(summary.contains("smoke console error"), "{summary}");
+
+    // A call right after a navigation reads the new document, whose agent
+    // knows none of the old one's refs.
+    create_once(shell, window, AGENT_KEY, &format!("{origin}/two"), cx)
+        .expect("preview-smoke: navigate");
+    let second = agent_call(shell, "snapshot", json!({}), cx)
+        .await
+        .expect("preview-smoke: second snapshot");
+    assert_eq!(second["title"], "Agent smoke two", "{second}");
+    let stale = agent_call(shell, "click", json!({ "ref": "e999" }), cx).await;
+    assert!(
+        stale
+            .as_ref()
+            .is_err_and(|error| error.contains("take a new snapshot")),
+        "{stale:?}"
+    );
+    shell.update(cx, |shell, cx| {
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .update(cx, |lifecycle, cx| lifecycle.drop_view(AGENT_KEY, cx))
+    });
+}
+
 fn creation_is_pending(error: &str) -> bool {
     error.starts_with("preview creation is ") || error.starts_with("preview is starting")
 }
@@ -313,6 +482,10 @@ pub async fn run(
             });
     });
     watchdog.finish_phase("recreate-after-inflight-drop");
+
+    watchdog.start_phase("page-agent");
+    page_agent(&shell, window, cx).await;
+    watchdog.finish_phase("page-agent");
 
     watchdog.start_phase("quit");
     watchdog.finish_phase("quit");

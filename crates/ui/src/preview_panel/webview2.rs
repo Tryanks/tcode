@@ -179,6 +179,13 @@ pub(super) async fn create(
         .map_err(|error| error.to_string())
 }
 
+/// The page of a controller not installed yet.
+pub(super) fn core_webview(
+    controller: &ICoreWebView2CompositionController,
+) -> windows_core::Result<ICoreWebView2> {
+    unsafe { controller.cast::<ICoreWebView2Controller>()?.CoreWebView2() }
+}
+
 /// Close a controller whose page was never installed.
 pub(super) fn discard(controller: &ICoreWebView2CompositionController) {
     if let Ok(controller) = controller.cast::<ICoreWebView2Controller>() {
@@ -220,9 +227,6 @@ impl RawWebView {
                 &mut token,
             )?;
             controller.SetIsVisible(false)?;
-            // As wry's builder was given: a first navigation, so a script
-            // run before the panel's own has a document.
-            webview.Navigate(&HSTRING::from("about:blank"))?;
         }
         Ok(Self {
             controller,
@@ -238,8 +242,8 @@ impl RawWebView {
         unsafe { self.webview.Navigate(&HSTRING::from(url)) }.map_err(|error| error.to_string())
     }
 
-    pub fn evaluate_script(&self, script: &str) -> Result<(), String> {
-        self.evaluate_script_with_callback(script, |_| {})
+    pub fn reload(&self) -> Result<(), String> {
+        unsafe { self.webview.Reload() }.map_err(|error| error.to_string())
     }
 
     /// Run `script`; `callback` gets its JSON-encoded result.
@@ -441,11 +445,11 @@ impl WebView {
     }
 
     pub fn back(&mut self) -> Result<(), String> {
-        self.page.raw.evaluate_script("history.back();")
+        unsafe { self.page.raw.webview.GoBack() }.map_err(|error| error.to_string())
     }
 
     pub fn forward(&mut self) -> Result<(), String> {
-        self.page.raw.evaluate_script("history.forward();")
+        unsafe { self.page.raw.webview.GoForward() }.map_err(|error| error.to_string())
     }
 }
 

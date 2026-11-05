@@ -36,21 +36,31 @@ pub struct EvaluateParams {
     pub js: String,
 }
 
-/// A CSS selector to target.
+/// The element to act on.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClickParams {
-    /// CSS selector of the element to click (first match).
-    pub selector: String,
+    /// The element's ref from preview_snapshot, such as `e7`.
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// A CSS selector, whose first match is used, instead of a ref.
+    #[serde(default)]
+    pub selector: Option<String>,
 }
 
-/// A CSS selector plus text to type.
+/// The field to type into, and the text.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TypeParams {
-    /// CSS selector of the field to type into (first match).
-    pub selector: String,
+    /// The field's ref from preview_snapshot, such as `e7`.
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// A CSS selector, whose first match is used, instead of a ref.
+    #[serde(default)]
+    pub selector: Option<String>,
     /// Text to set as the field's value.
     pub text: String,
 }
+
+const TARGET_REQUIRED: &str = "give the element's ref from preview_snapshot, or a selector";
 
 /// Fixed-canvas dimensions or a named device preset.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -91,7 +101,11 @@ pub struct ScrollParams {
     /// Vertical scroll delta in CSS pixels.
     #[serde(default)]
     pub delta_y: Option<f64>,
-    /// CSS selector of a scroll container; omitted to scroll the window.
+    /// A scroll container's ref from preview_snapshot; with neither ref nor
+    /// selector the window scrolls.
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// A scroll container's CSS selector.
     #[serde(default)]
     pub selector: Option<String>,
 }
@@ -218,7 +232,8 @@ impl PreviewTools {
         description = "Report the preview browser's current URL, title, and loading state; call this first for browser work. \
                        If no automation-capable preview is attached, call preview_open before concluding the browser is unavailable. \
                        Do not fall back to Chrome, Playwright, or another browser merely because the preview is initially closed or a first call fails; fall back only when preview_open explicitly reports unsupported or unavailable. \
-                       Includes load_error with the platform error when the last navigation failed, e.g. an untrusted certificate."
+                       Includes load_error with the platform error when the last navigation failed, e.g. an untrusted certificate, \
+                       and the console messages and network requests since the page last navigated: counts, with the latest errors and failures, each marked engine or script by where it was recorded."
     )]
     async fn preview_status(&self) -> CallToolResult {
         self.run(PreviewOp::Status).await
@@ -234,20 +249,30 @@ impl PreviewTools {
         self.run(PreviewOp::Evaluate { js: params.js }).await
     }
 
-    #[tool(description = "Click the first element matching a CSS selector in the preview page.")]
+    #[tool(
+        description = "Click an element in the preview page: its ref from preview_snapshot, or the first match of a CSS selector."
+    )]
     async fn preview_click(&self, Parameters(params): Parameters<ClickParams>) -> CallToolResult {
+        if params.reference.is_none() && params.selector.is_none() {
+            return tool_error(TARGET_REQUIRED);
+        }
         self.run(PreviewOp::Click {
             selector: params.selector,
+            r#ref: params.reference,
         })
         .await
     }
 
     #[tool(
-        description = "Type text into the first element matching a CSS selector in the preview page."
+        description = "Type text into a field in the preview page: its ref from preview_snapshot, or the first match of a CSS selector."
     )]
     async fn preview_type(&self, Parameters(params): Parameters<TypeParams>) -> CallToolResult {
+        if params.reference.is_none() && params.selector.is_none() {
+            return tool_error(TARGET_REQUIRED);
+        }
         self.run(PreviewOp::Type {
             selector: params.selector,
+            r#ref: params.reference,
             text: params.text,
         })
         .await
@@ -285,7 +310,7 @@ impl PreviewTools {
     }
 
     #[tool(
-        description = "Scroll the preview window or a CSS-selected container by deltaX and deltaY."
+        description = "Scroll the preview window, or a container by its ref from preview_snapshot or a CSS selector, by deltaX and deltaY."
     )]
     async fn preview_scroll(&self, Parameters(params): Parameters<ScrollParams>) -> CallToolResult {
         if params.delta_x.is_none() && params.delta_y.is_none() {
@@ -295,12 +320,13 @@ impl PreviewTools {
             delta_x: params.delta_x.unwrap_or(0.0),
             delta_y: params.delta_y.unwrap_or(0.0),
             selector: params.selector,
+            r#ref: params.reference,
         })
         .await
     }
 
     #[tool(
-        description = "Wait for a selector, document-text substring, and/or URL substring in the preview page."
+        description = "Wait for a selector, document-text substring, and/or URL substring in the preview page; the wait follows the page across navigations and ends early when a load fails."
     )]
     async fn preview_wait_for(
         &self,
@@ -320,7 +346,7 @@ impl PreviewTools {
     }
 
     #[tool(
-        description = "Snapshot the preview page: URL, title, visible text, and interactive elements (role/name/selector). Prefer snapshot-provided locators over coordinates."
+        description = "Snapshot the preview page as an accessibility outline: one line per element, `@e7 button \"Save\"`, with its value and state; same-origin frames and open shadow roots inline. Act on elements by their ref (`e7`). Refs last for the document; after the user acts on the page, take a new snapshot."
     )]
     async fn preview_snapshot(&self) -> CallToolResult {
         self.run(PreviewOp::Snapshot).await

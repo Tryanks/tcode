@@ -10,10 +10,22 @@ pub enum PreviewRequest {
     Status,
     /// Evaluate a JS expression in the page and return its value.
     Evaluate { js: String },
-    /// Dispatch a DOM click at the center of the first `selector` match.
-    Click { selector: String },
-    /// Focus `selector` and type `text` into it (dispatching input events).
-    Type { selector: String, text: String },
+    /// Click the element a snapshot's `ref` names, or the first `selector`
+    /// match.
+    Click {
+        #[serde(default)]
+        selector: Option<String>,
+        #[serde(default)]
+        r#ref: Option<String>,
+    },
+    /// Focus the element and type `text` into it (dispatching input events).
+    Type {
+        #[serde(default)]
+        selector: Option<String>,
+        #[serde(default)]
+        r#ref: Option<String>,
+        text: String,
+    },
     /// Set a fixed WebView canvas, or clear it when both dimensions are `None`.
     Resize {
         width: Option<u32>,
@@ -21,20 +33,22 @@ pub enum PreviewRequest {
     },
     /// Dispatch a keyboard press to the focused page element.
     Press { key: String, modifiers: Vec<String> },
-    /// Scroll the window or the first element matching `selector`.
+    /// Scroll the window, or the element `ref` or `selector` names.
     Scroll {
         delta_x: f64,
         delta_y: f64,
         selector: Option<String>,
+        #[serde(default)]
+        r#ref: Option<String>,
     },
-    /// Poll page state until all requested conditions match or time out.
+    /// Wait until all requested conditions match or time out.
     WaitFor {
         selector: Option<String>,
         text: Option<String>,
         url_includes: Option<String>,
         timeout_ms: u64,
     },
-    /// Build a DOM outline of interactive elements (role/name/selector), capped.
+    /// The page's accessibility outline, each element with a ref.
     Snapshot,
     /// Capture the visible webview region as a PNG.
     Screenshot,
