@@ -52,8 +52,9 @@
 //! - No action moves the user's pointer: `clippy.toml` refuses the global
 //!   input APIs outside that one macOS keyboard retry. `show_agent_cursor`
 //!   (default on) draws the agent cursor (`backend::cursor`, drawn by each
-//!   platform's overlay), visible only while no other application's window
-//!   covers the action point on the target window.
+//!   platform's overlay); the cursor and everything it draws, ripples
+//!   included, are visible only while no other application's window covers
+//!   the action point on the target window.
 //! - macOS needs Accessibility (`AXIsProcessTrusted`) and, for screenshots,
 //!   Screen Recording (`CGPreflightScreenCaptureAccess`); `permissions`
 //!   checks and requests them, and Screen Recording grants that need a

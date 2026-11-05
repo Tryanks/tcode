@@ -305,10 +305,11 @@ impl Overlay {
         self.last_frame = now;
         let position = self.motion.position(now);
         self.fade.step(step, self.shown && position.is_some());
+        // Every pixel, ripple and glow included, is drawn at the cursor's
+        // opacity, so nothing stays on screen once the cursor has faded.
         let opacity = self.fade.opacity();
-        let rippling = self.rippling(now);
         let drawn = position
-            .filter(|_| opacity > 0.0 || rippling)
+            .filter(|_| opacity > 0.0)
             .map(|point| (point, self.frame(now, opacity)));
         let Some(window) = self.window.as_mut() else {
             return;
