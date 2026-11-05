@@ -7,7 +7,7 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    prelude::FluentBuilder as _,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::settlement::AgentExecution;
@@ -15,6 +15,8 @@ use tcode_core::settlement::AgentExecution;
 use super::RailView;
 use crate::agents_panel::{AgentLine, AgentState, Agents};
 use crate::chat::ChatView;
+use crate::material::CARD_INSET;
+use crate::scroll::{LeftRows, VirtualList, row_key};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
@@ -55,40 +57,55 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
 /// click; under the title, its state word whenever it has a state, what of
 /// its model, effort and branch is reported, and what it is doing while it
 /// runs or its result once it has one. Agents that leave the list fold away
-/// as they stood.
+/// as they stood. It is a list of its own that scrolls inside the card and
+/// lays out only the rows in view: a lead can run scores of agents.
 pub(super) fn body(
     rail: &RailView,
-    window: &mut Window,
+    _: &mut Window,
     cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
     let last = rail
         .motion
-        .keep::<Rc<RefCell<Vec<AgentLine>>>>("rail-agents-lines");
+        .keep::<Rc<RefCell<Rc<[AgentLine]>>>>("rail-agents-lines");
     if let Some(agents) = agents(rail, cx) {
         let store = rail.workspace_store.read(cx);
         let lead = rail.session_id.as_deref().unwrap_or_default();
-        last.replace(agents.with_results(store, lead, cx).lines());
+        last.replace(agents.with_results(store, lead, cx).lines().into());
     }
     let lines = last.borrow().clone();
     if lines.is_empty() {
         return None;
     }
+    let left = rail
+        .motion
+        .keep::<Rc<RefCell<Option<LeftRows<AgentLine>>>>>("rail-agents-left");
+    let keys: Rc<[u64]> = lines.iter().map(|line| row_key(&line.key)).collect();
+    left.borrow_mut()
+        .get_or_insert_with(|| LeftRows::over(ROWS))
+        .update(keys.iter().copied().zip(lines.iter().cloned()), cx);
     let store = rail.workspace_store.clone();
     let host = rail.agent_host(cx);
     let origins = rail.origins.clone();
-    let rows = lines
-        .into_iter()
-        .map(|line| (SharedString::from(line.key.clone()), line));
+    let draw = move |line: &AgentLine, window: &mut Window, cx: &mut App| {
+        row(line, &store, host.clone(), &origins, window, cx)
+    };
+    let leaving = {
+        let draw = draw.clone();
+        move |key: u64, window: &mut Window, cx: &mut App| {
+            let line = left.borrow().as_ref()?.get(key)?.clone();
+            Some(draw(&line, window, cx))
+        }
+    };
     Some(
-        crate::motion::keyed(
-            "rail-agents",
-            rows,
-            ROWS,
-            window,
-            cx,
-            |_, line, window, cx| row(line, &store, host.clone(), &origins, window, cx),
-        )
-        .render(gpui_base::v_flex().w_full().min_w_0())
+        VirtualList::measured("rail-agents", lines.len(), move |index, window, cx| {
+            draw(&lines[index], window, cx)
+        })
+        .keyed_live(keys, ROWS, leaving)
+        .measure_all()
+        .scrollbar()
+        .size_full()
+        .px(px(CARD_INSET))
+        .pb(cx.theme().tokens.spacing.sm)
         .into_any_element(),
     )
 }

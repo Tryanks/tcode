@@ -427,6 +427,12 @@ impl RailCard {
         }
     }
 
+    /// Whether its body is a list that scrolls itself inside the card, with
+    /// the card's inset, rather than content the card scrolls.
+    fn lists_itself(self) -> bool {
+        self == Self::Agents
+    }
+
     fn body(
         self,
         rail: &RailView,
@@ -692,15 +698,21 @@ impl RailView {
                 // The body takes the wheel over it rather than the timeline
                 // under the rail.
                 .occlude()
-                .child(
-                    div().w_full().overflow_y_scrollbar().child(
-                        div()
-                            .w_full()
-                            .px(px(CARD_INSET))
-                            .pb(cx.theme().tokens.spacing.sm)
-                            .child(body),
-                    ),
-                )
+                .map(|region| {
+                    if card.lists_itself() {
+                        region.child(body)
+                    } else {
+                        region.child(
+                            div().w_full().overflow_y_scrollbar().child(
+                                div()
+                                    .w_full()
+                                    .px(px(CARD_INSET))
+                                    .pb(cx.theme().tokens.spacing.sm)
+                                    .child(body),
+                            ),
+                        )
+                    }
+                })
                 // What is leaving takes no clicks.
                 .when(leaving, |body| body.child(crate::motion::shield()))
                 .into_any_element()

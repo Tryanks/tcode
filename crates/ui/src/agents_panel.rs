@@ -3,15 +3,16 @@
 //! It shows what the host reports; delivery is never decided here.
 
 use crate::widgets::TooltipTrigger as _;
-use std::time::Duration;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use agent::{ItemContent, ItemStatus, ProviderKind};
 use gpui::{
     Action, AnyElement, App, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{InteractiveElementExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 use serde::Deserialize;
 use tcode_core::notice::HostNotice;
 use tcode_core::session::{EntryContent, LatestActivity};
@@ -122,17 +123,14 @@ impl AgentRow {
         }
     }
 
+    /// How long its last run took, once it no longer runs.
     fn elapsed(&self) -> Option<String> {
-        let started = self.started_at?;
-        let ended = if self.clock_runs() {
-            tcode_core::project::now_secs() * 1000
-        } else if !self.execution.is_some_and(AgentExecution::running) {
-            self.run_ended()?
-        } else {
+        if self.execution.is_some_and(AgentExecution::running) {
             return None;
-        };
+        }
+        let started = self.started_at?;
         Some(crate::chat::format_elapsed_seconds(
-            ended.saturating_sub(started),
+            self.run_ended()?.saturating_sub(started),
         ))
     }
 
@@ -417,7 +415,7 @@ impl Agents {
                     running_since: row.started_at.filter(|started| {
                         running && !row.ended_at.is_some_and(|ended| ended >= *started)
                     }),
-                    elapsed: row.elapsed().filter(|_| !running),
+                    elapsed: row.elapsed(),
                     open: row.open.clone(),
                 }
             })
@@ -778,13 +776,9 @@ pub struct AgentsPanel {
     hover: crate::motion::ListHover,
     /// The phone sheet this panel fills, dismissed when an agent opens.
     sheet: Option<WeakEntity<PopoverState>>,
-    vscroll: ScrollHandle,
-    /// Whether a row drawn this render shows a running clock.
-    clock_shown: std::cell::Cell<bool>,
-    /// Whether the panel was drawn since the clock last ticked.
-    drawn: bool,
-    /// Ticks the running clocks while the panel is drawn with one.
-    tick: Option<Task<()>>,
+    /// What the entries that left the list showed, as they fold away.
+    left: Rc<RefCell<crate::scroll::LeftRows<Entry>>>,
+    focus: Rc<RefCell<ActionFocus>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -809,10 +803,8 @@ impl AgentsPanel {
             done_expanded: false,
             hover: crate::motion::ListHover::new(crate::material::HOVER),
             sheet: None,
-            vscroll: ScrollHandle::new(),
-            clock_shown: Default::default(),
-            drawn: false,
-            tick: None,
+            left: Rc::new(RefCell::new(crate::scroll::LeftRows::over(ROWS))),
+            focus: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -836,38 +828,6 @@ impl AgentsPanel {
                 store.release_archived_sessions();
             }
         });
-        if !shown {
-            self.tick = None;
-        }
-    }
-
-    /// Tick once a second only while the panel is drawn with a running
-    /// clock: a tick that finds the panel not drawn since the last one ends
-    /// the ticking, and the panel's next render starts it again.
-    fn sync_tick(&mut self, cx: &mut Context<Self>) {
-        if !self.clock_shown.replace(false) {
-            self.tick = None;
-            return;
-        }
-        self.drawn = true;
-        if self.tick.is_none() {
-            self.tick = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    let ticked = this.update(cx, |this, cx| {
-                        if !std::mem::take(&mut this.drawn) {
-                            this.tick = None;
-                            return false;
-                        }
-                        cx.notify();
-                        true
-                    });
-                    if !ticked.unwrap_or(false) {
-                        break;
-                    }
-                }
-            }));
-        }
     }
 
     pub(crate) fn in_sheet(&mut self, sheet: WeakEntity<PopoverState>) {
@@ -1014,12 +974,164 @@ impl AgentsPanel {
         badges
     }
 
+    fn render_empty(cx: &App) -> AnyElement {
+        material::empty_state(
+            Icon::new(IconName::Users),
+            crate::tr!("agents.empty_title"),
+            crate::tr!("agents.empty_desc"),
+            cx,
+        )
+        .into_any_element()
+    }
+}
+
+/// What drawing the list's entries takes of the panel. The list draws them
+/// as it lays out, after the panel has rendered: updating the panel then
+/// would count as changing it, and build it again on the next frame.
+#[derive(Clone)]
+struct Entries {
+    panel: WeakEntity<AgentsPanel>,
+    store: Entity<WorkspaceStore>,
+    session_id: Option<String>,
+    hover: crate::motion::ListHover,
+    focus: Rc<RefCell<ActionFocus>>,
+    compact: bool,
+}
+
+/// The focus handles of each row's actions, by row, kept while the row is
+/// listed whether the list draws it or not.
+#[derive(Default)]
+struct ActionFocus(std::collections::HashMap<String, Vec<gpui::FocusHandle>>);
+
+impl ActionFocus {
+    /// The handles of row `key`'s `count` actions.
+    fn handles(&mut self, key: &str, count: usize, cx: &mut App) -> Vec<gpui::FocusHandle> {
+        let handles = self.0.entry(key.to_owned()).or_default();
+        while handles.len() < count {
+            handles.push(cx.focus_handle());
+        }
+        handles[..count].to_vec()
+    }
+
+    /// Whether one of row `key`'s actions holds the keyboard's focus.
+    fn holds_keyboard(&self, key: &str, window: &Window) -> bool {
+        window.last_input_was_keyboard()
+            && self
+                .0
+                .get(key)
+                .is_some_and(|handles| handles.iter().any(|handle| handle.is_focused(window)))
+    }
+}
+
+impl Entries {
+    /// One entry of the list, carrying the gap under it, so the gap goes
+    /// with it.
+    fn render_entry(&self, entry: &Entry, window: &mut Window, cx: &mut App) -> AnyElement {
+        let compact = self.compact;
+        let inset = px(if compact {
+            material::COMPACT_PAGE_INSET
+        } else {
+            material::CARD_INSET
+        });
+        let entry = match entry {
+            Entry::SettleAll { disabled } => {
+                let parent_id = self.session_id.clone();
+                div()
+                    .px(inset)
+                    .py_2()
+                    .debug_selector(|| "agents-settle-all".into())
+                    .child(
+                        Button::new("agents-settle-all")
+                            .w_full()
+                            .outline()
+                            .small()
+                            .label(crate::tr!("agents.settle_all"))
+                            .touch(compact)
+                            .disabled(*disabled)
+                            .on_click({
+                                let store = self.store.clone();
+                                move |_, _, cx| {
+                                    if let Some(id) = parent_id.clone() {
+                                        store.update(cx, |store, _| store.settle_children(id));
+                                    }
+                                }
+                            }),
+                    )
+                    .into_any_element()
+            }
+            Entry::Summary(summary) => div()
+                .px(inset)
+                .py_2()
+                .text_secondary(compact, cx)
+                .debug_selector(|| "agents-summary".into())
+                .child(summary.clone())
+                .into_any_element(),
+            Entry::Row(row) => self.render_row(row, compact, window, cx),
+            Entry::NativeCaption => material::list_caption(
+                crate::tr!("agents.provider_subagents").into_owned().into(),
+                compact,
+                cx,
+            )
+            .into_any_element(),
+            Entry::ReadOnly(provider) => div()
+                .px(inset)
+                .py_1()
+                .text_secondary(compact, cx)
+                .child(crate::tr!("agents.readonly", provider = *provider))
+                .into_any_element(),
+            Entry::DoneHeader { count, expanded } => {
+                let label: SharedString = crate::tr!("agents.done", count = *count)
+                    .into_owned()
+                    .into();
+                gpui_base::Button::new("agents-done")
+                    .accessibility_label(label.clone())
+                    .aria_expanded(*expanded)
+                    .w_full()
+                    .h(px(material::bar_height(material::Bar::Section, compact)))
+                    .px(inset)
+                    .flex()
+                    .items_center()
+                    .rounded(material::radius_card(cx))
+                    .when(!crate::window_seam::is_mobile(cx), |header| {
+                        header
+                            .relative()
+                            .child(material::row_hover(material::radius_card(cx), cx))
+                    })
+                    .on_click({
+                        let panel = self.panel.clone();
+                        move |_, _, cx| {
+                            panel
+                                .update(cx, |this, cx| {
+                                    this.done_expanded = !this.done_expanded;
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    })
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_1p5()
+                            .items_center()
+                            .text_caption(cx)
+                            .child(crate::widgets::Chevron::new(
+                                "agents-done-chevron",
+                                *expanded,
+                            ))
+                            .child(label),
+                    )
+                    .into_any_element()
+            }
+        };
+        div().w_full().pb_0p5().child(entry).into_any_element()
+    }
+
     fn render_row(
         &self,
         row: &AgentRow,
         compact: bool,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let group = SharedString::from(format!("agent-row-{}", row.key));
@@ -1028,33 +1140,31 @@ impl AgentsPanel {
         } else {
             row.title.clone()
         };
-        let actions = Self::row_actions(row);
+        let actions = AgentsPanel::row_actions(row);
         // Hover reveals the actions over the elapsed time; a touch screen has
         // no hover, so there they stand in its place.
         let coarse = crate::window_seam::is_mobile(cx);
         let inline_actions = !compact && !actions.is_empty();
-        let elapsed = row.elapsed().filter(|_| !(inline_actions && coarse));
-        if elapsed.is_some() && row.clock_runs() {
-            self.clock_shown.set(true);
+        // A running clock ticks in a view of its own, only while it is drawn.
+        let elapsed = match row.started_at.filter(|_| row.clock_runs()) {
+            Some(started) => Some(
+                crate::widgets::clock::Clock::since(
+                    SharedString::from(format!("agent-elapsed-{}", row.key)),
+                    started,
+                    |elapsed| crate::chat::format_elapsed_seconds(elapsed).into(),
+                )
+                .into_any_element(),
+            ),
+            None => row.elapsed().map(IntoElement::into_any_element),
         }
+        .filter(|_| !(inline_actions && coarse));
         // The actions fade in over the time as the pointer comes onto the
         // row, and the time fades out under them.
-        // Each action button tracks a handle kept here, so the actions also
-        // fade in while the keyboard holds focus on one of them.
-        let focus: Vec<gpui::FocusHandle> = (0..actions.len())
-            .map(|index| {
-                window
-                    .use_keyed_state(
-                        SharedString::from(format!("{group}-action-focus-{index}")),
-                        cx,
-                        |_, cx| cx.focus_handle(),
-                    )
-                    .read(cx)
-                    .clone()
-            })
-            .collect();
-        let keyboard = window.last_input_was_keyboard()
-            && focus.iter().any(|handle| handle.is_focused(window));
+        // Each action button tracks a handle the panel keeps, so the actions
+        // also fade in while the keyboard holds focus on one of them, and
+        // the focus outlives the row scrolled out of the list.
+        let focus = self.focus.borrow_mut().handles(&row.key, actions.len(), cx);
+        let keyboard = self.focus.borrow().holds_keyboard(&row.key, window);
         let reveal = if inline_actions && !coarse {
             let focused = gpui_base::motion::transition(
                 (group.clone(), "action-focus-reveal"),
@@ -1125,7 +1235,7 @@ impl AgentsPanel {
         // the gap before it.
         let badges = crate::motion::keyed_across(
             SharedString::from(format!("agent-badges-{}", row.key)),
-            Self::delivery_badges(row),
+            AgentsPanel::delivery_badges(row),
             ROWS,
             window,
             cx,
@@ -1133,7 +1243,7 @@ impl AgentsPanel {
                 div()
                     .pl_2()
                     .child(
-                        Self::badge(
+                        AgentsPanel::badge(
                             SharedString::from(crate::tr!(key.as_ref()).into_owned()),
                             *style,
                             cx,
@@ -1300,16 +1410,6 @@ impl AgentsPanel {
             _ => row_el,
         }
     }
-
-    fn render_empty(cx: &App) -> AnyElement {
-        material::empty_state(
-            Icon::new(IconName::Users),
-            crate::tr!("agents.empty_title"),
-            crate::tr!("agents.empty_desc"),
-            cx,
-        )
-        .into_any_element()
-    }
 }
 
 impl Render for AgentsPanel {
@@ -1351,9 +1451,7 @@ impl Render for AgentsPanel {
         if fade.shows(1) {
             layers.push((1, self.render_list(&agents, compact, window, cx)));
         }
-        let panel = root.child(fade.render(layers).flex_1().min_h_0().w_full());
-        self.sync_tick(cx);
-        panel
+        root.child(fade.render(layers).flex_1().min_h_0().w_full())
     }
 }
 
@@ -1369,9 +1467,10 @@ enum Entry {
 }
 
 impl AgentsPanel {
-    /// The list as one column keyed by entry, so a row that moves from one
-    /// group to another glides there, rows that come or go fold in or away,
-    /// and the done rows fold open and shut under their header.
+    /// The list keyed by entry, so a row that moves from one group to
+    /// another glides there, rows that come or go fold in or away, and the
+    /// done rows fold open and shut under their header. It lays out only the
+    /// entries in view: a lead can run scores of agents.
     fn render_list(
         &mut self,
         agents: &Agents,
@@ -1379,11 +1478,6 @@ impl AgentsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let inset = px(if compact {
-            material::COMPACT_PAGE_INSET
-        } else {
-            material::CARD_INSET
-        });
         let mut entries: Vec<(SharedString, Entry)> = vec![(
             "settle-all".into(),
             Entry::SettleAll {
@@ -1420,123 +1514,63 @@ impl AgentsPanel {
                 entries.extend(agents.done.iter().map(row));
             }
         }
-        let parent_id = self.session_id.clone();
-        let this = &*self;
-        let column = crate::motion::keyed(
-            "agents-list",
-            entries,
-            ROWS,
-            window,
-            cx,
-            |_, entry, window, cx| {
-                let entry = match entry {
-                    Entry::SettleAll { disabled } => {
-                        let parent_id = parent_id.clone();
-                        div()
-                            .px(inset)
-                            .py_2()
-                            .debug_selector(|| "agents-settle-all".into())
-                            .child(
-                                Button::new("agents-settle-all")
-                                    .w_full()
-                                    .outline()
-                                    .small()
-                                    .label(crate::tr!("agents.settle_all"))
-                                    .touch(compact)
-                                    .disabled(*disabled)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Some(id) = parent_id.clone() {
-                                            this.store
-                                                .update(cx, |store, _| store.settle_children(id));
-                                        }
-                                    })),
-                            )
-                            .into_any_element()
-                    }
-                    Entry::Summary(summary) => div()
-                        .px(inset)
-                        .py_2()
-                        .text_secondary(compact, cx)
-                        .debug_selector(|| "agents-summary".into())
-                        .child(summary.clone())
-                        .into_any_element(),
-                    Entry::Row(row) => this.render_row(row, compact, window, cx),
-                    Entry::NativeCaption => material::list_caption(
-                        crate::tr!("agents.provider_subagents").into_owned().into(),
-                        compact,
-                        cx,
-                    )
-                    .into_any_element(),
-                    Entry::ReadOnly(provider) => div()
-                        .px(inset)
-                        .py_1()
-                        .text_secondary(compact, cx)
-                        .child(crate::tr!("agents.readonly", provider = *provider))
-                        .into_any_element(),
-                    Entry::DoneHeader { count, expanded } => {
-                        let label: SharedString = crate::tr!("agents.done", count = *count)
-                            .into_owned()
-                            .into();
-                        gpui_base::Button::new("agents-done")
-                            .accessibility_label(label.clone())
-                            .aria_expanded(*expanded)
-                            .w_full()
-                            .h(px(material::bar_height(material::Bar::Section, compact)))
-                            .px(inset)
-                            .flex()
-                            .items_center()
-                            .rounded(material::radius_card(cx))
-                            .when(!crate::window_seam::is_mobile(cx), |header| {
-                                header
-                                    .relative()
-                                    .child(material::row_hover(material::radius_card(cx), cx))
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.done_expanded = !this.done_expanded;
-                                cx.notify();
-                            }))
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .gap_1p5()
-                                    .items_center()
-                                    .text_caption(cx)
-                                    .child(crate::widgets::Chevron::new(
-                                        "agents-done-chevron",
-                                        *expanded,
-                                    ))
-                                    .child(label),
-                            )
-                            .into_any_element()
-                    }
-                };
-                // Each entry carries the gap under it, so the gap goes with it.
-                div().w_full().pb_0p5().child(entry).into_any_element()
-            },
-        )
-        .render(
-            v_flex()
-                .w_full()
-                .min_w_0()
-                .px(if compact {
-                    px(0.)
-                } else {
-                    cx.theme().tokens.spacing.sm
-                })
-                .pb_3(),
-        );
-        crate::scroll::page_viewport(
-            "agents-scroll-bounce",
-            &self.vscroll,
-            div()
-                .id("agents-scroll")
-                .size_full()
-                .overflow_y_scroll()
-                .lock_scroll_axis()
-                .track_scroll(&self.vscroll)
-                .child(column),
-        )
-        .into_any_element()
+        let keys: Rc<[u64]> = entries
+            .iter()
+            .map(|(key, _)| crate::scroll::row_key(key))
+            .collect();
+        let entries: Rc<[Entry]> = entries.into_iter().map(|(_, entry)| entry).collect();
+        let listed: std::collections::HashSet<&str> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Row(row) => Some(row.key.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut focus = self.focus.borrow_mut();
+        focus.0.retain(|key, _| listed.contains(key.as_str()));
+        // The row the keyboard is on is scrolled into view, where it can
+        // be seen and stays drawn.
+        let focused = entries.iter().position(|entry| match entry {
+            Entry::Row(row) => focus.holds_keyboard(&row.key, window),
+            _ => false,
+        });
+        drop(focus);
+        self.left
+            .borrow_mut()
+            .update(keys.iter().copied().zip(entries.iter().cloned()), cx);
+        let drawer = Entries {
+            panel: cx.weak_entity(),
+            store: self.store.clone(),
+            session_id: self.session_id.clone(),
+            hover: self.hover.clone(),
+            focus: self.focus.clone(),
+            compact,
+        };
+        let left = self.left.clone();
+        let draw = {
+            let drawer = drawer.clone();
+            move |index: usize, window: &mut Window, cx: &mut App| {
+                drawer.render_entry(&entries[index], window, cx)
+            }
+        };
+        let leaving = move |key: u64, window: &mut Window, cx: &mut App| {
+            let entry = left.borrow().get(key)?.clone();
+            Some(drawer.render_entry(&entry, window, cx))
+        };
+        crate::scroll::VirtualList::measured("agents-list", keys.len(), draw)
+            .keyed_live(keys, ROWS, leaving)
+            .measure_all()
+            .page()
+            .reveal(focused)
+            .size_full()
+            .min_w_0()
+            .px(if compact {
+                px(0.)
+            } else {
+                cx.theme().tokens.spacing.sm
+            })
+            .pb_3()
+            .into_any_element()
     }
 }
 
@@ -2019,10 +2053,9 @@ mod tests {
             gpui_base::Root::new(panel, window, cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        // The list lays its rows out again at the width it is resized to on
+        // the frame it asks for, which the app draws before a click lands.
+        crate::test_frames::draw_settled(cx);
         let button = cx
             .debug_bounds("agents-settle-all")
             .expect("settle-all button is drawn");
