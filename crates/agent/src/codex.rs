@@ -1272,6 +1272,7 @@ fn spawn_server(
             log::warn!("could not create CODEX_HOME {}: {err}", home.display());
         }
     }
+    crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
     let mut child = cmd
         .spawn()
         .map_err(|err| AgentError::Spawn(err.to_string()))?;

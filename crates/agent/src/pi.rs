@@ -231,6 +231,10 @@ async fn run_actor(
     for (key, value) in opts.launch_env.pairs(ProviderKind::Pi) {
         cmd.env(key, value);
     }
+    if let Err(err) = crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args()) {
+        let _ = ready.send(Err(err)).await;
+        return;
+    }
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) => {

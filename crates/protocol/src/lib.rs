@@ -271,6 +271,7 @@ pub use wire::{
 // (absent reads as true), patched by ScrollToLatestOnSend. SessionMeta
 // carries session_transfer_from, the account profile whose home holds the
 // native session until the thread starts under the account it switched to.
+// RuntimeError gains provider_batch_line_break.
 pub const PROTOCOL_VERSION: u32 = 24;
 
 #[cfg(test)]

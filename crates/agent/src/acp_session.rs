@@ -557,6 +557,7 @@ fn spawn_agent(
         launch.program.display(),
         launch.args
     );
+    crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
     cmd.spawn().map_err(|err| {
         AgentError::Spawn(format!(
             "could not launch ACP agent `{name}` ({}): {err}",

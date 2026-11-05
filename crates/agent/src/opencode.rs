@@ -2141,6 +2141,7 @@ impl Server {
         if let Some(config) = config_content(launch_env, registrations)? {
             command.env("OPENCODE_CONFIG_CONTENT", config);
         }
+        crate::process::refuse_batch_line_breaks(command.get_program(), command.get_args())?;
         let mut child = command
             .spawn()
             .map_err(|err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())))?;

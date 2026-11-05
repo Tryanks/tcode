@@ -26,6 +26,8 @@ pub mod claude {
     pub use crate::claude_context::*;
 }
 #[cfg(feature = "process")]
+mod cmd_shim;
+#[cfg(feature = "process")]
 pub mod codex;
 #[cfg(feature = "process")]
 pub mod cursor;
@@ -36,9 +38,11 @@ pub mod opencode;
 #[cfg(feature = "process")]
 pub mod pi;
 #[cfg(feature = "process")]
+pub use cmd_shim::CmdShim;
+#[cfg(feature = "process")]
 mod process;
 #[cfg(feature = "process")]
-pub use process::keep_own_stdio_from_children;
+pub use process::command;
 #[cfg(feature = "process")]
 mod subagent_tail;
 mod tool_name;
@@ -1617,6 +1621,11 @@ pub async fn list_models(
 #[derive(Debug)]
 pub enum AgentError {
     Spawn(String),
+    /// The CLI is a Windows batch file that is not a recognised package
+    /// manager shim, and an argument spans lines, which `cmd.exe` cannot pass.
+    BatchLineBreak {
+        program: PathBuf,
+    },
     Protocol(String),
     Provider(String),
     Io(std::io::Error),
@@ -1628,6 +1637,11 @@ impl std::fmt::Display for AgentError {
             Self::Spawn(message) => {
                 write!(formatter, "failed to spawn provider process: {message}")
             }
+            Self::BatchLineBreak { program } => write!(
+                formatter,
+                "failed to spawn provider process: `{}` is a batch file, which cannot be given an argument that spans lines; install the CLI's native build or set its executable in Settings → Providers",
+                program.display()
+            ),
             Self::Protocol(message) => write!(formatter, "protocol error: {message}"),
             Self::Provider(message) => write!(formatter, "provider reported error: {message}"),
             Self::Io(error) => error.fmt(formatter),

@@ -285,8 +285,14 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     }
     // Passed on every launch: the CLI records the rendered system prompt with the conversation
     // and renders it again from the current launch after a compaction.
-    if let Some(instructions) = &opts.instructions {
-        cmd.arg("--append-system-prompt").arg(instructions);
+    let instructions = opts
+        .instructions
+        .as_deref()
+        .map(InstructionsFile::write)
+        .transpose()
+        .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?;
+    if let Some(instructions) = &instructions {
+        cmd.arg("--append-system-prompt-file").arg(&instructions.0);
     }
     // Settings → Providers "Launch arguments", appended last so the user can
     // override anything we set above.
@@ -315,6 +321,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         cmd.env(key, value);
     }
 
+    crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
     let mut child = cmd
         .spawn()
         .map_err(|e| AgentError::Spawn(format!("spawning `{binary}`: {e}")))?;
@@ -339,6 +346,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     // internal channel; closing the channel signals stdout EOF.
     let (line_tx, line_rx) = smol::channel::unbounded::<String>();
     smol::spawn(async move {
+        // Kept until the CLI's output ends, so it reads the file whenever it likes.
+        let _instructions = instructions;
         let mut lines = BufReader::new(stdout).lines();
         while let Some(line) = lines.next().await {
             match line {
@@ -401,6 +410,35 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         commands: cmd_tx,
         events: event_rx,
     })
+}
+
+/// Tcode's instructions for `--append-system-prompt-file`, removed when dropped. Text that spans
+/// lines cannot be an argument to a Windows batch file, which `claude.cmd` may be.
+struct InstructionsFile(PathBuf);
+
+impl InstructionsFile {
+    fn write(text: &str) -> std::io::Result<Self> {
+        use std::io::Write as _;
+        let path = std::env::temp_dir().join(format!(
+            "tcode-claude-instructions-{}.md",
+            uuid::Uuid::new_v4()
+        ));
+        // A new file: in a shared temporary directory, a name someone else
+        // created first must not be written through.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let written = Self(path);
+        file.write_all(text.as_bytes())?;
+        Ok(written)
+    }
+}
+
+impl Drop for InstructionsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 const USAGE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -4200,7 +4238,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::create_dir_all(directory).unwrap();
         let binary = directory.join("claude");
-        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > argv\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\nwhile IFS= read -r line; do :; done\n").unwrap();
+        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\nprintf '%s\\0' \"$@\" > argv\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\nwhile IFS= read -r line; do :; done\n").unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         binary
     }
@@ -4276,6 +4314,8 @@ mod tests {
         }
     }
 
+    /// Every argument fits on one line, so a Windows batch launcher can pass it,
+    /// and the instructions reach the system prompt word for word.
     #[cfg(unix)]
     #[test]
     fn instructions_append_to_the_system_prompt_on_creation_and_resume() {
@@ -4295,7 +4335,11 @@ mod tests {
                     fork: false,
                     binary_path: Some(binary.clone()),
                     option_selections: Vec::new(),
-                    mcp_servers: Vec::new(),
+                    mcp_servers: vec![crate::McpRegistration {
+                        name: "tcode_pull_requests".into(),
+                        url: "http://127.0.0.1:1/mcp".into(),
+                        bearer_token: "token".into(),
+                    }],
                     launch_env: LaunchEnv::default(),
                     extra_args: Vec::new(),
                     acp: None,
@@ -4308,13 +4352,25 @@ mod tests {
                     AgentEvent::ProviderOptions { .. }
                 ) {}
                 let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-                assert_eq!(resume.is_some(), argv.contains("--resume\nnative\n"));
-                assert_eq!(
-                    argv.matches(&format!("--append-system-prompt\n{instructions}"))
-                        .count(),
-                    1,
-                    "{argv}"
+                let args: Vec<_> = argv.trim_end_matches('\0').split('\0').collect();
+                assert!(
+                    !args.iter().any(|arg| arg.contains(['\r', '\n'])),
+                    "{args:?}"
                 );
+                assert_eq!(
+                    resume.is_some(),
+                    args.windows(2).any(|pair| pair == ["--resume", "native"])
+                );
+                let files: Vec<_> = args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--append-system-prompt-file")
+                    .map(|pair| pair[1])
+                    .collect();
+                let [file] = files[..] else {
+                    panic!("{args:?}");
+                };
+                assert_eq!(std::fs::read_to_string(file).unwrap(), instructions);
+                assert!(args.contains(&"--mcp-config"));
                 shut_down(handle).await;
             }
             std::fs::remove_dir_all(directory).unwrap();
@@ -4359,7 +4415,7 @@ mod tests {
                 }
             }
             let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-            let args: Vec<_> = argv.lines().collect();
+            let args: Vec<_> = argv.split('\0').collect();
             assert!(
                 args.windows(2)
                     .any(|pair| pair == ["--permission-mode", "auto"])

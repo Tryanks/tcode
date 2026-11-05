@@ -868,6 +868,12 @@ pub enum RuntimeError {
     ProviderStart {
         error: String,
     },
+    /// The provider's CLI is a Windows batch file Tcode cannot start as what
+    /// it runs, and one of its arguments spans lines, which a batch file
+    /// cannot be given.
+    ProviderBatchLineBreak {
+        program: PathBuf,
+    },
     /// A provider could not start because the thread's working directory is
     /// gone; `project_id` lets a client offer to re-point or remove the project.
     WorkingDirectoryMissing {
