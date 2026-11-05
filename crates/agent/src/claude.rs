@@ -104,9 +104,10 @@ pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Copy the session `resume` names from the config directory `from` launches
 /// with into the one `to` launches with: its transcript, the directory beside
-/// it (subagent transcripts, stored tool results) and its file checkpoints.
-/// What `to` already holds of the session is replaced, since `from` holds the
-/// copy the thread last ran. Blocking.
+/// it (subagent transcripts, stored tool results), its file checkpoints, task
+/// list, todo lists, hook-set environment and the plan files its transcript
+/// names. What `to` already holds of the session is replaced, since `from`
+/// holds the copy the thread last ran. Blocking.
 pub fn transfer_session(
     from: &LaunchEnv,
     to: &LaunchEnv,
@@ -115,7 +116,7 @@ pub fn transfer_session(
     let not_found = |what: String| std::io::Error::new(std::io::ErrorKind::NotFound, what);
     let session_id = resume
         .str_field(&["session_id"])
-        .filter(|id| Path::new(id).file_name() == Some(std::ffi::OsStr::new(id)))
+        .filter(|id| is_file_name(id))
         .ok_or_else(|| not_found("the resume cursor names no session".into()))?;
     let (Some(from), Some(to)) = (config_dir(from), config_dir(to)) else {
         return Err(not_found("a profile has no config directory".into()));
@@ -159,13 +160,70 @@ pub fn transfer_session(
         &target.join(session_id),
         &mut ancestors,
     )?;
-    copy_resolved(
-        &from.join("file-history").join(session_id),
-        &to.join("file-history").join(session_id),
-        &mut ancestors,
-    )?;
+    for dir in ["file-history", "tasks", "session-env"] {
+        copy_resolved(
+            &from.join(dir).join(session_id),
+            &to.join(dir).join(session_id),
+            &mut ancestors,
+        )?;
+    }
+    let agent_todos = format!("{session_id}-agent-");
+    copy_entries(&from.join("todos"), &to.join("todos"), |name| {
+        name.starts_with(&agent_todos) && name.ends_with(".json")
+    })?;
+    // A plan file is named for the plan's slug, which the transcript records
+    // on its entries; a subagent's plan adds its agent id.
+    for slug in plan_slugs(&project.join(&transcript))? {
+        let agent_plans = format!("{slug}-agent-");
+        copy_entries(&from.join("plans"), &to.join("plans"), |name| {
+            name.strip_suffix(".md")
+                .is_some_and(|stem| stem == slug || stem.starts_with(&agent_plans))
+        })?;
+    }
     std::fs::create_dir_all(&target)?;
     std::fs::copy(project.join(&transcript), target.join(&transcript))?;
+    Ok(())
+}
+
+fn is_file_name(name: &str) -> bool {
+    Path::new(name).file_name() == Some(std::ffi::OsStr::new(name))
+}
+
+/// The plan slugs a session transcript records, in the order they appear.
+fn plan_slugs(transcript: &Path) -> std::io::Result<Vec<String>> {
+    let mut slugs = Vec::<String>::new();
+    for line in std::fs::read(transcript)?.split(|byte| *byte == b'\n') {
+        if !line.windows(6).any(|window| window == b"\"slug\"") {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if let Some(slug) = entry.get("slug").and_then(Value::as_str)
+            && is_file_name(slug)
+            && !slugs.iter().any(|known| known == slug)
+        {
+            slugs.push(slug.to_owned());
+        }
+    }
+    Ok(slugs)
+}
+
+/// Copy the entries of the directory `from` whose names `wanted` accepts into
+/// `to`.
+fn copy_entries(from: &Path, to: &Path, wanted: impl Fn(&str) -> bool) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(from) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    let mut ancestors = HashSet::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_str().is_some_and(&wanted) {
+            std::fs::create_dir_all(to)?;
+            copy_resolved(&entry.path(), &to.join(entry.file_name()), &mut ancestors)?;
+        }
+    }
     Ok(())
 }
 
