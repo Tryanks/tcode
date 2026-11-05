@@ -284,11 +284,7 @@ impl TimelineView {
                     })
                     .flatten();
                 let painted = this.painted_rows.clone();
-                let inset = px(if this.window_state.read(cx).compact {
-                    crate::material::COMPACT_PAGE_INSET
-                } else {
-                    CONTENT_MIN_PADDING
-                });
+                let (left, right) = this.column_insets(cx);
                 v_flex()
                     .id(("timeline-row", row.identity))
                     .debug_selector(move || format!("timeline-row-{index}"))
@@ -301,8 +297,8 @@ impl TimelineView {
                     })
                     .w_full()
                     .items_center()
-                    .px(inset)
-                    .pr(inset + this.layout.shift + this.layout.overhang)
+                    .pl(left)
+                    .pr(right)
                     .rounded(crate::material::radius_card(cx))
                     .bg(highlight)
                     // A press inside the mark lets it go, and still does what

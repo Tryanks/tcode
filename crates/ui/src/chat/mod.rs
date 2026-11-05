@@ -951,7 +951,6 @@ impl ChatView {
             self.rail.update(cx, |rail, _| rail.set_layout(rail_layout));
         }
         let mut side = self.render_side(window, cx);
-        let track_inset = self.track_inset();
         let phone_strip = self.render_phone_strip(agents.as_ref(), window, cx);
         let phone_strip_height = phone_strip.as_ref().map_or(px(0.), |(_, progress)| {
             px(crate::material::bar_height(
@@ -971,7 +970,6 @@ impl ChatView {
             width,
             overhang,
             shift,
-            track_inset,
             strip: phone_strip_height,
             cwd: cwd.to_path_buf(),
             is_draft,

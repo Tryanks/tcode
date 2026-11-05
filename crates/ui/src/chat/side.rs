@@ -445,12 +445,6 @@ impl ChatView {
         }
     }
 
-    /// The right inset of the timeline's scrollbar track this frame: see
-    /// [`super::rail::BodyLayout::track_inset`].
-    pub(super) fn track_inset(&self) -> gpui::Pixels {
-        self.body.track_inset(self.side.width)
-    }
-
     /// The agent shown beside the thread.
     pub(crate) fn side_session_id(&self) -> Option<&str> {
         self.side.host.as_ref().map(|host| host.session_id.as_str())

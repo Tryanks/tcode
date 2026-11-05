@@ -68,8 +68,6 @@ pub(super) struct BodyLayout {
     side_reach: Pixels,
     /// How far in the agent's card is.
     side_presence: f32,
-    /// Whether the body is compact, where nothing takes the slot.
-    compact: bool,
 }
 
 impl BodyLayout {
@@ -113,7 +111,6 @@ impl BodyLayout {
                 reach(body, side_width + CHAT_SIDE_GRIP)
             }),
             side_presence: 0.,
-            compact,
         }
     }
 
@@ -176,21 +173,6 @@ impl BodyLayout {
     /// changes hands.
     pub(super) fn shift(&self) -> Pixels {
         self.blend(self.reach, self.side_reach)
-    }
-
-    /// The right inset of the timeline's scrollbar track: left of what takes
-    /// the slot, and of the grip of an agent's card `side_width` wide, in
-    /// the gap the column keeps clear; at the body's edge with nothing there.
-    /// It takes `side_width` rather than the layout's own because a card
-    /// leaving keeps the width it had.
-    pub(super) fn track_inset(&self, side_width: Pixels) -> Pixels {
-        if self.compact {
-            return px(0.);
-        }
-        self.blend(
-            self.width + px(CHAT_RAIL_EDGE),
-            side_width + px(CHAT_SIDE_GRIP + CHAT_RAIL_EDGE),
-        )
     }
 
     /// `rail` as far as the rail is in and `side` as far as the agent's

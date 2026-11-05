@@ -1,6 +1,6 @@
-//! The lead's timeline scrollbar stands left of whatever takes the slot right
-//! of its column, in the gap the column keeps clear, and goes back to the
-//! body's edge once nothing does.
+//! The lead's timeline scrollbar stands just right of its content column,
+//! wherever the column is: what takes the slot beside the column moves it
+//! only by moving the column.
 
 use gpui::point;
 
@@ -20,6 +20,20 @@ fn track(cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
     cx.debug_bounds("chat-track").expect("the lead's track")
 }
 
+/// The lead's column, as its composer's card spans it.
+fn column(cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
+    cx.debug_bounds("composer-card")
+        .expect("the lead's composer")
+}
+
+/// The track stands against the column's right edge.
+fn hugs(at: gpui::Bounds<Pixels>, column: gpui::Bounds<Pixels>, when: &str) {
+    assert!(
+        (at.left() - column.right()).abs() < px(0.5),
+        "{when}: {at:?} against {column:?}"
+    );
+}
+
 fn top_row(left: Pixels, right: Pixels, cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
     rows_in(left, right, cx).last().expect("the lead's rows").1
 }
@@ -36,6 +50,39 @@ fn drag(from: gpui::Point<Pixels>, to: gpui::Point<Pixels>, cx: &mut VisualTestC
     }
     cx.simulate_mouse_up(to, MouseButton::Left, none);
     settle_frames(cx);
+}
+
+/// `id` starts a turn and runs a command in it.
+fn serve_command_started(host: &MountedShell, id: &str) {
+    let events = [
+        agent::AgentEvent::TurnStarted {
+            turn_id: "turn-build".into(),
+        },
+        agent::AgentEvent::ItemStarted(agent::ThreadItem {
+            id: "build".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::CommandExecution {
+                command: "cargo build".into(),
+                output: String::new(),
+                exit_code: None,
+                status: agent::ItemStatus::InProgress,
+            },
+        }),
+    ];
+    send_events(
+        host,
+        events
+            .into_iter()
+            .map(|event| {
+                (
+                    Topic::SessionEvents {
+                        session_id: id.into(),
+                    },
+                    ServerEvent::SessionEvent(event.into()),
+                )
+            })
+            .collect(),
+    );
 }
 
 /// Opens `agent-1` in the lead's slot, or on a sheet where it has no room.
@@ -61,51 +108,71 @@ fn open_agent(shell: &Entity<AppShell>, host: &MountedShell, cx: &mut VisualTest
     settle_frames(cx);
 }
 
-/// With the rail or the agent's card in the slot, the track stands between
-/// the column and it, the wheel over that gap moves the lead and the thumb
-/// drags there, the grip's whole band staying the grip's; the agent's own
-/// scrollbar stays on its card. The rail leaving takes the track back to the
-/// body's edge over the rail's own glide, and the sheet leaves it there.
+/// With the rail empty the track stands against the column's right edge,
+/// and a command bringing the rail in beside the centred column leaves it
+/// there on every frame; where the column moves clear of the rail or of an
+/// agent's card, the track moves with it, in the gap left of the slot, and
+/// never over the grip's band. The wheel over the track and right of it
+/// moves the lead, and the thumb drags where the track now is; the agent's
+/// own scrollbar stays on its card. The rail leaving glides the column back,
+/// the track with it, and the sheet leaves it at the column.
 #[gpui::test]
-fn the_leads_scrollbar_stands_left_of_the_slot(cx: &mut TestAppContext) {
+fn the_leads_scrollbar_stands_at_its_columns_edge_whatever_takes_the_slot(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, host, cx) = mount_lead_with_agent(cx);
+    let (shell, host, cx) = mount_panes(cx);
     serve_finished_turns(&host, "thread-1", 60, false);
     await_restore_update(&shell, cx, |store, cx| {
         store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(60)
     });
     let slack = px(0.5);
 
-    for window in [WIDE, MIDDLE] {
-        resize(cx, window);
-        settle_frames(cx);
-        let viewport = lead_viewport(&shell, cx);
-        let rail = cx.debug_bounds("chat-rail").expect("the lead's rail");
-        let column = cx
-            .debug_bounds("composer-card")
-            .expect("the lead's composer");
-        let at = track(cx);
-        let centred = (column.center().x - viewport.center().x).abs() < slack;
-        assert_eq!(centred, window == WIDE, "{column:?} in {viewport:?}");
-        assert!(
-            (at.right() - rail.left()).abs() < slack && at.left() >= column.right() - slack,
-            "{window}: {at:?} between {column:?} and {rail:?}"
-        );
+    resize(cx, WIDE);
+    settle_frames(cx);
+    assert_eq!(cx.debug_bounds("chat-rail"), None, "the rail is empty");
+    let at = track(cx);
+    hugs(at, column(cx), "with the rail empty");
 
+    serve_command_started(&host, "thread-1");
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(
+            Some("thread-1"),
+            |timeline| timeline.entries.iter().any(|entry| entry.id == "build"),
+            cx,
+        ) == Some(true)
+    });
+    for frame in 0..30 {
+        assert_eq!(track(cx), at, "frame {frame} of the rail coming in");
+        display_frame(cx);
+    }
+    let rail = cx
+        .debug_bounds("chat-rail")
+        .expect("the command's card brings the rail");
+    assert_eq!(track(cx), at, "with the rail in");
+    hugs(at, column(cx), "with the rail in");
+    assert!(at.right() <= rail.left(), "{at:?} left of {rail:?}");
+
+    let viewport = lead_viewport(&shell, cx);
+    for (over, x) in [("track", at.center().x), ("gutter", at.right() + px(20.))] {
         let row = top_row(viewport.left(), rail.left(), cx);
-        wheel(at.center(), 120., cx);
+        wheel(point(x, at.center().y), 120., cx);
         assert!(
             top_row(viewport.left(), rail.left(), cx) != row,
-            "{window}: the wheel over the gap moves the lead"
+            "the wheel over the {over} moves the lead"
         );
     }
 
+    resize(cx, MIDDLE);
+    settle_frames(cx);
     let viewport = lead_viewport(&shell, cx);
     let rail = cx.debug_bounds("chat-rail").expect("the lead's rail");
-    let column = cx
-        .debug_bounds("composer-card")
-        .expect("the lead's composer");
+    let beside = column(cx);
     let at = track(cx);
+    assert!(
+        beside.center().x < viewport.center().x - slack,
+        "{beside:?} moves clear of {rail:?} in {viewport:?}"
+    );
+    hugs(at, beside, "beside the rail");
+    assert!(at.right() <= rail.left() + slack, "{at:?} left of {rail:?}");
     let (row, _) = rows_in(viewport.left(), rail.left(), cx)[0];
     let thumb = point(at.right() - px(5.), at.bottom() - px(30.));
     drag(thumb, point(thumb.x, at.center().y), cx);
@@ -113,28 +180,31 @@ fn the_leads_scrollbar_stands_left_of_the_slot(cx: &mut TestAppContext) {
         rows_in(viewport.left(), rail.left(), cx)
             .iter()
             .all(|(index, _)| *index < row),
-        "the thumb drags in the gap"
+        "the thumb drags where the track is"
     );
 
+    send_events(&host, vec![lead_with_agent_index("thread-1")]);
+    await_restore_update(&shell, cx, |store, _| {
+        store.thread_meta("agent-1").is_some()
+    });
     open_agent(&shell, &host, cx);
     let card = cx.debug_bounds("chat-side-card").expect("the agent's card");
     let grip = cx.debug_bounds("chat-side-grip").expect("the card's grip");
     let band = grip.center().x - BAND / 2.;
     let viewport = lead_viewport(&shell, cx);
     let at = track(cx);
-    let lead = lead_card(column, cx).expect("the lead's composer keeps its width");
+    let lead = lead_card(beside, cx).expect("the lead's composer keeps its width");
+    hugs(at, lead, "beside the agent's card");
     assert!(
-        at.left() >= lead.right() - slack
-            && at.right() <= band + slack
-            && band + BAND <= card.left(),
-        "{at:?} between {lead:?} and the grip's band at {band:?}, left of {card:?}"
+        at.right() <= band + slack && band + BAND <= card.left(),
+        "{at:?} left of the grip's band at {band:?}, left of {card:?}"
     );
     let own = cx
         .debug_bounds("chat-side-track")
         .expect("the agent's track");
     assert!(
-        (own.right() - card.right()).abs() < px(2.),
-        "{own:?} at the edge of {card:?}"
+        own.left() >= card.left() && own.right() <= card.right(),
+        "{own:?} on {card:?}"
     );
 
     let row = top_row(viewport.left(), card.left(), cx);
@@ -165,10 +235,8 @@ fn the_leads_scrollbar_stands_left_of_the_slot(cx: &mut TestAppContext) {
         dragged.left() > card.left() + px(10.),
         "over the band, {dragged:?} narrows from {card:?}"
     );
-    assert!(
-        (track(cx).right() - (at.right() + dragged.left() - card.left())).abs() < slack,
-        "the track follows the card's edge"
-    );
+    let lead = lead_card(beside, cx).expect("the lead's composer keeps its width");
+    hugs(track(cx), lead, "with the card narrowed");
 
     press_control("side-close", cx);
     settle_panes(cx);
@@ -176,36 +244,39 @@ fn the_leads_scrollbar_stands_left_of_the_slot(cx: &mut TestAppContext) {
     let rail = cx
         .debug_bounds("chat-rail")
         .expect("the rail takes the slot");
-    assert!(
-        (track(cx).right() - rail.left()).abs() < slack,
-        "{:?} back beside {rail:?}",
-        track(cx)
-    );
+    hugs(track(cx), column(cx), "with the rail back");
+    assert!(track(cx).right() <= rail.left() + slack);
 
     resize(cx, NARROW);
-    let viewport = lead_viewport(&shell, cx);
-    let mut glide = vec![track(cx).right()];
-    for _ in 0..30 {
+    let mut glide = vec![track(cx).left()];
+    for frame in 0..30 {
         display_frame(cx);
-        glide.push(track(cx).right());
+        let at = track(cx);
+        hugs(
+            at,
+            column(cx),
+            &format!("frame {frame} of the rail leaving"),
+        );
+        glide.push(at.left());
     }
     assert!(
         glide.is_sorted()
             && glide
                 .iter()
-                .any(|at| *at > glide[0] && *at < viewport.right()),
-        "the track glides to the body's edge at {:?}: {glide:?}",
-        viewport.right()
+                .any(|at| *at > glide[0] && *at < *glide.last().unwrap()),
+        "the track glides with the column: {glide:?}"
     );
-    assert!((*glide.last().unwrap() - viewport.right()).abs() < slack);
     assert_eq!(cx.debug_bounds("chat-rail"), None, "the rail has left");
+    let at = track(cx);
+    hugs(at, column(cx), "with nothing in the slot");
 
     open_agent(&shell, &host, cx);
     assert_eq!(cx.debug_bounds("chat-side-card"), None, "on a sheet");
     assert!(cx.debug_bounds("chat-side-header").is_some(), "the sheet");
-    assert!(
-        (track(cx).right() - viewport.right()).abs() < slack,
-        "the track stays at the body's edge under the sheet"
+    assert_eq!(
+        track(cx),
+        at,
+        "the track stays at the column under the sheet"
     );
 }
 
