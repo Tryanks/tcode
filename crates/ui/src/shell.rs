@@ -3000,6 +3000,18 @@ impl AppShell {
                 pushed.push(*destination);
             }
         });
+        // A thread page the reader navigates to is put up anew, its thread
+        // a new scene; one the window builds as it turns compact is the
+        // conversation it showed, drawn under a new parent.
+        if motion == NavMotion::Animated
+            && self.window_state.read(cx).compact
+            && pushed.contains(&Destination::Thread)
+            && let Some(attachment) = &self.attachment
+        {
+            attachment
+                .chat(cx)
+                .update(cx, |chat, cx| chat.restart_scene(cx));
+        }
         self.mounted.truncate(common);
         self.mounted.extend(pushed);
         let state = self.window_state.read(cx);

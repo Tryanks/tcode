@@ -220,7 +220,7 @@ impl ChatView {
             } else if text.len() > ASYNC_MARKDOWN_THRESHOLD_BYTES {
                 self.spawn_markdown_build(id, text, cx);
             } else {
-                let mut md = MdState::new(&text, cx);
+                let mut md = MdState::new(&text, cx).in_scene(&self.scene, cx);
                 md.sync_from(&entry, text, cx);
                 md.set_streaming(streaming, cx);
                 self.md_states.insert(id, md);
@@ -348,7 +348,7 @@ impl ChatView {
             return;
         }
 
-        let mut state = MdState::from_parsed(&parsed_text, parsed, cx);
+        let mut state = MdState::from_parsed(&parsed_text, parsed, cx).in_scene(&self.scene, cx);
         if desired_text != parsed_text {
             state.sync(desired_text, cx);
         }

@@ -125,9 +125,12 @@ pub struct MarkdownState {
     own_selection_focus_out: Option<gpui::Subscription>,
     /// The runs of text painted last frame, which selection ends hit-test.
     pub(super) runs: Rc<RefCell<Vec<PaintedRun>>>,
-    /// Whether the document has been drawn: text appended before then was
-    /// never seen arriving, so it does not fade in.
+    /// Whether the document has been drawn in its scene: text appended
+    /// before then was never seen arriving, so it does not fade in.
     drawn: bool,
+    /// The scene the document is drawn in: in a new one it starts at rest,
+    /// as one never drawn does, whatever it was revealing.
+    scene: crate::motion::InScene,
     stream_fade: StreamFade,
     /// The fades this frame paints, sampled when the document renders.
     fade_frame: Option<Rc<FadeFrame>>,
@@ -192,6 +195,7 @@ impl MarkdownState {
             own_selection_focus_out: None,
             runs: Rc::default(),
             drawn: false,
+            scene: Default::default(),
             stream_fade: StreamFade::default(),
             fade_frame: None,
             unrevealed: Cell::new(px(0.)),
@@ -200,9 +204,24 @@ impl MarkdownState {
         }
     }
 
+    /// Draw the document in `epoch`'s scenes.
+    pub(crate) fn set_scene(&mut self, epoch: &crate::motion::Epoch) {
+        self.scene = crate::motion::InScene::new(epoch);
+    }
+
+    /// A new scene started since the document was last reached: it has not
+    /// been drawn in it.
+    fn enter_scene(&mut self) {
+        if self.scene.entered() {
+            self.drawn = false;
+            self.stream_fade.clear();
+            self.fade_frame = None;
+        }
+    }
+
     /// Append text, synchronously reparse the one canonical source, and
     /// repaint. While the text is streaming into a document that has been
-    /// drawn, what this adds fades in; anything else -- a thread opening, a
+    /// drawn in its scene, what this adds fades in; anything else -- a thread opening, a
     /// client catching up, a message rebuilt -- appears as it is.
     pub fn push_str(&mut self, text: &str, cx: &mut Context<Self>) {
         if text.is_empty() {
@@ -599,6 +618,7 @@ impl MarkdownState {
         for (old, new) in old_suffix.iter().zip(&blocks[unchanged..]) {
             new.reuse_highlights(old);
         }
+        self.enter_scene();
         self.last_append_burst = if self.drawn && self.streaming {
             self.stream_fade.record(
                 &old_suffix,
@@ -717,6 +737,20 @@ impl MarkdownState {
         self.fade_frame.as_ref().map_or_else(Vec::new, |frame| {
             frame.run(&origin.path, origin.line, origin.base, len)
         })
+    }
+
+    /// Whether the text is revealing: words fading in, or waiting to.
+    pub(crate) fn revealing(&self) -> bool {
+        !self.stream_fade.is_empty() || self.fade_frame.is_some()
+    }
+
+    /// Show the text as it is from the next frame: a reader who did not
+    /// watch it arrive is not shown it arriving. What is appended after
+    /// reveals as ever.
+    pub(crate) fn settle(&mut self, cx: &mut Context<Self>) {
+        self.stream_fade.clear();
+        self.fade_frame = None;
+        cx.notify();
     }
 
     /// While the reveal has words waiting: the document's height it has not
@@ -845,6 +879,7 @@ fn root_items(root: &BlockNode) -> Rc<[RootItem]> {
 
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.enter_scene();
         let first_draw = !self.drawn;
         self.drawn = true;
         let root = self.parsed.clone();

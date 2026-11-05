@@ -115,6 +115,11 @@ impl StreamFade {
         self.paced_at = None;
     }
 
+    /// Whether any word is fading in, or waiting to.
+    pub(super) fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
+    }
+
     /// When the last word waiting starts, while any waits.
     pub(super) fn drains_at(&self) -> Option<Instant> {
         let paced_at = self.paced_at.filter(|_| self.backlog > 0.)?;
