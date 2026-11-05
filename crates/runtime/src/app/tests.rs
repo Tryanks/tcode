@@ -5683,8 +5683,9 @@ const CLI_PROJECT_DIR: &str = "-tmp-release-project-3f2a";
 
 impl AccountSwitch {
     /// With `on_disk`, the built-in account's home holds the session as the CLI writes it:
-    /// the transcript, the subagent transcripts and stored tool results beside it, and its
-    /// file checkpoints, next to another session of the same project.
+    /// the transcript, the subagent transcripts and stored tool results beside it, its file
+    /// checkpoints, task list, todo lists, hook environment and the plans of the slug its
+    /// transcript records, next to another session of the same project with its own.
     fn new(cx: &mut TestAppContext, name: &str, on_disk: bool) -> Self {
         let store = TestStore::new(name);
         let cwd = store.root().join("release");
@@ -5753,21 +5754,43 @@ impl AccountSwitch {
         switch.send(cx, 3, "plan the release").unwrap();
         let (delivery_id, _, events) = next_turn(cx, &switch.launches, 0);
         if on_disk {
-            let project = switch.default_home.join("projects").join(CLI_PROJECT_DIR);
+            let project = Path::new("projects").join(CLI_PROJECT_DIR);
             for (path, content) in [
-                ("native-1.jsonl", "{\"turn\":1}\n"),
-                ("native-1/subagents/agent-a.jsonl", "{\"agent\":\"a\"}\n"),
-                ("native-1/subagents/agent-a.meta.json", "{}"),
-                ("native-1/tool-results/toolu_1.txt", "release notes"),
-                ("other-session.jsonl", "{\"other\":true}\n"),
+                (
+                    project.join("native-1.jsonl"),
+                    "{\"turn\":1}\n{\"turn\":1,\"slug\":\"quiet-release-plan\"}\n",
+                ),
+                (
+                    project.join("native-1/subagents/agent-a.jsonl"),
+                    "{\"agent\":\"a\"}\n",
+                ),
+                (project.join("native-1/subagents/agent-a.meta.json"), "{}"),
+                (
+                    project.join("native-1/tool-results/toolu_1.txt"),
+                    "release notes",
+                ),
+                (
+                    project.join("other-session.jsonl"),
+                    "{\"other\":true,\"slug\":\"other-plan\"}\n",
+                ),
+                ("file-history/native-1/9c1e@v1".into(), "before"),
+                ("tasks/native-1/1.json".into(), "{\"subject\":\"Tag v1\"}"),
+                (
+                    "session-env/native-1/sessionstart-hook-0.sh".into(),
+                    "export STAGE=release\n",
+                ),
+                ("todos/native-1-agent-native-1.json".into(), "[]"),
+                ("todos/native-1-agent-a.json".into(), "[]"),
+                ("plans/quiet-release-plan.md".into(), "# Release"),
+                ("plans/quiet-release-plan-agent-a.md".into(), "# Notes"),
+                ("tasks/other-session/1.json".into(), "{}"),
+                ("todos/other-session-agent-other-session.json".into(), "[]"),
+                ("plans/other-plan.md".into(), "# Other"),
             ] {
-                let path = project.join(path);
+                let path = switch.default_home.join(path);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, content).unwrap();
             }
-            let checkpoint = switch.default_home.join("file-history/native-1/9c1e@v1");
-            std::fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
-            std::fs::write(checkpoint, "before").unwrap();
         }
         switch.run_turn(cx, &events, delivery_id, "Tag v1 on Friday.");
         switch
@@ -5931,6 +5954,12 @@ fn switching_accounts_carries_the_native_session() {
         format!("{project}/native-1/subagents/agent-a.meta.json"),
         format!("{project}/native-1/tool-results/toolu_1.txt"),
         "file-history/native-1/9c1e@v1".into(),
+        "tasks/native-1/1.json".into(),
+        "session-env/native-1/sessionstart-hook-0.sh".into(),
+        "todos/native-1-agent-native-1.json".into(),
+        "todos/native-1-agent-a.json".into(),
+        "plans/quiet-release-plan.md".into(),
+        "plans/quiet-release-plan-agent-a.md".into(),
     ] {
         assert!(read(&switch.work_home, &path).is_some(), "{path}");
         assert_eq!(
@@ -5938,10 +5967,14 @@ fn switching_accounts_carries_the_native_session() {
             read(&switch.default_home, &path)
         );
     }
-    assert_eq!(
-        read(&switch.work_home, &format!("{project}/other-session.jsonl")),
-        None
-    );
+    for path in [
+        format!("{project}/other-session.jsonl"),
+        "tasks/other-session/1.json".into(),
+        "todos/other-session-agent-other-session.json".into(),
+        "plans/other-plan.md".into(),
+    ] {
+        assert_eq!(read(&switch.work_home, &path), None, "{path}");
+    }
     std::fs::write(
         switch.work_home.join(format!("{project}/native-1.jsonl")),
         "{\"turn\":1}\n{\"turn\":2}\n",
