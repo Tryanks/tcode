@@ -197,7 +197,7 @@ pub(crate) struct Morph {
     mark: Option<(Origins, SharedString, SharedString)>,
     /// The surface's frame, drawn at the size it has now, its corners
     /// `radius` round at rest, inside a border `border` wide.
-    frame: Option<Div>,
+    frame: Option<crate::material::Raised<Div>>,
     radius: Pixels,
     border: Pixels,
     content: Option<AnyElement>,
@@ -205,7 +205,12 @@ pub(crate) struct Morph {
 
 impl Morph {
     /// `content` on `frame`, at rest in its place.
-    pub(crate) fn new(frame: Div, radius: Pixels, border: Pixels, content: AnyElement) -> Self {
+    pub(crate) fn new(
+        frame: crate::material::Raised<Div>,
+        radius: Pixels,
+        border: Pixels,
+        content: AnyElement,
+    ) -> Self {
         Self {
             from: None,
             growth: 1.,

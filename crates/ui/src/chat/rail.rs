@@ -511,7 +511,7 @@ impl ChatView {
         Some(
             slot(self.body.width, presence)
                 .debug_selector(|| "chat-rail".into())
-                .child(stack)
+                .child(crate::motion::faded::faded(presence, stack))
                 .when(!self.body.rail, |rail| rail.child(crate::motion::shield()))
                 .into_any_element(),
         )
@@ -593,16 +593,13 @@ impl ChatView {
                 .into_any_element()
         });
         stack::StackCard {
-            chrome: crate::material::shadow_outside(
-                crate::material::card_raised(cx)
-                    .p_0()
-                    .size_full()
-                    .opacity(presence)
-                    .debug_selector(move || format!("rail-card-frame-{key}"))
-                    .block_mouse_except_scroll(),
-                crate::material::radius_card(cx),
-            )
-            .into_any_element(),
+            chrome: crate::material::card_raised(cx)
+                .p_0()
+                .size_full()
+                .opacity(presence)
+                .debug_selector(move || format!("rail-card-frame-{key}"))
+                .block_mouse_except_scroll()
+                .into_any_element(),
             header,
             body,
             presence,

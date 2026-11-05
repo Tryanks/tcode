@@ -69,7 +69,7 @@ impl Tooltip {
                 Kbd::binding_for_action(action.as_ref(), context.as_deref(), window)
             })
         });
-        gpui_base::Tooltip::new("tooltip-popup")
+        crate::material::raised(gpui_base::Tooltip::new("tooltip-popup"))
             .h_flex()
             .relative()
             .top(crate::motion::lift(progress))

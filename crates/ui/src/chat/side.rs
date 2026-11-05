@@ -1168,7 +1168,7 @@ impl ChatView {
                     }
                 }),
             )
-            .child(card)
+            .child(crate::motion::faded::faded(fade.unwrap_or(presence), card))
             .children(edge)
             .when(!shown, |card| card.child(crate::motion::shield()))
             .into_any_element()

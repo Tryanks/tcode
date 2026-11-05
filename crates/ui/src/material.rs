@@ -165,11 +165,13 @@ pub fn faded_hairline(cx: &App) -> impl IntoElement {
 
 /// Applies the T3 overlay contour: fully opaque fill, hairline border and a
 /// large soft shadow. Radius stays the caller's choice (`radius_overlay`).
-pub fn overlay_contour(el: Div, cx: &App) -> Div {
-    el.bg(cx.theme().popover)
-        .border_1()
-        .border_color(cx.theme().border)
-        .shadow_xl()
+pub fn overlay_contour<E: Styled>(el: E, cx: &App) -> Raised<E> {
+    raised(
+        el.bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_xl(),
+    )
 }
 
 /// Height of the drag handle strip above a compact sheet's title row.
@@ -179,12 +181,14 @@ pub const SHEET_TITLE_HEIGHT: f32 = 48.;
 
 /// The compact bottom sheet's surface: top corners at the sheet radius, opaque
 /// fill, a hairline along its top edge and the large soft shadow.
-pub fn sheet_contour<E: Styled>(el: E, cx: &App) -> E {
-    el.rounded_t(radius_overlay_sheet(cx))
-        .bg(cx.theme().popover)
-        .border_t_1()
-        .border_color(cx.theme().border)
-        .shadow_xl()
+pub fn sheet_contour<E: Styled>(el: E, cx: &App) -> Raised<E> {
+    raised(
+        el.rounded_t(radius_overlay_sheet(cx))
+            .bg(cx.theme().popover)
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .shadow_xl(),
+    )
 }
 
 /// The window edge a [`floating_panel`] is docked against.
@@ -196,8 +200,8 @@ pub enum Side {
 
 /// A side panel floating over the content: opaque fill, a medium shadow and a
 /// hairline on the edge that faces the content.
-pub fn floating_panel<E: Styled>(el: E, side: Side, cx: &App) -> E {
-    let el = el.bg(cx.theme().popover).shadow_lg();
+pub fn floating_panel<E: Styled>(el: E, side: Side, cx: &App) -> Raised<E> {
+    let el = raised(el).bg(cx.theme().popover).shadow_lg();
     match side {
         Side::Left => el.border_r_1(),
         Side::Right => el.border_l_1(),
@@ -208,7 +212,7 @@ pub fn floating_panel<E: Styled>(el: E, side: Side, cx: &App) -> E {
 /// A side panel `lift` of the way from docked to [floating](floating_panel). A
 /// docked one is a peer of the content beside it: the same paper, opaque for
 /// what runs on beneath it, the same hairline, and no shadow.
-pub fn lifting_panel<E: Styled>(el: E, side: Side, lift: f32, cx: &App) -> E {
+pub fn lifting_panel<E: Styled>(el: E, side: Side, lift: f32, cx: &App) -> Raised<E> {
     let mut el = floating_panel(el, side, cx);
     let style = el.style();
     style.box_shadow = style
@@ -246,107 +250,108 @@ pub fn card_secondary(cx: &App) -> Div {
 }
 
 /// A [`card`] lifted off the page: opaque fill, hairline border, small shadow.
-pub fn card_raised(cx: &App) -> Div {
-    card(cx)
-        .bg(cx.theme().popover)
-        .border_1()
-        .border_color(cx.theme().border)
-        .shadow_sm()
+pub fn card_raised(cx: &App) -> Raised<Div> {
+    raised(
+        card(cx)
+            .bg(cx.theme().popover)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_sm(),
+    )
 }
 
-/// `surface`, whose corners are `radius` round, with its drop shadows drawn
-/// only around it, as a box shadow is drawn outside its border box.
+/// `surface`, raised off what it lies on by its drop shadows: while it is
+/// drawn faint, by its own opacity or a fade it is painted under
+/// ([`crate::motion::faded`]), its shadows are drawn only around it, as a
+/// box shadow is drawn outside its border box; at rest, as GPUI draws them.
 ///
 /// Gap: GPUI draws an element's drop shadow under it as well as around it,
 /// and fades an element by fading each thing it paints rather than the
-/// element as one. A raised card fading in or out (or fading in with the
-/// conversation it is on) then shows its own shadow through its fill, darker
-/// than both what it lies on and the card. A rounded corner leaves part of
-/// its square uncovered, where the shadow shows around the card too, so the
-/// shadow is still drawn under those squares. Remove this once GPUI draws a
-/// drop shadow only outside its element, or fades an element as one.
-pub fn shadow_outside(mut surface: Div, radius: Pixels) -> ShadowOutside {
-    let style = surface.style();
-    let opacity = style.opacity.unwrap_or(1.);
-    let shadows = style
-        .box_shadow
-        .take()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|mut shadow| {
-            shadow.color.a *= opacity;
-            shadow
-        })
-        .collect();
-    ShadowOutside {
-        surface: surface.into_any_element(),
-        shadows,
-        radius,
+/// element as one. A raised surface fading in or out would show its own
+/// shadow through its fill, darker than both what it lies on and the
+/// surface. A rounded corner leaves part of its square uncovered, where the
+/// shadow shows around the surface too, so the shadow is still drawn under
+/// those squares. Remove this once GPUI draws a drop shadow only outside its
+/// element, or fades an element as one.
+pub fn raised<E: Styled>(surface: E) -> Raised<E> {
+    Raised {
+        inner: Some(surface),
     }
 }
 
-/// See [`shadow_outside`].
-pub struct ShadowOutside {
+/// See [`raised`].
+pub struct Raised<E> {
+    inner: Option<E>,
+}
+
+impl<E> Raised<E> {
+    fn inner(&mut self) -> &mut E {
+        self.inner
+            .as_mut()
+            .expect("a raised surface is laid out once")
+    }
+}
+
+/// What a [`Raised`] keeps from its layout to its paint.
+pub struct RaisedLayout {
     surface: gpui::AnyElement,
     shadows: Vec<BoxShadow>,
-    radius: Pixels,
+    corners: gpui::CornersRefinement<gpui::AbsoluteLength>,
+    /// The surface's own opacity.
+    opacity: f32,
 }
 
-impl ShadowOutside {
-    /// The regions the shadows of a surface at `bounds` are drawn in: all
-    /// round it, and the squares of its corners. Their edges lie on device
-    /// pixels the surface covers whole, so neighbours meet without a gap or
-    /// an overlap.
-    fn regions(
-        &self,
-        bounds: gpui::Bounds<Pixels>,
-        scale: f32,
-    ) -> Option<[gpui::Bounds<Pixels>; 8]> {
-        let snap = |value: Pixels, up: bool| {
-            let device = f32::from(value) * scale;
-            px(if up { device.ceil() } else { device.floor() } / scale)
-        };
-        let (left, top) = (snap(bounds.left(), true), snap(bounds.top(), true));
-        let (right, bottom) = (snap(bounds.right(), false), snap(bounds.bottom(), false));
-        if right <= left || bottom <= top {
-            return None;
-        }
-        let reach = self
-            .shadows
-            .iter()
-            .map(|shadow| {
-                shadow.blur_radius * 3.
-                    + shadow.spread_radius.max(px(0.))
-                    + shadow.offset.x.abs()
-                    + shadow.offset.y.abs()
-            })
-            .fold(px(0.), Pixels::max)
-            + px(1.);
-        let corner = snap(
-            self.radius
-                .min((right - left) / 2.)
-                .min((bottom - top) / 2.),
-            true,
-        );
-        let (outer_left, outer_top) = (left - reach, top - reach);
-        let (outer_right, outer_bottom) = (right + reach, bottom + reach);
-        let rect = |left, top, right, bottom| {
-            gpui::Bounds::from_corners(gpui::point(left, top), gpui::point(right, bottom))
-        };
-        Some([
-            rect(outer_left, outer_top, outer_right, top),
-            rect(outer_left, bottom, outer_right, outer_bottom),
-            rect(outer_left, top, left, bottom),
-            rect(right, top, outer_right, bottom),
-            rect(left, top, left + corner, top + corner),
-            rect(right - corner, top, right, top + corner),
-            rect(left, bottom - corner, left + corner, bottom),
-            rect(right - corner, bottom - corner, right, bottom),
-        ])
+/// The regions the shadows of a surface at `bounds` with `radii` corners
+/// are drawn in while it is faint: all round it, and the squares of its
+/// corners. Their edges lie on device pixels the surface covers whole, so
+/// neighbours meet without a gap or an overlap.
+fn around(
+    bounds: gpui::Bounds<Pixels>,
+    radii: gpui::Corners<Pixels>,
+    shadows: &[BoxShadow],
+    scale: f32,
+) -> Option<[gpui::Bounds<Pixels>; 8]> {
+    let snap = |value: Pixels, up: bool| {
+        let device = f32::from(value) * scale;
+        px(if up { device.ceil() } else { device.floor() } / scale)
+    };
+    let (left, top) = (snap(bounds.left(), true), snap(bounds.top(), true));
+    let (right, bottom) = (snap(bounds.right(), false), snap(bounds.bottom(), false));
+    if right <= left || bottom <= top {
+        return None;
     }
+    let reach = shadows
+        .iter()
+        .map(|shadow| {
+            shadow.blur_radius * 3.
+                + shadow.spread_radius.max(px(0.))
+                + shadow.offset.x.abs()
+                + shadow.offset.y.abs()
+        })
+        .fold(px(0.), Pixels::max)
+        + px(1.);
+    let most = ((right - left) / 2.).min((bottom - top) / 2.);
+    let corner = |radius: Pixels| snap(radius.min(most), true);
+    let (top_left, top_right) = (corner(radii.top_left), corner(radii.top_right));
+    let (bottom_left, bottom_right) = (corner(radii.bottom_left), corner(radii.bottom_right));
+    let (outer_left, outer_top) = (left - reach, top - reach);
+    let (outer_right, outer_bottom) = (right + reach, bottom + reach);
+    let rect = |left, top, right, bottom| {
+        gpui::Bounds::from_corners(gpui::point(left, top), gpui::point(right, bottom))
+    };
+    Some([
+        rect(outer_left, outer_top, outer_right, top),
+        rect(outer_left, bottom, outer_right, outer_bottom),
+        rect(outer_left, top, left, bottom),
+        rect(right, top, outer_right, bottom),
+        rect(left, top, left + top_left, top + top_left),
+        rect(right - top_right, top, right, top + top_right),
+        rect(left, bottom - bottom_left, left + bottom_left, bottom),
+        rect(right - bottom_right, bottom - bottom_right, right, bottom),
+    ])
 }
 
-impl IntoElement for ShadowOutside {
+impl<E: IntoElement + Styled + 'static> IntoElement for Raised<E> {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -354,8 +359,8 @@ impl IntoElement for ShadowOutside {
     }
 }
 
-impl gpui::Element for ShadowOutside {
-    type RequestLayoutState = ();
+impl<E: IntoElement + Styled + 'static> gpui::Element for Raised<E> {
+    type RequestLayoutState = RaisedLayout;
     type PrepaintState = ();
 
     fn id(&self) -> Option<ElementId> {
@@ -372,8 +377,26 @@ impl gpui::Element for ShadowOutside {
         _: Option<&gpui::InspectorElementId>,
         window: &mut gpui::Window,
         cx: &mut App,
-    ) -> (gpui::LayoutId, ()) {
-        (self.surface.request_layout(window, cx), ())
+    ) -> (gpui::LayoutId, RaisedLayout) {
+        let mut inner = self
+            .inner
+            .take()
+            .expect("a raised surface is laid out once");
+        let style = inner.style();
+        let shadows = style.box_shadow.take().unwrap_or_default();
+        let corners = style.corner_radii.clone();
+        let opacity = style.opacity.unwrap_or(1.);
+        let mut surface = inner.into_any_element();
+        let layout = surface.request_layout(window, cx);
+        (
+            layout,
+            RaisedLayout {
+                surface,
+                shadows,
+                corners,
+                opacity,
+            },
+        )
     }
 
     fn prepaint(
@@ -381,11 +404,11 @@ impl gpui::Element for ShadowOutside {
         _: Option<&gpui::GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         _: gpui::Bounds<Pixels>,
-        _: &mut (),
+        layout: &mut RaisedLayout,
         window: &mut gpui::Window,
         cx: &mut App,
     ) {
-        self.surface.prepaint(window, cx);
+        layout.surface.prepaint(window, cx);
     }
 
     fn paint(
@@ -393,26 +416,73 @@ impl gpui::Element for ShadowOutside {
         _: Option<&gpui::GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: gpui::Bounds<Pixels>,
-        _: &mut (),
+        layout: &mut RaisedLayout,
         _: &mut (),
         window: &mut gpui::Window,
         cx: &mut App,
     ) {
-        let radii = gpui::Corners::all(self.radius);
-        match self.regions(bounds, window.scale_factor()) {
-            Some(regions) => {
-                for region in regions {
-                    window
-                        .with_content_mask(Some(gpui::ContentMask { bounds: region }), |window| {
-                            window.paint_drop_shadows(bounds, radii, &self.shadows)
-                        });
+        if !layout.shadows.is_empty() {
+            let rem = window.rem_size();
+            let most = bounds.size.width.min(bounds.size.height) / 2.;
+            let radius = |corner: Option<gpui::AbsoluteLength>| {
+                corner
+                    .map_or(px(0.), |corner| corner.to_pixels(rem))
+                    .min(most)
+            };
+            let corners = &layout.corners;
+            let radii = gpui::Corners {
+                top_left: radius(corners.top_left),
+                top_right: radius(corners.top_right),
+                bottom_right: radius(corners.bottom_right),
+                bottom_left: radius(corners.bottom_left),
+            };
+            // The surface's own opacity is applied as it paints itself,
+            // after these.
+            let opacity = layout.opacity;
+            let shadows: Vec<BoxShadow> = layout
+                .shadows
+                .iter()
+                .cloned()
+                .map(|mut shadow| {
+                    shadow.color.a *= opacity;
+                    shadow
+                })
+                .collect();
+            let faint = opacity * crate::motion::faded::opacity() < 1.;
+            match around(bounds, radii, &shadows, window.scale_factor()).filter(|_| faint) {
+                Some(regions) => {
+                    for region in regions {
+                        window.with_content_mask(
+                            Some(gpui::ContentMask { bounds: region }),
+                            |window| window.paint_drop_shadows(bounds, radii, &shadows),
+                        );
+                    }
                 }
+                None => window.paint_drop_shadows(bounds, radii, &shadows),
             }
-            // Too small to cover a device pixel whole: nothing of it hides
-            // its shadow.
-            None => window.paint_drop_shadows(bounds, radii, &self.shadows),
         }
-        self.surface.paint(window, cx);
+        // What the surface holds is drawn as faint as it is.
+        crate::motion::faded::within(layout.opacity, || layout.surface.paint(window, cx));
+    }
+}
+
+impl<E: Styled> Styled for Raised<E> {
+    fn style(&mut self) -> &mut gpui::StyleRefinement {
+        self.inner().style()
+    }
+}
+
+impl<E: InteractiveElement> InteractiveElement for Raised<E> {
+    fn interactivity(&mut self) -> &mut gpui::Interactivity {
+        self.inner().interactivity()
+    }
+}
+
+impl<E: gpui::StatefulInteractiveElement> gpui::StatefulInteractiveElement for Raised<E> {}
+
+impl<E: gpui::ParentElement> gpui::ParentElement for Raised<E> {
+    fn extend(&mut self, elements: impl IntoIterator<Item = gpui::AnyElement>) {
+        self.inner().extend(elements);
     }
 }
 
@@ -477,8 +547,8 @@ pub fn row_hairline(indent: Pixels, cx: &App) -> Div {
 }
 
 /// One grouped-list container shared by settings surfaces.
-pub fn group(cx: &App) -> Div {
-    v_flex()
+pub fn group(cx: &App) -> Raised<Div> {
+    raised(v_flex())
         .w_full()
         .rounded(radius_card(cx))
         .border_1()
@@ -490,7 +560,7 @@ pub fn group(cx: &App) -> Div {
 
 /// Assemble rows into a floating group with inset hairlines between them.
 /// Rows carry their own inset ([`group_row`] for the common one).
-pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
+pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Raised<Div> {
     let mut group = group(cx);
     let last = rows.len().saturating_sub(1);
     for (index, row) in rows.into_iter().enumerate() {

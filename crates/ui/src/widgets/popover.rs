@@ -419,17 +419,22 @@ impl Popover {
 }
 
 /// The desktop popover's surface at `progress` of its appear motion.
-fn surface(appearance: bool, progress: f32, cx: &App) -> gpui::Stateful<gpui::Div> {
-    gpui_base::v_flex()
-        .when(appearance, |el| {
-            material::overlay_contour(el, cx)
-                .p_1()
-                .rounded(material::radius_overlay(cx))
-        })
-        .id("tcode-popover-content")
-        .occlude()
-        .opacity(progress)
-        .top(crate::motion::lift(progress))
+fn surface(
+    appearance: bool,
+    progress: f32,
+    cx: &App,
+) -> gpui::Stateful<material::Raised<gpui::Div>> {
+    if appearance {
+        material::overlay_contour(gpui_base::v_flex(), cx)
+            .p_1()
+            .rounded(material::radius_overlay(cx))
+    } else {
+        material::raised(gpui_base::v_flex())
+    }
+    .id("tcode-popover-content")
+    .occlude()
+    .opacity(progress)
+    .top(crate::motion::lift(progress))
 }
 
 impl Popover {

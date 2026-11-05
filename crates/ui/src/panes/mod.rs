@@ -754,7 +754,10 @@ impl Render for ThreadPanel {
                         None => content.h_full(),
                     })
                     .opacity(held.opacity)
-                    .child(self.split.clone()),
+                    .child(crate::motion::faded::faded(
+                        held.opacity,
+                        self.split.clone(),
+                    )),
             )
             .when(self.closing, |pane| pane.child(crate::motion::shield()))
             .child(self.press_catcher(cx))

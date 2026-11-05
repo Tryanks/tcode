@@ -265,7 +265,7 @@ impl Render for Notification {
                 })
             });
             let spacing = &cx.theme().tokens.spacing;
-            return div()
+            return crate::material::raised(div())
                 .id("compact-toast")
                 .debug_selector(|| "compact-toast".into())
                 .role(gpui::Role::Alert)
@@ -323,54 +323,56 @@ impl Render for Notification {
             .or_else(|| self.type_.map(|kind| kind.icon(cx)));
         let has_icon = icon.is_some();
         let spacing = &cx.theme().tokens.spacing;
-        BaseToast::new("notification")
-            .debug_selector(|| "wide-toast".into())
-            .transition_status(self.transition_status)
-            .flex()
-            .items_start()
-            .gap(spacing.md)
-            .relative()
-            .top(lift)
-            .opacity(progress)
-            .occlude()
-            .w_full()
-            .p(spacing.lg)
-            .text_body(false, cx)
-            .rounded(crate::material::radius_overlay(cx))
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().popover)
-            .shadow_lg()
-            .when_some(icon, |el, icon| el.child(icon))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(spacing.xs)
-                    .when_some(self.title.clone(), |el, title| {
-                        el.child(div().font_semibold().child(title))
-                    })
-                    .when_some(self.message.clone(), |el, message| el.child(message))
-                    .when_some(content, |el, content| el.child(content))
-                    .when(!has_icon, |el| el),
-            )
-            .when_some(action, |el, action| el.child(action))
-            .child(
-                div().absolute().top_1().right_1().child(
-                    Button::new("notification-close")
-                        .ghost()
-                        .xsmall()
-                        .icon(IconName::Close)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.dismiss(window, cx);
-                        })),
-                ),
-            )
-            .children(cover)
-            .into_any_element()
+        crate::material::raised(
+            BaseToast::new("notification")
+                .debug_selector(|| "wide-toast".into())
+                .transition_status(self.transition_status),
+        )
+        .flex()
+        .items_start()
+        .gap(spacing.md)
+        .relative()
+        .top(lift)
+        .opacity(progress)
+        .occlude()
+        .w_full()
+        .p(spacing.lg)
+        .text_body(false, cx)
+        .rounded(crate::material::radius_overlay(cx))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().popover)
+        .shadow_lg()
+        .when_some(icon, |el, icon| el.child(icon))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(spacing.xs)
+                .when_some(self.title.clone(), |el, title| {
+                    el.child(div().font_semibold().child(title))
+                })
+                .when_some(self.message.clone(), |el, message| el.child(message))
+                .when_some(content, |el, content| el.child(content))
+                .when(!has_icon, |el| el),
+        )
+        .when_some(action, |el, action| el.child(action))
+        .child(
+            div().absolute().top_1().right_1().child(
+                Button::new("notification-close")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.dismiss(window, cx);
+                    })),
+            ),
+        )
+        .children(cover)
+        .into_any_element()
     }
 }
 
