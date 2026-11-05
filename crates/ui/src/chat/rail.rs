@@ -593,13 +593,16 @@ impl ChatView {
                 .into_any_element()
         });
         stack::StackCard {
-            chrome: crate::material::card_raised(cx)
-                .p_0()
-                .size_full()
-                .opacity(presence)
-                .debug_selector(move || format!("rail-card-frame-{key}"))
-                .block_mouse_except_scroll()
-                .into_any_element(),
+            chrome: crate::material::shadow_outside(
+                crate::material::card_raised(cx)
+                    .p_0()
+                    .size_full()
+                    .opacity(presence)
+                    .debug_selector(move || format!("rail-card-frame-{key}"))
+                    .block_mouse_except_scroll(),
+                crate::material::radius_card(cx),
+            )
+            .into_any_element(),
             header,
             body,
             presence,
