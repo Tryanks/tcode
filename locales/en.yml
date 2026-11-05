@@ -1250,6 +1250,7 @@ errors:
   profile_config: "Failed to prepare or remove a profile's config directory: %{error}"
   process_gone: "Session process is gone; try reopening."
   provider_start: "Failed to start provider: %{error}"
+  provider_batch_line_break: "Could not start %{program}: it is a batch file, and batch files cannot be given an argument that spans lines. Install the CLI's native build, or set its executable in Settings → Providers."
   provider_closed_reason: "Provider session closed unexpectedly: %{reason}"
   working_directory_missing: "The working directory %{cwd} no longer exists."
   provider_closed: "Provider session closed unexpectedly."

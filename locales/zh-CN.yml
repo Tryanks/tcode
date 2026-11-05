@@ -1243,6 +1243,7 @@ errors:
   profile_config: "准备或删除配置的配置目录失败：%{error}"
   process_gone: "会话进程已结束，请尝试重新打开。"
   provider_start: "启动提供商失败：%{error}"
+  provider_batch_line_break: "无法启动 %{program}：它是批处理文件，无法接收跨行的参数。请安装该 CLI 的原生版本，或在“设置 → 提供商”中指定它的可执行文件。"
   provider_closed_reason: "提供商会话意外关闭：%{reason}"
   working_directory_missing: "工作目录 %{cwd} 已不存在。"
   provider_closed: "提供商会话意外关闭。"

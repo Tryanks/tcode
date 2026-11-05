@@ -340,13 +340,18 @@ impl AppState {
                                 .find_meta(&session_id)
                                 .filter(|meta| !meta.cwd.is_dir())
                                 .map(|meta| (meta.project_id, meta.cwd));
-                            let error = match missing_cwd {
-                                Some((project_id, cwd)) => RuntimeError::WorkingDirectoryMissing {
-                                    session_id: session_id.clone(),
-                                    project_id,
-                                    cwd,
-                                },
-                                None => RuntimeError::ProviderStart {
+                            let error = match (missing_cwd, err) {
+                                (Some((project_id, cwd)), _) => {
+                                    RuntimeError::WorkingDirectoryMissing {
+                                        session_id: session_id.clone(),
+                                        project_id,
+                                        cwd,
+                                    }
+                                }
+                                (None, agent::AgentError::BatchLineBreak { program }) => {
+                                    RuntimeError::ProviderBatchLineBreak { program }
+                                }
+                                (None, err) => RuntimeError::ProviderStart {
                                     error: err.to_string(),
                                 },
                             };
