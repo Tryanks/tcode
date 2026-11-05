@@ -5,7 +5,9 @@
 //! card is as tall as its content; when they do not, each body that can
 //! scroll gives up height in proportion to its own, down to a few rows,
 //! and scrolls inside, while a body that cannot ([`StackCard::rigid`])
-//! keeps its whole content; when not even that fits, a part that scales
+//! keeps its whole content, and a body of rows that never scrolls
+//! ([`StackCard::fit`]) gives up rows down to its first, shows those that
+//! fit and counts the rest; when not even that fits, a part that scales
 //! gives up its height ([`Scale`]), and then the headers keep their height
 //! and the bodies share what is left in proportion to those heights. A card
 //! coming or going takes its share as it moves, so the others give way to
@@ -37,6 +39,9 @@ pub(super) struct StackCard {
     /// Whether the body holds content of its own height rather than rows
     /// to scroll through: it gives up none of it to the other cards.
     pub(super) rigid: bool,
+    /// Rows the body shows as many of as fit, counting the rest, rather
+    /// than scrolling through them.
+    pub(super) fit: Option<Fit>,
     /// How far in the card is, from absent to at rest.
     pub(super) presence: f32,
     /// A part of the body that scales down before the bodies are cut below
@@ -59,6 +64,66 @@ impl Scale {
     /// The height the part is drawn at now.
     pub(super) fn now(&self) -> f32 {
         self.height.get().unwrap_or(self.full)
+    }
+}
+
+/// A body of rows that never scrolls: given less height than all its rows
+/// take, it shows as many as fit above a count of the rest. The body notes
+/// in `fitted` the heights it lays a row and the count out at, and shows
+/// as many rows as the stack sets there from the next frame on.
+pub(super) struct Fit {
+    /// How many rows the body has.
+    pub(super) rows: usize,
+    /// How much of the body's height is not rows or the count (its inset).
+    pub(super) edge: f32,
+    pub(super) fitted: std::rc::Rc<std::cell::Cell<Fitted>>,
+}
+
+/// What a [`Fit`] body and the stack tell each other.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Fitted {
+    /// How tall the body lays a row out, once it has.
+    pub(super) row: Option<f32>,
+    /// How tall it lays the count out, once it has.
+    pub(super) more: Option<f32>,
+    /// How many rows it shows: all of them until the stack says.
+    pub(super) shown: Option<usize>,
+}
+
+impl Fit {
+    /// How far a row may run past the height it is given and still be
+    /// in it: under half a pixel, which laying it out on whole pixels takes.
+    const SLACK: f32 = 0.5;
+
+    /// What the body asks of the rail, laid out `laid_out` tall: every row,
+    /// and at least its first and the count of the rest. Until it has laid
+    /// a row out it asks for what it laid out, which is every row.
+    fn demand(&self, fitted: Fitted, laid_out: f32) -> Demand {
+        let Some(row) = fitted.row else {
+            return Demand {
+                natural: laid_out,
+                min: least(laid_out, false),
+            };
+        };
+        let natural = self.edge + row * self.rows as f32;
+        Demand {
+            natural,
+            min: natural.min(self.edge + row + fitted.more.unwrap_or(row)),
+        }
+    }
+
+    /// How many rows fit `height`: every one when they all do, else as
+    /// many as fit whole above the count.
+    fn fitting(&self, fitted: Fitted, height: f32) -> usize {
+        let Some(row) = fitted.row.filter(|row| *row > 0.) else {
+            return self.rows;
+        };
+        let room = height + Self::SLACK - self.edge;
+        if row * self.rows as f32 <= room {
+            return self.rows;
+        }
+        let room = room - fitted.more.unwrap_or(row);
+        ((room / row).floor().max(0.) as usize).min(self.rows.saturating_sub(1))
     }
 }
 
@@ -206,7 +271,13 @@ impl gpui::Element for RailStack {
         let mut room = f32::from(bounds.size.height);
         let mut headers = Vec::with_capacity(self.cards.len());
         let mut demands = Vec::with_capacity(self.cards.len());
-        for card in &mut self.cards {
+        // What each fitting body had noted as this frame began.
+        let fitted: Vec<Option<Fitted>> = self
+            .cards
+            .iter()
+            .map(|card| card.fit.as_ref().map(|fit| fit.fitted.get()))
+            .collect();
+        for (card, fitted) in self.cards.iter_mut().zip(&fitted) {
             let presence = card.presence.clamp(0., 1.);
             let header = f32::from(card.header.layout_as_root(natural, window, cx).height);
             let body = card.body.as_mut().map_or(0., |body| {
@@ -214,9 +285,12 @@ impl gpui::Element for RailStack {
             });
             room -= presence * (header + gap);
             headers.push(header);
-            demands.push(Demand {
-                natural: body,
-                min: least(body, card.rigid),
+            demands.push(match (&card.fit, fitted) {
+                (Some(fit), Some(fitted)) => fit.demand(*fitted, body),
+                _ => Demand {
+                    natural: body,
+                    min: least(body, card.rigid),
+                },
             });
         }
         let presences: Vec<f32> = self
@@ -233,11 +307,11 @@ impl gpui::Element for RailStack {
             .zip(&self.cards)
             .zip(&presences)
             .map(|((demand, card), presence)| {
-                let full = card
-                    .scale
-                    .as_ref()
-                    .map_or(0., |scale| scale.full - scale.now());
-                least(demand.natural + full, card.rigid) * presence
+                let min = match &card.scale {
+                    Some(scale) => least(demand.natural + scale.full - scale.now(), card.rigid),
+                    None => demand.min,
+                };
+                min * presence
             })
             .sum::<f32>()
             - room;
@@ -341,6 +415,22 @@ impl gpui::Element for RailStack {
                     }
                 },
             );
+            // A body that fits its rows shows from the next frame as many as
+            // fit what it is given, and is measured again once it has noted
+            // new heights.
+            if let (Some(fit), Some(began)) = (&card.fit, fitted[index])
+                && presence > 0.
+            {
+                let now = fit.fitted.get();
+                let rows = fit.fitting(now, shown);
+                if now != began || now.shown != Some(rows) {
+                    fit.fitted.set(Fitted {
+                        shown: Some(rows),
+                        ..now
+                    });
+                    window.request_animation_frame();
+                }
+            }
             placed.push(PlacedCard {
                 surface,
                 bounds: card_bounds,
