@@ -88,20 +88,9 @@ impl SettingsStore {
         }
     }
 
-    pub fn load(&self) -> Settings {
-        let Ok(bytes) = fs::read(&self.path) else {
-            return Settings::default();
-        };
-        match self.decode(&bytes) {
-            Ok(settings) => settings,
-            Err(err) => {
-                log::warn!("failed to parse settings.json: {err}");
-                Settings::default()
-            }
-        }
-    }
-
-    /// A read before an automatic update must not replace unreadable settings with defaults.
+    /// The saved settings, or the defaults when there is no file yet. A file
+    /// that cannot be read or parsed is an error, never the defaults: it may
+    /// be a newer build's, and settings saved from defaults would replace it.
     pub fn try_load(&self) -> std::io::Result<Settings> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
@@ -491,7 +480,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = store.load();
+        let loaded = store.try_load().unwrap();
         assert_eq!(
             loaded.provider(ProviderKind::ClaudeCode).binary_path,
             Some(PathBuf::from("/usr/bin/claude"))
@@ -555,7 +544,7 @@ mod tests {
         )
         .unwrap();
 
-        store.load();
+        store.try_load().unwrap();
 
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(&store.path).unwrap()).unwrap();
@@ -591,7 +580,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = store.load();
+        let loaded = store.try_load().unwrap();
         let hosts = &loaded.source_control.hosts;
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts["github.com"].kind, HostKind::Github);
@@ -602,7 +591,7 @@ mod tests {
         store.save(&loaded).unwrap();
         let saved = fs::read_to_string(&store.path).unwrap();
         assert!(!saved.contains("\"github\":"), "{saved}");
-        assert_eq!(store.load().source_control.hosts, *hosts);
+        assert_eq!(store.try_load().unwrap().source_control.hosts, *hosts);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -633,7 +622,7 @@ mod tests {
         // name + sensitive flag and an empty value (nothing to echo back).
         let raw = fs::read_to_string(&store.path).unwrap();
         assert!(!raw.contains("sk-live"));
-        let loaded = store.load();
+        let loaded = store.try_load().unwrap();
         let env = loaded.provider(ProviderKind::ClaudeCode).env;
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].name, "ANTHROPIC_API_KEY");

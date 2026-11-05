@@ -1236,6 +1236,7 @@ errors:
   terminal_restart: "重新启动终端失败：%{error}"
   persist_project: "保存项目失败：%{error}"
   persist_settings: "保存设置失败：%{error}"
+  settings_unreadable: "Tcode 读不了 settings.json（%{error}），现在使用默认设置，也不会把任何设置写进这个文件。它可能是更新版本的 Tcode 写的，请改用那个版本打开。"
   delete_session: "删除会话失败：%{error}"
   delete_project: "删除项目失败：%{error}"
   persist_session: "保存会话失败：%{error}"

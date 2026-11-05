@@ -1,6 +1,6 @@
 //! Persisted application settings domain data.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use agent::{ModelSpec, OptionDescriptor, ProviderKind};
@@ -1641,9 +1641,10 @@ impl Settings {
         }
     }
 
-    /// Turn a human name into a stable, unique profile id (slug). Never collides
-    /// with a built-in id or an existing profile id.
-    pub fn allocate_profile_id(&self, name: &str) -> String {
+    /// The ids a new profile named `name` may take, best first: the name as a
+    /// slug, then `<slug>-2`, `<slug>-3`, …, skipping built-in ids and the ids
+    /// of these settings' profiles.
+    pub fn profile_id_candidates(&self, name: &str) -> impl Iterator<Item = String> + use<> {
         let base: String = name
             .trim()
             .to_lowercase()
@@ -1651,20 +1652,11 @@ impl Settings {
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
             .collect();
         let base = base.trim_matches('-');
-        let base = if base.is_empty() { "profile" } else { base };
-        let taken =
-            |id: &str, s: &Settings| Self::is_builtin_profile_id(id) || s.profiles.contains_key(id);
-        if !taken(base, self) {
-            return base.to_string();
-        }
-        let mut n = 2;
-        loop {
-            let candidate = format!("{base}-{n}");
-            if !taken(&candidate, self) {
-                return candidate;
-            }
-            n += 1;
-        }
+        let base = if base.is_empty() { "profile" } else { base }.to_string();
+        let taken: BTreeSet<String> = self.profiles.keys().cloned().collect();
+        std::iter::once(base.clone())
+            .chain((2..).map(move |n| format!("{base}-{n}")))
+            .filter(move |id| !Self::is_builtin_profile_id(id) && !taken.contains(id))
     }
 
     /// The `0xRRGGBB` color for a provider color key (see
@@ -2641,7 +2633,10 @@ mod tests {
         settings.provider_mut(ProviderKind::ClaudeCode).display_name = Some("Claude".into());
 
         // A user profile driving the same protocol (third-party Claude).
-        let id = settings.allocate_profile_id("Klaude Kode");
+        let id = settings
+            .profile_id_candidates("Klaude Kode")
+            .next()
+            .unwrap();
         assert_eq!(id, "klaude-kode");
         settings.profiles.insert(
             id.clone(),
@@ -2694,7 +2689,13 @@ mod tests {
         assert_eq!(settings.resolved_profile("nope"), None);
 
         // A second profile of the same name gets a distinct id.
-        assert_eq!(settings.allocate_profile_id("Klaude Kode"), "klaude-kode-2");
+        assert_eq!(
+            settings
+                .profile_id_candidates("Klaude Kode")
+                .next()
+                .unwrap(),
+            "klaude-kode-2"
+        );
     }
 
     #[test]
@@ -2718,7 +2719,7 @@ mod tests {
             ProviderKind::Cursor
         );
         assert!(!Settings::is_builtin_profile_id(
-            &settings.allocate_profile_id(&builtin.id)
+            &settings.profile_id_candidates(&builtin.id).next().unwrap()
         ));
         let thread = crate::project::SessionMeta::new(ProviderKind::Cursor, "/x".into(), None);
         assert_ne!(

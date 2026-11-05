@@ -1243,6 +1243,7 @@ errors:
   terminal_restart: "Failed to restart terminal: %{error}"
   persist_project: "Failed to persist project: %{error}"
   persist_settings: "Failed to persist settings: %{error}"
+  settings_unreadable: "Tcode could not read settings.json (%{error}), so it is running on default settings and will not save any over the file. A newer version of Tcode may have written it: open that version instead."
   delete_session: "Failed to delete session: %{error}"
   delete_project: "Failed to remove project: %{error}"
   persist_session: "Failed to persist session: %{error}"

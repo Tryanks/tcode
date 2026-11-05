@@ -356,6 +356,12 @@ pub struct AppState {
     store_writer: Option<std::thread::JoinHandle<()>>,
     /// Set once the store failed and every thread was stopped.
     store_failed: bool,
+    /// Why settings.json could not be read at start. While set, no settings
+    /// are written: the file may be a newer build's, and these settings are
+    /// defaults standing in for it.
+    settings_unreadable: Option<String>,
+    /// Whether the first settings write refused for that reason was reported.
+    settings_unreadable_reported: bool,
     pub sessions: SessionIndex,
     archived_revision: u64,
     activity_pending: VecDeque<String>,
@@ -503,7 +509,13 @@ impl AppState {
             project.quick_chat = scratch_root.as_ref() == Some(&project.root);
         }
         let settings_store = SettingsStore::new(store.root().clone());
-        let settings = settings_store.load();
+        let (settings, settings_unreadable) = match settings_store.try_load() {
+            Ok(settings) => (settings, None),
+            Err(error) => {
+                log::error!("settings.json is unreadable; running on defaults: {error}");
+                (Settings::default(), Some(error.to_string()))
+            }
+        };
         let review_records = settings_store.load_review_records();
         let control_activity = settings_store.load_control_activity();
         let forge = tcode_services::forge::connect(settings_store.clone(), std::env::vars());
@@ -576,6 +588,8 @@ impl AppState {
             store_write_failure_receiver: Some(store_write_failure_receiver),
             store_writer: None,
             store_failed: false,
+            settings_unreadable,
+            settings_unreadable_reported: false,
             sessions: sessions.into(),
             projects,
             archived_revision: 0,
@@ -729,6 +743,13 @@ impl AppState {
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
+        if let Some(error) = &self.settings_unreadable {
+            if !std::mem::replace(&mut self.settings_unreadable_reported, true) {
+                let error = error.clone();
+                self.report_error(RuntimeError::SettingsUnreadable { error }, cx);
+            }
+            return;
+        }
         let mut settings = settings.clone();
         settings.source_control.status.clear();
         match serde_json::to_vec_pretty(&settings) {

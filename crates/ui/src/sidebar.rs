@@ -7140,7 +7140,9 @@ mod tests {
         }
 
         driver.shutdown(cx, &store, &host);
-        let persisted = tcode_services::settings::SettingsStore::new(root.clone()).load();
+        let persisted = tcode_services::settings::SettingsStore::new(root.clone())
+            .try_load()
+            .unwrap();
         assert_eq!(
             persisted.sidebar_layout,
             SidebarLayout::Grouped,

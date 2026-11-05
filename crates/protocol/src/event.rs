@@ -857,6 +857,11 @@ pub enum RuntimeError {
     PersistSettings {
         error: String,
     },
+    /// settings.json could not be read at start, so the host runs on defaults
+    /// and writes no settings over it.
+    SettingsUnreadable {
+        error: String,
+    },
     TerminalStart {
         error: String,
     },
