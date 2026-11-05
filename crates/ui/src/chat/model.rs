@@ -13,13 +13,15 @@ use super::timeline::rows::TimelineRow;
 
 /// The row, its turn, the entries it renders (a Work Log header's whole run),
 /// the turn's entries for the trailer (empty unless the row is the turn's
-/// last), and the pinned message ids.
+/// last), how far the gap above the trailer is open, and the pinned message
+/// ids.
 pub(crate) type RowRenderArgs<'a> = (
     &'a TimelineRow,
     &'a TurnMeta,
     &'a Path,
     &'a [Arc<TimelineEntry>],
     &'a [Arc<TimelineEntry>],
+    f32,
     (Option<&'a str>, Option<&'a str>),
 );
 

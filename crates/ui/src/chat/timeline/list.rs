@@ -112,6 +112,7 @@ impl TimelineView {
                                 &item_cwd,
                                 &left.own,
                                 &[],
+                                1.,
                                 (last_user_id.as_deref(), last_assistant_id.as_deref()),
                             ),
                             window,
@@ -138,6 +139,23 @@ impl TimelineView {
                     .into_iter()
                     .map(|(key, left, progress)| fold((key, left), progress, false, window, cx))
                     .collect();
+                let moving = !cx.reduce_motion() && this.capture.is_none();
+                let entering = moving
+                    .then(|| this.rows_motion.entering(row.identity, now))
+                    .flatten();
+                // What arrives in place of a row, or between two, opens its
+                // own room; what arrives at the end takes the end's padding
+                // from the row above.
+                let opening = entering
+                    .filter(|(arrival, _)| arrival.arrival != Arrival::Appended)
+                    .map_or(1., |(_, progress)| progress);
+                // A row that opens its turn brings the turn's trailer with it,
+                // the gap above it open; otherwise the trailer was on screen,
+                // and moves down to it as the row opens.
+                let (trailer_glide, trailer_gap) = match entering {
+                    Some((arrival, progress)) if arrival.note => (Glide::Enter(progress), 1.),
+                    _ => (Glide::Rest, opening),
+                };
                 let rendered = this.render_row(
                     (
                         &row,
@@ -145,19 +163,18 @@ impl TimelineView {
                         &item_cwd,
                         &own,
                         &trailer,
+                        trailer_gap,
                         (last_user_id.as_deref(), last_assistant_id.as_deref()),
                     ),
                     window,
                     cx,
                 );
                 let below = std::mem::take(&mut this.row_folds);
-                let moving = !cx.reduce_motion() && this.capture.is_none();
                 let arrival = |row: &TimelineRow| {
                     moving
                         .then(|| this.rows_motion.entering(row.identity, now))
                         .flatten()
                 };
-                let entering = arrival(&row);
                 // The reader follows the reveal: the row opens with its text,
                 // and nothing stands below the text yet to show.
                 let revealing = (moving && following)
@@ -194,12 +211,6 @@ impl TimelineView {
                     }
                     None => Glide::Rest,
                 };
-                // What arrives in place of a row, or between two, opens its
-                // own room; what arrives at the end takes the end's padding
-                // from the row above.
-                let opening = entering
-                    .filter(|(arrival, _)| arrival.arrival != Arrival::Appended)
-                    .map_or(1., |(_, progress)| progress);
                 let padding = below_arrival.unwrap_or(1.) * opening;
                 // The rhythm below a row is set by the row after it.
                 let strip = this.layout.strip;
@@ -234,17 +245,11 @@ impl TimelineView {
                 if let Some((_, until)) = revealing {
                     this.rows_motion.hold(row.identity, until);
                 }
-                // A row that opens its turn brings the turn's trailer with it;
-                // otherwise the trailer was on screen, and moves down to it.
-                let trailer = rendered.trailer.map(|(trailer, gap)| {
-                    let (trailer_glide, gap_scale) = match entering {
-                        Some((arrival, progress)) if arrival.note => (Glide::Enter(progress), 1.),
-                        _ => (Glide::Rest, opening),
-                    };
+                let trailer = rendered.trailer.map(|trailer| {
                     RowGlide::new(
                         ("timeline-trailer-glide", row.identity),
                         trailer_glide,
-                        trailer.when(gap, |trailer| trailer.pt(px(SEGMENT_GAP) * gap_scale)),
+                        trailer,
                     )
                     .owned(&this.motion)
                 });
