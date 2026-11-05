@@ -83,7 +83,7 @@ use crate::composer_trigger::{
 };
 use crate::context_meter;
 use crate::palette::fuzzy_score;
-use crate::provider_card::provider_glyph;
+use crate::provider_card::profile_glyph;
 use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ComposerState, WorkspaceStore};

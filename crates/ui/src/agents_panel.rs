@@ -61,6 +61,8 @@ struct AgentRow {
     key: String,
     title: String,
     provider: Option<ProviderKind>,
+    /// The profile it runs on; absent on its provider's built-in one.
+    profile_id: Option<String>,
     /// The model it runs on, and the reasoning effort it runs with, as
     /// reported.
     model: Option<String>,
@@ -220,6 +222,7 @@ impl Agents {
                             .filter(|title| !title.is_empty())
                             .unwrap_or_else(|| agent_type.clone()),
                         provider,
+                        profile_id: parent.and_then(|parent| parent.profile_id.clone()),
                         model: model.clone(),
                         effort: effort.clone(),
                         execution: Some(execution),
@@ -276,6 +279,7 @@ impl Agents {
                 key: meta.id.clone(),
                 title: meta.title.clone(),
                 provider: Some(meta.provider),
+                profile_id: meta.profile_id.clone(),
                 model: meta.model.clone(),
                 effort: None,
                 execution,
@@ -1167,7 +1171,11 @@ impl AgentsPanel {
                 line.child(
                     match provider {
                         ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
-                        kind => crate::provider_card::provider_glyph(kind),
+                        kind => crate::provider_card::profile_glyph(
+                            self.store.read(cx),
+                            kind,
+                            row.profile_id.as_deref(),
+                        ),
                     }
                     .flex_none(),
                 )

@@ -54,27 +54,6 @@ impl ModelRow {
     }
 }
 
-/// The provider glyph tinted with the accent configured on its Settings →
-/// Providers card, falling back to the provider's own brand tint.
-fn tinted_provider_glyph(provider: ProviderKind, store: &WorkspaceStore) -> Icon {
-    let glyph = provider_glyph(provider);
-    let profile_id = tcode_core::settings::Settings::builtin_profile_id(provider);
-    match store.provider_profile_accent(profile_id) {
-        Some(accent) => glyph.text_color(rgb(accent)),
-        None => glyph,
-    }
-}
-
-/// A profile's rail glyph: the kind's glyph tinted with the profile's own accent
-/// (so a third-party profile can be told apart from the built-in at a glance).
-fn tinted_profile_glyph(profile_id: &str, store: &WorkspaceStore) -> Icon {
-    let glyph = provider_glyph(store.provider_profile_kind(profile_id));
-    match store.provider_profile_accent(profile_id) {
-        Some(accent) => glyph.text_color(rgb(accent)),
-        None => glyph,
-    }
-}
-
 impl Composer {
     /// The rail the picker shows: an explicit user choice, else Favorites when
     /// any favorites exist, else the active session's profile.
@@ -266,7 +245,32 @@ impl Composer {
                     .gap_1p5()
                     .items_center()
                     .text_chip(cx)
-                    .child(tinted_provider_glyph(provider, store))
+                    .child({
+                        // The account the thread runs on, in its card's accent;
+                        // another account's glyph cross-fades over it.
+                        let (motion, key) = (self.motion.clone(), self.motion_key("model-glyph"));
+                        let profile = (
+                            provider,
+                            active_profile.clone().unwrap_or_else(|| {
+                                tcode_core::settings::Settings::builtin_profile_id(provider)
+                                    .to_owned()
+                            }),
+                        );
+                        let store = self.workspace_store.clone();
+                        crate::motion::Sampled::new(move |window, cx| {
+                            motion.cross_fade_part(
+                                key,
+                                profile,
+                                CHANGE,
+                                window,
+                                cx,
+                                move |(provider, profile_id), _, cx| {
+                                    profile_glyph(store.read(cx), *provider, Some(profile_id))
+                                        .into_any_element()
+                                },
+                            )
+                        })
+                    })
                     .child({
                         // A new model's name cross-fades over the last one's.
                         let (motion, key) = (self.motion.clone(), self.motion_key("model-label"));
@@ -748,7 +752,7 @@ fn render_model_pane(
         ));
     // One entry per *enabled* native profile: every built-in plus any
     // user-created profiles whose switch is on. Each is its own rail.
-    let profile_ids: Vec<String> = {
+    let profiles: Vec<(String, ProviderKind)> = {
         let store = store_entity.read(cx);
         let profiles = store.enabled_profiles();
         ProviderKind::NATIVE
@@ -757,12 +761,12 @@ fn render_model_pane(
                 profiles
                     .iter()
                     .filter(move |profile| profile.kind == kind)
-                    .map(|profile| profile.id.clone())
+                    .map(|profile| (profile.id.clone(), profile.kind))
             })
             .collect()
     };
-    for id in profile_ids {
-        let glyph = tinted_profile_glyph(&id, store_entity.read(cx));
+    for (id, kind) in profiles {
+        let glyph = profile_glyph(store_entity.read(cx), kind, Some(&id));
         let label = store_entity.read(cx).provider_profile_display_name(&id);
         rail_col = rail_col.item(rail_icon(
             gpui::SharedString::from(format!("rail-profile-{id}")),
@@ -1201,18 +1205,11 @@ fn render_model_row(
                 .child({
                     // A third-party profile's row is attributed to that profile
                     // (its accent + display name), not the built-in provider.
-                    let (glyph, label) = match &row.profile_id {
-                        Some(id) => {
-                            let store = store_entity.read(cx);
-                            (
-                                tinted_profile_glyph(id, store),
-                                store.provider_profile_display_name(id).into(),
-                            )
-                        }
-                        None => (
-                            tinted_provider_glyph(row.provider, store_entity.read(cx)),
-                            gpui::SharedString::from(provider_label(row.provider)),
-                        ),
+                    let store = store_entity.read(cx);
+                    let glyph = profile_glyph(store, row.provider, row.profile_id.as_deref());
+                    let label = match &row.profile_id {
+                        Some(id) => store.provider_profile_display_name(id).into(),
+                        None => gpui::SharedString::from(provider_label(row.provider)),
                     };
                     h_flex()
                         .gap_1()

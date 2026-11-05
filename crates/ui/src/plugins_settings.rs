@@ -412,7 +412,11 @@ impl PluginsSettingsPanel {
                     SharedString::from(format!("plugins-tab-{}", profile.id)),
                     name,
                 )
-                .icon(crate::provider_card::provider_glyph(profile.kind))
+                .icon(crate::provider_card::profile_glyph(
+                    self.store.read(cx),
+                    profile.kind,
+                    Some(&profile.id),
+                ))
                 .selected(profile.id == selected)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.selected = Some(profile_id.clone());
