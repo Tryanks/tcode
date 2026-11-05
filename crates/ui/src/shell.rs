@@ -7643,6 +7643,174 @@ pub(crate) mod tests {
         assert_eq!(select(at(1.), at(60.), cx).as_deref(), Some("Select"));
     }
 
+    /// Text being selected holds still under the pointer while a reply
+    /// streams in below it: the transcript stops following the tail for as
+    /// long as the button is held, so what the drag ends on is what the
+    /// pointer is over, not what has scrolled under it since the press.
+    #[gpui::test]
+    fn a_drag_in_the_transcript_selects_under_the_pointer_while_a_reply_streams(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, host, cx) = mount(cx);
+        // The streamed text lands at once, and the tail follows it there.
+        cx.update(|window, cx| {
+            window.activate_window();
+            cx.set_reduce_motion(true);
+        });
+        let session = "thread-1";
+        let cwd = std::path::Path::new("/tmp/tcode-selection");
+        let answer = |id: &str, text: String| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content: agent::ItemContent::AssistantMessage {
+                    text,
+                    summarized: false,
+                },
+            })
+        };
+        let streamed = |id: &str, text: String| agent::AgentEvent::Delta {
+            item_id: id.into(),
+            kind: agent::DeltaKind::AssistantText,
+            text,
+        };
+        let records: Vec<agent::AgentEvent> = vec![
+            agent::AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+            answer(
+                "finished",
+                format!(
+                    "Done.\n\nselectable {}",
+                    "words of the finished answer ".repeat(12)
+                ),
+            ),
+            agent::AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+            agent::AgentEvent::TurnStarted {
+                turn_id: "turn-2".into(),
+            },
+            streamed("streaming", "The next answer arrives. ".repeat(20)),
+        ];
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            cwd.into(),
+            None,
+        );
+        meta.id = session.into();
+        let mut status = session_status(session, cwd);
+        status.activity.working = true;
+        status.activity.turn_running = true;
+        status.running_turn = Some(tcode_core::session::RunningTurn {
+            turn: 1,
+            started_at: Some(crate::time::now_millis()),
+        });
+        send_events(
+            &host,
+            vec![
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(Default::default()),
+                ),
+                (
+                    Topic::Index,
+                    ServerEvent::IndexSnapshot(IndexSnapshot {
+                        summary: Default::default(),
+                        sessions: vec![meta],
+                        projects: Vec::new(),
+                    }),
+                ),
+                (
+                    Topic::SessionStatus {
+                        session_id: session.into(),
+                    },
+                    ServerEvent::SessionStatusReplaced(Box::new(status)),
+                ),
+                (
+                    Topic::SessionEvents {
+                        session_id: session.into(),
+                    },
+                    ServerEvent::SessionSnapshot {
+                        total: records.len() as u64,
+                        total_turns: 2,
+                        truncated: false,
+                        from: 0,
+                        end: records.len() as u64,
+                        records: records.into_iter().map(Into::into).collect(),
+                    },
+                ),
+            ],
+        );
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.show_thread(session.into(), cx));
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some(session), cx)
+        });
+        cx.simulate_resize(size(px(1200.), px(560.)));
+        draw(cx);
+        // The finished answer's second paragraph, its first line.
+        let text = cx
+            .debug_bounds("markdown-block-1")
+            .expect("the finished answer's paragraph");
+        let line = text.top() + px(8.);
+        let none = gpui::Modifiers::default();
+        let (from, to) = (
+            gpui::point(text.left() + px(2.), line),
+            gpui::point(text.left() + px(70.), line),
+        );
+        // What a copy takes, or None when it takes nothing.
+        let copy = |cx: &mut VisualTestContext| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+            cx.simulate_keystrokes("cmd-c");
+            draw(cx);
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .filter(|text| !text.is_empty())
+        };
+        // The same drag with nothing arriving: what the pointer passes over.
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        draw(cx);
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), none);
+        draw(cx);
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        draw(cx);
+        let still = copy(cx);
+        assert!(still.as_deref().is_some_and(|text| text.starts_with("sel")));
+
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        draw(cx);
+        for step in 1..=8 {
+            // Lines of the streaming answer arrive with each frame.
+            send_events(
+                &host,
+                vec![(
+                    Topic::SessionEvents {
+                        session_id: session.into(),
+                    },
+                    ServerEvent::SessionEvent(
+                        streamed(
+                            "streaming",
+                            format!("arrived {step} {}", "and more ".repeat(12)),
+                        )
+                        .into(),
+                    ),
+                )],
+            );
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            let at = from + (to - from) * (step as f32 / 8.);
+            cx.simulate_mouse_move(at, Some(MouseButton::Left), none);
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        draw(cx);
+        assert_eq!(copy(cx), still);
+    }
+
     #[gpui::test]
     fn a_click_in_the_thread_pane_focuses_the_composer_only_on_desktop(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
