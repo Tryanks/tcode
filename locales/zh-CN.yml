@@ -2410,7 +2410,7 @@ agents:
   summary_unsettled: "%{count} 个待收尾"
   summary_unsettled_one: "1 个待收尾"
   provider_subagents: "提供商子代理"
-  done: "已结束（%{count}）"
+  settled_count: "已收尾（%{count}）"
   untitled: "子代理"
   state_working: "工作中"
   state_waiting: "等待中"

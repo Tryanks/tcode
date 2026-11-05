@@ -2417,7 +2417,7 @@ agents:
   summary_unsettled: "%{count} awaiting settle"
   summary_unsettled_one: "1 awaiting settle"
   provider_subagents: "Provider subagents"
-  done: "Done (%{count})"
+  settled_count: "Settled (%{count})"
   untitled: "Agent"
   state_working: "Working"
   state_waiting: "Waiting"

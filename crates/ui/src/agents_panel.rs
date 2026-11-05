@@ -157,7 +157,11 @@ pub(crate) struct Agents {
     needs_settle: Vec<AgentRow>,
     running: Vec<AgentRow>,
     native: Vec<AgentRow>,
+    /// Dispatched agents whose result will not be delivered, not settled.
     done: Vec<AgentRow>,
+    /// Agents whose thread is settled, dispatched or a native subagent's
+    /// mirror: shown only on the Agents view's Settled shelf.
+    settled: Vec<AgentRow>,
 }
 
 impl Agents {
@@ -188,6 +192,7 @@ impl Agents {
             store.latest_activity(id?).filter(|_| execution.running())
         };
         let mut native = Vec::new();
+        let mut settled_native = Vec::new();
         store.with_entries_for(
             Some(parent_id),
             |timeline| {
@@ -214,7 +219,12 @@ impl Agents {
                         ItemStatus::Interrupted => AgentExecution::Interrupted,
                         ItemStatus::Failed | ItemStatus::Declined => AgentExecution::Failed,
                     };
-                    native.push(AgentRow {
+                    let group = if mirror.is_some_and(|meta| meta.is_settled()) {
+                        &mut settled_native
+                    } else {
+                        &mut native
+                    };
+                    group.push(AgentRow {
                         key: entry.id.clone(),
                         title: Some(compact(description))
                             .filter(|title| !title.is_empty())
@@ -245,6 +255,7 @@ impl Agents {
             cx,
         );
         native.reverse();
+        settled_native.reverse();
 
         let mut dispatched: Vec<_> = live
             .iter()
@@ -305,9 +316,11 @@ impl Agents {
             match delivery {
                 AgentDelivery::AwaitingSettle => agents.needs_settle.push(row),
                 AgentDelivery::Running => agents.running.push(row),
-                AgentDelivery::Settled | AgentDelivery::NotDelivered => agents.done.push(row),
+                AgentDelivery::NotDelivered => agents.done.push(row),
+                AgentDelivery::Settled => agents.settled.push(row),
             }
         }
+        agents.settled.extend(settled_native);
         agents
     }
 
@@ -339,7 +352,12 @@ impl Agents {
             },
             cx,
         );
-        for row in self.needs_settle.iter_mut().chain(&mut self.done) {
+        for row in self
+            .needs_settle
+            .iter_mut()
+            .chain(&mut self.done)
+            .chain(&mut self.settled)
+        {
             row.preview = results.remove(&row.key);
         }
         self
@@ -353,13 +371,12 @@ impl Agents {
                 .any(|row| row.execution.is_some_and(AgentExecution::running))
     }
 
+    /// Whether the lead has no agents at all, settled ones included.
     pub(crate) fn is_empty(&self) -> bool {
-        self.needs_settle.is_empty()
-            && self.running.is_empty()
-            && self.native.is_empty()
-            && self.done.is_empty()
+        self.count() == 0 && self.settled.is_empty()
     }
 
+    /// How many agents are not settled: those the rail lists.
     pub(crate) fn count(&self) -> usize {
         self.needs_settle.len() + self.running.len() + self.native.len() + self.done.len()
     }
@@ -381,16 +398,16 @@ impl Agents {
         }
     }
 
-    /// Every agent as one line each, in the panel's order: those awaiting
-    /// settle, the running ones, the provider's own, then the finished ones.
-    /// A finished agent whose result awaits settle says that in place of
-    /// how its run ended.
+    /// Every agent not settled as one line each, in the panel's order: those
+    /// awaiting settle, the running ones, those not delivered, then the
+    /// provider's own. A finished agent whose result awaits settle says that
+    /// in place of how its run ended.
     pub(crate) fn lines(&self) -> Vec<AgentLine> {
         self.needs_settle
             .iter()
             .chain(&self.running)
-            .chain(&self.native)
             .chain(&self.done)
+            .chain(&self.native)
             .map(|row| {
                 let running = row.execution.is_some_and(AgentExecution::running);
                 let state = match row.state() {
@@ -476,6 +493,7 @@ impl Agents {
             .chain(&self.running)
             .chain(&self.native)
             .chain(&self.done)
+            .chain(&self.settled)
             .find(|row| row.open.as_deref() == Some(open))
             .map(|row| AgentHeading {
                 key: row.key.clone(),
@@ -771,7 +789,8 @@ pub struct AgentsPanel {
     /// Whether the panel is on screen and so holds the store's archived
     /// threads, from which archived agents come.
     shown: bool,
-    done_expanded: bool,
+    /// Whether the Settled shelf is open.
+    settled_expanded: bool,
     /// The row the pointer is over, whose actions fade in over its time.
     hover: crate::motion::ListHover,
     /// The phone sheet this panel fills, dismissed when an agent opens.
@@ -800,7 +819,7 @@ impl AgentsPanel {
             store,
             session_id,
             shown: false,
-            done_expanded: false,
+            settled_expanded: false,
             hover: crate::motion::ListHover::new(crate::material::HOVER),
             sheet: None,
             left: Rc::new(RefCell::new(crate::scroll::LeftRows::over(ROWS))),
@@ -1079,11 +1098,12 @@ impl Entries {
                 .text_secondary(compact, cx)
                 .child(crate::tr!("agents.readonly", provider = *provider))
                 .into_any_element(),
-            Entry::DoneHeader { count, expanded } => {
-                let label: SharedString = crate::tr!("agents.done", count = *count)
+            Entry::SettledHeader { count, expanded } => {
+                let label: SharedString = crate::tr!("agents.settled_count", count = *count)
                     .into_owned()
                     .into();
-                gpui_base::Button::new("agents-done")
+                gpui_base::Button::new("agents-settled")
+                    .debug_selector(|| "agents-settled".into())
                     .accessibility_label(label.clone())
                     .aria_expanded(*expanded)
                     .w_full()
@@ -1102,7 +1122,7 @@ impl Entries {
                         move |_, _, cx| {
                             panel
                                 .update(cx, |this, cx| {
-                                    this.done_expanded = !this.done_expanded;
+                                    this.settled_expanded = !this.settled_expanded;
                                     cx.notify();
                                 })
                                 .ok();
@@ -1115,7 +1135,7 @@ impl Entries {
                             .items_center()
                             .text_caption(cx)
                             .child(crate::widgets::Chevron::new(
-                                "agents-done-chevron",
+                                "agents-settled-chevron",
                                 *expanded,
                             ))
                             .child(label),
@@ -1463,13 +1483,13 @@ enum Entry {
     Row(Box<AgentRow>),
     NativeCaption,
     ReadOnly(&'static str),
-    DoneHeader { count: usize, expanded: bool },
+    SettledHeader { count: usize, expanded: bool },
 }
 
 impl AgentsPanel {
     /// The list keyed by entry, so a row that moves from one group to
     /// another glides there, rows that come or go fold in or away, and the
-    /// done rows fold open and shut under their header. It lays out only the
+    /// settled rows fold open and shut under their shelf's header at the end. It lays out only the
     /// entries in view: a lead can run scores of agents.
     fn render_list(
         &mut self,
@@ -1493,7 +1513,14 @@ impl AgentsPanel {
                 Entry::Row(Box::new(row.clone())),
             )
         };
-        entries.extend(agents.needs_settle.iter().chain(&agents.running).map(row));
+        entries.extend(
+            agents
+                .needs_settle
+                .iter()
+                .chain(&agents.running)
+                .chain(&agents.done)
+                .map(row),
+        );
         if !agents.native.is_empty() {
             entries.push(("native-caption".into(), Entry::NativeCaption));
             entries.extend(agents.native.iter().map(row));
@@ -1501,17 +1528,17 @@ impl AgentsPanel {
                 entries.push(("native-readonly".into(), Entry::ReadOnly(provider)));
             }
         }
-        if !agents.done.is_empty() {
-            let expanded = self.done_expanded;
+        if !agents.settled.is_empty() {
+            let expanded = self.settled_expanded;
             entries.push((
-                "done-header".into(),
-                Entry::DoneHeader {
-                    count: agents.done.len(),
+                "settled-header".into(),
+                Entry::SettledHeader {
+                    count: agents.settled.len(),
                     expanded,
                 },
             ));
             if expanded {
-                entries.extend(agents.done.iter().map(row));
+                entries.extend(agents.settled.iter().map(row));
             }
         }
         let keys: Rc<[u64]> = entries
@@ -1585,10 +1612,10 @@ mod tests {
     use crate::store::{WorkspaceAttachment, WorkspaceStore};
 
     /// A settled child is not resident, so the host reports no activity for
-    /// it: it is done and the badge leaves it out, while an unsettled child
-    /// the host has not reported yet is running.
+    /// it: it is settled and the badge leaves it out, while an unsettled
+    /// child the host has not reported yet is running.
     #[gpui::test]
-    fn a_settled_child_without_reported_activity_is_done(cx: &mut TestAppContext) {
+    fn a_settled_child_without_reported_activity_is_settled(cx: &mut TestAppContext) {
         let (to_host, _requests) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -1635,7 +1662,7 @@ mod tests {
             let keys = |rows: &[super::AgentRow]| {
                 rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>()
             };
-            assert_eq!(keys(&agents.done), ["settled"]);
+            assert_eq!(keys(&agents.settled), ["settled"]);
             assert_eq!(keys(&agents.running), ["unsettled"]);
             assert_eq!(agents.outstanding(), 1);
         });
@@ -2082,5 +2109,140 @@ mod tests {
             }]
         );
         link.close();
+    }
+
+    /// The agents a lead started stand in its rail until each is settled: a
+    /// settled one leaves the rail, which goes once none is left, for the
+    /// Agents view's Settled shelf, which opens on it; un-settled, it comes
+    /// back to the rail.
+    #[gpui::test]
+    fn a_settled_agent_leaves_the_rail_for_the_settled_shelf(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, VisualContext as _, VisualTestContext, px, size};
+        use tcode_core::control::StartedBy;
+        use tcode_core::project::{ChildExpectation, Project};
+        use tcode_core::settlement::AgentReport;
+        use tcode_runtime::pipe::{HostServices, spawn_host};
+        use tcode_services::store::SessionStore;
+
+        use crate::chat::ChatView;
+        use crate::test_frames::draw_settled;
+
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let root = crate::store::tests::scratch_root("settled-agents");
+        let project = Project::from_root(root.clone());
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project).unwrap();
+        let thread = |id: &str| {
+            let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+            meta.id = id.into();
+            meta.title = id.into();
+            meta.project_id = Some(project.id.clone());
+            meta
+        };
+        disk.upsert_meta(&thread("lead")).unwrap();
+        // As `start_thread` with `subagent: true` leaves a child, once it
+        // has reported.
+        for (id, created_at) in [("child-a", 2), ("child-b", 1)] {
+            let mut child = thread(id);
+            child.parent_session_id = Some("lead".into());
+            child.started_by = Some(StartedBy {
+                thread_id: "lead".into(),
+                request_id: id.into(),
+            });
+            child.expectation = Some(ChildExpectation {
+                state: AgentReport::Reported,
+                ..ChildExpectation::opened(created_at)
+            });
+            child.created_at = created_at;
+            disk.upsert_meta(&child).unwrap();
+        }
+        let host = spawn_host(disk, HostServices::default()).unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "the lead's agents", |cx| {
+            store.read_with(cx, |store, _| {
+                store.baseline_ready() && store.thread_meta("child-b").is_some()
+            })
+        });
+        store.update(cx, |store, cx| store.show_alone("lead".into(), cx));
+        driver.wait_until(cx, &store, "the lead", |cx| {
+            store.read_with(cx, |store, cx| !store.chat_loading_for(Some("lead"), cx))
+        });
+
+        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let chat = {
+            let (_, chat) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+                ChatView::new(store.clone(), window_state, Some("lead".into()), window, cx)
+            });
+            chat.window_handle()
+        };
+        let panel = {
+            let (_, panel) = cx.add_window_view(|window, cx| {
+                let panel =
+                    cx.new(|cx| super::AgentsPanel::new(store.clone(), Some("lead".into()), cx));
+                gpui_base::Root::new(panel, window, cx)
+            });
+            panel.window_handle()
+        };
+        let chat = VisualTestContext::from_window(chat, cx).into_mut();
+        let panel = VisualTestContext::from_window(panel, cx).into_mut();
+        chat.simulate_resize(size(px(1800.), px(1000.)));
+        panel.simulate_resize(size(px(400.), px(800.)));
+        let shown = |cx: &mut VisualTestContext, selectors: &[&'static str]| {
+            draw_settled(cx);
+            selectors
+                .iter()
+                .map(|selector| cx.debug_bounds(selector).is_some())
+                .collect::<Vec<_>>()
+        };
+        let rail = [
+            "rail-card-agents",
+            "rail-agent-child-a",
+            "rail-agent-child-b",
+        ];
+        assert_eq!(shown(chat, &rail), [true, true, true]);
+        let mut set = |cx: &mut TestAppContext, id: &str, settle: bool| {
+            store.update(cx, |store, _| {
+                if settle {
+                    store.settle_session(id.into());
+                } else {
+                    store.make_session_active(id.into());
+                }
+            });
+            driver.wait_until(cx, &store, "the agent's settlement", |cx| {
+                store.read_with(cx, |store, _| {
+                    store
+                        .thread_meta(id)
+                        .is_some_and(|meta| meta.is_settled() == settle)
+                })
+            });
+        };
+
+        set(cx, "child-a", true);
+        assert_eq!(shown(chat, &rail), [true, false, true]);
+        let shelf = ["agents-settled", "agent-row-child-a", "agent-row-child-b"];
+        assert_eq!(shown(panel, &shelf), [true, false, true]);
+        let header = panel.debug_bounds("agents-settled").unwrap();
+        panel.simulate_click(header.center(), Modifiers::default());
+        assert_eq!(shown(panel, &shelf), [true, true, true]);
+
+        set(cx, "child-b", true);
+        assert_eq!(shown(chat, &rail), [false, false, false]);
+
+        set(cx, "child-a", false);
+        assert_eq!(shown(chat, &rail), [true, true, false]);
+        driver.shutdown(cx, &store, &host);
+        std::fs::remove_dir_all(root).ok();
     }
 }
