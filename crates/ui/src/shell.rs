@@ -1539,28 +1539,8 @@ impl AppShell {
         if self.compact(cx) {
             self.unwind_leads(session_id, cx);
         }
-        let row = self
-            .attachment
-            .as_ref()
-            .map(|attachment| attachment.sidebar.clone())
-            .and_then(|sidebar| sidebar.update(cx, |sidebar, _| sidebar.take_opened(session_id)));
-        let Some(pane) = self.place(session_id, shown.replacing.as_deref(), cx) else {
-            return;
-        };
-        let showed = pane.read(cx).session_id().map(str::to_owned);
-        let current = self.acting_pane().as_ref() == Some(&pane);
-        self.show_in_pane(&pane, session_id, shown.asked, window, cx);
-        // A thread shown from its row comes out of the row into its pane:
-        // a pane that now shows it grows out of the row with it, and a pane
-        // that showed it already takes the row's highlight as it becomes
-        // current. The phone's list pushes the thread's page instead.
-        let arrival = if pane.read(cx).session_id() != showed.as_deref() {
-            Some(crate::panes::Arrival::Thread)
-        } else {
-            (!current).then_some(crate::panes::Arrival::Current)
-        };
-        if let Some((row, arrival)) = row.zip(arrival).filter(|_| !self.compact(cx)) {
-            ThreadPanel::arrive(&pane, row, arrival, cx);
+        if let Some(pane) = self.place(session_id, shown.replacing.as_deref(), cx) {
+            self.show_in_pane(&pane, session_id, shown.asked, window, cx);
         }
     }
 
@@ -5807,7 +5787,6 @@ pub(crate) mod tests {
     mod compact_agent;
     mod docked_panel;
     mod lead_scrollbar;
-    mod row_arrival;
     mod scenes;
 
     /// One shell over a transport the test holds both ends of, so what the

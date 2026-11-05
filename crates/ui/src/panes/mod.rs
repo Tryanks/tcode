@@ -47,14 +47,6 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// lies over the whole conversation, so less than on the row.
 const ROW_HOVERED_FILL: f32 = 0.6;
 
-/// The share of its way out of a row from which a pane's surface fades,
-/// leaving the pane as it rests: the column's own paper is beneath it.
-const ARRIVAL_LANDS: f32 = 0.85;
-
-/// The share of its way out of a row the row's highlight keeps all of its
-/// fill for, travelling to a pane that showed the row's thread already.
-const HIGHLIGHT_HOLDS: f32 = 0.3;
-
 actions!(
     tcode,
     [SplitRight, SplitDown, ClosePane, CloseOtherPanes, ZoomPane]
@@ -223,27 +215,6 @@ pub(crate) const MAX_PANES: usize = 6;
 
 type Entered = Rc<dyn Fn(Entity<ThreadPanel>, &mut Window, &mut App)>;
 
-/// How a pane takes the thread of a row pressed in the threads list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Arrival {
-    /// The pane shows the row's thread now: its surface grows out of the
-    /// row into the pane, the pane's content at rest inside it.
-    Thread,
-    /// The pane showed the row's thread already and becomes current: the
-    /// row's highlight grows out of the row over the pane, fading as it
-    /// lands.
-    Current,
-}
-
-/// A pane on its way out of a row: how, where the row was on screen with
-/// the radius of its corners, and since when.
-#[derive(Clone, Copy)]
-struct Arriving {
-    arrival: Arrival,
-    from: (Bounds<Pixels>, Pixels),
-    at: Instant,
-}
-
 /// One thread shown in one pane.
 pub(crate) struct ThreadPanel {
     chat: Entity<ChatView>,
@@ -296,8 +267,6 @@ pub(crate) struct ThreadPanel {
     /// The chat on its way in from another pane: where it was drawn there,
     /// and when it set off.
     flight: Option<(Bounds<Pixels>, Instant)>,
-    /// The pane on its way out of a row of the threads list.
-    arriving: Option<Arriving>,
     /// The pane's fades: the waiting hint's cross-fade with its chat, and the
     /// fill of a hovered row. Kept here because the dock draws the pane under
     /// a new parent whenever the layout around it changes (see
@@ -372,7 +341,6 @@ impl ThreadPanel {
             awaiting: false,
             held: Held::default(),
             flight: None,
-            arriving: None,
             motion: Default::default(),
             on_entered,
             _focus: focus,
@@ -445,47 +413,6 @@ impl ThreadPanel {
             .map(|from| (from, cx.background_executor().now()));
         cx.notify();
         replaced
-    }
-
-    /// The pane takes the thread of the row drawn at `from`, with corners
-    /// that round, as `arrival` says: out of the row, over [`GROW`]'s
-    /// spring, or at once under reduced motion.
-    ///
-    /// [`GROW`]: crate::motion::expand::GROW
-    pub(crate) fn arrive(
-        this: &Entity<Self>,
-        from: (Bounds<Pixels>, Pixels),
-        arrival: Arrival,
-        cx: &mut App,
-    ) {
-        if cx.reduce_motion() {
-            return;
-        }
-        this.update(cx, |pane, cx| {
-            pane.arriving = Some(Arriving {
-                arrival,
-                from,
-                at: cx.background_executor().now(),
-            });
-            cx.notify();
-        });
-    }
-
-    /// How the pane is arriving out of a row this frame, and how far along
-    /// its way it is; none once it is there.
-    fn arriving(&mut self, window: &mut Window, cx: &App) -> Option<(Arriving, f32)> {
-        let arriving = self.arriving?;
-        let elapsed = cx
-            .background_executor()
-            .now()
-            .saturating_duration_since(arriving.at);
-        let left = crate::motion::expand::spring_left(elapsed, crate::motion::expand::GROW);
-        if left < crate::motion::expand::GROW_REST || cx.reduce_motion() {
-            self.arriving = None;
-            return None;
-        }
-        window.request_animation_frame();
-        Some((arriving, 1. - left))
     }
 
     /// Where the pane's chat is drawn now: on its way in, or in the pane.
@@ -774,35 +701,6 @@ impl Render for ThreadPanel {
         if self.awaiting {
             window.request_animation_frame();
         }
-        let arriving = self.arriving(window, cx);
-        // Out of a row, the pane's content is drawn over the window, inside
-        // its surface: the surface starts in the threads list, outside the
-        // pane, which would clip it.
-        let content = match arriving {
-            Some((
-                Arriving {
-                    arrival: Arrival::Thread,
-                    from,
-                    ..
-                },
-                way,
-            )) => gpui::deferred(arrival_surface(
-                from,
-                way,
-                self.split.clone().into_any_element(),
-                cx,
-            ))
-            .into_any_element(),
-            _ => self.split.clone().into_any_element(),
-        };
-        let highlight = arriving.and_then(|(arriving, way)| {
-            (arriving.arrival == Arrival::Current).then(|| {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .child(gpui::deferred(arrival_highlight(arriving.from, way, cx)))
-            })
-        });
         let waiting = self.waiting();
         // A slot gliding below the dock's slot floor runs past its split's
         // end, where the split's frame clips it: the pane's bounds are the
@@ -856,56 +754,14 @@ impl Render for ThreadPanel {
                         None => content.h_full(),
                     })
                     .opacity(held.opacity)
-                    .child(crate::motion::faded::faded(held.opacity, content)),
+                    .child(crate::motion::faded::faded(
+                        held.opacity,
+                        self.split.clone(),
+                    )),
             )
             .when(self.closing, |pane| pane.child(crate::motion::shield()))
-            .children(highlight)
             .child(self.press_catcher(cx))
     }
-}
-
-/// A pane's surface `way` of its way out of a row at `from` into the pane,
-/// holding `content` at rest in the pane: its fill comes in as the row's
-/// selected fill over the column's paper, and goes as the content lands,
-/// so that the pane ends as it rests. What the content shows comes in as
-/// the scene the pane shows does.
-fn arrival_surface(
-    from: (Bounds<Pixels>, Pixels),
-    way: f32,
-    content: AnyElement,
-    cx: &App,
-) -> crate::motion::expand::Morph {
-    use crate::motion::expand::{OPEN_SURFACE, ramp};
-    let fill = crate::material::opaque_canvas(cx)
-        .blend(crate::material::content_surface(cx))
-        .blend(cx.theme().list_active.opacity(1. - way));
-    let frame = crate::material::raised(
-        div()
-            .debug_selector(|| "pane-arrival".into())
-            .bg(fill)
-            .shadow_sm(),
-    );
-    crate::motion::expand::Morph::new(frame, px(0.), px(0.), content)
-        .from(Some(from), way)
-        .surface(ramp(way, 0., OPEN_SURFACE) * (1. - ramp(way, ARRIVAL_LANDS, 1.)))
-}
-
-/// The selected fill of a row at `from`, `way` of its way out of the row
-/// over a pane that showed the row's thread already: the pane's own
-/// highlight of a hovered row, fading as it lands.
-fn arrival_highlight(
-    from: (Bounds<Pixels>, Pixels),
-    way: f32,
-    cx: &App,
-) -> crate::motion::expand::Morph {
-    let frame = crate::material::raised(
-        div()
-            .debug_selector(|| "pane-arrival-highlight".into())
-            .bg(cx.theme().list_active),
-    );
-    crate::motion::expand::Morph::new(frame, px(0.), px(0.), Empty.into_any_element())
-        .from(Some(from), way)
-        .surface(1. - crate::motion::expand::ramp(way, HIGHLIGHT_HOLDS, 1.))
 }
 
 impl Panel for ThreadPanel {
