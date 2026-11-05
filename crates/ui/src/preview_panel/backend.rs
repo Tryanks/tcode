@@ -673,7 +673,11 @@ impl PreviewPanel {
                     let margin = px(0.);
                     // gpui-webview has no corner radius or layer clip for
                     // the native view, so the page stays square inside the
-                    // rounded frame and its corners cover the frame's.
+                    // rounded frame and its corners cover the frame's (on
+                    // Windows, where it lies beneath GPUI, the frame's cover
+                    // its corners).
+                    #[cfg(target_os = "windows")]
+                    let shown = view.clone();
                     let frame = div()
                         .size_full()
                         .rounded(crate::material::radius_card(cx))
@@ -681,6 +685,13 @@ impl PreviewPanel {
                         .border_color(cx.theme().border)
                         .overflow_hidden()
                         .child(view);
+                    // Within the border and the frame's clip: where the
+                    // surfaces beneath leave the page unpainted.
+                    #[cfg(target_os = "windows")]
+                    let frame =
+                        gpui_base::ElementExt::on_prepaint(frame, move |bounds, window, cx| {
+                            super::page_holes::record(&shown, bounds, window, cx)
+                        });
                     // The page fills the panel or keeps a fixed canvas; going
                     // from one to the other its size glides, the native view
                     // following its bounds. A panel resized is followed at once.
