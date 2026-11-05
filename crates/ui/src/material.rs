@@ -463,16 +463,25 @@ pub struct RaisedLayout {
     opacity: f32,
 }
 
-/// The regions the shadows of a surface at `bounds` with `radii` corners
-/// are drawn in while it is faint: all round it, and the squares of its
-/// corners. Their edges lie on device pixels the surface covers whole, so
-/// neighbours meet without a gap or an overlap.
+/// The regions `shadow` of a surface at `bounds` with `radii` corners is
+/// drawn in while the surface is faint: all round it, and the parts of its
+/// corners' squares the rounding leaves open. Their edges lie on device
+/// pixels the surface covers whole, so neighbours meet without a gap or an
+/// overlap.
+///
+/// GPUI culls a shadow whose content mask misses the rectangle it blurs,
+/// although it draws the blur well past it (`Scene::insert_primitive`
+/// against the shadow shader's margin). A shadow whose rectangle lies inside
+/// the surface on a side, which a small or negative spread makes it, would
+/// be culled from that side's region entirely: each region reaches into the
+/// surface just past the rectangle's edge on its side, and the shadow is
+/// drawn under that edge of the surface too.
 fn around(
     bounds: gpui::Bounds<Pixels>,
     radii: gpui::Corners<Pixels>,
-    shadows: &[BoxShadow],
+    shadow: &BoxShadow,
     scale: f32,
-) -> Option<[gpui::Bounds<Pixels>; 8]> {
+) -> Option<Vec<gpui::Bounds<Pixels>>> {
     let snap = |value: Pixels, up: bool| {
         let device = f32::from(value) * scale;
         px(if up { device.ceil() } else { device.floor() } / scale)
@@ -482,35 +491,61 @@ fn around(
     if right <= left || bottom <= top {
         return None;
     }
-    let reach = shadows
-        .iter()
-        .map(|shadow| {
-            shadow.blur_radius * 3.
-                + shadow.spread_radius.max(px(0.))
-                + shadow.offset.x.abs()
-                + shadow.offset.y.abs()
-        })
-        .fold(px(0.), Pixels::max)
-        + px(1.);
+    // How far inside the surface the blurred rectangle's edge lies on each
+    // side, and so how far that side's region reaches in: past the edge by a
+    // device pixel, or not at all where the rectangle reaches out.
+    let pixel = px(1. / scale);
+    let inward = |inset: Pixels| {
+        if inset < px(0.) {
+            px(0.)
+        } else {
+            snap(inset, true) + pixel
+        }
+    };
+    let (offset, spread) = (shadow.offset, shadow.spread_radius);
     let most = ((right - left) / 2.).min((bottom - top) / 2.);
-    let corner = |radius: Pixels| snap(radius.min(most), true);
-    let (top_left, top_right) = (corner(radii.top_left), corner(radii.top_right));
-    let (bottom_left, bottom_right) = (corner(radii.bottom_left), corner(radii.bottom_right));
+    let band_top = inward(offset.y - spread).min(most);
+    let band_bottom = inward(-offset.y - spread).min(most);
+    let band_left = inward(offset.x - spread).min(most);
+    let band_right = inward(-offset.x - spread).min(most);
+    let reach =
+        shadow.blur_radius * 3. + spread.max(px(0.)) + offset.x.abs() + offset.y.abs() + px(1.);
     let (outer_left, outer_top) = (left - reach, top - reach);
     let (outer_right, outer_bottom) = (right + reach, bottom + reach);
-    let rect = |left, top, right, bottom| {
-        gpui::Bounds::from_corners(gpui::point(left, top), gpui::point(right, bottom))
+    let (inner_top, inner_bottom) = (top + band_top, bottom - band_bottom);
+    let (inner_left, inner_right) = (left + band_left, right - band_right);
+    let corner = |radius: Pixels| snap(radius.min(most), true);
+    let rect = |left: Pixels, top: Pixels, right: Pixels, bottom: Pixels| {
+        (right > left && bottom > top)
+            .then(|| gpui::Bounds::from_corners(gpui::point(left, top), gpui::point(right, bottom)))
     };
-    Some([
-        rect(outer_left, outer_top, outer_right, top),
-        rect(outer_left, bottom, outer_right, outer_bottom),
-        rect(outer_left, top, left, bottom),
-        rect(right, top, outer_right, bottom),
-        rect(left, top, left + top_left, top + top_left),
-        rect(right - top_right, top, right, top + top_right),
-        rect(left, bottom - bottom_left, left + bottom_left, bottom),
-        rect(right - bottom_right, bottom - bottom_right, right, bottom),
-    ])
+    let (top_left, top_right) = (corner(radii.top_left), corner(radii.top_right));
+    let (bottom_left, bottom_right) = (corner(radii.bottom_left), corner(radii.bottom_right));
+    Some(
+        [
+            rect(outer_left, outer_top, outer_right, inner_top),
+            rect(outer_left, inner_bottom, outer_right, outer_bottom),
+            rect(outer_left, inner_top, inner_left, inner_bottom),
+            rect(inner_right, inner_top, outer_right, inner_bottom),
+            rect(inner_left, inner_top, left + top_left, top + top_left),
+            rect(right - top_right, inner_top, inner_right, top + top_right),
+            rect(
+                inner_left,
+                bottom - bottom_left,
+                left + bottom_left,
+                inner_bottom,
+            ),
+            rect(
+                right - bottom_right,
+                bottom - bottom_right,
+                inner_right,
+                inner_bottom,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+    )
 }
 
 impl<E: IntoElement + Styled + 'static> IntoElement for Raised<E> {
@@ -616,16 +651,20 @@ impl<E: IntoElement + Styled + 'static> gpui::Element for Raised<E> {
                 || crate::preview_panel::page_holes(window, cx)
                     .iter()
                     .any(|hole| hole.intersects(&bounds));
-            match around(bounds, radii, &shadows, window.scale_factor()).filter(|_| faint) {
-                Some(regions) => {
-                    for region in regions {
-                        window.with_content_mask(
-                            Some(gpui::ContentMask { bounds: region }),
-                            |window| window.paint_drop_shadows(bounds, radii, &shadows),
-                        );
+            let scale = window.scale_factor();
+            for shadow in &shadows {
+                let shadow = std::slice::from_ref(shadow);
+                match around(bounds, radii, &shadow[0], scale).filter(|_| faint) {
+                    Some(regions) => {
+                        for region in regions {
+                            window.with_content_mask(
+                                Some(gpui::ContentMask { bounds: region }),
+                                |window| window.paint_drop_shadows(bounds, radii, shadow),
+                            );
+                        }
                     }
+                    None => window.paint_drop_shadows(bounds, radii, shadow),
                 }
-                None => window.paint_drop_shadows(bounds, radii, &shadows),
             }
         }
         // What the surface holds is drawn as faint as it is.

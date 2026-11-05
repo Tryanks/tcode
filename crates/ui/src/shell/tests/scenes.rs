@@ -1021,10 +1021,59 @@ fn rail_lightness(cx: &mut VisualTestContext) -> [Option<[f32; 2]>; 3] {
     })
 }
 
+/// How opaque the surface laid out at `bounds` is drawn in the last frame:
+/// the alpha of its fill, which is opaque at rest.
+fn fill_alpha(window: &gpui::Window, bounds: gpui::Bounds<Pixels>) -> Option<f32> {
+    let bounds = bounds.scale(window.scale_factor());
+    let near = |a: gpui::ScaledPixels, b: gpui::ScaledPixels| (a - b).0.abs() <= 1.;
+    crate::test_frames::painted_quads(window)
+        .iter()
+        .filter(|quad| {
+            near(quad.bounds.left(), bounds.left())
+                && near(quad.bounds.top(), bounds.top())
+                && near(quad.bounds.right(), bounds.right())
+                && near(quad.bounds.bottom(), bounds.bottom())
+        })
+        .filter_map(|quad| quad.background.as_solid())
+        .map(|fill| fill.a)
+        .reduce(f32::max)
+}
+
+/// Checks that a surface's shadow at a point just outside it, `seen` there
+/// frame by frame with how opaque the surface was drawn, darkens `canvas`
+/// in step with the surface, toward what it does at `rest`: as a surface
+/// fading as one would, with no frame where it is missing and comes in
+/// late.
+fn shadow_follows(
+    what: &str,
+    seen: &[(Option<f32>, [f32; 2])],
+    canvas: [f32; 2],
+    rest: [f32; 2],
+    failures: &mut Vec<String>,
+) {
+    for (backdrop, name) in ["black", "white"].iter().enumerate() {
+        let full = canvas[backdrop] - rest[backdrop];
+        if full < 0.002 {
+            failures.push(format!("{what}: no shadow at rest over {name}: {full:.4}"));
+            continue;
+        }
+        for (frame, (opacity, lit)) in seen.iter().enumerate() {
+            let Some(opacity) = opacity else { continue };
+            let shade = canvas[backdrop] - lit[backdrop];
+            if (shade - full * opacity).abs() > 0.2 * full + 0.001 {
+                failures.push(format!(
+                    "{what}, frame {frame}: the surface at {opacity:.3} shades {shade:.4} \
+                     over {name}, against {full:.4} at rest"
+                ));
+            }
+        }
+    }
+}
+
 /// The rail's cards of a thread switched to fade in with the thread from
 /// the canvas to the card through nothing darker than either, in either
 /// theme: a card's shadow does not show through its fill while the fill is
-/// faint.
+/// faint, and fades in around it with it.
 #[gpui::test]
 fn the_rail_cards_of_a_thread_switched_to_fade_in_through_nothing_darker(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -1044,13 +1093,29 @@ fn the_rail_cards_of_a_thread_switched_to_fade_in_through_nothing_darker(cx: &mu
         for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
             serve_holding(&host, id, Holding::Rail);
             switch(&shell, key, id, cx);
+            // Between the plan's card and the commands', in the gap the
+            // shadows of both shade.
+            let gap = |cx: &mut VisualTestContext| {
+                let card = cx.debug_bounds("rail-card-frame-commands")?;
+                let probe = gpui::point(card.center().x, card.top() - px(2.));
+                Some(cx.update(|window, _| {
+                    let at = probe.scale(window.scale_factor());
+                    (
+                        fill_alpha(window, card),
+                        [0., 1.].map(|backdrop| luminance_at(window, at, backdrop)),
+                    )
+                }))
+            };
             let mut seen = vec![rail_lightness(cx)];
+            let mut shading = Vec::from_iter(gap(cx));
             for _ in 0..30 {
                 display_frame(cx);
                 seen.push(rail_lightness(cx));
+                shading.extend(gap(cx));
             }
             let rest =
                 rail_lightness(cx).map(|card| card.unwrap_or_else(|| panic!("{id}'s cards")));
+            let shaded = gap(cx).expect("the commands card").1;
             // The canvas: under the rail, below its last card and that
             // card's shadow.
             let rail = cx.debug_bounds("chat-rail").expect("the rail");
@@ -1065,6 +1130,13 @@ fn the_rail_cards_of_a_thread_switched_to_fade_in_through_nothing_darker(cx: &mu
                     .scale(window.scale_factor());
                 [0., 1.].map(|backdrop| luminance_at(window, probe, backdrop))
             });
+            shadow_follows(
+                &format!("{mode:?}, {id}, between the plan and the commands"),
+                &shading,
+                canvas,
+                shaded,
+                &mut failures,
+            );
             for (frame, cards) in seen.iter().enumerate() {
                 for ((card, lit), rest) in RAIL_CARDS.iter().zip(cards).zip(&rest) {
                     let Some(lit) = lit else { continue };
@@ -1088,7 +1160,8 @@ fn the_rail_cards_of_a_thread_switched_to_fade_in_through_nothing_darker(cx: &mu
 /// A thread's menu fades in over the sidebar, and out again, from what lies
 /// under it to the menu and back, through nothing darker than either, in
 /// either theme: its shadow does not show through its fill while the fill
-/// is faint, though what fades it is the popover it is drawn in.
+/// is faint, though what fades it is the popover it is drawn in, and fades
+/// in and out around it with it.
 #[gpui::test]
 fn a_menu_fades_in_and_out_through_nothing_darker(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -1117,12 +1190,22 @@ fn a_menu_fades_in_and_out_through_nothing_darker(cx: &mut TestAppContext) {
         cx.simulate_mouse_down(row, right, plain);
         cx.simulate_mouse_up(row, right, plain);
         settle_frames(cx);
-        let at = menu(cx).expect("thread-2's menu").center();
+        let resting = menu(cx).expect("thread-2's menu");
+        let at = resting.center();
+        // Beside its left edge, where its shadow falls.
+        let beside = gpui::point(resting.left() - px(4.), resting.center().y);
         let open = light(at, cx);
+        let shaded = light(beside, cx);
         cx.simulate_keystrokes("escape");
         settle_frames(cx);
         assert!(menu(cx).is_none(), "the menu closed");
         let under = light(at, cx);
+        let canvas = light(beside, cx);
+        let shading = |cx: &mut VisualTestContext| {
+            let opacity = menu(cx).and_then(|menu| cx.update(|window, _| fill_alpha(window, menu)));
+            (opacity, light(beside, cx))
+        };
+        let mut shades = Vec::new();
 
         cx.simulate_mouse_down(row, right, plain);
         cx.simulate_mouse_up(row, right, plain);
@@ -1130,14 +1213,23 @@ fn a_menu_fades_in_and_out_through_nothing_darker(cx: &mut TestAppContext) {
         let mut seen = Vec::new();
         for _ in 0..30 {
             seen.push(light(at, cx));
+            shades.push(shading(cx));
             display_frame(cx);
         }
         cx.simulate_keystrokes("escape");
         draw(cx);
         for _ in 0..30 {
             seen.push(light(at, cx));
+            shades.push(shading(cx));
             display_frame(cx);
         }
+        shadow_follows(
+            &format!("{mode:?}, beside the menu"),
+            &shades,
+            canvas,
+            shaded,
+            &mut failures,
+        );
         assert_eq!(
             light(at, cx),
             under,
