@@ -613,51 +613,59 @@ fn serve_holding(host: &MountedShell, id: &str, holding: Holding) {
             text: "Reading the build files, then the tests that cover them. ".repeat(4),
         }),
         Holding::StreamedOn => events.push(answer_delta(id, streamed_on(0))),
-        Holding::Rail => {
-            status.goal = Some(agent::Goal {
-                objective: format!("Keep {id} going"),
-                status: agent::GoalStatus::Active,
-                tokens_used: Some(12_000),
-                token_budget: Some(200_000),
-                time_used_secs: Some(90),
-                checks: Some(2),
-                last_check: None,
-            });
-            send_events(
-                host,
-                vec![(
-                    Topic::SessionPlan {
-                        session_id: id.into(),
-                    },
-                    ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
-                        session_id: id.into(),
-                        steps: (0..3)
-                            .map(|step| agent::PlanStep {
-                                step: format!("Step {step} of {id}'s plan"),
-                                status: agent::PlanStepStatus::Pending,
-                            })
-                            .collect(),
-                        explanation: None,
-                    }),
-                )],
-            );
-            events.push(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
-                id: format!("{id}-command"),
-                parent_item_id: None,
-                content: agent::ItemContent::CommandExecution {
-                    command: "cargo test".into(),
-                    output: "ok\n".into(),
-                    exit_code: Some(0),
-                    status: agent::ItemStatus::Completed,
-                },
-            }));
-        }
+        Holding::Rail => with_rail(host, id, &mut status, &mut events),
         Holding::Plain | Holding::RightPanel | Holding::AgentsPanel => {}
     }
     if !running {
         events.push(completed());
     }
     serve_log(host, status, events);
+}
+
+/// `id`'s side rail cards: a goal, a plan, and a command its turn ran.
+fn with_rail(
+    host: &MountedShell,
+    id: &str,
+    status: &mut tcode_protocol::SessionStatus,
+    events: &mut Vec<agent::AgentEvent>,
+) {
+    status.goal = Some(agent::Goal {
+        objective: format!("Keep {id} going"),
+        status: agent::GoalStatus::Active,
+        tokens_used: Some(12_000),
+        token_budget: Some(200_000),
+        time_used_secs: Some(90),
+        checks: Some(2),
+        last_check: None,
+    });
+    send_events(
+        host,
+        vec![(
+            Topic::SessionPlan {
+                session_id: id.into(),
+            },
+            ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
+                session_id: id.into(),
+                steps: (0..3)
+                    .map(|step| agent::PlanStep {
+                        step: format!("Step {step} of {id}'s plan"),
+                        status: agent::PlanStepStatus::Pending,
+                    })
+                    .collect(),
+                explanation: None,
+            }),
+        )],
+    );
+    events.push(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+        id: format!("{id}-command"),
+        parent_item_id: None,
+        content: agent::ItemContent::CommandExecution {
+            command: "cargo test".into(),
+            output: "ok\n".into(),
+            exit_code: Some(0),
+            status: agent::ItemStatus::Completed,
+        },
+    }));
 }
 
 fn answer_delta(id: &str, text: String) -> agent::AgentEvent {
@@ -727,10 +735,11 @@ fn serve_streamed_on(host: &MountedShell, id: &str) {
 }
 
 /// thread-2 as the pane switches to it: one turn done, a long question
-/// and a long answer, so nothing of it lies where thread-1's lies.
+/// and a long answer, so nothing of it lies where thread-1's lies, and side
+/// rail cards of its own, which replace thread-1's.
 fn serve_other(host: &MountedShell) {
-    let status = session_status("thread-2", std::path::Path::new(PANES_CWD));
-    let events = vec![
+    let mut status = session_status("thread-2", std::path::Path::new(PANES_CWD));
+    let mut events = vec![
         started(),
         agent::AgentEvent::ItemCompleted(agent::ThreadItem {
             id: "thread-2-ask".into(),
@@ -749,8 +758,9 @@ fn serve_other(host: &MountedShell) {
                 summarized: false,
             },
         }),
-        completed(),
     ];
+    with_rail(host, "thread-2", &mut status, &mut events);
+    events.push(completed());
     serve_log(host, status, events);
 }
 

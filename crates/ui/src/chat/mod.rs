@@ -762,7 +762,14 @@ impl Render for ChatView {
         }
         self.composer_drawn = composer_drawn;
         if let Some(active) = active.filter(|_| !loading) {
-            layers.push((SURFACE_THREAD, self.render_thread(active, window, cx)));
+            // Motion sampled from element state as the thread is built
+            // (a rail card's rows, a plan's steps) is keyed by the path
+            // the view renders at, which the scene's root id is not yet
+            // on: it is put there, so it is this scene's alone.
+            let thread = window.with_id(self.scene.id("chat-thread"), |window| {
+                self.render_thread(active, window, cx)
+            });
+            layers.push((SURFACE_THREAD, thread));
         }
         // An agent beside its lead keeps its header, and its way back, while
         // its thread loads.
