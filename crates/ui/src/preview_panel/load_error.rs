@@ -82,14 +82,20 @@ fn record(webview: usize, error: LoadError) {
     changed();
 }
 
+/// The native webview a failure is recorded for.
+#[cfg(not(any(target_os = "android", target_os = "windows")))]
+type Raw = wry::WebView;
+#[cfg(target_os = "windows")]
+type Raw = super::webview2::RawWebView;
+
 /// Start reporting failed navigations for a freshly created webview.
 #[cfg(not(target_os = "android"))]
-pub(crate) fn install(raw: &wry::WebView) {
+pub(crate) fn install(raw: &Raw) {
     imp::install(raw);
 }
 
 #[cfg(not(target_os = "android"))]
-pub(crate) fn get(raw: &wry::WebView) -> Option<LoadError> {
+pub(crate) fn get(raw: &Raw) -> Option<LoadError> {
     let webview = imp::key(raw);
     LAST.with_borrow(|last| last.get(&webview).cloned())
 }
@@ -97,7 +103,7 @@ pub(crate) fn get(raw: &wry::WebView) -> Option<LoadError> {
 /// Drop the record for a webview that is going away, so a later allocation at
 /// the same address cannot inherit it.
 #[cfg(not(target_os = "android"))]
-pub(crate) fn forget(raw: &wry::WebView) {
+pub(crate) fn forget(raw: &Raw) {
     clear(imp::key(raw));
 }
 
@@ -268,17 +274,16 @@ mod imp {
         NavigationCompletedEventHandler, NavigationStartingEventHandler, take_pwstr,
     };
     use windows_core::Interface as _;
-    use wry::WebViewExtWindows as _;
 
-    use super::LoadError;
+    use super::{LoadError, Raw};
 
-    pub(super) fn key(raw: &wry::WebView) -> usize {
+    pub(super) fn key(raw: &Raw) -> usize {
         raw.webview().as_raw() as usize
     }
 
     /// WebView2 reports a failed navigation only through `NavigationCompleted`;
     /// the page itself keeps showing the previous document.
-    pub(super) fn install(raw: &wry::WebView) {
+    pub(super) fn install(raw: &Raw) {
         let webview = raw.webview();
         let mut token = 0i64;
         let started = NavigationStartingEventHandler::create(Box::new(move |webview, _| {

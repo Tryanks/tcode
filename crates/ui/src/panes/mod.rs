@@ -875,7 +875,6 @@ fn arrival_surface(
     content: AnyElement,
     cx: &App,
 ) -> crate::motion::expand::Morph {
-    use crate::material::SurfaceFill as _;
     use crate::motion::expand::{OPEN_SURFACE, ramp};
     let fill = crate::material::opaque_canvas(cx)
         .blend(crate::material::content_surface(cx))
@@ -883,7 +882,7 @@ fn arrival_surface(
     let frame = crate::material::raised(
         div()
             .debug_selector(|| "pane-arrival".into())
-            .surface_bg(fill)
+            .bg(fill)
             .shadow_sm(),
     );
     crate::motion::expand::Morph::new(frame, px(0.), px(0.), content)

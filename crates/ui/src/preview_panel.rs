@@ -15,17 +15,18 @@
 //! `gpui-webview` embeds WebKitGTK as an X11 child and drives GTK from GPUI, so
 //! the backend exists only when GPUI runs on X11 (see [`preview_backend`]).
 //! Android hosts activity-owned WebViews through JNI; iOS adds a `gpui-webview`
-//! child to the GPUI host view and places it itself (see [`ios`]). A client
+//! child to the GPUI host view and places it itself (see [`ios`]); Windows
+//! drives a WebView2 composition controller itself (see [`webview2`]). A client
 //! without a backend — the browser, Linux on Wayland — neither offers the tab
 //! ([`WorkspaceStore::offers_preview`](crate::store::WorkspaceStore::offers_preview))
 //! nor subscribes to the agent's preview requests.
 //!
 //! Windows creation is deliberately asynchronous. WebView2 construction is
-//! asynchronous underneath, but wry's synchronous `build_as_child` waits by
-//! running a nested Win32 message pump. That pump can dispatch GPUI teardown
-//! while the parent HWND is still underneath the creation call. We instead use
-//! `build_as_child_async` on GPUI's window foreground executor and generation-tag
-//! each pending child, so teardown can cancel the slot without re-entering GPUI
+//! asynchronous underneath; waiting for it synchronously means a nested Win32
+//! message pump, which can dispatch GPUI teardown while the parent HWND is
+//! still underneath the creation call. Its completions are awaited on GPUI's
+//! window foreground executor instead, and each pending page is
+//! generation-tagged, so teardown can cancel the slot without re-entering GPUI
 //! or allowing a stale completion to replace a newer preview. macOS keeps the
 //! proven synchronous child-view path.
 //!
@@ -40,8 +41,9 @@
 //!
 //! ## Native overlays
 //!
-//! On macOS, `gpui-webview` uses GPUI Fast composition to put deferred GPUI
-//! overlays above the native page. Its element owns document bounds and clipping.
+//! On macOS and Linux `gpui-webview`, and on Windows [`webview2`], use GPUI
+//! Fast's window composition to put deferred GPUI overlays above the native
+//! page. Their element owns document bounds and clipping.
 //! GPUI overlays are not reliably painted above the page after a window resize,
 //! so the palette and the compact menu still hide the page on every platform.
 //! Tab/conversation switch and route changes hide inactive pages without
@@ -92,34 +94,6 @@ pub fn preview_backend() -> bool {
 pub(crate) mod lifecycle;
 #[cfg(preview_backend)]
 mod load_error;
-#[cfg(all(preview_backend, target_os = "windows"))]
-mod page_holes;
-
-/// Where pages show in `window`, which the surfaces painted beneath them
-/// leave unpainted: only on Windows, where a page lies beneath all of GPUI
-/// (see `page_holes`). Elsewhere a page is above the surfaces under it.
-pub(crate) fn page_holes(
-    #[cfg_attr(
-        not(all(preview_backend, target_os = "windows")),
-        expect(unused_variables, reason = "only Windows pages lie beneath GPUI")
-    )]
-    window: &Window,
-    #[cfg_attr(
-        not(all(preview_backend, target_os = "windows")),
-        expect(unused_variables, reason = "only Windows pages lie beneath GPUI")
-    )]
-    cx: &mut App,
-) -> Vec<gpui::Bounds<gpui::Pixels>> {
-    #[cfg(all(preview_backend, target_os = "windows"))]
-    {
-        page_holes::in_window(window, cx)
-    }
-    #[cfg(not(all(preview_backend, target_os = "windows")))]
-    {
-        Vec::new()
-    }
-}
-
 /// The reply channel a broker request is answered on.
 #[cfg(preview_backend)]
 type ReplyTx = async_channel::Sender<Result<PreviewResponse, String>>;
@@ -1027,6 +1001,9 @@ mod android_geometry;
 
 #[cfg(all(preview_backend, target_os = "ios"))]
 mod ios;
+
+#[cfg(all(preview_backend, target_os = "windows"))]
+mod webview2;
 
 #[cfg(all(
     preview_backend,

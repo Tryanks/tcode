@@ -606,13 +606,11 @@ impl Drawer {
                 .occlude()
         });
         let conversation_bounds = host.conversation.clone();
-        let conversation = crate::material::left_of_pages(
-            div()
-                .debug_selector(|| "pane-conversation".into())
-                .size_full()
-                .on_prepaint(move |painted, _, _| conversation_bounds.set(painted))
-                .child(conversation),
-        );
+        let conversation = div()
+            .debug_selector(|| "pane-conversation".into())
+            .size_full()
+            .on_prepaint(move |painted, _, _| conversation_bounds.set(painted))
+            .child(conversation);
         let chat_min = (pane_width - room).min(px(CONVERSATION_MIN_WIDTH));
         let group = h_resizable("right-panel-split")
             .with_state(&self.split)

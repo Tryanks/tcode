@@ -8,10 +8,9 @@ use crate::typography::TextRole as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
-    App, Bounds, BoxShadow, Div, ElementId, Hsla, InteractiveElement, IntoElement,
-    ParentElement as _, Pixels, Rgba, Role, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled, div, linear_color_stop, linear_gradient,
-    prelude::FluentBuilder as _, px,
+    App, BoxShadow, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement as _,
+    Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled, div,
+    linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, Toolbar, h_flex, v_flex};
 
@@ -107,156 +106,6 @@ pub fn content_surface(cx: &App) -> Hsla {
 
 fn paper(theme: &crate::theme::Theme) -> Hsla {
     theme.by_mode(rgba(0xFD, 0xFD, 0xFB, 0xF2), rgba(0x1B, 0x1E, 0x24, 0xF0))
-}
-
-/// A surface's fill, for a surface a page may show over: `.bg(color)`,
-/// except where a page lies beneath GPUI ([`crate::preview_panel::page_holes`]),
-/// whose bounds it leaves unpainted. Call it before adding children, so the
-/// fill is painted under them.
-pub(crate) trait SurfaceFill: Styled + gpui::ParentElement + Sized {
-    fn surface_bg(self, color: Hsla) -> Self {
-        if cfg!(all(preview_backend, target_os = "windows")) {
-            self.bg(gpui::transparent_black()).child(
-                gpui::canvas(
-                    |_, _, _| {},
-                    move |bounds, _, window, cx| {
-                        let holes = crate::preview_panel::page_holes(window, cx);
-                        for part in outside(bounds, &holes, window.scale_factor()) {
-                            window.paint_quad(gpui::fill(part, color));
-                        }
-                    },
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-            )
-        } else {
-            self.bg(color)
-        }
-    }
-}
-
-impl<E: Styled + gpui::ParentElement> SurfaceFill for E {}
-
-/// `content`, which a side panel may be drawn over, painted only left of the
-/// pages that panel shows where a page lies beneath GPUI
-/// ([`crate::preview_panel::page_holes`]): under an opaque panel nothing of
-/// it shows, but over such a page it would. A page in such a panel runs to
-/// the panel's right edge, past the content's, so the part left of it is a
-/// rectangle.
-pub(crate) fn left_of_pages(content: impl IntoElement) -> gpui::AnyElement {
-    if cfg!(all(preview_backend, target_os = "windows")) {
-        LeftOfPages(content.into_any_element()).into_any_element()
-    } else {
-        content.into_any_element()
-    }
-}
-
-struct LeftOfPages(gpui::AnyElement);
-
-impl IntoElement for LeftOfPages {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl gpui::Element for LeftOfPages {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        window: &mut gpui::Window,
-        cx: &mut App,
-    ) -> (gpui::LayoutId, ()) {
-        (self.0.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut gpui::Window,
-        cx: &mut App,
-    ) {
-        self.0.prepaint(window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
-        window: &mut gpui::Window,
-        cx: &mut App,
-    ) {
-        let right = crate::preview_panel::page_holes(window, cx)
-            .iter()
-            .filter(|hole| hole.intersects(&bounds))
-            .map(|hole| hole.left())
-            .fold(bounds.right(), Pixels::min);
-        let mask = gpui::ContentMask {
-            bounds: Bounds::from_corners(bounds.origin, gpui::point(right, bounds.bottom())),
-        };
-        window.with_content_mask(Some(mask), |window| self.0.paint(window, cx));
-    }
-}
-
-/// `bounds` but for `holes`, as rectangles. A hole's edges are snapped to
-/// the device pixels the page's window is placed on, so the parts meet the
-/// page, and each other, without a seam.
-fn outside(bounds: Bounds<Pixels>, holes: &[Bounds<Pixels>], scale: f32) -> Vec<Bounds<Pixels>> {
-    let snap = |at: Pixels| px((f32::from(at) * scale).round() / scale);
-    let mut parts = vec![bounds];
-    for hole in holes {
-        let left = snap(hole.origin.x);
-        let top = snap(hole.origin.y);
-        let hole = Bounds::from_corners(
-            gpui::point(left, top),
-            gpui::point(left + snap(hole.size.width), top + snap(hole.size.height)),
-        );
-        parts = parts
-            .into_iter()
-            .flat_map(|part| {
-                let cut = part.intersect(&hole);
-                if cut.is_empty() {
-                    return vec![part];
-                }
-                let (outer_top, outer_bottom) = (part.top(), part.bottom());
-                let (outer_left, outer_right) = (part.left(), part.right());
-                [
-                    (outer_left, outer_top, outer_right, cut.top()),
-                    (outer_left, cut.bottom(), outer_right, outer_bottom),
-                    (outer_left, cut.top(), cut.left(), cut.bottom()),
-                    (cut.right(), cut.top(), outer_right, cut.bottom()),
-                ]
-                .into_iter()
-                .map(|(left, top, right, bottom)| {
-                    Bounds::from_corners(gpui::point(left, top), gpui::point(right, bottom))
-                })
-                .filter(|part| !part.is_empty())
-                .collect()
-            })
-            .collect();
-    }
-    parts
 }
 
 /// Popovers, menus, dialogs, toasts: the theme's large-element radius.
@@ -368,12 +217,7 @@ pub fn floating_panel<E: Styled>(el: E, side: Side, cx: &App) -> Raised<E> {
 /// A side panel `lift` of the way from docked to [floating](floating_panel). A
 /// docked one is a peer of the content beside it: the same paper, opaque for
 /// what runs on beneath it, the same hairline, and no shadow.
-pub fn lifting_panel<E: Styled + gpui::ParentElement>(
-    el: E,
-    side: Side,
-    lift: f32,
-    cx: &App,
-) -> Raised<E> {
+pub fn lifting_panel<E: Styled>(el: E, side: Side, lift: f32, cx: &App) -> Raised<E> {
     let mut el = floating_panel(el, side, cx);
     let style = el.style();
     style.box_shadow = style
@@ -390,7 +234,7 @@ pub fn lifting_panel<E: Styled + gpui::ParentElement>(
                 .collect()
         });
     let docked = opaque_canvas(cx).blend(content_surface(cx));
-    el.surface_bg(docked.blend(cx.theme().popover.opacity(lift)))
+    el.bg(docked.blend(cx.theme().popover.opacity(lift)))
 }
 
 /// A card inside a page or a chat column: its radius, inset, gap and the muted
@@ -432,10 +276,8 @@ pub fn card_raised(cx: &App) -> Raised<Div> {
 /// shadow through its fill, darker than both what it lies on and the
 /// surface. A rounded corner leaves part of its square uncovered, where the
 /// shadow shows around the surface too, so the shadow is still drawn under
-/// those squares. A surface open over a page that lies beneath GPUI
-/// ([`crate::preview_panel::page_holes`]) shows its shadow there too, so it
-/// is drawn only around such a surface as well. Remove this once GPUI draws
-/// a drop shadow only outside its element, or fades an element as one.
+/// those squares. Remove this once GPUI draws a drop shadow only outside its
+/// element, or fades an element as one.
 pub fn raised<E: Styled>(surface: E) -> Raised<E> {
     Raised {
         inner: Some(surface),
@@ -646,12 +488,7 @@ impl<E: IntoElement + Styled + 'static> gpui::Element for Raised<E> {
                     shadow
                 })
                 .collect();
-            // Faint, or open over a page that lies beneath GPUI, the
-            // surface no longer covers its own shadow.
-            let faint = opacity * crate::motion::faded::opacity() < 1.
-                || crate::preview_panel::page_holes(window, cx)
-                    .iter()
-                    .any(|hole| hole.intersects(&bounds));
+            let faint = opacity * crate::motion::faded::opacity() < 1.;
             let scale = window.scale_factor();
             for shadow in &shadows {
                 let shadow = std::slice::from_ref(shadow);

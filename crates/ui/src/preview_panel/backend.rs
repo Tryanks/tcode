@@ -676,9 +676,7 @@ impl PreviewPanel {
                     let margin = px(0.);
                     // gpui-webview has no corner radius or layer clip for
                     // the native view, so the page stays square inside the
-                    // rounded frame and its corners cover the frame's (on
-                    // Windows, where it lies beneath GPUI, the frame's cover
-                    // its corners).
+                    // rounded frame and its corners cover the frame's.
                     #[cfg(target_os = "windows")]
                     let shown = view.clone();
                     let frame = div()
@@ -688,18 +686,13 @@ impl PreviewPanel {
                         .border_color(cx.theme().border)
                         .overflow_hidden()
                         .child(view);
-                    // Within the border and the frame's clip: where the
-                    // surfaces beneath leave the page unpainted.
-                    #[cfg(target_os = "windows")]
-                    let frame =
-                        gpui_base::ElementExt::on_prepaint(frame, move |bounds, window, cx| {
-                            super::page_holes::record(&shown, bounds, window, cx)
-                        });
                     // The page fills the panel or keeps a fixed canvas; going
                     // from one to the other its size glides, the native view
                     // following its bounds. A panel resized is followed at once.
                     let canvas = self.store.read(cx).preview_canvas(id);
                     let size = page_size(canvas, window, cx);
+                    #[cfg(target_os = "windows")]
+                    shown.read(cx).lead(size.ahead);
                     page = Some(
                         div()
                             .p(margin)
@@ -1438,6 +1431,9 @@ fn png_reply(cg_image: &objc2_core_graphics::CGImage) -> Result<PreviewResponse,
 /// The size the page is drawn at this frame, and the area it is laid out in.
 struct PageSize {
     size: Option<gpui::Size<Pixels>>,
+    /// How much larger the page is about to be, per axis, while it glides.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    ahead: gpui::Size<Pixels>,
     area: Rc<std::cell::Cell<gpui::Size<Pixels>>>,
 }
 
@@ -1485,7 +1481,11 @@ fn page_size(canvas: Option<(u32, u32)>, window: &mut Window, cx: &mut App) -> P
         .clone();
     let room = area.get();
     if room.width <= px(0.) || room.height <= px(0.) {
-        return PageSize { size: None, area };
+        return PageSize {
+            size: None,
+            ahead: gpui::Size::default(),
+            area,
+        };
     }
     let target = match canvas {
         Some((width, height)) => gpui::size(
@@ -1522,6 +1522,10 @@ fn page_size(canvas: Option<(u32, u32)>, window: &mut Window, cx: &mut App) -> P
     glide.drawn = Some(size);
     PageSize {
         size: Some(size),
+        ahead: gpui::size(
+            (target.width - size.width).max(px(0.)),
+            (target.height - size.height).max(px(0.)),
+        ),
         area,
     }
 }
