@@ -5038,20 +5038,30 @@ fn compact_glyph(
     }
 }
 
+/// What a thread with a turn running or a request open says of itself: the
+/// request it waits on the user for, else that it works.
+fn busy_status(state: &ThreadRowState, cx: &App) -> (Cow<'static, str>, gpui::Hsla) {
+    if state.waiting_for_approval {
+        (crate::tr!("mobile.approval"), cx.theme().warning)
+    } else if state.waiting_for_input {
+        (crate::tr!("mobile.answer"), cx.theme().primary)
+    } else {
+        (crate::tr!("mobile.working"), cx.theme().primary)
+    }
+}
+
 /// Status label and color, or `None` for an idle thread that shows only its time.
 fn compact_status_line(
     state: &ThreadRowState,
     working: bool,
     cx: &App,
 ) -> Option<(Cow<'static, str>, gpui::Hsla)> {
-    if state.waiting_for_approval {
-        Some((crate::tr!("mobile.approval"), cx.theme().warning))
-    } else if state.waiting_for_input {
-        Some((crate::tr!("mobile.answer"), cx.theme().primary))
+    if state.waiting() {
+        Some(busy_status(state, cx))
     } else if state.failed {
         Some((crate::tr!("sidebar.failed"), cx.theme().danger))
     } else if working {
-        Some((crate::tr!("mobile.working"), cx.theme().primary))
+        Some(busy_status(state, cx))
     } else if state.waiting {
         Some((crate::tr!("sidebar.waiting"), cx.theme().muted_foreground))
     } else if state.show_unread {
