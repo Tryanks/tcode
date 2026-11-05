@@ -50,8 +50,14 @@ pub enum PreviewRequest {
     },
     /// The page's accessibility outline, each element with a ref.
     Snapshot,
-    /// Capture the visible webview region as a PNG.
-    Screenshot,
+    /// A PNG of what is on screen, of the element a snapshot's `ref` names,
+    /// or of the whole document.
+    Screenshot {
+        #[serde(default)]
+        r#ref: Option<String>,
+        #[serde(default)]
+        full_page: bool,
+    },
 }
 
 /// The UI's answer to a [`PreviewRequest`].

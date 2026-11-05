@@ -110,6 +110,18 @@ pub struct ScrollParams {
     pub selector: Option<String>,
 }
 
+/// What to capture.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotParams {
+    /// An element's ref from preview_snapshot, to capture only it.
+    #[serde(default, rename = "ref")]
+    pub reference: Option<String>,
+    /// Capture the whole document, beyond what is on screen.
+    #[serde(default)]
+    pub full_page: Option<bool>,
+}
+
 /// Page conditions to poll until all are satisfied.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -352,9 +364,22 @@ impl PreviewTools {
         self.run(PreviewOp::Snapshot).await
     }
 
-    #[tool(description = "Capture a screenshot of the preview page as a PNG.")]
-    async fn preview_screenshot(&self) -> CallToolResult {
-        self.run(PreviewOp::Screenshot).await
+    #[tool(
+        description = "Capture a PNG of the preview page: what is on screen, one element by its ref from preview_snapshot, or with fullPage the whole document. A kind of picture this client's browser cannot take is refused with the reason."
+    )]
+    async fn preview_screenshot(
+        &self,
+        Parameters(params): Parameters<ScreenshotParams>,
+    ) -> CallToolResult {
+        let full_page = params.full_page.unwrap_or(false);
+        if full_page && params.reference.is_some() {
+            return tool_error("give a ref or fullPage, not both");
+        }
+        self.run(PreviewOp::Screenshot {
+            r#ref: params.reference,
+            full_page,
+        })
+        .await
     }
 
     /// Route one op through the broker and map its reply into a tool result.
@@ -453,7 +478,10 @@ mod tests {
                     PreviewReply::Json(serde_json::json!({"url":"https://x/"})),
                 ),
                 (
-                    PreviewOp::Screenshot,
+                    PreviewOp::Screenshot {
+                        r#ref: None,
+                        full_page: false,
+                    },
                     PreviewReply::Image {
                         mime: "image/png".into(),
                         data_base64: "AAA".into(),
@@ -473,7 +501,9 @@ mod tests {
             matches!(status.content.as_slice(), [ContentBlock::Text(text)]
             if serde_json::from_str::<serde_json::Value>(&text.text).unwrap() == serde_json::json!({"url":"https://x/"}))
         );
-        let shot = tools.preview_screenshot().await;
+        let shot = tools
+            .preview_screenshot(Parameters(ScreenshotParams::default()))
+            .await;
         assert_eq!(shot.is_error, Some(false));
         assert!(
             matches!(shot.content.as_slice(), [ContentBlock::Image(image)]

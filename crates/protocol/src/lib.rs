@@ -274,7 +274,8 @@ pub use wire::{
 // an optional ref, and Scroll an optional ref; a snapshot's reply is the
 // page agent's outline (url, title, loading, generation, elements, outline,
 // omitted) instead of interactiveElements and visibleText; a status reply
-// adds generation, console and network.
+// adds generation, console and network. PreviewRequest::Screenshot is a
+// struct variant with an optional ref and full_page.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

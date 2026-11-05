@@ -160,13 +160,28 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                     if ((long)view.getWidth() * view.getHeight() > 16000000)
                         throw new IllegalStateException("preview screenshot exceeds 16 megapixels");
                     Bitmap bitmap = Bitmap.createBitmap(view.getWidth(), view.getHeight(), Bitmap.Config.ARGB_8888);
+                    Bitmap shot = bitmap;
                     try {
                         view.draw(new Canvas(bitmap));
+                        // An element's box, in device pixels: x,y,width,height.
+                        if (!value.isEmpty()) {
+                            String[] box = value.split(",");
+                            int left = Math.max(0, Integer.parseInt(box[0]));
+                            int top = Math.max(0, Integer.parseInt(box[1]));
+                            int cropWidth = Math.min(Integer.parseInt(box[2]), bitmap.getWidth() - left);
+                            int cropHeight = Math.min(Integer.parseInt(box[3]), bitmap.getHeight() - top);
+                            if (cropWidth <= 0 || cropHeight <= 0)
+                                throw new IllegalStateException("the element has no visible area to capture");
+                            shot = Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight);
+                        }
                         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-                        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes))
+                        if (!shot.compress(Bitmap.CompressFormat.PNG, 100, bytes))
                             throw new IllegalStateException("PNG encoding failed");
                         nativeResult(request, null, bytes.toByteArray(), null);
-                    } finally { bitmap.recycle(); }
+                    } finally {
+                        if (shot != bitmap) shot.recycle();
+                        bitmap.recycle();
+                    }
                     break;
                 default: throw new IllegalArgumentException("unknown preview operation " + operation);
             }

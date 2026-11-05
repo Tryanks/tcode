@@ -94,8 +94,13 @@ impl RawWebView {
         })
         .detach();
     }
-    pub(super) fn screenshot(&self) -> impl Future<Output = Result<Reply, String>> + use<> {
-        self.browser.request("screenshot", "")
+    /// What is on screen, or the part `crop` names: `x,y,width,height` in
+    /// device pixels.
+    pub(super) fn screenshot(
+        &self,
+        crop: &str,
+    ) -> impl Future<Output = Result<Reply, String>> + use<> {
+        self.browser.request("screenshot", crop)
     }
 }
 
