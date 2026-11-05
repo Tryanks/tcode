@@ -27,9 +27,11 @@ const ROWS: Duration = Duration::from_millis(200);
 /// How long an agent's state word takes to cross-fade to its next.
 const CHANGE: Duration = Duration::from_millis(200);
 
+/// The thread's agents while any is not settled: a settled agent stays
+/// only on the Agents view's Settled shelf.
 fn agents(rail: &RailView, cx: &App) -> Option<Agents> {
     let lead = rail.session_id.as_deref()?;
-    Some(Agents::of(rail.workspace_store.read(cx), lead, cx)).filter(|agents| !agents.is_empty())
+    Some(Agents::of(rail.workspace_store.read(cx), lead, cx)).filter(|agents| agents.count() > 0)
 }
 
 /// Whether the card has something to show for `rail`'s thread now.
@@ -53,7 +55,7 @@ pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
 }
 
 /// What the card shows below its header, laid out at the rail's width: a row
-/// for each agent, with its title and how long it has run, opening it on a
+/// for each agent not settled, with its title and how long it has run, opening it on a
 /// click; under the title, its state word whenever it has a state, what of
 /// its model, effort and branch is reported, and what it is doing while it
 /// runs or its result once it has one. Agents that leave the list fold away

@@ -316,7 +316,8 @@ impl ChatView {
     }
 
     /// The phone entry to the Agents view: a pill that opens the sheet, shown
-    /// while the thread has agents.
+    /// while the thread has agents. It counts those not settled; with every
+    /// one settled it only names the sheet, whose Settled shelf holds them.
     fn render_agents_pill(
         &self,
         count: usize,
@@ -325,6 +326,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let label: SharedString = match count {
+            0 => crate::tr!("agents.title").into_owned(),
             1 => crate::tr!("agents.pill_one").into_owned(),
             count => crate::tr!("agents.pill", count = count).into_owned(),
         }
