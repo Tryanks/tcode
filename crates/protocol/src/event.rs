@@ -64,6 +64,12 @@ pub enum Topic {
     PreviewSession {
         session_id: String,
     },
+    /// The listeners on the host a thread's preview offers to open, most
+    /// relevant to the thread first. The host reads them only while
+    /// something subscribes.
+    DevServers {
+        session_id: String,
+    },
     ExternalImport {
         project_id: String,
     },
@@ -118,6 +124,9 @@ pub enum ServerEvent {
     /// A [`Topic::PreviewSession`]'s whole state: the answer to subscribing,
     /// and a push after every change.
     PreviewSessionReplaced(crate::PreviewSession),
+    /// A [`Topic::DevServers`]'s whole list: the answer to subscribing, and a
+    /// push whenever it changes.
+    DevServersReplaced(Vec<crate::DevServer>),
     SessionEvent(StoredEvent),
     SessionStatusReplaced(Box<SessionStatus>),
     SessionUsageChanged {

@@ -10,7 +10,6 @@
 use std::time::Duration;
 
 pub mod page;
-pub mod ports;
 mod tools;
 
 pub use tools::{INSTRUCTIONS, tool_descriptions};

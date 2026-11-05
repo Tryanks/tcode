@@ -487,6 +487,10 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         Topic::PreviewSession {
             session_id: "a".into(),
         },
+        // The host machine's processes are a full device's to see.
+        Topic::DevServers {
+            session_id: "a".into(),
+        },
         Topic::ExternalImport {
             project_id: host.a.id.clone(),
         },

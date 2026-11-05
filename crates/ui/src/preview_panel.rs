@@ -136,7 +136,7 @@ pub(crate) enum PreviewAction {
     Close,
     CopyUrl,
     OpenExternal,
-    ScanPorts,
+    DevServers,
 }
 
 /// Add a scheme to a bare host/port (so `localhost:5173` becomes a real URL).
@@ -181,12 +181,8 @@ pub struct PreviewPanel {
     /// The panel's motion, kept here: the window draws the panel under
     /// another parent as it turns compact or wide.
     motion: crate::motion::owned::Owned,
-    #[cfg(preview_backend)]
-    /// Discovered localhost dev-server ports (populated by the "Ports" button).
-    dev_ports: Vec<u16>,
-    #[cfg(preview_backend)]
-    /// Discards a completed scan when a newer click has superseded it.
-    port_scan_generation: u64,
+    /// The thread whose dev servers on the host the panel shows as picks.
+    dev_servers: Option<String>,
     #[cfg(preview_backend)]
     backend: backend::Backend,
     _subscriptions: Vec<Subscription>,
@@ -287,6 +283,12 @@ impl PreviewPanel {
                 cx.notify();
             }),
             cx.subscribe_in(&url_input, window, Self::on_url_event),
+            cx.on_release(|this, cx| {
+                if let Some(session_id) = this.dev_servers.take() {
+                    this.store
+                        .update(cx, |store, _| store.hide_dev_servers(&session_id));
+                }
+            }),
             #[cfg(preview_backend)]
             {
                 let owner = cx.entity_id();
@@ -309,10 +311,7 @@ impl PreviewPanel {
             idle_releases: Default::default(),
             rendered_on: String::new(),
             motion: Default::default(),
-            #[cfg(preview_backend)]
-            dev_ports: Vec::new(),
-            #[cfg(preview_backend)]
-            port_scan_generation: 0,
+            dev_servers: None,
             #[cfg(preview_backend)]
             backend,
             _subscriptions: subscriptions,
@@ -325,6 +324,16 @@ impl PreviewPanel {
     pub(crate) fn set_session(this: &Entity<Self>, session_id: Option<String>, cx: &mut App) {
         if this.read(cx).session_id != session_id {
             this.update(cx, |panel, cx| {
+                // The picks shown follow the thread.
+                if let Some(shown) = panel.dev_servers.take() {
+                    panel.store.update(cx, |store, cx| {
+                        store.hide_dev_servers(&shown);
+                        if let Some(session_id) = &session_id {
+                            store.show_dev_servers(session_id, cx);
+                        }
+                    });
+                    panel.dev_servers.clone_from(&session_id);
+                }
                 panel.session_id = session_id;
                 cx.notify();
             });
@@ -389,6 +398,24 @@ impl PreviewPanel {
         }
         self.user_acted(cx);
         self.navigate(key, url, window, cx);
+    }
+
+    /// Show the host's dev servers for this panel's thread as picks, or stop.
+    fn toggle_dev_servers(&mut self, cx: &mut Context<Self>) {
+        let shown = match self.dev_servers.take() {
+            Some(shown) => {
+                self.store
+                    .update(cx, |store, _| store.hide_dev_servers(&shown));
+                None
+            }
+            None => self.session_id.clone(),
+        };
+        if let Some(session_id) = &shown {
+            self.store
+                .update(cx, |store, cx| store.show_dev_servers(session_id, cx));
+        }
+        self.dev_servers = shown;
+        cx.notify();
     }
 
     /// The user acted on this panel's page, which the page the agent last
@@ -571,10 +598,11 @@ impl PreviewPanel {
                     material::toolbar_icon_button(
                         "preview-ports",
                         IconName::Globe,
-                        crate::tr!("preview.scan_ports"),
+                        crate::tr!("preview.dev_servers"),
                         false,
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
+                    .selected(self.dev_servers.is_some())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_dev_servers(cx))),
                 )
             })
             .child(
@@ -635,6 +663,7 @@ impl PreviewPanel {
     /// The compact chrome's one menu of the actions on the page.
     fn render_overflow_actions(&self, offer_ports: bool, cx: &mut Context<Self>) -> AnyElement {
         let panel = cx.entity().downgrade();
+        let shows_dev_servers = self.dev_servers.is_some();
         material::toolbar_icon_button(
             "preview-overflow",
             IconName::Ellipsis,
@@ -667,11 +696,13 @@ impl PreviewPanel {
                 crate::tr!("preview.open_external").into_owned(),
                 Box::new(PreviewAction::OpenExternal),
             )
-            .menu_with_enable(
-                crate::tr!("preview.scan_ports").into_owned(),
-                Box::new(PreviewAction::ScanPorts),
-                offer_ports,
-            )
+            .when(offer_ports, |menu| {
+                menu.menu_with_check(
+                    crate::tr!("preview.dev_servers").into_owned(),
+                    shows_dev_servers,
+                    Box::new(PreviewAction::DevServers),
+                )
+            })
         })
         .into_any_element()
     }
@@ -697,13 +728,10 @@ impl PreviewPanel {
                 panel.right_tab,
             )
         };
-        // Port discovery scans *this* machine's listeners. Over a remote link
-        // those ports belong to the wrong computer, so the affordance is hidden
-        // rather than offering the user a list of their own dev servers as if
-        // they were the host's. A host URL typed into the field still works.
-        let offer_ports = !cfg!(any(target_os = "android", target_os = "ios"))
-            && preview_backend()
-            && !self.store.read(cx).is_remote();
+        // The host's dev servers, wherever this client is: a picked one
+        // loads on the client rendering the page, through the Preview
+        // tunnels when that is not the host.
+        let offer_ports = preview_backend() && self.store.read(cx).scope().is_full();
         // Compact: one toolbar row on the page inset, with 44pt touch targets.
         // Close is a right-panel affordance — the Panel page's Back leaves it —
         // so it is not drawn here at all.
@@ -758,7 +786,7 @@ impl PreviewPanel {
             PreviewAction::Close => self.release_preview(cx),
             PreviewAction::CopyUrl => self.copy_url(cx),
             PreviewAction::OpenExternal => self.open_in_system_browser(_window, cx),
-            PreviewAction::ScanPorts => self.rescan_ports(cx),
+            PreviewAction::DevServers => self.toggle_dev_servers(cx),
         }
     }
 
@@ -903,8 +931,6 @@ mod portable {
         ) -> Option<AnyElement> {
             None
         }
-
-        pub(super) fn rescan_ports(&mut self, _cx: &mut Context<Self>) {}
 
         pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
 

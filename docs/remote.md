@@ -631,8 +631,10 @@ Windows, Linux and Android embedded previews use the connected machine's network
 all HTTP and HTTPS traffic. `http://localhost:5173/app` opens the dev server on
 the machine, even when it listens only on loopback. The URL stays unchanged in
 the address bar, redirects, scripts and `preview_status`. No dev-server port
-needs to be exposed. Open-in-system-browser still opens on this device and
-cannot use the embedded preview's routing.
+needs to be exposed. The dev-server picks list the machine's own listeners,
+not this device's, and a pick opens through the same routing.
+Open-in-system-browser still opens on this device and cannot use the embedded
+preview's routing.
 
 Preview traffic rides the attachment's own Traverse connection: each browser
 connection becomes one tunnel that names its `host:port`, and the machine

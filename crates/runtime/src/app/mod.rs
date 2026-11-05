@@ -245,6 +245,7 @@ mod authorization;
 mod command_output;
 mod command_validation;
 mod control;
+mod dev_servers;
 mod diff_pass;
 mod events;
 mod git;
@@ -389,6 +390,7 @@ pub struct AppState {
     command_output_feeds: HashMap<Topic, command_output::CommandOutputFeed>,
     next_command_output_feed: u64,
     previews: preview::Previews,
+    dev_servers: dev_servers::DevServerReads,
     /// Provider-native rewind requested while a session is live or starting.
     /// Kept here (rather than in persisted session metadata) because the
     /// provider response is the only authority that can complete it.
@@ -600,6 +602,7 @@ impl AppState {
             command_output_feeds: HashMap::new(),
             next_command_output_feed: 0,
             previews: Default::default(),
+            dev_servers: Default::default(),
             pending_native_rewinds: HashMap::new(),
             native_subagent_sessions: HashMap::new(),
             native_subagent_turns: HashMap::new(),

@@ -107,3 +107,18 @@ pub struct PreviewSession {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub user_acted_since_snapshot: bool,
 }
+
+/// A TCP listener on the host machine that a thread's preview offers as a
+/// page to open: one of the user's own processes listening on loopback or on
+/// every interface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DevServer {
+    pub port: u16,
+    pub pid: u32,
+    /// The owning process's executable name.
+    pub process: String,
+    /// The process's working directory relative to the thread's, `""` at its
+    /// root; none when it is outside it or the host cannot tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
