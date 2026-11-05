@@ -252,27 +252,17 @@ pub use wire::{
 // server/tool names) stored with item_version 1; a session plan's
 // explanation; and the item_backgrounded event.
 //
-// Unreleased: SessionMeta drops orchestrate_enabled and result_max_chars;
-// subagents start through tcode_control rather than a tcode_orchestrate
-// server; SessionActivity carries latest_activity, what the thread's running
-// turn last started. Settings' favorite_models holds {provider, profile_id,
-// model} rows beside the bare ids older settings stored, which still read, and
-// ToggleFavoriteModel carries provider and profile_id. TerminalDelta carries
-// scrolled, the rows its screen moved up before rows_replaced applies. A
-// command output topic pushes CommandOutputDelta, what changed since the
-// screen or change last sent on it, after the screen a subscriber holds. The
-// Hosting topic answers a full device's subscription with HostingReplaced and
-// pushes it again whenever the machine's hosting state changes, which
-// replaces polling Query::Hosting for it. TerminalInput and
-// SetTerminalHeight are sent without a delivery key and are not retained.
-// ProviderUsageChanged carries account usage and the usage reads in flight
-// when the rest of the providers status is unchanged, while subscription
-// replies remain full statuses. Settings carry scroll_to_latest_on_send
-// (absent reads as true), patched by ScrollToLatestOnSend. SessionMeta
-// carries session_transfer_from, the account profile whose home holds the
-// native session until the thread starts under the account it switched to.
-// RuntimeError gains provider_batch_line_break.
-pub const PROTOCOL_VERSION: u32 = 24;
+// Version 25 (v0.4.0-rc.2): SessionMeta drops orchestrate_enabled and
+// result_max_chars and carries session_transfer_from; subagents start
+// through tcode_control; SessionActivity's latest_activity; favorite_models
+// rows {provider, profile_id, model} and ToggleFavoriteModel's provider and
+// profile_id; TerminalDelta's scrolled and the CommandOutputDelta push; the
+// Hosting topic with HostingReplaced instead of polling Query::Hosting;
+// TerminalInput and SetTerminalHeight without a delivery key; the
+// ProviderUsageChanged event; Settings' scroll_to_latest_on_send with the
+// ScrollToLatestOnSend patch; and the provider_batch_line_break runtime
+// error.
+pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]
 mod tests;
