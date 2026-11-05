@@ -8,9 +8,13 @@
 //! ([`Carried`]; it still carries the payload, so drop targets, the dock's
 //! included, work as before) and a window overlay draws the ghost instead,
 //! from [`lift`] until it has settled into its row's [`slot`], or into the
-//! rect a drop target hands it with [`land_in`]. Where a slot is laid out is
-//! measured into a [`FlipBounds`] each frame, and the ghost travels there on
-//! [`flip_offset`], so it follows a slot that is itself still moving.
+//! rect a drop target hands it with [`land_in`]. Where a slot comes to rest
+//! is measured into a [`FlipBounds`] each frame, and the ghost travels there
+//! on [`flip_offset`], so it follows a slot whose place moves. A row
+//! gliding to a new place is measured where it is going, not where its
+//! glide draws it ([`gliding`]): the ghost sets out for the row's place at
+//! once, rather than for where the row was and after it from there, the
+//! row's own glide taking the same time.
 
 use std::{
     cell::RefCell,
@@ -27,7 +31,7 @@ use gpui_base::motion::{MotionStatus, Transition, transition, transition_with_st
 
 use super::{
     LIFT, child_id,
-    keyed::{FlipBounds, flip_offset},
+    keyed::{FlipBounds, flip_offset, gliding},
 };
 
 /// How long a ghost takes to lift off its row as a drag picks it up, and to
@@ -441,7 +445,8 @@ impl gpui::Element for Slot {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.slots.measure(&self.key, Point::default(), bounds);
+        let place = Bounds::new(bounds.origin - gliding(), bounds.size);
+        self.slots.measure(&self.key, Point::default(), place);
         self.seen.borrow_mut().insert(self.key.clone());
         self.child.prepaint(window, cx);
     }

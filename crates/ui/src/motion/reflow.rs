@@ -372,7 +372,7 @@ impl gpui::Element for Part {
         cx: &mut App,
     ) {
         let offset = self.offset(bounds, window, cx);
-        window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
+        super::keyed::prepaint_gliding(offset, window, |window| self.child.prepaint(window, cx));
     }
 
     fn paint(

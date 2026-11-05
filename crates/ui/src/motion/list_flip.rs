@@ -16,7 +16,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui::{AnyElement, App, Bounds, ElementId, IntoElement, ListState, Pixels, Point, Window, px};
 
-use super::keyed::flip_offset;
+use super::keyed::{flip_offset, prepaint_gliding};
 
 /// How long a row drawn here takes to spring to a new place.
 const FLIP: std::time::Duration = std::time::Duration::from_millis(200);
@@ -143,7 +143,7 @@ impl gpui::Element for FlipRow {
             window,
             cx,
         );
-        window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
+        prepaint_gliding(offset, window, |window| self.child.prepaint(window, cx));
     }
 
     fn paint(
