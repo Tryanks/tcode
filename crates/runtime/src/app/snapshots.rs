@@ -1055,6 +1055,9 @@ impl AppState {
             Topic::PreviewSession { session_id } => {
                 ServerEvent::PreviewSessionReplaced(self.preview_session_snapshot(session_id))
             }
+            Topic::DevServers { session_id } => {
+                ServerEvent::DevServersReplaced(self.dev_servers_snapshot(session_id)?)
+            }
             // The transport that owns hosting answers it.
             Topic::Hosting => return None,
             // Retained latest-run status, so a client that subscribes after a

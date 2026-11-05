@@ -379,6 +379,7 @@ async fn pump(
                                             | "index_summary_replaced"
                                             | "preview_session_replaced"
                                             | "preview_rendering_replaced"
+                                            | "dev_servers_replaced"
                                     )
                                 })
                                 .map(|kind| format!("{kind}:{topic}"));

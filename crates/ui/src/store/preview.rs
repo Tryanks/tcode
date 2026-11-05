@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use gpui::{App, Context, Entity};
 use tcode_protocol::{
-    Command, PreviewClient, PreviewSession, PreviewTab, ServerEvent, Subscription, Topic,
+    Command, DevServer, PreviewClient, PreviewSession, PreviewTab, ServerEvent, Subscription, Topic,
 };
 
 use super::WorkspaceStore;
@@ -43,6 +43,17 @@ pub(super) struct PreviewReplica {
     /// Threads this client asked to render, until the host answers: with
     /// `true` it took them over and renders them meanwhile.
     asked: HashMap<String, bool>,
+    /// The host's dev servers of each thread whose picks something here
+    /// shows.
+    dev_servers: HashMap<String, DevServersShown>,
+}
+
+struct DevServersShown {
+    /// How many surfaces here show them.
+    shown: usize,
+    /// None until the host's first read answers.
+    servers: Option<Vec<DevServer>>,
+    revision: Entity<Revision>,
 }
 
 struct HeldPreview {
@@ -64,6 +75,7 @@ impl PreviewReplica {
             sessions: HashMap::new(),
             rendering: HashSet::new(),
             asked: HashMap::new(),
+            dev_servers: HashMap::new(),
         }
     }
 
@@ -83,6 +95,12 @@ impl PreviewReplica {
 
 fn topic(session_id: &str) -> Topic {
     Topic::PreviewSession {
+        session_id: session_id.to_owned(),
+    }
+}
+
+fn dev_servers_topic(session_id: &str) -> Topic {
+    Topic::DevServers {
         session_id: session_id.to_owned(),
     }
 }
@@ -214,8 +232,66 @@ impl WorkspaceStore {
                 }
                 Some(changed)
             }
+            (Topic::DevServers { session_id }, ServerEvent::DevServersReplaced(servers)) => {
+                if let Some(shown) = self.preview.dev_servers.get_mut(session_id) {
+                    shown.servers = Some(servers.clone());
+                    Revision::bump(&shown.revision, cx);
+                }
+                // Their readers watch the list's own revision.
+                Some(Vec::new())
+            }
             _ => None,
         }
+    }
+
+    /// Show the host's dev servers for `session_id` on a surface here,
+    /// until [`Self::hide_dev_servers`]. The host reads its listeners only
+    /// while some client shows them.
+    pub(crate) fn show_dev_servers(&mut self, session_id: &str, cx: &mut App) {
+        if !self.scope.is_full() {
+            return;
+        }
+        let shown = self
+            .preview
+            .dev_servers
+            .entry(session_id.to_owned())
+            .or_insert_with(|| DevServersShown {
+                shown: 0,
+                servers: None,
+                revision: Revision::new(cx),
+            });
+        shown.shown += 1;
+        if shown.shown == 1 {
+            let _ = self.host.subscribe(Subscription {
+                known_index: None,
+                topic: dev_servers_topic(session_id),
+                after: None,
+            });
+        }
+    }
+
+    pub(crate) fn hide_dev_servers(&mut self, session_id: &str) {
+        let Some(shown) = self.preview.dev_servers.get_mut(session_id) else {
+            return;
+        };
+        shown.shown -= 1;
+        if shown.shown == 0 {
+            self.preview.dev_servers.remove(session_id);
+            let _ = self.host.unsubscribe(Subscription {
+                known_index: None,
+                topic: dev_servers_topic(session_id),
+                after: None,
+            });
+        }
+    }
+
+    /// The host's dev servers for `session_id`, most relevant first, once
+    /// the host answered, read as a view depending on them.
+    #[cfg(preview_backend)]
+    pub(crate) fn dev_servers(&self, session_id: &str, cx: &App) -> Option<Vec<DevServer>> {
+        let shown = self.preview.dev_servers.get(session_id)?;
+        Revision::watch(&shown.revision, cx);
+        shown.servers.clone()
     }
 
     pub(super) fn bump_preview(&self, session_id: &str, cx: &mut App) {

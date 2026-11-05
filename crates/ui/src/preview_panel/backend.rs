@@ -15,7 +15,6 @@ use gpui::{
 #[cfg(not(target_os = "android"))]
 use gpui::{Bounds, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, canvas};
 use gpui_base::v_flex;
-use preview_mcp::ports;
 use tcode_protocol::{PreviewRequest, PreviewResponse};
 
 use super::lifecycle::{Availability, BrowserLifecycle};
@@ -492,9 +491,9 @@ impl PreviewPanel {
         }
     }
 
-    /// A row of quick-pick buttons for discovered localhost dev ports.
-    /// The ports a scan found, as buttons: the row folds in once there are
-    /// some, and a rescan's ports widen in and narrow away where they are.
+    /// The host's dev servers for this panel's thread, as buttons that load
+    /// one here: the row folds in once they are shown, and the servers that
+    /// start and stop widen in and narrow away where they are.
     pub(super) fn render_port_row(
         &self,
         window: &mut Window,
@@ -502,33 +501,56 @@ impl PreviewPanel {
     ) -> Option<AnyElement> {
         use crate::sizing::Sizable as _;
         use crate::widgets::button::Button;
-        let shown = crate::motion::shown(
-            "preview-dev-ports",
-            (!self.dev_ports.is_empty()).then(|| self.dev_ports.clone()),
-            SHOW,
-            window,
-            cx,
-        )?;
+        let servers = self
+            .dev_servers
+            .as_deref()
+            .and_then(|session_id| self.store.read(cx).dev_servers(session_id, cx));
+        let shown = crate::motion::shown("preview-dev-servers", servers, SHOW, window, cx)?;
+        let compact = self.window_state.read(cx).compact;
         let gap = cx.theme().tokens.spacing.xs;
-        let ports = shown
-            .value
-            .iter()
-            .map(|port| (gpui::SharedString::from(port.to_string()), *port));
+        let row = gpui_base::h_flex()
+            .flex_none()
+            .w_full()
+            .px(gap)
+            .pb(gap)
+            .flex_wrap();
+        if shown.value.is_empty() {
+            return Some(
+                shown.fold(
+                    row.child(
+                        div()
+                            .px(gap)
+                            .text_secondary(compact, cx)
+                            .child(crate::tr!("preview.no_dev_servers")),
+                    ),
+                ),
+            );
+        }
+        let servers = shown.value.iter().map(|server| {
+            (
+                gpui::SharedString::from(server.port.to_string()),
+                server.clone(),
+            )
+        });
         let buttons =
-            crate::motion::keyed_across("preview-dev-port-buttons", ports, ROWS, window, cx, {
-                |_, port, _, cx| {
-                    let port = *port;
+            crate::motion::keyed_across("preview-dev-server-buttons", servers, ROWS, window, cx, {
+                |_, server, _, cx| {
+                    let url = format!("http://localhost:{}/", server.port);
+                    let mut label = format!(":{} {}", server.port, server.process);
+                    if let Some(dir) = server.cwd.as_deref().filter(|dir| !dir.is_empty()) {
+                        label.push_str(&format!(" · {dir}"));
+                    }
                     div()
                         .flex_none()
                         .pr(gap)
                         .child(
-                            Button::new(("dev-port", port as usize))
+                            Button::new(("dev-server", server.port as usize))
                                 .outline()
                                 .small()
                                 .compact()
-                                .label(format!(":{port}"))
+                                .label(label)
+                                .tooltip(url.clone())
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    let url = format!("http://localhost:{port}/");
                                     if let Some(key) = this.active_key(cx) {
                                         this.navigate_here(&key, &url, window, cx);
                                     }
@@ -537,36 +559,8 @@ impl PreviewPanel {
                         .into_any_element()
                 }
             })
-            .render(
-                gpui_base::h_flex()
-                    .flex_none()
-                    .w_full()
-                    .px(gap)
-                    .pb(gap)
-                    .flex_wrap(),
-            );
+            .render(row);
         Some(shown.fold(buttons))
-    }
-
-    pub(super) fn rescan_ports(&mut self, cx: &mut Context<Self>) {
-        if cfg!(any(target_os = "android", target_os = "ios")) || self.store.read(cx).is_remote() {
-            return;
-        }
-        self.port_scan_generation = self.port_scan_generation.wrapping_add(1);
-        let generation = self.port_scan_generation;
-        cx.spawn(async move |this, cx| {
-            let ports = cx
-                .background_executor()
-                .spawn(async { ports::scan_listening() })
-                .await;
-            let _ = this.update(cx, |panel, cx| {
-                if panel.port_scan_generation == generation {
-                    panel.dev_ports = ports;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     pub(super) fn render_body(

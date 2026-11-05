@@ -14,6 +14,7 @@ pub mod gitlab;
 pub mod image_bytes;
 pub mod image_previews;
 pub mod import;
+pub mod listening;
 pub mod process;
 pub mod project_config;
 pub mod project_icons;

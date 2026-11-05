@@ -13,7 +13,9 @@ pub use original::{OriginalMetadata, OriginalReply, OriginalRequest, OriginalTar
 mod preview;
 mod pull_request;
 mod query;
-pub use preview::{PreviewClient, PreviewRequest, PreviewResponse, PreviewSession, PreviewTab};
+pub use preview::{
+    DevServer, PreviewClient, PreviewRequest, PreviewResponse, PreviewSession, PreviewTab,
+};
 pub use pull_request::{
     MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestAction, PullRequestActionResult,
     PullRequestActionState, PullRequestActor, PullRequestCapabilities, PullRequestComment,
@@ -275,7 +277,9 @@ pub use wire::{
 // page agent's outline (url, title, loading, generation, elements, outline,
 // omitted) instead of interactiveElements and visibleText; a status reply
 // adds generation and console. PreviewRequest::Screenshot is a
-// struct variant with an optional ref and full_page.
+// struct variant with an optional ref and full_page. The DevServers topic
+// carries the host's dev servers for one thread (DevServersReplaced with
+// DevServer port, pid, process and cwd).
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

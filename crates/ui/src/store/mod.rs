@@ -90,7 +90,9 @@ impl From<&Topic> for TopicKind {
             Topic::RuntimeEvents => Self::RuntimeEvents,
             Topic::Terminal { .. } => Self::Terminal,
             Topic::CommandOutput { .. } => Self::CommandOutput,
-            Topic::Preview { .. } | Topic::PreviewSession { .. } => Self::Preview,
+            Topic::Preview { .. } | Topic::PreviewSession { .. } | Topic::DevServers { .. } => {
+                Self::Preview
+            }
             Topic::ExternalImport { .. } => Self::ExternalImport,
             Topic::Hosting => Self::Hosting,
         }
@@ -1238,6 +1240,7 @@ impl WorkspaceStore {
                     | Topic::RuntimeEvents
                     | Topic::Preview { .. }
                     | Topic::PreviewSession { .. }
+                    | Topic::DevServers { .. }
                     | Topic::ExternalImport { .. }
                     | Topic::Hosting
             )

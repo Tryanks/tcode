@@ -122,6 +122,7 @@ impl AppState {
                 | Topic::RuntimeEvents
                 | Topic::Preview { .. }
                 | Topic::PreviewSession { .. }
+                | Topic::DevServers { .. }
                 | Topic::Hosting
                 | Topic::ExternalImport { .. } => Err(refusal("subscription")),
             },

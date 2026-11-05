@@ -88,6 +88,7 @@ impl AppState {
                 }
                 Topic::CommandOutput { .. } => self.open_command_output(&subscription.topic),
                 Topic::Preview { client } => self.preview_client_subscribed(client, cx),
+                Topic::DevServers { .. } => self.dev_servers_subscribed(cx),
                 _ => {}
             }
         }

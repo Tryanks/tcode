@@ -40,6 +40,12 @@ pub(crate) fn observed_events(link: &HostLink) -> async_channel::Receiver<EventE
 }
 
 pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
+    let (host, mux, link, session_id, _) = fixture_in_project();
+    (host, mux, link, session_id)
+}
+
+/// [`fixture`], with the thread's directory.
+fn fixture_in_project() -> (SpawnedHost, HostMux, HostLink, String, PathBuf) {
     let root = std::env::temp_dir().join(format!("tcode-p4b-{}", uuid::Uuid::new_v4()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -61,7 +67,7 @@ pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
     let CommandResponse::SessionId(Some(session_id)) = link
         .command_blocking(Command::StartDraft {
             project_id,
-            cwd: project,
+            cwd: project.clone(),
         })
         .unwrap()
     else {
@@ -75,7 +81,7 @@ pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
         after: None,
     })
     .unwrap();
-    (host, mux, link, session_id)
+    (host, mux, link, session_id, project)
 }
 
 pub(super) fn next(
@@ -945,4 +951,94 @@ fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() 
     );
     assert_eq!(search("zqxsentinel", 3).len(), 3);
     link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
+/// A dev server the user started in a thread's directory: a process other
+/// than the host, listening on loopback until its stdin closes.
+#[test]
+#[ignore = "the dev server of a_remote_client_sees_the_dev_servers_the_host_machine_runs, which starts it"]
+fn dev_server_process() {
+    use std::io::Write as _;
+    // A port of its own choosing, as dev servers have: below the range the
+    // system hands out to whoever asks for any.
+    let first = 20_000 + (std::process::id() % 10_000) as u16;
+    let listener = (first..30_000)
+        .chain(20_000..first)
+        .find_map(|port| std::net::TcpListener::bind(("127.0.0.1", port)).ok())
+        .unwrap();
+    println!("listening:{}", listener.local_addr().unwrap().port());
+    std::io::stdout().flush().unwrap();
+    let _ = std::io::read_to_string(std::io::stdin());
+}
+
+#[test]
+fn a_remote_client_sees_the_dev_servers_the_host_machine_runs() {
+    use std::io::BufRead as _;
+    let (_host, mux, desk, session_id, project) = fixture_in_project();
+    let phone = linked(&mux);
+    let events = observed_events(&phone);
+    let executable = std::env::current_exe().unwrap();
+    let mut server = tcode_services::process::command(&executable)
+        .args([
+            "--exact",
+            "pipe::p4b_tests::dev_server_process",
+            "--ignored",
+            "--nocapture",
+        ])
+        .current_dir(&project)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let port: u16 = std::io::BufReader::new(server.stdout.take().unwrap())
+        .lines()
+        .find_map(|line| line.unwrap().strip_prefix("listening:")?.parse().ok())
+        .unwrap();
+    phone
+        .subscribe(Subscription {
+            known_index: None,
+            topic: Topic::DevServers {
+                session_id: session_id.clone(),
+            },
+            after: None,
+        })
+        .unwrap();
+    let listed = |event: &ServerEvent| match event {
+        ServerEvent::DevServersReplaced(servers) => Some(servers.clone()),
+        _ => None,
+    };
+    let servers = listed(&next(&events, |event| {
+        listed(event).is_some_and(|servers| servers.iter().any(|server| server.port == port))
+    }))
+    .unwrap();
+    let name = if cfg!(windows) {
+        executable.file_stem()
+    } else {
+        executable.file_name()
+    };
+    let position = servers.iter().position(|server| server.port == port);
+    if !cfg!(windows) {
+        assert_eq!(
+            position,
+            Some(0),
+            "the thread's own dev server comes first: {servers:?}"
+        );
+    }
+    assert_eq!(
+        servers[position.unwrap()],
+        tcode_protocol::DevServer {
+            port,
+            pid: server.id(),
+            process: name.unwrap().to_string_lossy().into_owned(),
+            // Windows tells no other process's working directory cheaply.
+            cwd: (!cfg!(windows)).then(String::new),
+        }
+    );
+
+    drop(server.stdin.take());
+    server.wait().unwrap();
+    next(&events, |event| {
+        listed(event).is_some_and(|servers| servers.iter().all(|server| server.port != port))
+    });
+    desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
