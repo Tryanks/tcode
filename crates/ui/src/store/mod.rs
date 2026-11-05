@@ -3062,11 +3062,10 @@ impl WorkspaceStore {
         self.providers_replica.tcode_update.clone()
     }
 
-    pub fn provider_profile_accent(&self, profile_id: &str) -> Option<u32> {
-        self.settings_replica
-            .resolved_profile(profile_id)?
-            .settings
-            .accent_rgb()
+    /// The `0xRRGGBB` color a provider profile is drawn in; see
+    /// [`Settings::provider_color`].
+    pub fn provider_profile_color(&self, profile_id: &str) -> u32 {
+        self.settings_replica.provider_color(profile_id)
     }
 
     pub fn provider_profile_stored_secret_names(&self, profile_id: &str) -> HashSet<String> {

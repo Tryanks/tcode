@@ -576,9 +576,9 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
 }
 
 /// The glyph a provider profile is drawn with wherever that profile, rather
-/// than its CLI, is meant: the kind's [`provider_glyph`], tinted with the
-/// accent chosen on the profile's card when it has one. `None` is the kind's
-/// built-in profile.
+/// than its CLI, is meant: the kind's [`provider_glyph`] in the profile's color,
+/// the one its sidebar threads are marked with. `None` is the kind's built-in
+/// profile.
 pub fn profile_glyph(
     store: &WorkspaceStore,
     provider: ProviderKind,
@@ -586,9 +586,5 @@ pub fn profile_glyph(
 ) -> Icon {
     let profile_id =
         profile_id.unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider));
-    let glyph = provider_glyph(provider);
-    match store.provider_profile_accent(profile_id) {
-        Some(accent) => glyph.text_color(rgb(accent)),
-        None => glyph,
-    }
+    provider_glyph(provider).text_color(rgb(store.provider_profile_color(profile_id)))
 }
