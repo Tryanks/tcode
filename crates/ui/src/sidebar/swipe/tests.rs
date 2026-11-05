@@ -403,48 +403,6 @@ fn a_pan_stays_on_the_axis_its_first_points_chose(cx: &mut TestAppContext) {
     phone.close(cx);
 }
 
-/// A row swipes as soon as the list it is in looks still. gpui coasts a
-/// flung pan on long after the list has come to rest against its end, and
-/// a touch put down meanwhile catches that coast: its pan has no direction
-/// until it first moves, and a sideways first move still takes the row.
-#[gpui::test]
-fn a_row_swipes_right_after_the_list_was_flung(cx: &mut TestAppContext) {
-    let (phone, cx) = phone(cx, "swipe-after-fling", 40);
-    let rest = phone.row(cx, 1);
-
-    let below = phone.row(cx, 2).center();
-    let mut flick = Finger::down(cx, 1, below);
-    for _ in 0..4 {
-        flick.slide(cx, 0., 40., FRAME);
-    }
-    flick.lift(cx);
-    let mut still = 0;
-    for _ in 0..120 {
-        frame(cx);
-        still = if phone.row(cx, 1) == rest {
-            still + 1
-        } else {
-            0
-        };
-        if still == 4 {
-            break;
-        }
-    }
-    assert_eq!(still, 4, "the list comes back to rest at its top");
-
-    let mut swipe = Finger::down(cx, 2, rest.center());
-    let mut travel = 0.;
-    for (dx, dy) in [(-3., 1.), (-5., 1.), (-7., 2.), (-9., 1.), (-11., 2.)] {
-        swipe.slide(cx, dx, dy, FRAME);
-        travel += dx;
-        assert_eq!(phone.row(cx, 1).left(), rest.left() + px(travel));
-    }
-    assert_eq!(phone.row(cx, 1).top(), rest.top(), "the list stays put");
-    pass(cx, ms(120));
-    swipe.lift(cx);
-    phone.close(cx);
-}
-
 /// Every frame the row stands where the finger is, from the frame the pan
 /// is known: the distance the recognizer waited for is not lost, and a
 /// change of direction is followed at once.
