@@ -120,7 +120,8 @@ impl AppState {
                 | Topic::Settings
                 | Topic::Providers
                 | Topic::RuntimeEvents
-                | Topic::Preview
+                | Topic::Preview { .. }
+                | Topic::PreviewSession { .. }
                 | Topic::Hosting
                 | Topic::ExternalImport { .. } => Err(refusal("subscription")),
             },
@@ -353,6 +354,9 @@ impl AppState {
                 | Command::ToggleFavoriteModel { .. }
                 | Command::ToggleProjectCollapsed { .. }
                 | Command::PreviewReply { .. }
+                | Command::ShowPreviewHere { .. }
+                | Command::ReportPreviewTabs { .. }
+                | Command::ReportPreviewInput { .. }
                 | Command::ReloadProvider
                 | Command::SetHostToken { .. }
                 | Command::RefreshHostCredentials

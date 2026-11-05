@@ -85,47 +85,143 @@ pub(super) fn next(
     super::tests::next_event(events, |event| predicate(&event.event)).event
 }
 
-#[test]
-fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscriber_refusal() {
-    let (host, mux, link, _viewed) = fixture();
-    let second = linked(&mux);
-    for client in [&link, &second] {
-        client
-            .subscribe(Subscription {
-                known_index: None,
-                topic: Topic::Preview,
-                after: None,
-            })
-            .unwrap();
-        client.command_blocking(Command::OpenLatestSession).unwrap(); // subscription barrier
-    }
-    // Neither client views `background`: the agent's thread may be off every
-    // screen while it drives the preview.
-    let session_id = "background".to_string();
-    let events = observed_events(&link);
-    let other_events = observed_events(&second);
-    let (requests, receiver) = async_channel::unbounded();
-    smol::block_on(
-        host.update_state_for_test(move |state, cx| {
-            state.pump_preview_requests(Some(receiver), cx)
-        }),
-    )
+/// Subscribe `link` to its preview channel as a client that renders pages.
+fn preview_client(link: &HostLink, name: &str) -> tcode_protocol::PreviewClient {
+    let client = tcode_protocol::PreviewClient {
+        id: format!("{name}-id"),
+        name: name.into(),
+    };
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::Preview {
+            client: client.clone(),
+        },
+        after: None,
+    })
     .unwrap();
+    link.command_blocking(Command::OpenLatestSession).unwrap(); // subscription barrier
+    client
+}
+
+/// An agent's preview call, as the preview MCP broker hands it to the host.
+fn agent_call(
+    host: &SpawnedHost,
+    session_id: &str,
+    op: preview_mcp::PreviewOp,
+    timeout: Duration,
+) -> async_channel::Receiver<Result<preview_mcp::PreviewReply, String>> {
     let (reply, answer) = async_channel::bounded(1);
-    requests
-        .send_blocking(preview_mcp::BrokerRequest {
-            session_id: session_id.clone(),
-            op: preview_mcp::PreviewOp::Navigate {
-                url: "http://localhost:5173".into(),
+    let session_id = session_id.to_owned();
+    smol::block_on(host.update_state_for_test(move |state, cx| {
+        state.route_preview_with_timeout(
+            preview_mcp::BrokerRequest {
+                session_id,
+                op,
+                reply,
             },
-            reply,
-        })
-        .unwrap();
+            timeout,
+            cx,
+        )
+    }))
+    .unwrap();
+    answer
+}
+
+fn show_here(
+    link: &HostLink,
+    session_id: &str,
+    client: &tcode_protocol::PreviewClient,
+    take_over: bool,
+) {
+    link.command_blocking(Command::ShowPreviewHere {
+        session_id: session_id.into(),
+        client_id: client.id.clone(),
+        take_over,
+    })
+    .unwrap();
+}
+
+fn rendering(event: &ServerEvent) -> Option<Vec<String>> {
+    match event {
+        ServerEvent::PreviewRenderingReplaced(sessions) => Some(
+            sessions
+                .iter()
+                .map(|session| session.session_id.clone())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn watch_session(link: &HostLink, session_id: &str) {
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::PreviewSession {
+            session_id: session_id.into(),
+        },
+        after: None,
+    })
+    .unwrap();
+}
+
+fn session_replaced(event: &ServerEvent) -> Option<&tcode_protocol::PreviewSession> {
+    match event {
+        ServerEvent::PreviewSessionReplaced(session) => Some(session),
+        _ => None,
+    }
+}
+
+fn answer(link: &HostLink, request_id: u64, json: serde_json::Value) {
+    link.command_blocking(Command::PreviewReply {
+        request_id,
+        response: Ok(tcode_protocol::PreviewResponse::Json(json)),
+    })
+    .unwrap();
+}
+
+fn request_id(event: ServerEvent) -> u64 {
+    match event {
+        ServerEvent::PreviewRequest { request_id, .. } => request_id,
+        other => panic!("expected a preview request, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_agent_preview_request_reaches_only_the_client_rendering_its_thread() {
+    let (host, mux, desk, session_id) = fixture();
+    let refused = agent_call(
+        &host,
+        &session_id,
+        preview_mcp::PreviewOp::Status,
+        Duration::from_secs(60),
+    );
+    assert!(
+        refused
+            .recv_blocking()
+            .unwrap()
+            .unwrap_err()
+            .contains("no connected client has a preview browser")
+    );
+    let laptop = linked(&mux);
+    let desk_events = observed_events(&desk);
+    let laptop_events = observed_events(&laptop);
+    let desk_client = preview_client(&desk, "Desk");
+    preview_client(&laptop, "Laptop");
+    show_here(&desk, &session_id, &desk_client, false);
+
+    let answered = agent_call(
+        &host,
+        &session_id,
+        preview_mcp::PreviewOp::Navigate {
+            url: "http://localhost:5173".into(),
+        },
+        Duration::from_secs(60),
+    );
     let ServerEvent::PreviewRequest {
         request_id,
         session_id: delivered,
         request,
-    } = next(&events, |event| {
+    } = next(&desk_events, |event| {
         matches!(event, ServerEvent::PreviewRequest { .. })
     })
     else {
@@ -138,85 +234,275 @@ fn preview_mux_request_reply_first_responder_subscriber_timeout_and_no_subscribe
             url: "http://localhost:5173".into()
         }
     );
-    next(
-        &other_events,
-        |event| matches!(event, ServerEvent::PreviewRequest { request_id: id, .. } if *id == request_id),
+    // Subscribing now answers after anything the host sent the laptop before.
+    watch_session(&laptop, &session_id);
+    let seen = next(&laptop_events, |event| {
+        matches!(
+            event,
+            ServerEvent::PreviewRequest { .. } | ServerEvent::PreviewSessionReplaced(_)
+        )
+    });
+    assert_eq!(
+        session_replaced(&seen).and_then(|session| session.renderer.clone()),
+        Some(desk_client.clone()),
+        "only the rendering client receives the request"
     );
     let json = serde_json::json!({"url":"http://host.lan:5173"});
-    link.command_blocking(Command::PreviewReply {
-        request_id,
-        response: Ok(tcode_protocol::PreviewResponse::Json(json.clone())),
-    })
-    .unwrap();
+    answer(&desk, request_id, json.clone());
     assert_eq!(
-        answer.recv_blocking().unwrap(),
+        answered.recv_blocking().unwrap(),
         Ok(preview_mcp::PreviewReply::Json(json))
     );
-    second
-        .command_blocking(Command::PreviewReply {
-            request_id,
-            response: Err("late response".into()),
+
+    let unanswered = agent_call(
+        &host,
+        &session_id,
+        preview_mcp::PreviewOp::Status,
+        Duration::from_millis(30),
+    );
+    next(
+        &desk_events,
+        |event| matches!(event, ServerEvent::PreviewRequest { request, .. } if *request == tcode_protocol::PreviewRequest::Status),
+    );
+    let error = unanswered.recv_blocking().unwrap().unwrap_err();
+    assert!(
+        error.contains("timed out") && error.contains("Desk"),
+        "{error}"
+    );
+    desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
+#[test]
+fn show_here_moves_rendering_and_the_page_with_it() {
+    let (host, mux, desk, session_id) = fixture();
+    let laptop = linked(&mux);
+    let desk_events = observed_events(&desk);
+    let laptop_events = observed_events(&laptop);
+    let desk_client = preview_client(&desk, "Desk");
+    let laptop_client = preview_client(&laptop, "Laptop");
+    show_here(&desk, &session_id, &desk_client, false);
+    let tab = tcode_protocol::PreviewTab {
+        url: Some("http://localhost:5173/settings".into()),
+        canvas: Some((390, 844)),
+    };
+    desk.command_blocking(Command::ReportPreviewTabs {
+        session_id: session_id.clone(),
+        client_id: desk_client.id.clone(),
+        tabs: vec![tab.clone()],
+    })
+    .unwrap();
+    watch_session(&laptop, &session_id);
+    let watched = next(&laptop_events, |event| session_replaced(event).is_some());
+    assert_eq!(
+        session_replaced(&watched).unwrap().renderer,
+        Some(desk_client.clone())
+    );
+
+    // Showing the preview where another client renders it does not take
+    // it, and only the rendering client's pages are the thread's.
+    show_here(&laptop, &session_id, &laptop_client, false);
+    laptop
+        .command_blocking(Command::ReportPreviewTabs {
+            session_id: session_id.clone(),
+            client_id: laptop_client.id.clone(),
+            tabs: Vec::new(),
         })
         .unwrap();
-    assert!(answer.try_recv().is_err());
-    let (reply, answer) = async_channel::bounded(1);
-    smol::block_on(host.update_state_for_test(move |state, cx| {
-        state.route_preview_with_timeout(
-            preview_mcp::BrokerRequest {
-                session_id: session_id.clone(),
-                op: preview_mcp::PreviewOp::Status,
-                reply,
-            },
-            Duration::from_millis(30),
-            cx,
-        )
-    }))
+    let tab = tcode_protocol::PreviewTab {
+        url: Some("http://localhost:5173/profile".into()),
+        ..tab
+    };
+    desk.command_blocking(Command::ReportPreviewTabs {
+        session_id: session_id.clone(),
+        client_id: desk_client.id.clone(),
+        tabs: vec![tab.clone()],
+    })
     .unwrap();
-    assert!(
-        answer
-            .recv_blocking()
-            .unwrap()
-            .unwrap_err()
-            .contains("timed out")
+    let changed = next(&laptop_events, |event| session_replaced(event).is_some());
+    let changed = session_replaced(&changed).unwrap();
+    assert_eq!(changed.renderer, Some(desk_client.clone()));
+    assert_eq!(changed.tabs, std::slice::from_ref(&tab));
+
+    show_here(&laptop, &session_id, &laptop_client, true);
+    let ServerEvent::PreviewRenderingReplaced(taken) = next(&laptop_events, |event| {
+        rendering(event).is_some_and(|sessions| !sessions.is_empty())
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(taken.len(), 1);
+    assert_eq!(taken[0].session_id, session_id);
+    assert_eq!(taken[0].tabs, [tab], "the page reopens where it was");
+    assert_eq!(taken[0].renderer, Some(laptop_client.clone()));
+    next(&desk_events, |event| {
+        rendering(event).is_some_and(|sessions| sessions.is_empty())
+    });
+
+    let answered = agent_call(
+        &host,
+        &session_id,
+        preview_mcp::PreviewOp::Status,
+        Duration::from_secs(60),
     );
-    for events in [&events, &other_events] {
-        next(
-            events,
-            |event| matches!(event, ServerEvent::PreviewRequest { request, .. } if *request == tcode_protocol::PreviewRequest::Status),
-        );
-    }
-    for client in [&link, &second] {
-        client
-            .unsubscribe(Subscription {
-                known_index: None,
-                topic: Topic::Preview,
-                after: None,
-            })
-            .unwrap();
-        client.command_blocking(Command::OpenLatestSession).unwrap(); // unsubscription barrier
-    }
-    let (reply, answer) = async_channel::bounded(1);
-    smol::block_on(host.update_state_for_test(move |state, cx| {
-        state.route_preview_with_timeout(
-            preview_mcp::BrokerRequest {
-                session_id: "background".into(),
-                op: preview_mcp::PreviewOp::Status,
-                reply,
-            },
+    let request_id = request_id(next(&laptop_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    }));
+    answer(&laptop, request_id, serde_json::json!({}));
+    assert_eq!(
+        answered.recv_blocking().unwrap().unwrap(),
+        preview_mcp::PreviewReply::Json(serde_json::json!({
+            "userActedSinceSnapshot": false,
+            "renderedOn": "Laptop",
+        }))
+    );
+    // The desk let go before the request went out: it never sees it.
+    watch_session(&desk, &session_id);
+    let seen = next(&desk_events, |event| {
+        matches!(
+            event,
+            ServerEvent::PreviewRequest { .. } | ServerEvent::PreviewSessionReplaced(_)
+        )
+    });
+    assert!(session_replaced(&seen).is_some());
+    desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
+#[test]
+fn a_rendering_client_that_goes_away_releases_its_threads() {
+    let (host, mux, desk, session_id) = fixture();
+    let desk_events = observed_events(&desk);
+    let desk_client = preview_client(&desk, "Desk");
+    // The phone is a raw attachment so the test can close its link, as a
+    // phone does when it goes to the background.
+    let connection = mux.attach(
+        tcode_protocol::Principal::Full,
+        tcode_client::attachment::AttachmentPolicy::network(),
+    );
+    let phone_link = connection.to_host.clone();
+    let phone = HostLink::new(connection.to_host, connection.from_host);
+    let pump = phone.clone();
+    smol::spawn(async move { pump.pump().await }).detach();
+    let phone_events = observed_events(&phone);
+    let phone_client = preview_client(&phone, "Phone");
+    show_here(&phone, &session_id, &phone_client, true);
+    let tab = tcode_protocol::PreviewTab {
+        url: Some("http://localhost:3000/".into()),
+        canvas: None,
+    };
+    phone
+        .command_blocking(Command::ReportPreviewTabs {
+            session_id: session_id.clone(),
+            client_id: phone_client.id.clone(),
+            tabs: vec![tab.clone()],
+        })
+        .unwrap();
+    watch_session(&desk, &session_id);
+
+    let orphaned = agent_call(
+        &host,
+        &session_id,
+        preview_mcp::PreviewOp::Status,
+        Duration::from_secs(60),
+    );
+    next(&phone_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    });
+    phone_link.close();
+    let error = orphaned.recv_blocking().unwrap().unwrap_err();
+    assert!(
+        error.contains("Phone") && error.contains("went away"),
+        "{error}"
+    );
+    next(&desk_events, |event| {
+        session_replaced(event).is_some_and(|session| session.renderer.is_none())
+    });
+
+    // The next call opens the page on a client still here.
+    let answered = agent_call(
+        &host,
+        &session_id,
+        preview_mcp::PreviewOp::Status,
+        Duration::from_secs(60),
+    );
+    let ServerEvent::PreviewRenderingReplaced(taken) = next(&desk_events, |event| {
+        rendering(event).is_some_and(|sessions| !sessions.is_empty())
+    }) else {
+        unreachable!()
+    };
+    assert_eq!(taken[0].tabs, [tab]);
+    assert_eq!(taken[0].renderer, Some(desk_client));
+    let request_id = request_id(next(&desk_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    }));
+    answer(&desk, request_id, serde_json::json!({}));
+    assert!(answered.recv_blocking().unwrap().is_ok());
+    desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+}
+
+#[test]
+fn user_input_on_the_rendering_page_reaches_the_agent_until_it_snapshots() {
+    let (host, mux, desk, session_id) = fixture();
+    let laptop = linked(&mux);
+    let desk_events = observed_events(&desk);
+    let laptop_events = observed_events(&laptop);
+    let desk_client = preview_client(&desk, "Desk");
+    let laptop_client = preview_client(&laptop, "Laptop");
+    show_here(&desk, &session_id, &desk_client, false);
+    watch_session(&laptop, &session_id);
+    let status = |expected: bool| {
+        let answered = agent_call(
+            &host,
+            &session_id,
+            preview_mcp::PreviewOp::Status,
             Duration::from_secs(60),
-            cx,
-        )
-    }))
+        );
+        let request_id = request_id(next(&desk_events, |event| {
+            matches!(event, ServerEvent::PreviewRequest { .. })
+        }));
+        answer(
+            &desk,
+            request_id,
+            serde_json::json!({"url": "http://localhost:5173/"}),
+        );
+        let Ok(preview_mcp::PreviewReply::Json(value)) = answered.recv_blocking().unwrap() else {
+            panic!("status failed");
+        };
+        assert_eq!(value["userActedSinceSnapshot"], expected, "{value}");
+    };
+
+    // Input on a page the laptop does not render is not the thread's.
+    laptop
+        .command_blocking(Command::ReportPreviewInput {
+            session_id: session_id.clone(),
+            client_id: laptop_client.id.clone(),
+        })
+        .unwrap();
+    status(false);
+    desk.command_blocking(Command::ReportPreviewInput {
+        session_id: session_id.clone(),
+        client_id: desk_client.id.clone(),
+    })
     .unwrap();
-    assert!(
-        answer
-            .recv_blocking()
-            .unwrap()
-            .unwrap_err()
-            .contains("no connected client has a preview browser")
+    next(&laptop_events, |event| {
+        session_replaced(event).is_some_and(|session| session.user_acted_since_snapshot)
+    });
+    status(true);
+
+    let snapshot = agent_call(
+        &host,
+        &session_id,
+        preview_mcp::PreviewOp::Snapshot,
+        Duration::from_secs(60),
     );
-    assert!(events.try_recv().is_err());
-    link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
+    let request_id = request_id(next(&desk_events, |event| {
+        matches!(event, ServerEvent::PreviewRequest { .. })
+    }));
+    answer(&desk, request_id, serde_json::json!({"elements": []}));
+    assert!(snapshot.recv_blocking().unwrap().is_ok());
+    next(&laptop_events, |event| {
+        session_replaced(event).is_some_and(|session| !session.user_acted_since_snapshot)
+    });
+    status(false);
+    desk.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
 
 #[test]

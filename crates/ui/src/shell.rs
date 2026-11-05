@@ -1200,10 +1200,11 @@ impl AppShell {
                 },
             ),
         ];
-        // Every client pumps preview requests: one without a backend still has
-        // to answer `unsupported` for anything that reaches it.
-        let requests = store.read(cx).remote_preview_requests();
+        // The host sends a client only the requests of threads it renders,
+        // so only a client that can render pages has any to answer.
+        #[cfg(preview_backend)]
         let preview_pump = {
+            let requests = store.read(cx).remote_preview_requests();
             let preview = preview.clone();
             let store = store.downgrade();
             cx.spawn_in(window, async move |_, cx| {
@@ -1217,7 +1218,16 @@ impl AppShell {
                         continue;
                     };
                     let (reply, receiver) = async_channel::bounded(1);
-                    if preview
+                    // A request sent before the thread's page moved away
+                    // would otherwise open the page here again.
+                    if store
+                        .read_with(cx, |store, _| !store.renders_preview(&session_id))
+                        .unwrap_or(true)
+                    {
+                        let _ = reply.try_send(Err(
+                            "the preview moved to another client; call the tool again".into(),
+                        ));
+                    } else if preview
                         .update_in(cx, |panel, window, cx| {
                             panel.handle_op(session_id, request, reply, window, cx)
                         })
@@ -1313,7 +1323,10 @@ impl AppShell {
                 store: link.store.clone(),
                 open: Some(link),
             },
+            #[cfg(preview_backend)]
             _tasks: vec![preview_pump],
+            #[cfg(not(preview_backend))]
+            _tasks: Vec::new(),
             _subscriptions: subscriptions,
         });
         self.hosts
@@ -7955,6 +7968,57 @@ pub(crate) mod tests {
                 ServerEvent::SessionStatusReplaced(Box::new(status)),
             )],
         );
+    }
+
+    /// What the host answers a client showing `id`'s preview while no other
+    /// client renders it: its pages are this client's.
+    #[cfg(preview_backend)]
+    fn render_preview_here(
+        host: &MountedShell,
+        store: &Entity<WorkspaceStore>,
+        id: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        while let Ok(line) = host.outgoing.try_recv() {
+            host.observed
+                .borrow_mut()
+                .push(decode_client_line(&line).unwrap());
+        }
+        let client = host
+            .observed
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|message| match &message.payload {
+                ClientPayload::Subscribe(tcode_protocol::Subscription {
+                    topic: Topic::Preview { client },
+                    ..
+                }) => Some(client.clone()),
+                _ => None,
+            })
+            .expect("the client offers to render previews");
+        let session = tcode_protocol::PreviewSession {
+            session_id: id.into(),
+            renderer: Some(client.clone()),
+            ..Default::default()
+        };
+        send_events(
+            host,
+            vec![
+                (
+                    Topic::PreviewSession {
+                        session_id: id.into(),
+                    },
+                    ServerEvent::PreviewSessionReplaced(session.clone()),
+                ),
+                (
+                    Topic::Preview { client },
+                    ServerEvent::PreviewRenderingReplaced(vec![session]),
+                ),
+            ],
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
     }
 
     /// What the host answers a thread's subscriptions with: its status and an
@@ -15216,6 +15280,9 @@ pub(crate) mod tests {
         });
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-a", tcode_core::ui::RightTab::Preview, cx);
+        });
+        render_preview_here(&host, &store, "thread-a", cx);
+        store.update(cx, |store, cx| {
             store.set_preview_url(&key, "https://example.com/".into(), cx);
         });
         lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
@@ -17219,6 +17286,9 @@ pub(crate) mod tests {
         let open = |cx: &mut VisualTestContext| {
             store.update(cx, |store, cx| {
                 store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Preview, cx);
+            });
+            render_preview_here(&host, &store, "thread-1", cx);
+            store.update(cx, |store, cx| {
                 store.set_preview_url(&key, "https://example.com/".into(), cx);
             });
             lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));

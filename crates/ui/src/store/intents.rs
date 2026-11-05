@@ -53,6 +53,9 @@ impl WorkspaceStore {
                 | Command::ToggleFavoriteModel { .. }
                 | Command::ToggleProjectCollapsed { .. }
                 | Command::PreviewReply { .. }
+                | Command::ShowPreviewHere { .. }
+                | Command::ReportPreviewTabs { .. }
+                | Command::ReportPreviewInput { .. }
                 | Command::ReloadProvider
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
@@ -539,6 +542,7 @@ impl WorkspaceStore {
             }
         }
         self.release_left_threads();
+        self.unfollow_preview(session_id);
         for topic in [
             tcode_protocol::Topic::SessionEvents {
                 session_id: session_id.to_owned(),
@@ -681,6 +685,7 @@ impl WorkspaceStore {
                 topic,
             });
         }
+        self.follow_preview(session_id, cx);
         self.sync_terminal_topics(cx);
         self.sync_conversation_ui(session_id);
     }

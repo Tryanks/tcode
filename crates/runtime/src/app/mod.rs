@@ -255,6 +255,7 @@ mod lifecycle;
 mod options;
 mod orchestrate;
 mod plugins;
+mod preview;
 mod providers;
 mod pull_request_stacks;
 mod pull_request_watch;
@@ -387,8 +388,7 @@ pub struct AppState {
     /// per subscribed width.
     command_output_feeds: HashMap<Topic, command_output::CommandOutputFeed>,
     next_command_output_feed: u64,
-    preview_pending: HashMap<u64, async_channel::Sender<Result<preview_mcp::PreviewReply, String>>>,
-    next_preview_request: u64,
+    previews: preview::Previews,
     /// Provider-native rewind requested while a session is live or starting.
     /// Kept here (rather than in persisted session metadata) because the
     /// provider response is the only authority that can complete it.
@@ -599,8 +599,7 @@ impl AppState {
             terminal_projections: HashMap::new(),
             command_output_feeds: HashMap::new(),
             next_command_output_feed: 0,
-            preview_pending: HashMap::new(),
-            next_preview_request: 0,
+            previews: Default::default(),
             pending_native_rewinds: HashMap::new(),
             native_subagent_sessions: HashMap::new(),
             native_subagent_turns: HashMap::new(),

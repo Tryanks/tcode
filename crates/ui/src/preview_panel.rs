@@ -2,7 +2,9 @@
 //!
 //! The panel itself is shared by every client: the URL field, open-externally,
 //! copy-URL, the per-conversation URL/canvas state and the loading/error copy
-//! are ordinary replicated-store UI. What is native is the embedded browser —
+//! are ordinary replicated-store UI. One client renders a thread's pages
+//! (`store::preview`); the panel on any other says where they are and offers
+//! to show them here. What is native is the embedded browser —
 //! creating a `gpui-webview` child view, driving its history and JS, and snapshotting
 //! it — and that lives behind [`preview_backend`].
 //!
@@ -52,11 +54,12 @@ use gpui::{
     prelude::FluentBuilder as _,
 };
 use gpui_base::{h_flex, v_flex};
+#[cfg(preview_backend)]
 use tcode_protocol::PreviewResponse;
 
 use crate::icon::IconName;
 use crate::material;
-use crate::store::WorkspaceStore;
+use crate::store::{PreviewPlace, PreviewReleased, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::menu::DropdownMenu as _;
@@ -118,6 +121,7 @@ pub(crate) fn page_holes(
 }
 
 /// The reply channel a broker request is answered on.
+#[cfg(preview_backend)]
 type ReplyTx = async_channel::Sender<Result<PreviewResponse, String>>;
 
 // Only a build with a backend routes by these; the tests below pin the contract
@@ -189,6 +193,9 @@ pub struct PreviewPanel {
     /// Pages the desktop panel let go of while their thread's turn was
     /// running, by key, with that thread: let go once the turn ends.
     idle_releases: std::collections::HashMap<String, String>,
+    /// The client last shown rendering this panel's thread, for the note
+    /// saying so while it fades.
+    rendered_on: String,
     /// The panel's motion, kept here: the window draws the panel under
     /// another parent as it turns compact or wide.
     motion: crate::motion::owned::Owned,
@@ -213,15 +220,29 @@ impl PreviewPanel {
     ) -> Self {
         #[cfg(preview_backend)]
         let backend = backend::Backend::new(store.read(cx).preview_proxy(), cx);
-        Self::with_backend(
-            store,
+        let mut panel = Self::with_backend(
+            store.clone(),
             window_state,
             None,
             #[cfg(preview_backend)]
             backend,
             window,
             cx,
-        )
+        );
+        panel._subscriptions.push(cx.subscribe(
+            &store,
+            |this, _, released: &PreviewReleased, cx| {
+                let key = this
+                    .store
+                    .read(cx)
+                    .preview_key_for(&released.session_id, cx)
+                    .unwrap_or_else(|| released.session_id.clone());
+                this.idle_releases.remove(&key);
+                this.drop_webview(&key, cx);
+                cx.notify();
+            },
+        ));
+        panel
     }
 
     /// A panel on this panel's pages, showing `session_id`'s in a pane.
@@ -304,6 +325,7 @@ impl PreviewPanel {
             mirrored_url: None,
             compact_overflow_open: false,
             idle_releases: Default::default(),
+            rendered_on: String::new(),
             motion: Default::default(),
             #[cfg(preview_backend)]
             dev_ports: Vec::new(),
@@ -376,6 +398,71 @@ impl PreviewPanel {
         cx.notify();
     }
 
+    /// The user sent the page to `url`: it shows here, taken from any
+    /// other client rendering it.
+    fn navigate_here(&mut self, key: &str, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.session_id.clone() {
+            self.store
+                .update(cx, |store, cx| store.show_preview_here(&session_id, cx));
+        }
+        self.user_acted(cx);
+        self.navigate(key, url, window, cx);
+    }
+
+    /// The user acted on this panel's page, which the page the agent last
+    /// read no longer reflects.
+    fn user_acted(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.session_id.clone() {
+            self.store
+                .update(cx, |store, _| store.report_preview_input(&session_id));
+        }
+    }
+
+    /// Where this panel's thread's pages render. Shown here while no client
+    /// renders them, they become this client's.
+    fn place(&mut self, cx: &mut Context<Self>) -> PreviewPlace {
+        let Some(session_id) = self.session_id.clone().filter(|_| preview_backend()) else {
+            return PreviewPlace::Here;
+        };
+        let place = self.store.read(cx).preview_place(&session_id, cx);
+        match &place {
+            PreviewPlace::Settling => self
+                .store
+                .update(cx, |store, _| store.claim_preview(&session_id)),
+            PreviewPlace::Elsewhere(device) => self.rendered_on.clone_from(device),
+            PreviewPlace::Here => {}
+        }
+        place
+    }
+
+    fn show_here(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.session_id.clone() {
+            self.store
+                .update(cx, |store, cx| store.show_preview_here(&session_id, cx));
+            cx.notify();
+        }
+    }
+
+    /// The thread's page is on another client: say which, and offer to
+    /// bring it here.
+    fn render_elsewhere(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::sizing::Sizable as _;
+        material::empty_state(
+            crate::icon::Icon::new(IconName::Monitor),
+            crate::tr!("preview.elsewhere", device = self.rendered_on),
+            crate::tr!("preview.elsewhere_hint"),
+            cx,
+        )
+        .child(
+            crate::widgets::button::Button::new("preview-show-here")
+                .motion(&self.motion)
+                .small()
+                .label(crate::tr!("preview.show_here"))
+                .on_click(cx.listener(|this, _, _, cx| this.show_here(cx))),
+        )
+        .into_any_element()
+    }
+
     fn on_url_event(
         &mut self,
         input: &Entity<InputState>,
@@ -388,7 +475,7 @@ impl PreviewPanel {
             if !url.is_empty()
                 && let Some(key) = self.active_key(cx)
             {
-                self.navigate(&key, &url, window, cx);
+                self.navigate_here(&key, &url, window, cx);
             }
         }
     }
@@ -607,7 +694,12 @@ impl PreviewPanel {
         .into_any_element()
     }
 
-    fn render_chrome(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_chrome(
+        &self,
+        here: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         // Windows: an open Preview tab is the rightmost column, so its
         // chrome row is a top strip hosting the caption buttons, which reach
         // the window's true top-right corner.
@@ -641,9 +733,14 @@ impl PreviewPanel {
         };
         material::bar("preview-chrome", kind, compact, cx)
             .when(hosts_caption, |chrome| chrome.pr_0())
-            // Back / forward / reload drive a page. Without a backend they are
-            // absent rather than present-but-dead.
-            .children(self.history_controls(cx))
+            // Back / forward / reload drive a page. Without a backend, or
+            // with the page on another client, they are absent rather than
+            // present-but-dead.
+            .children(
+                here.then(|| self.history_controls(cx))
+                    .into_iter()
+                    .flatten(),
+            )
             .child(div().flex_1().min_w_0().child(
                 Input::new(&self.url_input).placeholder(crate::tr!("preview.url_placeholder")),
             ))
@@ -725,11 +822,39 @@ impl Render for PreviewPanel {
             self.mirrored_url = current_url;
         }
 
-        let body = self.render_body(active.as_deref(), window, cx);
+        let place = self.place(cx);
+        let state = match place {
+            PreviewPlace::Here => 0,
+            PreviewPlace::Elsewhere(_) => 1,
+            PreviewPlace::Settling => 2,
+        };
+        let fade = crate::motion::CrossFade::new("preview-place", state, 3, CHANGE, window, cx);
+        let mut layers = Vec::new();
+        for layer in (0..3).filter(|layer| fade.shows(*layer)) {
+            let content = match layer {
+                0 if state == 0 => self.render_body(active.as_deref(), window, cx),
+                // A page leaving fades out natively once it is let go; drawn
+                // again, it would be made anew.
+                0 => continue,
+                1 => self.render_elsewhere(cx),
+                _ => material::empty_state(
+                    crate::icon::Icon::new(IconName::Globe),
+                    crate::tr!("preview.starting"),
+                    "",
+                    cx,
+                )
+                .into_any_element(),
+            };
+            layers.push((
+                layer,
+                v_flex().size_full().child(content).into_any_element(),
+            ));
+        }
+        let body = fade.fill().render(layers).flex_1().min_h_0().w_full();
         let panel = v_flex()
             .size_full()
             .on_action(cx.listener(Self::on_preview_action))
-            .child(self.render_chrome(window, cx))
+            .child(self.render_chrome(state == 0, window, cx))
             .children(self.render_port_row(window, cx))
             .child(body);
         #[cfg(all(preview_backend, not(target_os = "android")))]
@@ -740,8 +865,6 @@ impl Render for PreviewPanel {
 
 #[cfg(not(preview_backend))]
 mod portable {
-    use tcode_protocol::PreviewRequest;
-
     use super::*;
 
     impl PreviewPanel {
@@ -823,22 +946,6 @@ mod portable {
         ) -> AnyElement {
             div().into_any_element()
         }
-
-        /// Nothing here can drive a page. Answer immediately and explicitly:
-        /// a client that stayed silent would leave the agent's call to time out.
-        pub fn handle_op(
-            &mut self,
-            session_id: String,
-            op: PreviewRequest,
-            reply: ReplyTx,
-            _window: &mut Window,
-            _cx: &mut Context<Self>,
-        ) {
-            log::info!("preview: rejecting op {op:?} for session {session_id} (no backend)");
-            // Naming the client stops the agent retrying instead of waiting out
-            // a timeout it can never satisfy here.
-            let _ = reply.try_send(Err(crate::tr!("preview.unsupported_client").into_owned()));
-        }
     }
 }
 
@@ -847,66 +954,7 @@ mod backend;
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use tcode_protocol::PreviewRequest;
-
     use super::*;
-
-    /// A client with no embedded browser is still reachable over the preview
-    /// topic. It must answer, and say why, rather than let the agent's call sit
-    /// until it times out.
-    #[cfg(not(preview_backend))]
-    #[gpui::test]
-    fn a_client_without_a_backend_refuses_preview_requests_immediately(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use tcode_runtime::pipe::{HostServices, spawn_host};
-
-        let root = crate::store::tests::scratch_root("preview-unsupported");
-        let host = spawn_host(
-            tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .expect("spawn preview test host");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        driver.wait_until(cx, &store, "workspace baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
-        let window_state = cx.new(|_| WindowState::new(false));
-        let (panel, cx) = cx.add_window_view(|window, cx| {
-            PreviewPanel::new(store.clone(), window_state.clone(), window, cx)
-        });
-        let cx: &mut gpui::VisualTestContext = cx;
-
-        let (reply, answers) = async_channel::bounded(1);
-        cx.update(|window, cx| {
-            panel.update(cx, |panel, cx| {
-                panel.handle_op("session".into(), PreviewRequest::Status, reply, window, cx);
-            });
-        });
-        cx.run_until_parked();
-
-        let answer = answers
-            .try_recv()
-            .expect("an answer, not a dropped request");
-        assert_eq!(
-            answer,
-            Err(crate::tr!("preview.unsupported_client").into_owned())
-        );
-
-        driver.shutdown(cx, &store, &host);
-        let _ = std::fs::remove_dir_all(root);
-    }
 
     #[gpui::test]
     fn switching_language_relocalizes_the_address_placeholder(cx: &mut gpui::TestAppContext) {

@@ -73,6 +73,28 @@ pub enum Command {
         request_id: u64,
         response: Result<crate::PreviewResponse, String>,
     },
+    /// Render `session_id`'s preview on the client subscribed to
+    /// [`crate::Topic::Preview`] as `client_id`. With `take_over`, the
+    /// rendering client, if any, lets its page go; without it, only a thread
+    /// that no attached client renders comes here.
+    ShowPreviewHere {
+        session_id: String,
+        client_id: String,
+        take_over: bool,
+    },
+    /// The rendering client's pages of `session_id`, after they changed.
+    /// From any other client it changes nothing.
+    ReportPreviewTabs {
+        session_id: String,
+        client_id: String,
+        tabs: Vec<crate::PreviewTab>,
+    },
+    /// The user acted on the page of `session_id` on its rendering client.
+    /// From any other client it changes nothing.
+    ReportPreviewInput {
+        session_id: String,
+        client_id: String,
+    },
     /// Consume and apply the restart-continuity marker, returning the Settings
     /// section that the client should open.
     ApplyPendingRelaunch,
@@ -736,6 +758,8 @@ impl Command {
     /// height are a live stream, not retained: bytes typed for whatever the
     /// terminal showed then are wrong to replay into it after a relaunch, and
     /// a burst of them would evict pending messages from the bounded outbox.
+    /// A preview report is not retained either: losing the link releases
+    /// rendering, so the host would refuse it when replayed.
     pub fn requires_delivery_key(&self) -> bool {
         !matches!(
             self,
@@ -743,6 +767,8 @@ impl Command {
                 | Self::SetTerminalHeight { .. }
                 | Self::ResizeTerminal { .. }
                 | Self::PreviewReply { .. }
+                | Self::ReportPreviewTabs { .. }
+                | Self::ReportPreviewInput { .. }
                 | Self::ShutdownAllAndFlush
                 | Self::OpenLatestSession
                 | Self::RefreshHostCredentials

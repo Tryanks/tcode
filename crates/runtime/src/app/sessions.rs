@@ -87,6 +87,7 @@ impl AppState {
                     self.refresh_terminal_projection(*terminal_id);
                 }
                 Topic::CommandOutput { .. } => self.open_command_output(&subscription.topic),
+                Topic::Preview { client } => self.preview_client_subscribed(client, cx),
                 _ => {}
             }
         }
@@ -100,6 +101,9 @@ impl AppState {
         self.subscriptions.remove(&subscription.topic);
         if let Topic::CommandOutput { .. } = &subscription.topic {
             self.close_command_output(&subscription.topic);
+        }
+        if let Topic::Preview { client } = &subscription.topic {
+            self.preview_client_unsubscribed(client, cx);
         }
         if let Topic::SpaceIndex { space_id } = &subscription.topic {
             self.space_scopes.remove(space_id);
