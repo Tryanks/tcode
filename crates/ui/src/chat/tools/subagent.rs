@@ -9,7 +9,7 @@ use tcode_core::session::{EntryContent, TimelineEntry};
 
 use super::Activity;
 use super::window::{Argument, Chip, Header, Verb};
-use crate::chat::ChatView;
+use crate::chat::timeline::TimelineView;
 use crate::icon::IconName;
 
 /// The window a subagent item shows as: the agent's type in
@@ -50,7 +50,7 @@ pub(in crate::chat) fn activity(
 /// The thread the host keeps a subagent's own work in, once it has one.
 /// `None` for any other entry.
 pub(in crate::chat) fn child_thread(
-    chat: &ChatView,
+    chat: &TimelineView,
     entry: &TimelineEntry,
     cx: &App,
 ) -> Option<String> {

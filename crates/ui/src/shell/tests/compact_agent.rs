@@ -124,7 +124,9 @@ fn mount_lead_scrolled(
     cx.simulate_resize(size(px(WIDTH), px(852.)));
     settle_panes(cx);
     let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
-    let viewport = chat.read_with(cx, |chat, _| chat.capture_viewport().unwrap());
+    let viewport = chat
+        .read_with(cx, |chat, _| chat.timeline())
+        .read_with(cx, |chat, _| chat.capture_viewport().unwrap());
     cx.simulate_event(gpui::ScrollEvent {
         position: viewport.center(),
         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1000.))),

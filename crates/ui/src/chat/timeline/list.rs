@@ -6,7 +6,7 @@ const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
-impl ChatView {
+impl TimelineView {
     /// The timeline's virtual list: one element per [`TimelineRow`], each
     /// drawn in the centred content column with the rhythm around it.
     pub(in crate::chat) fn render_timeline_list(
@@ -202,7 +202,7 @@ impl ChatView {
                     .map_or(1., |(_, progress)| progress);
                 let padding = below_arrival.unwrap_or(1.) * opening;
                 // The rhythm below a row is set by the row after it.
-                let strip = this.phone_strip_height;
+                let strip = this.layout.strip;
                 let edge_below = |next: Option<&TimelineRow>| match next {
                     None => px(TIMELINE_EDGE_PADDING) + strip,
                     Some(next) if next.turn != row.turn => px(TURN_GAP),
@@ -297,7 +297,7 @@ impl ChatView {
                     .w_full()
                     .items_center()
                     .px(inset)
-                    .pr(inset + this.body.shift() + this.overhang)
+                    .pr(inset + this.layout.shift + this.layout.overhang)
                     .rounded(crate::material::radius_card(cx))
                     .bg(highlight)
                     // A press inside the mark lets it go, and still does what
@@ -370,6 +370,98 @@ impl ChatView {
         .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
         .flex_1()
         .min_h_0()
+    }
+}
+
+impl TimelineView {
+    /// The phone's "new thread" empty state: which project the thread
+    /// starts in, and which provider/model the first message reaches.
+    pub(super) fn render_compact_draft_empty(
+        &self,
+        cwd: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let store = self.workspace_store.read(cx);
+        let project = store
+            .projects()
+            .into_iter()
+            .find(|project| project.root == cwd)
+            .map(|project| project.name)
+            .unwrap_or_else(|| {
+                cwd.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let composer = store.composer_state_for(self.session_id.as_deref(), cx);
+        let model = composer
+            .active_model
+            .as_ref()
+            .map(|active| {
+                let name = composer
+                    .active_model_spec
+                    .as_ref()
+                    .map(|spec| spec.display_name.clone())
+                    .or_else(|| active.model.clone())
+                    .unwrap_or_default();
+                let provider = crate::settings::provider_label(active.provider);
+                if name.is_empty() {
+                    provider.to_string()
+                } else {
+                    format!("{provider} · {name}")
+                }
+            })
+            .unwrap_or_default();
+        crate::material::empty_state(
+            Icon::empty().path("icons/message-square.svg"),
+            crate::tr!("mobile.draft_empty_title", project = project),
+            crate::tr!("mobile.draft_empty_body", model = model),
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// The jump to the latest row, rising in while the reader is away from
+    /// it and sinking out once they are back.
+    pub(super) fn render_scroll_pill(
+        &self,
+        shown: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let shown =
+            self.motion
+                .shown("scroll-to-end-pill", shown.then_some(()), SHOW, window, cx)?;
+        // Absolute positioning ignores mx_auto without pinned horizontal
+        // insets; span the region and center with flex instead, clear of
+        // the side rail as the column is.
+        let pill = floating_backing(crate::material::radius_button(cx), cx).child(
+            Button::new("scroll-to-end")
+                .motion(&self.motion)
+                .debug_selector(|| "scroll-to-end".into())
+                .outline()
+                .small()
+                .icon(IconName::ChevronDown)
+                .label(crate::tr!("chat.scroll_end"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.list_scroll.scroll_to(
+                        &this.list_state,
+                        crate::motion::ScrollTarget::End,
+                        cx,
+                    );
+                    cx.notify();
+                })),
+        );
+        Some(
+            div()
+                .absolute()
+                .bottom(px(12.) + self.layout.strip)
+                .left_0()
+                .right(self.layout.shift)
+                .flex()
+                .justify_center()
+                .child(shown.fade(pill))
+                .into_any_element(),
+        )
     }
 }
 
@@ -460,7 +552,9 @@ mod tests {
     }
 
     fn marked(panes: &Entity<Panes>, cx: &mut VisualTestContext) -> Option<usize> {
-        panes.read_with(cx, |panes, cx| panes.chat.read(cx).highlighted_turn)
+        panes.read_with(cx, |panes, cx| {
+            panes.chat.read(cx).timeline.read(cx).highlighted_turn
+        })
     }
 
     fn first_row_of(
@@ -469,7 +563,7 @@ mod tests {
         cx: &mut VisualTestContext,
     ) -> gpui::Bounds<Pixels> {
         let index = panes.read_with(cx, |panes, cx| {
-            rows_of_turn(&panes.chat.read(cx).rows, turn).start
+            rows_of_turn(&panes.chat.read(cx).timeline.read(cx).rows, turn).start
         });
         cx.debug_bounds(format!("timeline-row-{index}").leak())
             .expect("the turn's first row is on screen")
@@ -544,7 +638,14 @@ mod tests {
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
         draw_settled(cx);
         let selected = panes.read_with(cx, |panes, cx| {
-            panes.chat.read(cx).selection.read(cx).selected_text(cx)
+            panes
+                .chat
+                .read(cx)
+                .timeline
+                .read(cx)
+                .selection
+                .read(cx)
+                .selected_text(cx)
         });
         assert!(!selected.is_empty(), "the drag selected nothing");
         assert_eq!(marked(&panes, cx), None);
@@ -701,8 +802,10 @@ mod tests {
         store.update(cx, |store, cx| {
             store.show_thread_at_turn(THREAD.into(), turn, cx);
         });
-        let marked =
-            |cx: &mut VisualTestContext| view.read_with(cx, |chat, _| chat.highlighted_turn);
+        let marked = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |chat, _| chat.timeline())
+                .read_with(cx, |chat, _| chat.highlighted_turn)
+        };
         settle(&mut thread, cx);
         assert!(
             first_held(cx) + 1 < turn,

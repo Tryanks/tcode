@@ -409,6 +409,8 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut chat = Self::new(workspace_store, window_state, Some(session_id), window, cx);
+        chat.timeline
+            .update(cx, |timeline, _| timeline.set_lead(lead.clone()));
         chat.side_of = Some(SideOf {
             lead,
             lead_session,
@@ -434,11 +436,6 @@ impl ChatView {
         });
         self.drawer_agent = Some(agent);
         cx.notify();
-    }
-
-    /// The lead of the agent this view shows beside it.
-    pub(super) fn side_lead(&self) -> Option<Entity<ChatView>> {
-        self.side_of.as_ref()?.lead.upgrade()
     }
 
     /// The drawer goes back to this thread, closing on the agent it showed.
@@ -616,9 +613,17 @@ impl ChatView {
         }
     }
 
-    /// Where what opens agents beside the thread is drawn.
+    /// Where what opens agents beside the thread is drawn by the view
+    /// itself; the timeline's rows record theirs on their own.
     pub(crate) fn side_origins(&self) -> &crate::motion::expand::Origins {
         &self.side_origins
+    }
+
+    /// Where `origin` was drawn, by the view or by its timeline's rows.
+    fn resolve_origin(&self, origin: &str) -> Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)> {
+        self.side_origins
+            .resolve(origin)
+            .or_else(|| self.timeline_origins.resolve(origin))
     }
 
     /// Show `id` beside the thread, with the keyboard, opened from `origin`
@@ -646,7 +651,7 @@ impl ChatView {
             let from = origin
                 .as_ref()
                 .filter(|_| !cx.reduce_motion())
-                .and_then(|origin| self.side_origins.resolve(origin));
+                .and_then(|origin| self.resolve_origin(origin));
             let now = cx.background_executor().now();
             match (origin, from) {
                 (Some(origin), Some(from)) => {
@@ -920,10 +925,11 @@ impl ChatView {
         let Some(expand) = &mut self.side.expand else {
             return ExpandFrame::default();
         };
-        let on_screen = expand
-            .origin
-            .as_ref()
-            .and_then(|origin| self.side_origins.resolve(origin));
+        let on_screen = expand.origin.as_ref().and_then(|origin| {
+            self.side_origins
+                .resolve(origin)
+                .or_else(|| self.timeline_origins.resolve(origin))
+        });
         if let Some(from) = on_screen {
             expand.from = Some(from);
         }
@@ -1140,7 +1146,7 @@ impl ChatView {
                         |this, event: &gpui::ScrollEvent, window, cx| {
                             let delta = event.delta.pixel_delta(window.line_height());
                             this.list_state.scroll_by(-delta.y);
-                            cx.notify();
+                            this.timeline.update(cx, |_, cx| cx.notify());
                         },
                     )),
                 )

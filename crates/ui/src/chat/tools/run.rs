@@ -18,7 +18,7 @@ use tcode_core::session::{EntryContent, TimelineEntry};
 
 use super::window::{self, Argument, Chip, Header, Verb};
 use super::{Call, drives_computer};
-use crate::chat::ChatView;
+use crate::chat::timeline::TimelineView;
 use crate::chat::timeline::{ActivityRow, AutoActivityRecency};
 use crate::icon::IconName;
 
@@ -71,7 +71,7 @@ fn key(first: &TimelineEntry) -> String {
     format!("run-{}", first.id)
 }
 
-impl ChatView {
+impl TimelineView {
     /// A computer run's window: its header, the latest screenshot, and,
     /// open, each call's own window.
     pub(in crate::chat) fn compose_computer_run(

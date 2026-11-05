@@ -10,8 +10,8 @@ use tcode_core::session::EntryContent;
 
 use crate::motion::list_rows::{Arrival, Attach};
 
-use super::super::ChatView;
 use super::LeftRow;
+use super::TimelineView;
 use super::rows::{RowPart, TimelineRow};
 
 /// The rows a regroup takes out, each with the survivor it folds against.
@@ -20,7 +20,7 @@ use super::rows::{RowPart, TimelineRow};
 #[derive(Default)]
 pub(super) struct Leaving(Vec<(u64, LeftRow, Attach)>);
 
-impl ChatView {
+impl TimelineView {
     /// Stamp the rows that just arrived live, so they rise in; each notes
     /// whether it is the first on screen of its turn, so the turn's trailer
     /// (its working status) arrives with it rather than moving down to it.
@@ -84,7 +84,7 @@ impl ChatView {
     }
 }
 
-impl ChatView {
+impl TimelineView {
     /// The rows of `old` a regroup took out, as they were drawn: a collapsed
     /// Work Log's activities. An expanded live window is not among them: its
     /// activities stay on screen in the run's own row.
@@ -832,15 +832,22 @@ mod tests {
         draw(cx);
         frame(cx);
         let rising = tail(&chat, rows - 1, cx);
-        assert!(chat.update(cx, |chat, cx| chat.capture_begin(cx)));
+        assert!(
+            chat.read_with(cx, |chat, _| chat.timeline())
+                .update(cx, |chat, cx| chat.capture_begin(cx))
+        );
         draw(cx);
         let captured = tail(&chat, rows - 1, cx);
-        assert!(chat.read_with(cx, |chat, _| chat.capture_settled()));
+        assert!(
+            chat.read_with(cx, |chat, _| chat.timeline())
+                .read_with(cx, |chat, _| chat.capture_settled())
+        );
         assert!(
             captured.height > rising.height + px(40.),
             "the capture's frame shows the row still rising: {rising:?} -> {captured:?}"
         );
-        chat.update(cx, |chat, cx| chat.capture_end(cx));
+        chat.read_with(cx, |chat, _| chat.timeline())
+            .update(cx, |chat, cx| chat.capture_end(cx));
         for _ in 0..16 {
             frame(cx);
         }
@@ -1338,7 +1345,9 @@ mod tests {
         chat: &Entity<ChatView>,
         cx: &mut VisualTestContext,
     ) -> (gpui::Pixels, gpui::Pixels) {
-        let last = chat.read_with(cx, |chat, _| chat.rows.len() - 1);
+        let last = chat
+            .read_with(cx, |chat, _| chat.timeline())
+            .read_with(cx, |chat, _| chat.rows.len() - 1);
         let header = cx
             .debug_bounds("worklog-header-4-check-0")
             .expect("the Work Log's header is on screen");

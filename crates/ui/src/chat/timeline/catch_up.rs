@@ -199,7 +199,9 @@ fn painted(
     chat: &Entity<ChatView>,
     cx: &mut VisualTestContext,
 ) -> Vec<(usize, gpui::Bounds<gpui::Pixels>)> {
-    let rows = chat.read_with(cx, |chat, _| chat.rows.len());
+    let rows = chat
+        .read_with(cx, |chat, _| chat.timeline())
+        .read_with(cx, |chat, _| chat.rows.len());
     (0..rows)
         .filter_map(|row| {
             cx.debug_bounds(format!("timeline-row-{row}").leak())
@@ -265,7 +267,9 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
         // The first frame drawn with its window is the thread at rest: the
         // frames after it, until the window asks for no more, move no row.
         draw(cx);
-        let latest = chat.read_with(cx, |chat, _| chat.rows.len() - 1);
+        let latest = chat
+            .read_with(cx, |chat, _| chat.timeline())
+            .read_with(cx, |chat, _| chat.rows.len() - 1);
         let first_frame = painted(&chat, cx);
         assert_eq!(
             first_frame.last().map(|(row, _)| *row),
@@ -296,7 +300,9 @@ fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
                 workspace_last(&store, &first, cx).as_deref() == Some("answer-4")
             });
         draw(cx);
-        let arrived = chat.read_with(cx, |chat, _| chat.rows.len() - 1);
+        let arrived = chat
+            .read_with(cx, |chat, _| chat.timeline())
+            .read_with(cx, |chat, _| chat.rows.len() - 1);
         let mut heights = Vec::new();
         for _ in 0..12 {
             heights.push(

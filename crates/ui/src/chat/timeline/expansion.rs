@@ -255,7 +255,7 @@ pub(in crate::chat) fn auto_activity_snapshot_keys(
     keys
 }
 
-impl ChatView {
+impl TimelineView {
     pub(in crate::chat) fn toggle_expanded(
         &mut self,
         turn: usize,
