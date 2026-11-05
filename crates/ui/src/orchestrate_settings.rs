@@ -20,7 +20,7 @@ use agent::ProviderKind;
 use tcode_core::provider_models::FastMode;
 use tcode_core::settings::orchestrate_efforts;
 
-use crate::provider_card::provider_glyph;
+use crate::provider_card::profile_glyph;
 use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
 use crate::settings::{ChildApprovalMode, OrchestrateChildModel, provider_label};
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
@@ -821,7 +821,11 @@ impl OrchestrateSettingsPanel {
                             .w_full()
                             .gap_2()
                             .items_center()
-                            .child(div().text_body(false, cx).child(provider_glyph(provider)))
+                            .child(div().text_body(false, cx).child(profile_glyph(
+                                self.store.read(cx),
+                                provider,
+                                row.profile_id.as_deref(),
+                            )))
                             .child(
                                 v_flex()
                                     .flex_1()

@@ -21,14 +21,14 @@ use crate::{
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px, rgb,
+    div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{PopoverState, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_core::settings::Settings;
 
-use crate::provider_card::provider_glyph;
+use crate::provider_card::profile_glyph;
 use crate::provider_status::{ProviderSnapshot, redact_email, signed_in_account};
 use crate::settings::provider_label;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
@@ -208,7 +208,7 @@ impl ProviderModelPicker {
                         (kind, "", None)
                     });
                 let display = self.display_name(provider, model, profile_id, cx);
-                let glyph = tinted_glyph(&self.store, provider, profile_id, cx);
+                let glyph = profile_glyph(self.store.read(cx), provider, profile_id);
                 Button::new(self.trigger_id)
                     .ghost()
                     .outline()
@@ -311,7 +311,7 @@ impl Render for ProviderModelPicker {
                     let popover = cx.entity();
                     tabs = tabs.item(
                         TabItem::new(("settings-provider-tab", tab_index), label)
-                            .icon(tinted_glyph(&store, kind, Some(&profile.id), cx))
+                            .icon(profile_glyph(store.read(cx), kind, Some(&profile.id)))
                             .selected(is_selected)
                             .on_click(move |_, _, cx| {
                                 picker.update(cx, |picker, cx| {
@@ -469,11 +469,10 @@ fn option_row(
     .items_center()
     .text_body(false, cx)
     .cursor_pointer()
-    .child(tinted_glyph(
-        store,
+    .child(profile_glyph(
+        store.read(cx),
         option.provider,
         option.profile_id.as_deref(),
-        cx,
     ))
     .child(
         v_flex()
@@ -525,25 +524,6 @@ fn account_caption(snapshot: &ProviderSnapshot) -> Option<String> {
             None => email,
         },
     )
-}
-
-/// The provider glyph tinted with the profile's own accent (falling back to the
-/// kind's built-in card accent), matching the composer's picker rail.
-fn tinted_glyph(
-    store: &Entity<WorkspaceStore>,
-    provider: ProviderKind,
-    profile_id: Option<&str>,
-    cx: &App,
-) -> Icon {
-    let glyph = provider_glyph(provider);
-    let profile_id = profile_id
-        .map(str::to_string)
-        .unwrap_or_else(|| Settings::builtin_profile_id(provider).to_string());
-    let accent = store.read(cx).provider_profile_accent(&profile_id);
-    match accent {
-        Some(accent) => glyph.text_color(rgb(accent)),
-        None => glyph,
-    }
 }
 
 /// The profile a selection belongs to: its explicit profile id, or the kind's

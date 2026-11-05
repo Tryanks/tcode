@@ -2147,7 +2147,7 @@ impl SettingsPage {
             window,
             cx,
         );
-        let header = self.usage_card_header(name, kind, plan, cx);
+        let header = self.usage_card_header(profile_id, name, kind, plan, cx);
         let reported = usage.filter(|usage| usage.error.is_some() || !usage.windows.is_empty());
         let error = crate::motion::shown(
             (card_id.clone(), "error"),
@@ -2235,6 +2235,7 @@ impl SettingsPage {
 
     fn usage_card_header(
         &self,
+        profile_id: &str,
         name: &str,
         kind: agent::ProviderKind,
         plan: Option<crate::motion::Shown<String>>,
@@ -2244,7 +2245,11 @@ impl SettingsPage {
         let compact = self.window_state.read(cx).compact;
         crate::material::group_row(cx)
             .text_body(compact, cx)
-            .child(crate::provider_card::provider_glyph(kind))
+            .child(crate::provider_card::profile_glyph(
+                self.store.read(cx),
+                kind,
+                Some(profile_id),
+            ))
             .child(div().flex_1().child(name.to_owned()))
             .when_some(plan, |row, plan| {
                 row.child(plan.fade(crate::material::semantic_chip(

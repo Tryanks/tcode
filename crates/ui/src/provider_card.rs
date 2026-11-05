@@ -141,14 +141,11 @@ impl ProviderCard {
         let update_available = provider_version
             .as_ref()
             .is_some_and(|v| v.update_available);
-        let accent = store.provider_profile_accent(&self.profile_id);
-
-        let provider_icon = provider_glyph(provider);
-        let provider_icon = match accent {
-            Some(accent) => provider_icon.text_color(rgb(accent)),
-            None => provider_icon,
-        };
-        let glyph = div().flex_none().text_body(false, cx).child(provider_icon);
+        let glyph = div().flex_none().text_body(false, cx).child(profile_glyph(
+            store,
+            provider,
+            Some(&self.profile_id),
+        ));
 
         let title = h_flex()
             .gap_2()
@@ -561,8 +558,8 @@ fn same_account_profile(
         .map(|profile| store.provider_profile_display_name(&profile.id))
 }
 
-/// The provider's glyph (the same asset the composer's picker rail uses).
-/// Claude's is pre-tinted with its brand color; the others take the text color.
+/// The provider's glyph. Claude's is pre-tinted with its brand color; the
+/// others take the text color.
 pub fn provider_glyph(provider: ProviderKind) -> Icon {
     let (path, tint) = match provider {
         ProviderKind::ClaudeCode => ("icons/claude.svg", builtin_provider_color(provider)),
@@ -576,4 +573,22 @@ pub fn provider_glyph(provider: ProviderKind) -> Icon {
     Icon::empty()
         .path(path)
         .when_some(tint, |icon, tint| icon.text_color(rgb(tint)))
+}
+
+/// The glyph a provider profile is drawn with wherever that profile, rather
+/// than its CLI, is meant: the kind's [`provider_glyph`], tinted with the
+/// accent chosen on the profile's card when it has one. `None` is the kind's
+/// built-in profile.
+pub fn profile_glyph(
+    store: &WorkspaceStore,
+    provider: ProviderKind,
+    profile_id: Option<&str>,
+) -> Icon {
+    let profile_id =
+        profile_id.unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider));
+    let glyph = provider_glyph(provider);
+    match store.provider_profile_accent(profile_id) {
+        Some(accent) => glyph.text_color(rgb(accent)),
+        None => glyph,
+    }
 }

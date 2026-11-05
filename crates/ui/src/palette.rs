@@ -29,7 +29,7 @@ use gpui::{
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
-use crate::provider_card::provider_glyph;
+use crate::provider_card::profile_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
@@ -108,8 +108,9 @@ struct Item {
     label: String,
     /// Optional muted subtitle (e.g. a thread's project).
     subtitle: Option<String>,
-    /// Thread rows carry their provider glyph + last-activity time (right side).
-    provider: Option<ProviderKind>,
+    /// Thread rows carry the glyph of the provider and profile they run on +
+    /// last-activity time (right side).
+    provider: Option<(ProviderKind, Option<String>)>,
     updated_at: Option<u64>,
     action: Action,
 }
@@ -581,7 +582,7 @@ impl CommandPalette {
                                 icon: IconName::SquareTerminal,
                                 label: meta.title.clone(),
                                 subtitle: Some(crate::project_icon::label(&group.project)),
-                                provider: Some(meta.provider),
+                                provider: Some((meta.provider, meta.profile_id.clone())),
                                 updated_at: Some(meta.updated_at),
                                 action: Action::OpenThread {
                                     session_id: meta.id.clone(),
@@ -611,7 +612,7 @@ impl CommandPalette {
                             icon: IconName::Search,
                             label: hit.session_title.clone(),
                             subtitle: Some(hit.snippet.clone()),
-                            provider: meta.map(|meta| meta.provider),
+                            provider: meta.map(|meta| (meta.provider, meta.profile_id.clone())),
                             updated_at: meta.map(|meta| meta.updated_at),
                             action: Action::OpenThread {
                                 session_id: hit.session_id.clone(),
@@ -855,7 +856,7 @@ impl CommandPalette {
                             )
                         }),
                 )
-                .when_some(item.provider, |this, provider| {
+                .when_some(item.provider.clone(), |this, (provider, profile_id)| {
                     this.child(
                         h_flex()
                             .flex_none()
@@ -866,7 +867,11 @@ impl CommandPalette {
                                 let ago = now_secs().saturating_sub(at);
                                 this.child(div().child(humanize_ago(ago)))
                             })
-                            .child(provider_glyph(provider)),
+                            .child(profile_glyph(
+                                self.store.read(cx),
+                                provider,
+                                profile_id.as_deref(),
+                            )),
                     )
                 })
                 .when_some(key, |this, key| {
