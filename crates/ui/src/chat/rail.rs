@@ -433,6 +433,14 @@ impl RailCard {
         self == Self::Agents
     }
 
+    /// Whether its body is content of a height of its own (a picture and
+    /// its caption, a clamped objective and verdict) rather than rows that
+    /// grow with what the thread holds: the rail gives it all of that
+    /// height while the other cards' bodies can scroll to make room.
+    fn rigid(self) -> bool {
+        matches!(self, Self::Goal | Self::Screen)
+    }
+
     fn body(
         self,
         rail: &RailView,
@@ -727,6 +735,7 @@ impl RailView {
                 .into_any_element(),
             header,
             body,
+            rigid: card.rigid(),
             presence,
             scale: (card == RailCard::Screen).then(|| screen::scale(self)),
         }
@@ -735,9 +744,9 @@ impl RailView {
 
 #[cfg(test)]
 mod tests {
-    use agent::{Goal, GoalStatus, PlanStep, PlanStepStatus};
+    use agent::{Attachment, Goal, GoalStatus, ItemContent, ItemStatus, PlanStep, PlanStepStatus};
     use gpui::{AppContext as _, Bounds, TestAppContext, VisualTestContext, point, size};
-    use tcode_core::session::Timeline;
+    use tcode_core::session::{EntryContent, Timeline};
 
     use super::*;
     use crate::chat::tests::*;
@@ -769,6 +778,76 @@ mod tests {
             .entries
             .extend((0..commands).map(|index| at_turn(command(&format!("cmd-{index}")), 1)));
         timeline
+    }
+
+    /// A thread whose latest turn observed a window through Tcode's computer
+    /// use, and ran `agents` subagents.
+    fn observed(agents: usize) -> Timeline {
+        let mut timeline = synthetic_markdown_timeline(2);
+        timeline.entries.push(at_turn(
+            entry(
+                "observe",
+                EntryContent::Item(ItemContent::ToolCall {
+                    image_reads: vec![Attachment {
+                        media_type: "image/jpeg".into(),
+                        data_base64: "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==".into(),
+                        source_path: None,
+                    }],
+                    name: "mcp__tcode_computer_use__observe_ui".into(),
+                    input: serde_json::json!({ "root": "@r1" }),
+                    output: Some("state_id: S1\nroot: @r1 app=\"Notes\" title=\"Groceries\"".into()),
+                    status: ItemStatus::Completed,
+                }),
+            ),
+            1,
+        ));
+        timeline.entries.extend((0..agents).map(|index| {
+            at_turn(
+                entry(
+                    &format!("agent-{index}"),
+                    EntryContent::Item(ItemContent::Subagent {
+                        agent_type: "general".into(),
+                        description: format!("Look through part {index} of the notes"),
+                        status: ItemStatus::Completed,
+                        summary: Some(format!("Part {index} has nothing new")),
+                        model: None,
+                        effort: None,
+                    }),
+                ),
+                1,
+            )
+        }));
+        timeline
+    }
+
+    /// A chat window short enough that a few cards fill its rail, showing
+    /// the first of two threads with `timeline`, settled.
+    fn short_rail(
+        cx: &mut TestAppContext,
+        timeline: impl Fn() -> Timeline,
+    ) -> (TwoThreads, &mut VisualTestContext) {
+        let mut threads = seed_two_threads(cx, timeline());
+        let store = threads.store.clone();
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+            ChatView::new(store, window_state, Some(threads.first.clone()), window, cx)
+        });
+        cx.simulate_resize(size(px(1_400.), px(560.)));
+        let first = threads.first.clone();
+        threads.bind(&chat, &first, timeline(), cx);
+        draw_settled(cx);
+        assert!(
+            cx.update(|_, cx| !cx.reduce_motion()),
+            "the cards come in with motion"
+        );
+        (threads, cx)
+    }
+
+    /// The next frame, 16ms on.
+    fn next_frame(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
     }
 
     const AT_REST: &[&str] = &["frame", "body"];
@@ -829,20 +908,8 @@ mod tests {
     /// surface whatever height its share comes to.
     #[gpui::test]
     fn cards_share_a_short_rail_and_scroll_inside_it(cx: &mut TestAppContext) {
-        let mut threads = seed_two_threads(cx, timeline(0));
-        let store = threads.store.clone();
-        let window_state = cx.new(|_| WindowState::new(false));
-        let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
-            ChatView::new(store, window_state, Some(threads.first.clone()), window, cx)
-        });
-        cx.simulate_resize(size(px(1_400.), px(560.)));
+        let (threads, cx) = short_rail(cx, || timeline(0));
         let first = threads.first.clone();
-        threads.bind(&chat, &first, timeline(0), cx);
-        draw_settled(cx);
-        assert!(
-            cx.update(|_, cx| !cx.reduce_motion()),
-            "the cards come in with motion"
-        );
         inside(cx, &["goal", "plan"], AT_REST, "at rest with two cards");
 
         // The commands card comes in over frames, the others giving way.
@@ -858,9 +925,7 @@ mod tests {
                 &format!("frame {frame}"),
             );
             on_surfaces(cx, &["goal", "plan"], &format!("frame {frame}"));
-            cx.update(|window, cx| window.simulate_next_frame(cx));
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(16));
+            next_frame(cx);
         }
         draw_settled(cx);
         inside(
@@ -914,5 +979,61 @@ mod tests {
             AT_REST,
             "after scrolling",
         );
+    }
+
+    /// A card whose body has a height of its own keeps all of it when a card
+    /// of many rows crowds the rail: the computer-use card shows its whole
+    /// picture and caption, with nothing to scroll, on every frame the
+    /// agents card comes in and once it is in, and the agents card scrolls
+    /// in what is left.
+    #[gpui::test]
+    fn a_card_of_fixed_height_keeps_it_in_a_crowded_rail(cx: &mut TestAppContext) {
+        let (threads, cx) = short_rail(cx, || observed(0));
+        let alone = bounds(cx, "rail-card-body-screen").expect("the screen card shows");
+        let picture = bounds(cx, "rail-screen-picture").expect("the picture shows");
+        let whole = |cx: &mut VisualTestContext, when: &str| {
+            let body = bounds(cx, "rail-card-body-screen").expect("the screen card shows");
+            assert!(
+                (body.size.height - alone.size.height).abs() <= px(0.5),
+                "{when}: the screen card's body is {body:?}, not its whole content {alone:?}"
+            );
+            let shown = bounds(cx, "rail-screen-picture").expect("the picture shows");
+            assert!(
+                (shown.size.height - picture.size.height).abs() <= px(0.5),
+                "{when}: the picture is drawn {shown:?}, not at its whole size {picture:?}"
+            );
+        };
+
+        threads.store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(threads.first.clone(), observed(40), cx)
+        });
+        draw(cx);
+        for frame in 0..30 {
+            let when = format!("frame {frame}");
+            whole(cx, &when);
+            inside(cx, &["agents", "screen"], &["frame"], &when);
+            next_frame(cx);
+        }
+        draw_settled(cx);
+        whole(cx, "at rest");
+        inside(cx, &["agents", "screen"], AT_REST, "at rest");
+
+        let body = bounds(cx, "rail-card-body-agents").expect("the agents body shows");
+        assert!(body.size.height > px(0.), "the agents body has room");
+        let newest = bounds(cx, "rail-agent-agent-39").expect("the newest agent is listed");
+        cx.simulate_mouse_move(body.center(), None, gpui::Modifiers::default());
+        cx.simulate_event(gpui::ScrollEvent {
+            position: body.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-20.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        draw_settled(cx);
+        let scrolled = bounds(cx, "rail-agent-agent-39").expect("the newest agent is listed");
+        assert!(
+            scrolled.top() < newest.top(),
+            "the agents body scrolls inside its card"
+        );
+        whole(cx, "after the agents scroll");
     }
 }
