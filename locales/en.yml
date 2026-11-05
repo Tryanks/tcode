@@ -1314,7 +1314,9 @@ preview:
   close: "Close preview and release the page"
   copy_url: "Copy URL"
   starting: "Preview is starting…"
-  unsupported_client: "this device has no embedded browser, so the preview tools are unavailable here"
+  elsewhere: "Shown on %{device}"
+  elsewhere_hint: "Its page, and the agent's preview tools, are on that device. Show here moves the page; its sign-ins and cookies stay on that device."
+  show_here: "Show here"
   unavailable: "The preview browser could not start."
   unavailable_hint: "It needs the system webview component. Everything else in Tcode works without it."
 git:

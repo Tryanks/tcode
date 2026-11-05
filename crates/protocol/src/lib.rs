@@ -13,7 +13,7 @@ pub use original::{OriginalMetadata, OriginalReply, OriginalRequest, OriginalTar
 mod preview;
 mod pull_request;
 mod query;
-pub use preview::{PreviewRequest, PreviewResponse};
+pub use preview::{PreviewClient, PreviewRequest, PreviewResponse, PreviewSession, PreviewTab};
 pub use pull_request::{
     MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestAction, PullRequestActionResult,
     PullRequestActionState, PullRequestActor, PullRequestCapabilities, PullRequestComment,
@@ -262,6 +262,15 @@ pub use wire::{
 // ProviderUsageChanged event; Settings' scroll_to_latest_on_send with the
 // ScrollToLatestOnSend patch; and the provider_batch_line_break runtime
 // error.
+//
+// Unreleased: the host holds each thread's preview (PreviewSession, its
+// renderer, tabs and user_acted_since_snapshot) on the new PreviewSession
+// topic with PreviewSessionReplaced; the Preview topic carries the
+// subscribing client (PreviewClient) and only the requests of the threads it
+// renders, with PreviewRenderingReplaced naming those threads; the protocol
+// adds the ShowPreviewHere, ReportPreviewTabs and ReportPreviewInput
+// commands; and a status request's reply carries userActedSinceSnapshot and
+// renderedOn.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

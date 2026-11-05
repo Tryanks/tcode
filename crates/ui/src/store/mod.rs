@@ -40,6 +40,8 @@ mod history;
 pub(crate) use history::HISTORY_WINDOW_SCREENS;
 pub(crate) mod images;
 mod intents;
+mod preview;
+pub(crate) use preview::{PreviewPlace, PreviewReleased};
 mod thread;
 pub(crate) use images::{
     MAX_PREVIEW_PIXELS, MediaState, image_preview, item_image_preview, pull_request_media,
@@ -88,7 +90,7 @@ impl From<&Topic> for TopicKind {
             Topic::RuntimeEvents => Self::RuntimeEvents,
             Topic::Terminal { .. } => Self::Terminal,
             Topic::CommandOutput { .. } => Self::CommandOutput,
-            Topic::Preview => Self::Preview,
+            Topic::Preview { .. } | Topic::PreviewSession { .. } => Self::Preview,
             Topic::ExternalImport { .. } => Self::ExternalImport,
             Topic::Hosting => Self::Hosting,
         }
@@ -181,13 +183,12 @@ pub struct WorkspaceStore {
     attachment_tasks: Vec<Task<()>>,
     /// Replicated terminal grids, keyed by the host's terminal id.
     terminals: HashMap<u64, std::rc::Rc<ClientTerminal>>,
-    /// Preview requests routed to this client. Every client owns the channel:
-    /// one without a backend still has to answer `unsupported` rather than
-    /// leave the agent's call hanging.
+    /// The agents' preview requests for the threads this client renders.
     remote_preview: (
         async_channel::Sender<EventEnvelope>,
         async_channel::Receiver<EventEnvelope>,
     ),
+    preview: preview::PreviewReplica,
     /// Latest host-published import status per project, replicated from
     /// [`Topic::ExternalImport`]. The dialog renders this rather than owning a
     /// second events consumer.
@@ -259,6 +260,8 @@ enum Reach {
     /// Only one terminal's grid: only what draws it, and what drains its
     /// bell and clipboard, is told.
     Terminal(u64),
+    /// Only these threads' previews: only their readers are.
+    Preview(Vec<String>),
 }
 
 /// Where a window of a thread's log sits in the whole log.
@@ -409,6 +412,8 @@ impl WorkspaceStore {
             attachment_tasks: Vec::new(),
             terminals: HashMap::new(),
             remote_preview: async_channel::unbounded(),
+            // Named below, from the preferences.
+            preview: preview::PreviewReplica::new(String::new()),
             import_statuses: HashMap::new(),
             connection_state: if remote {
                 host.connection_state()
@@ -446,6 +451,7 @@ impl WorkspaceStore {
             creation_request_generation: 0,
         };
         let mut store = store;
+        store.preview = preview::PreviewReplica::new(store.client_device_name());
 
         let _ = host.subscribe(Subscription {
             known_index: None,
@@ -565,6 +571,7 @@ impl WorkspaceStore {
         }));
     }
 
+    #[cfg(preview_backend)]
     pub(crate) fn preview_reply(
         &mut self,
         request_id: u64,
@@ -576,6 +583,7 @@ impl WorkspaceStore {
         });
     }
 
+    #[cfg(preview_backend)]
     pub(crate) fn remote_preview_requests(&self) -> async_channel::Receiver<EventEnvelope> {
         self.remote_preview.1.clone()
     }
@@ -725,16 +733,10 @@ impl WorkspaceStore {
                         after: None,
                     });
                 }
-                // A client with no preview backend must not become a competing
-                // owner of the preview: it would win requests it can only
-                // refuse. It still answers `unsupported` for anything that
-                // reaches it through an already-open subscription.
+                // Only a client that can render pages offers to: the host
+                // hands an agent's requests to a client that renders them.
                 if crate::preview_panel::preview_backend() {
-                    let _ = self.host.subscribe(Subscription {
-                        known_index: None,
-                        topic: Topic::Preview,
-                        after: None,
-                    });
+                    self.offer_preview();
                 }
                 for session_id in self.open_threads() {
                     self.reopen_thread(&session_id, cx);
@@ -1188,6 +1190,11 @@ impl WorkspaceStore {
             }
             // Its grid and label revisions are moved on as it applies.
             Reach::Terminal(terminal_id) => cx.emit(TerminalChange { terminal_id }),
+            Reach::Preview(session_ids) => {
+                for session_id in session_ids {
+                    self.bump_preview(&session_id, cx);
+                }
+            }
         }
         cx.emit(change);
     }
@@ -1229,7 +1236,8 @@ impl WorkspaceStore {
                 Topic::Settings
                     | Topic::Providers
                     | Topic::RuntimeEvents
-                    | Topic::Preview
+                    | Topic::Preview { .. }
+                    | Topic::PreviewSession { .. }
                     | Topic::ExternalImport { .. }
                     | Topic::Hosting
             )
@@ -1362,9 +1370,14 @@ impl WorkspaceStore {
             }
             (_, event) => Some(event),
         };
+        if let Some(event) = &event
+            && let Some(changed) = self.apply_preview_event(topic, event, cx)
+        {
+            reach = Reach::Preview(changed);
+        }
         if let Some(mut event) = event {
             match (topic, &mut event) {
-                (Topic::Preview, ServerEvent::PreviewRequest { .. }) => {
+                (Topic::Preview { .. }, ServerEvent::PreviewRequest { .. }) => {
                     let _ = self.remote_preview.0.try_send(EventEnvelope {
                         request_id,
                         topic: envelope_topic.clone(),
@@ -2421,53 +2434,10 @@ impl WorkspaceStore {
             .find_map(|(destination, ui)| (destination.preference_key() == key).then_some(ui))
     }
 
-    fn conversation_ui_by_key_mut(&mut self, key: &str) -> Option<&mut ConversationUiState> {
-        self.conversation_ui
-            .iter_mut()
-            .find_map(|(destination, ui)| (destination.preference_key() == key).then_some(ui))
-    }
-
     /// Whether the conversation `key` names has its right panel open.
     pub(crate) fn right_panel_open_for_key(&self, key: &str) -> bool {
         self.conversation_ui_by_key(key)
             .is_some_and(|ui| ui.right_panel_open)
-    }
-
-    pub fn preview_url(&self, key: &str) -> Option<String> {
-        self.conversation_ui_by_key(key)
-            .and_then(|ui| ui.preview_url.clone())
-    }
-
-    pub fn set_preview_url(&mut self, key: &str, url: String, cx: &mut Context<Self>) {
-        if let Some(ui) = self.conversation_ui_by_key_mut(key) {
-            ui.preview_url = Some(url);
-            cx.notify();
-        }
-    }
-
-    pub fn preview_canvas(&self, key: &str) -> Option<(u32, u32)> {
-        self.conversation_ui_by_key(key)
-            .and_then(|ui| ui.preview_canvas)
-    }
-
-    pub fn set_preview_canvas(
-        &mut self,
-        key: &str,
-        canvas: Option<(u32, u32)>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(ui) = self.conversation_ui_by_key_mut(key) {
-            ui.preview_canvas = canvas;
-            cx.notify();
-        }
-    }
-
-    pub fn clear_preview_chrome(&mut self, key: &str, cx: &mut Context<Self>) {
-        if let Some(ui) = self.conversation_ui_by_key_mut(key) {
-            ui.preview_url = None;
-            ui.preview_canvas = None;
-            cx.notify();
-        }
     }
 
     /// The project view: projects ordered by the activity of every thread
@@ -2656,6 +2626,7 @@ impl WorkspaceStore {
     pub fn set_client_device_name(&mut self, name: Option<String>) {
         self.client_preferences.device_name = name.filter(|name| !name.trim().is_empty());
         self.save_client_preferences();
+        self.rename_preview_client();
     }
 
     /// The device's own per-image ceiling for attachments sent across the
@@ -4229,6 +4200,7 @@ impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
 impl EventEmitter<StoreChange> for WorkspaceStore {}
 impl EventEmitter<TerminalChange> for WorkspaceStore {}
 impl EventEmitter<ShowThread> for WorkspaceStore {}
+impl EventEmitter<PreviewReleased> for WorkspaceStore {}
 impl EventEmitter<ConnectionState> for WorkspaceStore {}
 impl EventEmitter<tcode_protocol::HostingState> for WorkspaceStore {}
 
@@ -4334,7 +4306,7 @@ pub(crate) mod tests {
                             ClientPayload::Subscribe(subscription)
                                 if matches!(
                                     subscription.topic,
-                                    Topic::RuntimeEvents | Topic::Preview
+                                    Topic::RuntimeEvents | Topic::Preview { .. }
                                 ) && scope == Scope::Full =>
                             {
                                 HostMessage::Ack {
@@ -4758,7 +4730,8 @@ pub(crate) mod tests {
                             | Topic::Settings
                             | Topic::Providers
                             | Topic::RuntimeEvents
-                            | Topic::Preview
+                            | Topic::Preview { .. }
+                            | Topic::PreviewSession { .. }
                             | Topic::ExternalImport { .. },
                         ..
                     })
@@ -4978,6 +4951,7 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(preview_backend)]
     #[gpui::test]
     fn preview_requests_for_an_unviewed_thread_reach_the_panel(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
@@ -5001,7 +4975,12 @@ pub(crate) mod tests {
             store.receive(
                 EventEnvelope {
                     request_id: None,
-                    topic: Topic::Preview,
+                    topic: Topic::Preview {
+                        client: tcode_protocol::PreviewClient {
+                            id: "this-client".into(),
+                            name: "This client".into(),
+                        },
+                    },
                     event: ServerEvent::PreviewRequest {
                         request_id: 7,
                         session_id: "background".into(),
@@ -7083,6 +7062,107 @@ pub(crate) mod tests {
         driver.link.close();
         drop(driver);
         // A remote client closes its attachment; the local owner closes the host.
+        host.to_host.close();
+        host.from_host.close();
+        host.stopped.recv_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two clients of one host show the same thread's preview: the first to
+    /// show it renders it, the other says where it is, and Show here moves
+    /// the page across, the first letting its page go.
+    #[cfg(preview_backend)]
+    #[gpui::test]
+    fn show_here_moves_a_threads_preview_between_clients(cx: &mut TestAppContext) {
+        use crate::store::{PreviewPlace, PreviewReleased};
+        let root = scratch_root("preview-handover");
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project_at("p", &root)).unwrap();
+        disk.upsert_meta(&thread(&root, "one", "p", None)).unwrap();
+        let host = test_host(disk);
+        let mux =
+            tcode_traverse::mux::HostMux::new(host.attachments.clone(), host.from_host.clone());
+        let client = |name: &str, cx: &mut TestAppContext| {
+            let connection = mux.attach(
+                tcode_protocol::Principal::Full,
+                tcode_client::attachment::AttachmentPolicy::network(),
+            );
+            let mut driver = LocalHostDriver::from_link(tcode_client::HostLink::new(
+                connection.to_host,
+                connection.from_host,
+            ));
+            let store = driver.workspace(cx);
+            store.update(cx, |store, cx| {
+                store.set_client_device_name(Some(name.into()));
+                store.show_alone("one".into(), cx);
+            });
+            (driver, store)
+        };
+        let (mut desk_driver, desk) = client("Desk", cx);
+        let (mut laptop_driver, laptop) = client("Laptop", cx);
+        let released = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _released = cx.update(|cx| {
+            let released = released.clone();
+            cx.subscribe(&desk, move |_, event: &PreviewReleased, _| {
+                released.borrow_mut().push(event.session_id.clone())
+            })
+        });
+        let place = |store: &gpui::Entity<WorkspaceStore>, cx: &TestAppContext| {
+            store.read_with(cx, |store, cx| store.preview_place("one", cx))
+        };
+        let mut settle =
+            |cx: &mut TestAppContext,
+             what: &str,
+             ready: &mut dyn FnMut(&mut TestAppContext) -> bool| {
+                let deadline = host_deadline();
+                loop {
+                    desk_driver.step(cx, &desk);
+                    laptop_driver.step(cx, &laptop);
+                    if ready(cx) {
+                        return;
+                    }
+                    assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            };
+
+        // The desk shows the preview first, as its panel would.
+        settle(cx, "the desk renders", &mut |cx| {
+            desk.update(cx, |store, _| store.claim_preview("one"));
+            place(&desk, cx) == PreviewPlace::Here
+        });
+        let url = "http://localhost:5173/".to_string();
+        desk.update(cx, |store, cx| {
+            store.set_preview_url("one", url.clone(), cx)
+        });
+        settle(cx, "the laptop sees where the page is", &mut |cx| {
+            laptop.update(cx, |store, _| store.claim_preview("one"));
+            place(&laptop, cx) == PreviewPlace::Elsewhere("Desk".into())
+                && laptop.read_with(cx, |store, _| store.preview_url("one")) == Some(url.clone())
+        });
+        assert!(released.borrow().is_empty());
+
+        laptop.update(cx, |store, cx| store.show_preview_here("one", cx));
+        assert_eq!(place(&laptop, cx), PreviewPlace::Here);
+        settle(cx, "the desk lets its page go", &mut |cx| {
+            place(&desk, cx) == PreviewPlace::Elsewhere("Laptop".into())
+                && !released.borrow().is_empty()
+        });
+        assert_eq!(*released.borrow(), ["one"]);
+        assert_eq!(place(&laptop, cx), PreviewPlace::Here);
+        assert_eq!(
+            laptop.read_with(cx, |store, _| store.preview_url("one")),
+            Some(url),
+            "the page reopens where it was"
+        );
+
+        let link = desk_driver.link.clone();
+        desk_driver
+            .await_with_events(cx, &desk, link.command(Command::ShutdownAllAndFlush))
+            .unwrap();
+        desk_driver.link.close();
+        laptop_driver.link.close();
+        drop((desk_driver, laptop_driver));
         host.to_host.close();
         host.from_host.close();
         host.stopped.recv_blocking().unwrap();

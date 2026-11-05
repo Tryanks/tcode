@@ -455,12 +455,13 @@ fn a_pane_narrowing_into_cover_hands_the_panel_the_keyboard(cx: &mut TestAppCont
 #[gpui::test]
 fn a_docked_page_fills_its_slot_and_keeps_its_size_as_it_slides(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-    let (shell, _host, cx) = mount_panes(cx);
+    let (shell, host, cx) = mount_panes(cx);
     let store = store_of(&shell, cx);
     one_pane(1345., cx);
     store.update(cx, |store, cx| {
         store.toggle_tab_panel_for("thread-1", RightTab::Preview, cx)
     });
+    render_preview_here(&host, &store, "thread-1", cx);
     draw(cx);
     let mut widths = Vec::new();
     for _ in 0..60 {

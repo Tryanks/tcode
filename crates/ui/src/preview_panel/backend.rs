@@ -510,6 +510,7 @@ impl PreviewPanel {
     }
 
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.user_acted(cx);
         if let Some(id) = self.active_key(cx)
             && let Availability::Ready(view) = self.ensure_webview(&id, window, cx)
         {
@@ -522,6 +523,7 @@ impl PreviewPanel {
     }
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
+        self.user_acted(cx);
         if let Some(id) = self.active_key(cx) {
             #[cfg(target_os = "android")]
             self.eval_fire(&id, "history.forward();", cx);
@@ -537,6 +539,7 @@ impl PreviewPanel {
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
+        self.user_acted(cx);
         if let Some(id) = self.active_key(cx) {
             self.eval_fire(&id, "location.reload();", cx);
         }
@@ -580,7 +583,7 @@ impl PreviewPanel {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     let url = format!("http://localhost:{port}/");
                                     if let Some(key) = this.active_key(cx) {
-                                        this.navigate(&key, &url, window, cx);
+                                        this.navigate_here(&key, &url, window, cx);
                                     }
                                 })),
                         )

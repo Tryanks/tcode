@@ -1049,7 +1049,12 @@ impl AppState {
             Topic::SessionEvents { .. } => return None,
             Topic::CommandOutput { .. } => return None,
             Topic::RuntimeEvents => return None,
-            Topic::Preview => return None,
+            Topic::Preview { client } => {
+                ServerEvent::PreviewRenderingReplaced(self.preview_rendering_snapshot(client))
+            }
+            Topic::PreviewSession { session_id } => {
+                ServerEvent::PreviewSessionReplaced(self.preview_session_snapshot(session_id))
+            }
             // The transport that owns hosting answers it.
             Topic::Hosting => return None,
             // Retained latest-run status, so a client that subscribes after a

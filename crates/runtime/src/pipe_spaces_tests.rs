@@ -448,6 +448,12 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             request_id: "request".into(),
             approve: true,
         },
+        // Preview is a full device's: a member may not render even its own thread's.
+        Command::ShowPreviewHere {
+            session_id: "a".into(),
+            client_id: "member-device".into(),
+            take_over: true,
+        },
         // A reference would let thread a's model read thread b, which the space cannot read.
         Command::AddThreadReference {
             session_id: "a".into(),
@@ -472,7 +478,15 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         Topic::Settings,
         Topic::Providers,
         Topic::RuntimeEvents,
-        Topic::Preview,
+        Topic::Preview {
+            client: tcode_protocol::PreviewClient {
+                id: "member-device".into(),
+                name: "Member device".into(),
+            },
+        },
+        Topic::PreviewSession {
+            session_id: "a".into(),
+        },
         Topic::ExternalImport {
             project_id: host.a.id.clone(),
         },

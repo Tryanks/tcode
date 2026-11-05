@@ -26,8 +26,8 @@ pub struct HostServices {
     pub background_startup_probes: bool,
     /// Generate AI-authored titles for new threads and explicit regeneration.
     pub ai_title_generation: bool,
-    /// URL/tokens and the broker receiver stay host-side. Requests reach
-    /// subscribed WebViews through the preview reverse-RPC topic.
+    /// URL/tokens and the broker receiver stay host-side. Requests reach the
+    /// client rendering the thread's preview on its preview topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
     pub pull_requests: Option<pull_request_mcp::PullRequestMcpServer>,
     /// Registration-only startup data (URL and token issuer); this contains no
@@ -39,8 +39,8 @@ pub struct HostServices {
 impl HostServices {
     /// Starts the MCP servers a host offers its agents on one loopback MCP host, computer use
     /// only where `computer_use`. A host that cannot bind or start runs without any of them.
-    /// Preview requests travel to whichever client shows the session's preview panel, so a host
-    /// without a desktop serves preview too.
+    /// Preview requests travel to the client rendering the thread's preview, so a host without a
+    /// desktop serves preview too.
     pub fn start_mcp_servers(&mut self, computer_use: bool) -> std::io::Result<()> {
         let mut host = mcp_host::Host::bind()?;
         let preview = preview_mcp::start(&mut host);
@@ -503,7 +503,25 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::PreviewReply {
             request_id,
             response,
-        } => app.resolve_preview(request_id, response),
+        } => app.resolve_preview(request_id, response, cx),
+        Command::ShowPreviewHere {
+            session_id,
+            client_id,
+            take_over,
+        } => {
+            if let Err(error) = app.show_preview_here(&session_id, &client_id, take_over, cx) {
+                return CommandOutcome::Immediate(Err(error));
+            }
+        }
+        Command::ReportPreviewTabs {
+            session_id,
+            client_id,
+            tabs,
+        } => app.report_preview_tabs(&session_id, &client_id, tabs, cx),
+        Command::ReportPreviewInput {
+            session_id,
+            client_id,
+        } => app.report_preview_input(&session_id, &client_id, cx),
         Command::ApplyPendingRelaunch => {
             let (section, session_id) = app.apply_pending_relaunch();
             response = CommandResponse::PendingRelaunchSection {

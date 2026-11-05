@@ -55,7 +55,15 @@ pub enum Topic {
         item_id: String,
         cols: u16,
     },
-    Preview,
+    /// One client's preview channel, subscribed while it can render pages:
+    /// the threads it renders, and their agents' preview requests.
+    Preview {
+        client: crate::PreviewClient,
+    },
+    /// The host-held preview of one thread.
+    PreviewSession {
+        session_id: String,
+    },
     ExternalImport {
         project_id: String,
     },
@@ -95,11 +103,21 @@ pub enum ServerEvent {
     /// What changed in a [`Topic::CommandOutput`]'s screen since the last
     /// screen or change pushed on it.
     CommandOutputDelta(Box<crate::terminal::TerminalDelta>),
+    /// An agent's preview request, sent on the [`Topic::Preview`] of the
+    /// one client rendering its thread.
     PreviewRequest {
         request_id: u64,
         session_id: String,
         request: crate::PreviewRequest,
     },
+    /// The threads a [`Topic::Preview`]'s client renders, each as it stood
+    /// when rendering came to that client: the answer to subscribing, and a
+    /// push whenever the set changes. A thread that leaves the set is
+    /// rendered elsewhere or nowhere, and its page here is let go.
+    PreviewRenderingReplaced(Vec<crate::PreviewSession>),
+    /// A [`Topic::PreviewSession`]'s whole state: the answer to subscribing,
+    /// and a push after every change.
+    PreviewSessionReplaced(crate::PreviewSession),
     SessionEvent(StoredEvent),
     SessionStatusReplaced(Box<SessionStatus>),
     SessionUsageChanged {
