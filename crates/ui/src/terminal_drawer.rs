@@ -1454,12 +1454,16 @@ impl TerminalDrawer {
             if let Some(text) = self
                 .workspace_store
                 .read(cx)
-                .with_terminal_workspace_for(self.session_id.as_deref(), |workspace| {
-                    workspace
-                        .terminal(terminal_id)
-                        .and_then(|entry| entry.terminal.selected_text())
-                        .map(|selection| selection.text)
-                })
+                .with_terminal_workspace_for(
+                    self.session_id.as_deref(),
+                    |workspace| {
+                        workspace
+                            .terminal(terminal_id)
+                            .and_then(|entry| entry.terminal.selected_text())
+                            .map(|selection| selection.text)
+                    },
+                    cx,
+                )
                 .flatten()
             {
                 cx.write_to_primary(ClipboardItem::new_string(text));
