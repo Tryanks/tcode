@@ -738,6 +738,14 @@ fn serve_streamed_on(host: &MountedShell, id: &str) {
 /// and a long answer, so nothing of it lies where thread-1's lies, and side
 /// rail cards of its own, which replace thread-1's.
 fn serve_other(host: &MountedShell) {
+    serve_other_after(host, 1);
+}
+
+/// [`serve_other`] once its turn has gone on `went_on` times while the pane
+/// was away: before that it has neither a goal, a plan nor a command; the
+/// first time it gains them and the side rail's cards, and each time after
+/// it runs one more command.
+fn serve_other_after(host: &MountedShell, went_on: usize) {
     let mut status = session_status("thread-2", std::path::Path::new(PANES_CWD));
     let mut events = vec![
         started(),
@@ -759,7 +767,21 @@ fn serve_other(host: &MountedShell) {
             },
         }),
     ];
-    with_rail(host, "thread-2", &mut status, &mut events);
+    if went_on > 0 {
+        with_rail(host, "thread-2", &mut status, &mut events);
+    }
+    events.extend((1..went_on).map(|index| {
+        agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: format!("thread-2-more-{index}"),
+            parent_item_id: None,
+            content: agent::ItemContent::CommandExecution {
+                command: format!("cargo test --test part-{index}"),
+                output: "ok\n".into(),
+                exit_code: Some(0),
+                status: agent::ItemStatus::Completed,
+            },
+        })
+    }));
     events.push(completed());
     serve_log(host, status, events);
 }
@@ -820,14 +842,16 @@ fn differences(a: &[[i32; 4]], b: &[[i32; 4]]) -> (Vec<[i32; 4]>, Vec<[i32; 4]>)
 /// its right panel, its terminal drawer, its agents, an agent's window, an
 /// answer streaming in, its side rail's cards) and whatever the thread
 /// shown had when it was last on screen, an answer it left still revealing
-/// included, which the thread finished while away. Only the thread's fade
-/// in, which moves nothing, plays.
+/// included, which the thread finished while away, and whatever it gained
+/// while away (a goal, a plan, commands its turn ran). Only the thread's
+/// fade in, which moves nothing, plays.
 #[gpui::test]
 fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
     let (shell, host, cx) = mount_panes(cx);
     let store = store_of(&shell, cx);
     let mut failures = Vec::new();
+    let mut went_on = 0;
     for holding in [
         Holding::Plain,
         Holding::Steers,
@@ -886,8 +910,10 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
                     serve_holding(&host, id, holding);
                     switch(&shell, key, id, cx);
                 }
+                // thread-2 went on while the pane was away.
                 _ => {
-                    serve_other(&host);
+                    serve_other_after(&host, went_on);
+                    went_on += 1;
                     switch(&shell, key, id, cx);
                 }
             }

@@ -676,6 +676,43 @@ impl Render for ChatView {
             self.composer
                 .update(cx, |composer, cx| composer.set_compact(compact, cx));
         }
+        // The skeleton, the empty workspace and the thread cross-fade. A
+        // thread that leaves cannot be drawn again (the view is bound to what
+        // replaced it), so what comes after it fades in over nothing.
+        let loading = self
+            .workspace_store
+            .read(cx)
+            .chat_loading_for(self.session_id.as_deref(), cx);
+        let surface = match (&active, loading) {
+            (_, true) => SURFACE_SKELETON,
+            (None, false) => SURFACE_EMPTY,
+            (Some(_), false) => SURFACE_THREAD,
+        };
+        // What the view was bound to shows once it can be drawn at rest;
+        // until then nothing does, and the skeleton only once that has
+        // taken longer than a glance.
+        if !self.scene_shown && self.scene_ready(loading, cx) {
+            self.scene_shown = true;
+            // What the thread drew while it readied itself unseen moved
+            // toward what arrived meanwhile (a catch-up's rows and text, the
+            // goal and rail it brought). The reader's first frame starts the
+            // scene anew, so all of that is where it rests; only the
+            // surface's own fade in, from what showed until now, plays.
+            let unseen = if now.saturating_duration_since(self.scene_at) >= SCENE_PATIENCE {
+                SURFACE_SKELETON
+            } else {
+                SURFACE_NOTHING
+            };
+            self.scene.restart();
+            self.motion
+                .layers("chat-surface", unseen, 4, GLIDE, window, cx);
+            self.timeline.update(cx, |timeline, cx| {
+                timeline.settle_reveals(cx);
+                cx.notify();
+            });
+            self.composer.update(cx, |_, cx| cx.notify());
+            self.rail.update(cx, |_, cx| cx.notify());
+        }
         // The phone reads on T1 paper; the desktop keeps the glass canvas,
         // but for an agent beside its lead, which reads on its card or sheet.
         // The header's title menu dispatches these, and the header is a sibling of `main`.
@@ -697,31 +734,6 @@ impl Render for ChatView {
             .on_action(cx.listener(Self::on_show_agent_tools))
             .on_action(cx.listener(Self::on_toggle_panel));
 
-        // The skeleton, the empty workspace and the thread cross-fade. A
-        // thread that leaves cannot be drawn again (the view is bound to what
-        // replaced it), so what comes after it fades in over nothing.
-        let loading = self
-            .workspace_store
-            .read(cx)
-            .chat_loading_for(self.session_id.as_deref(), cx);
-        let surface = match (&active, loading) {
-            (_, true) => SURFACE_SKELETON,
-            (None, false) => SURFACE_EMPTY,
-            (Some(_), false) => SURFACE_THREAD,
-        };
-        // What the view was bound to shows once it can be drawn at rest;
-        // until then nothing does, and the skeleton only once that has
-        // taken longer than a glance.
-        if !self.scene_shown && self.scene_ready(loading, cx) {
-            self.scene_shown = true;
-            // What arrived while the thread readied itself unseen (a
-            // catch-up's text, the rail it brought) is there as it is on
-            // the first frame the reader sees.
-            self.timeline
-                .update(cx, |timeline, cx| timeline.settle_reveals(cx));
-            self.motion.forget("chat-rail");
-            self.motion.forget("chat-side");
-        }
         if self.held {
             self.motion.forget("chat-surface");
         }
