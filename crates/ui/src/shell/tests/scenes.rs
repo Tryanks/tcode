@@ -543,6 +543,9 @@ enum Holding {
     /// pane leaves; while away the turn finishes the answer and goes on
     /// past it, which the host sends once the pane is back.
     StreamedOn,
+    /// One turn done, which ran a command, with a goal and a plan: the
+    /// side rail shows their cards.
+    Rail,
 }
 
 /// What [`Holding::StreamedOn`]'s answer has streamed by the time the pane
@@ -610,6 +613,45 @@ fn serve_holding(host: &MountedShell, id: &str, holding: Holding) {
             text: "Reading the build files, then the tests that cover them. ".repeat(4),
         }),
         Holding::StreamedOn => events.push(answer_delta(id, streamed_on(0))),
+        Holding::Rail => {
+            status.goal = Some(agent::Goal {
+                objective: format!("Keep {id} going"),
+                status: agent::GoalStatus::Active,
+                tokens_used: Some(12_000),
+                token_budget: Some(200_000),
+                time_used_secs: Some(90),
+                checks: Some(2),
+                last_check: None,
+            });
+            send_events(
+                host,
+                vec![(
+                    Topic::SessionPlan {
+                        session_id: id.into(),
+                    },
+                    ServerEvent::SessionPlanReplaced(tcode_protocol::SessionPlan {
+                        session_id: id.into(),
+                        steps: (0..3)
+                            .map(|step| agent::PlanStep {
+                                step: format!("Step {step} of {id}'s plan"),
+                                status: agent::PlanStepStatus::Pending,
+                            })
+                            .collect(),
+                        explanation: None,
+                    }),
+                )],
+            );
+            events.push(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: format!("{id}-command"),
+                parent_item_id: None,
+                content: agent::ItemContent::CommandExecution {
+                    command: "cargo test".into(),
+                    output: "ok\n".into(),
+                    exit_code: Some(0),
+                    status: agent::ItemStatus::Completed,
+                },
+            }));
+        }
         Holding::Plain | Holding::RightPanel | Holding::AgentsPanel => {}
     }
     if !running {
@@ -766,10 +808,10 @@ fn differences(a: &[[i32; 4]], b: &[[i32; 4]]) -> (Vec<[i32; 4]>, Vec<[i32; 4]>)
 /// on the first frame that shows a thread, everything painted is where and
 /// as large as it rests, whatever the thread left was showing (its steers,
 /// its right panel, its terminal drawer, its agents, an agent's window, an
-/// answer streaming in) and whatever the thread shown had when it was last
-/// on screen, an answer it left still revealing included, which the thread
-/// finished while away. Only the thread's fade in, which moves nothing,
-/// plays.
+/// answer streaming in, its side rail's cards) and whatever the thread
+/// shown had when it was last on screen, an answer it left still revealing
+/// included, which the thread finished while away. Only the thread's fade
+/// in, which moves nothing, plays.
 #[gpui::test]
 fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -785,6 +827,7 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
         Holding::Subagent,
         Holding::Streaming,
         Holding::StreamedOn,
+        Holding::Rail,
     ] {
         serve_holding(&host, "thread-1", holding);
         switch(&shell, "secondary-1", "thread-1", cx);
@@ -866,6 +909,125 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
             _ => {}
         });
         settle_frames(cx);
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// How light the last frame is at `probe`, by relative luminance, over a
+/// black or a white `backdrop` (what the window's translucent canvas lets
+/// through): every solid fill and every shadow drawn there, composited in
+/// the order they were drawn. A shadow counts where its blur has reached
+/// its full strength, so `probe` lies well inside what it shades.
+fn luminance_at(
+    window: &gpui::Window,
+    probe: gpui::Point<gpui::ScaledPixels>,
+    backdrop: f32,
+) -> f32 {
+    let mut drawn: Vec<(u32, gpui::Hsla)> = crate::test_frames::painted_quads(window)
+        .iter()
+        .filter(|quad| quad.bounds.contains(&probe) && quad.content_mask.bounds.contains(&probe))
+        .filter_map(|quad| Some((quad.order, quad.background.as_solid()?)))
+        .collect();
+    drawn.extend(
+        crate::test_frames::painted_shadows(window)
+            .iter()
+            .filter(|shadow| {
+                let full = shadow
+                    .bounds
+                    .dilate(gpui::ScaledPixels(-3. * shadow.blur_radius.0));
+                full.contains(&probe) && shadow.content_mask.bounds.contains(&probe)
+            })
+            .map(|shadow| (shadow.order, shadow.color)),
+    );
+    drawn.sort_by_key(|(order, _)| *order);
+    let [r, g, b] = drawn.iter().fold([backdrop; 3], |under, (_, colour)| {
+        let colour = gpui::Rgba::from(*colour);
+        let over = |channel: f32, under: f32| channel * colour.a + under * (1. - colour.a);
+        [
+            over(colour.r, under[0]),
+            over(colour.g, under[1]),
+            over(colour.b, under[2]),
+        ]
+    });
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// The cards [`Holding::Rail`] shows on the side rail.
+const RAIL_CARDS: [&str; 3] = ["goal", "plan", "commands"];
+
+/// How light each of the rail's cards is drawn at its centre in the last
+/// frame, over a black and a white backdrop; nothing for a card not drawn.
+fn rail_lightness(cx: &mut VisualTestContext) -> [Option<[f32; 2]>; 3] {
+    let cards = RAIL_CARDS.map(|card| cx.debug_bounds(format!("rail-card-frame-{card}").leak()));
+    cx.update(|window, _| {
+        let scale = window.scale_factor();
+        cards.map(|card| {
+            let centre = card?.center().scale(scale);
+            Some([0., 1.].map(|backdrop| luminance_at(window, centre, backdrop)))
+        })
+    })
+}
+
+/// The rail's cards of a thread switched to fade in with the thread from
+/// the canvas to the card through nothing darker than either, in either
+/// theme: a card's shadow does not show through its fill while the fill is
+/// faint.
+#[gpui::test]
+fn the_rail_cards_of_a_thread_switched_to_fade_in_through_nothing_darker(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_panes(cx);
+    serve_holding(&host, "thread-1", Holding::Rail);
+    await_restore_update(&shell, cx, |store, cx| {
+        store.with_timeline_for(Some("thread-1"), |timeline| timeline.turns.len(), cx) == Some(1)
+    });
+    settle_frames(cx);
+    let mut failures = Vec::new();
+    for mode in [
+        crate::theme::ThemeMode::Light,
+        crate::theme::ThemeMode::Dark,
+    ] {
+        cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
+        settle_frames(cx);
+        for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
+            serve_holding(&host, id, Holding::Rail);
+            switch(&shell, key, id, cx);
+            let mut seen = vec![rail_lightness(cx)];
+            for _ in 0..30 {
+                display_frame(cx);
+                seen.push(rail_lightness(cx));
+            }
+            let rest =
+                rail_lightness(cx).map(|card| card.unwrap_or_else(|| panic!("{id}'s cards")));
+            // The canvas: under the rail, below its last card and that
+            // card's shadow.
+            let rail = cx.debug_bounds("chat-rail").expect("the rail");
+            let last = RAIL_CARDS
+                .iter()
+                .filter_map(|card| cx.debug_bounds(format!("rail-card-frame-{card}").leak()))
+                .map(|card| card.bottom())
+                .fold(px(0.), Pixels::max);
+            assert!(rail.bottom() - last > px(40.), "{id}'s cards fill the rail");
+            let canvas = cx.update(|window, _| {
+                let probe = gpui::point(rail.center().x, rail.bottom() - px(8.))
+                    .scale(window.scale_factor());
+                [0., 1.].map(|backdrop| luminance_at(window, probe, backdrop))
+            });
+            for (frame, cards) in seen.iter().enumerate() {
+                for ((card, lit), rest) in RAIL_CARDS.iter().zip(cards).zip(&rest) {
+                    let Some(lit) = lit else { continue };
+                    for (backdrop, name) in ["black", "white"].iter().enumerate() {
+                        let floor = canvas[backdrop].min(rest[backdrop]);
+                        if lit[backdrop] < floor - 0.005 {
+                            failures.push(format!(
+                                "{mode:?}, {id}, frame {frame}: the {card} card at {:.4} \
+                                 over {name}, under both the canvas {:.4} and the card {:.4}",
+                                lit[backdrop], canvas[backdrop], rest[backdrop]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }

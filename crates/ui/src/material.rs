@@ -254,6 +254,168 @@ pub fn card_raised(cx: &App) -> Div {
         .shadow_sm()
 }
 
+/// `surface`, whose corners are `radius` round, with its drop shadows drawn
+/// only around it, as a box shadow is drawn outside its border box.
+///
+/// Gap: GPUI draws an element's drop shadow under it as well as around it,
+/// and fades an element by fading each thing it paints rather than the
+/// element as one. A raised card fading in or out (or fading in with the
+/// conversation it is on) then shows its own shadow through its fill, darker
+/// than both what it lies on and the card. A rounded corner leaves part of
+/// its square uncovered, where the shadow shows around the card too, so the
+/// shadow is still drawn under those squares. Remove this once GPUI draws a
+/// drop shadow only outside its element, or fades an element as one.
+pub fn shadow_outside(mut surface: Div, radius: Pixels) -> ShadowOutside {
+    let style = surface.style();
+    let opacity = style.opacity.unwrap_or(1.);
+    let shadows = style
+        .box_shadow
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut shadow| {
+            shadow.color.a *= opacity;
+            shadow
+        })
+        .collect();
+    ShadowOutside {
+        surface: surface.into_any_element(),
+        shadows,
+        radius,
+    }
+}
+
+/// See [`shadow_outside`].
+pub struct ShadowOutside {
+    surface: gpui::AnyElement,
+    shadows: Vec<BoxShadow>,
+    radius: Pixels,
+}
+
+impl ShadowOutside {
+    /// The regions the shadows of a surface at `bounds` are drawn in: all
+    /// round it, and the squares of its corners. Their edges lie on device
+    /// pixels the surface covers whole, so neighbours meet without a gap or
+    /// an overlap.
+    fn regions(
+        &self,
+        bounds: gpui::Bounds<Pixels>,
+        scale: f32,
+    ) -> Option<[gpui::Bounds<Pixels>; 8]> {
+        let snap = |value: Pixels, up: bool| {
+            let device = f32::from(value) * scale;
+            px(if up { device.ceil() } else { device.floor() } / scale)
+        };
+        let (left, top) = (snap(bounds.left(), true), snap(bounds.top(), true));
+        let (right, bottom) = (snap(bounds.right(), false), snap(bounds.bottom(), false));
+        if right <= left || bottom <= top {
+            return None;
+        }
+        let reach = self
+            .shadows
+            .iter()
+            .map(|shadow| {
+                shadow.blur_radius * 3.
+                    + shadow.spread_radius.max(px(0.))
+                    + shadow.offset.x.abs()
+                    + shadow.offset.y.abs()
+            })
+            .fold(px(0.), Pixels::max)
+            + px(1.);
+        let corner = snap(
+            self.radius
+                .min((right - left) / 2.)
+                .min((bottom - top) / 2.),
+            true,
+        );
+        let (outer_left, outer_top) = (left - reach, top - reach);
+        let (outer_right, outer_bottom) = (right + reach, bottom + reach);
+        let rect = |left, top, right, bottom| {
+            gpui::Bounds::from_corners(gpui::point(left, top), gpui::point(right, bottom))
+        };
+        Some([
+            rect(outer_left, outer_top, outer_right, top),
+            rect(outer_left, bottom, outer_right, outer_bottom),
+            rect(outer_left, top, left, bottom),
+            rect(right, top, outer_right, bottom),
+            rect(left, top, left + corner, top + corner),
+            rect(right - corner, top, right, top + corner),
+            rect(left, bottom - corner, left + corner, bottom),
+            rect(right - corner, bottom - corner, right, bottom),
+        ])
+    }
+}
+
+impl IntoElement for ShadowOutside {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for ShadowOutside {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.surface.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        _: gpui::Bounds<Pixels>,
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        self.surface.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&gpui::GlobalElementId>,
+        _: Option<&gpui::InspectorElementId>,
+        bounds: gpui::Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        let radii = gpui::Corners::all(self.radius);
+        match self.regions(bounds, window.scale_factor()) {
+            Some(regions) => {
+                for region in regions {
+                    window
+                        .with_content_mask(Some(gpui::ContentMask { bounds: region }), |window| {
+                            window.paint_drop_shadows(bounds, radii, &self.shadows)
+                        });
+                }
+            }
+            // Too small to cover a device pixel whole: nothing of it hides
+            // its shadow.
+            None => window.paint_drop_shadows(bounds, radii, &self.shadows),
+        }
+        self.surface.paint(window, cx);
+    }
+}
+
 /// A dense header strip across the top of a [`card`]: a desktop section bar's
 /// height at the card inset. Callers add the content.
 pub fn card_header_row(cx: &App) -> Div {
