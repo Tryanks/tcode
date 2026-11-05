@@ -393,6 +393,29 @@ fn invitation_changes_are_reported_in_order() {
     host.shutdown();
 }
 
+/// A fresh manifest cache for an instance whose relay is
+/// `https://{name}.relay.test/`, so no test fetches a manifest.
+fn cache_manifest(path: &std::path::Path, name: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    std::fs::write(
+        path,
+        json!({
+            "fetchedAtMs": now_ms,
+            "manifest": {
+                "version": 1,
+                "updatedAt": "2999-01-01T00:00:00Z",
+                "relays": [{"url": format!("https://{name}.relay.test/")}],
+                "pkarr": [format!("https://{name}.lookup.test/pkarr")]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
 fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut seen = device.relays();
@@ -420,39 +443,12 @@ fn device_relays_follow_the_traverse_instances_of_its_machines() {
     let (mux, _, _) = fake_host();
     let custom_host = start_host(mux, &custom_dir, None);
     let dir = TestDir::new("relays-phone");
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    std::fs::write(
-        dir.0.join("traverse-manifest-official.json"),
-        json!({
-            "fetchedAtMs": now_ms,
-            "manifest": {
-                "version": 1,
-                "updatedAt": "2999-01-01T00:00:00Z",
-                "relays": [{"url": "https://official.relay.test/"}],
-                "pkarr": ["https://official.lookup.test/pkarr"]
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
+    cache_manifest(&dir.0.join("traverse-manifest-official.json"), "official");
     let custom_base: url::Url = "https://custom.traverse.test/".parse().unwrap();
-    std::fs::write(
-        tcode_traverse::manifest::ManifestSource::Custom(custom_base.clone()).cache_path(&dir.0),
-        json!({
-            "fetchedAtMs": now_ms,
-            "manifest": {
-                "version": 1,
-                "updatedAt": "2999-01-01T00:00:00Z",
-                "relays": [{"url": "https://custom.relay.test/"}],
-                "pkarr": ["https://custom.lookup.test/pkarr"]
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
+    cache_manifest(
+        &tcode_traverse::manifest::ManifestSource::Custom(custom_base.clone()).cache_path(&dir.0),
+        "custom",
+    );
     let phone = device(&dir, "phone");
 
     let minted = off_host.new_invitation();
@@ -604,18 +600,28 @@ fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
     host.shutdown();
 }
 
-/// A phone away long enough to reconnect on return parks its link: the
-/// connection closes, and the return dials again and delivers what was
-/// written while it was down.
+/// Leaving the app parks its link: the connection closes and so does the
+/// device's endpoint, home relay and all, and the machine sees the device
+/// gone. The return binds a new endpoint with the same key, dials again
+/// and delivers what was written while the app was away.
 #[test]
-fn a_parked_link_closes_and_the_return_delivers_what_was_written_meanwhile() {
+fn a_parked_link_closes_the_endpoint_and_the_return_delivers_what_was_written_meanwhile() {
     let host_dir = TestDir::new("park-host");
     let (mux, _, _) = fake_host();
     let host = start_host(mux, &host_dir, None);
     let dir = TestDir::new("park-device");
+    cache_manifest(&dir.0.join("traverse-manifest-official.json"), "official");
     let phone = device(&dir, "phone");
     let minted = host.new_invitation();
-    let paired = pair(&minted.invite, &phone).unwrap();
+    // The test machine runs Off; the saved copy claims the official
+    // service, which the machine never checks, so the endpoint carries a relay.
+    let paired = PairedHost {
+        traverse: Vec::new(),
+        ..pair(&minted.invite, &phone).unwrap()
+    };
+    tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&paired)).unwrap();
+    phone.hosts_changed();
+    wait_relays(&phone, &["https://official.relay.test/"]);
     let client = tcode_traverse::connect(&paired, &phone);
     wait_state(&client, syncing_directly);
     client.to_host.send_blocking(subscribe(1)).unwrap();
@@ -626,11 +632,21 @@ fn a_parked_link_closes_and_the_return_delivers_what_was_written_meanwhile() {
     wait_state(&client, |state| {
         matches!(state, ConnectionState::Reconnecting { .. })
     });
+    wait_relays(&phone, &[]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while host.devices()[0].live.is_some() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        host.devices()[0].live.is_none(),
+        "the machine saw the device leave"
+    );
     let open = json!({"id": 2, "payload": {"type": "command", "content": {"type": "open_latest_session"}}});
     client.to_host.send_blocking(open.to_string()).unwrap();
     client.to_host.wake(Wake::Reconnect);
     wait_state(&client, syncing_directly);
     recv_type(&client, "ack", Some(2));
+    assert_eq!(phone.relays(), ["https://official.relay.test/"]);
     host.shutdown();
 }
 

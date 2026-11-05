@@ -1,4 +1,5 @@
-//! Retry and foreground policy shared by browser and native transports.
+//! Retry policy shared by browser and native transports, and the wakes a
+//! native link takes from the app.
 
 #[derive(Default)]
 pub struct Backoff {
@@ -40,49 +41,10 @@ impl Backoff {
 pub enum Wake {
     Reconnect,
     Probe,
-    /// Close the link and stay down until a [`Wake::Reconnect`]: the client
-    /// has been away long enough that its return reconnects anyway.
+    /// The app has left: close the link and everything it dials from, and
+    /// stay down until a [`Wake::Reconnect`]. The return syncs in full, so
+    /// nothing kept running through the absence would be used.
     Park,
-}
-
-/// An absence this long ends in a reconnect, so a link kept up through it
-/// buys nothing; after it the link is parked.
-pub const RECONNECT_AFTER_MS: u64 = 10_000;
-
-#[derive(Default)]
-pub struct Lifecycle {
-    background_ms: Option<u64>,
-    parked: bool,
-}
-
-impl Lifecycle {
-    pub fn background(&mut self, now_ms: u64) {
-        self.background_ms.get_or_insert(now_ms);
-    }
-
-    /// How long until the link should be parked: `None` in the foreground
-    /// or once parked.
-    pub fn park_in(&self, now_ms: u64) -> Option<u64> {
-        let start = self.background_ms.filter(|_| !self.parked)?;
-        Some((start + RECONNECT_AFTER_MS).saturating_sub(now_ms))
-    }
-
-    pub fn park(&mut self) -> Wake {
-        self.parked = true;
-        Wake::Park
-    }
-
-    /// Consumes the background interval: Foreground followed by Active probes once.
-    pub fn foreground(&mut self, now_ms: u64) -> Option<Wake> {
-        let parked = std::mem::take(&mut self.parked);
-        self.background_ms.take().map(|start| {
-            if parked || now_ms.saturating_sub(start) >= RECONNECT_AFTER_MS {
-                Wake::Reconnect
-            } else {
-                Wake::Probe
-            }
-        })
-    }
 }
 
 #[cfg(test)]
@@ -117,37 +79,5 @@ mod tests {
         assert!((800..=1200).contains(&backoff.failed(0, 0.5)));
         assert_eq!(backoff.attempt(), 6);
         assert!((1600..=2400).contains(&backoff.failed(0, 0.5)));
-    }
-
-    #[test]
-    fn foreground_uses_elapsed_background_time_and_deduplicates_phases() {
-        let mut lifecycle = Lifecycle::default();
-        assert_eq!(lifecycle.foreground(0), None);
-        lifecycle.background(100);
-        lifecycle.background(200);
-        assert_eq!(lifecycle.foreground(10_099), Some(Wake::Probe));
-        assert_eq!(lifecycle.foreground(10_100), None);
-        lifecycle.background(20_000);
-        assert_eq!(lifecycle.foreground(30_000), Some(Wake::Reconnect));
-        lifecycle.background(40_000);
-        assert_eq!(lifecycle.foreground(55_000), Some(Wake::Reconnect));
-    }
-
-    /// The link is parked once per absence, when the absence reaches the
-    /// length that reconnects on return, and a parked link always reconnects,
-    /// even if the wall clock stepped back meanwhile.
-    #[test]
-    fn a_long_absence_parks_the_link_once_and_the_return_reconnects() {
-        let mut lifecycle = Lifecycle::default();
-        assert_eq!(lifecycle.park_in(0), None);
-        lifecycle.background(1_000);
-        assert_eq!(lifecycle.park_in(4_000), Some(7_000));
-        assert_eq!(lifecycle.park_in(11_000), Some(0));
-        assert_eq!(lifecycle.park(), Wake::Park);
-        assert_eq!(lifecycle.park_in(20_000), None);
-        assert_eq!(lifecycle.foreground(5_000), Some(Wake::Reconnect));
-        assert_eq!(lifecycle.park_in(30_000), None);
-        lifecycle.background(40_000);
-        assert_eq!(lifecycle.foreground(45_000), Some(Wake::Probe));
     }
 }
