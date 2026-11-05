@@ -3813,6 +3813,7 @@ dependencies = [
  "gpui-mobile-pacing",
  "gpui-mobile-touch",
  "jni 0.22.4",
+ "libc",
  "log",
  "ndk",
  "parking_lot",

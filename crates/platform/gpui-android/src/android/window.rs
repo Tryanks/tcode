@@ -145,8 +145,9 @@ impl AndroidWindow {
             },
             None,
         )?;
+        host::attach_surface(&surface.window);
 
-        Ok(Self(Rc::new(AndroidWindowInner {
+        let window = Self(Rc::new(AndroidWindowInner {
             display,
             gpu_context,
             state: RefCell::new(WindowState {
@@ -173,14 +174,17 @@ impl AndroidWindow {
             keyboard_tap: Cell::new(None),
             touch_gestures: RefCell::default(),
             input_sync: RefCell::new(Default::default()),
-        })))
+        }));
+        // The forced first frame draws only once a frame runs.
+        host::request_frame();
+        Ok(window)
     }
 
     pub(crate) fn set_surface(&self, native_window: Option<NativeWindow>) {
         let mut state = self.0.state.borrow_mut();
         match native_window {
             Some(native_window) => {
-                let surface = NativeSurface::new(native_window);
+                let surface = NativeSurface::new(native_window.clone());
                 let physical_size = surface.physical_size();
                 let config = WgpuSurfaceConfig {
                     size: physical_size,
@@ -201,6 +205,7 @@ impl AndroidWindow {
                 }
                 state.native_surface = Some(surface);
                 drop(state);
+                host::attach_surface(&native_window);
                 self.resize_from_native_window();
                 self.schedule_frame();
                 self.0.forced_frame_requested.set(true);
@@ -208,6 +213,7 @@ impl AndroidWindow {
             None => {
                 self.0.pacing.borrow_mut().suspend();
                 host::pause_frames();
+                host::detach_surface();
                 state.renderer.unconfigure_surface();
                 state.native_surface = None;
                 drop(state);

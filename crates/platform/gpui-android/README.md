@@ -12,19 +12,34 @@ panic instead of pulling Android libraries into host builds.
 process-local platform. Android's native activity loop remains the GPUI
 foreground executor. Work submitted to the background executor is distributed
 over a small Rust worker pool; delayed work waits on one timer thread, in
-deadline order, and foreground continuations wake the Android looper. GPUI's
-`frame_waker` and `schedule_frame` start a Java `Choreographer` callback, which
-reposts itself each vsync until native code pauses it, so only starting and
-stopping frames cross to the UI thread; unrelated looper wakes do not render.
+deadline order, and foreground continuations wake the Android looper.
+
+GPUI's `frame_waker` and `schedule_frame` start frames; unrelated looper wakes
+do not render. On API 29+ ([vsync.rs](src/android/vsync.rs)) the native activity
+thread, whose looper android-activity polls, posts an NDK `AChoreographer`
+callback (`AChoreographer_postFrameCallback64`), and each one that fires while
+frames are wanted draws once the poll returns, then posts the next; nothing
+crosses to Java. On API 30+ the same path votes for the display's maximum
+refresh rate with `ANativeWindow_setFrameRate` (seamless switching only, as its
+NDK definition says) while frames run, re-applies the vote to a new surface,
+and releases it (rate 0) when frames stop or the surface goes. The symbols are
+looked up in `libandroid.so` at run time, since minSdk is 26. Where
+`postFrameCallback64` is missing, frames run on the Java path instead: Rust
+asks the activity to start or stop a Java `Choreographer` callback, which
+reposts itself each vsync until native code pauses it, and the activity votes
+with `Surface.setFrameRate` on API 30+ (seamless-only on API 31+). Only one path
+runs, and it alone votes. Rust starts frames for each new surface on both
+paths. android-activity 0.6.1 logs an error each time its poll runs a looper
+callback, so `tcode-android`'s logger drops that one message.
+
 [FramePacer](../frame-pacing/src/lib.rs) owns demand and activity grace, shared
 with iOS. Isolated invalidations return to pause; touch input and next-frame
 animations keep callbacks scheduled. Pausing the activity or losing its surface
 suspends pacing without losing invalidation. The Java host reports the display's
-maximum refresh capability and uses `Surface.setFrameRate` on API 30+, with
-seamless-only switching on API 31+. Idle clears the frame-rate vote, leaving
-system power and thermal policy in control. On API 29+ the host also reports
-`PowerManager`'s thermal status and its changes, so GPUI's own thermal frame
-cap applies; below that the state stays nominal. On every level it reports
+maximum refresh capability, which also sets the native vote. Idle clears the
+frame-rate vote, leaving system power and thermal policy in control. On API
+29+ the host also reports `PowerManager`'s thermal status and its changes, so
+GPUI's own thermal frame cap applies; below that the state stays nominal. On every level it reports
 Battery Saver (`isPowerSaveMode` and `ACTION_POWER_SAVE_MODE_CHANGED`), so
 GPUI's Low Power Mode cap applies too.
 
@@ -66,6 +81,8 @@ The Java declarations live in
 The matching JNI exports in [tcode-android](../../android/src/lib.rs) forward
 callbacks to this backend. Rust calls activity methods on Android's Java UI
 thread; incoming callbacks are queued for the native activity/GPUI thread.
+`nativeFrame`, `gpuiRequestFrame` and `gpuiPauseFrames` are used only on the
+Java frame path.
 Keep the method signatures at these two ends synchronized.
 
 URL opening uses an Android `ACTION_VIEW` intent on the Java UI thread, handing

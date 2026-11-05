@@ -106,6 +106,11 @@ public final class GpuiActivity extends NativeActivity {
         }
     }
 
+    /**
+     * Rust starts and stops frames here only where the NDK's AChoreographer
+     * path is unavailable; otherwise it drives vsync and the frame-rate vote
+     * itself and this activity never posts a callback or votes.
+     */
     public void gpuiRequestFrame() {
         if (renderSurface == null || !renderSurface.isValid()) return;
         if (!framesActive) {
@@ -135,7 +140,6 @@ public final class GpuiActivity extends NativeActivity {
         renderSurface = holder.getSurface();
         updateDisplayRate();
         super.surfaceCreated(holder);
-        gpuiRequestFrame();
     }
 
     @Override public void surfaceDestroyed(SurfaceHolder holder) {

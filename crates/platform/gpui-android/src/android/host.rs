@@ -1,3 +1,4 @@
+use super::vsync::{self, Vsync};
 use crate::text_input::TextInputState;
 use android_activity::AndroidApp;
 use gpui::TextInputConfiguration;
@@ -7,6 +8,7 @@ use jni::{
     signature::MethodSignature,
     strings::JNIStr,
 };
+use ndk::native_window::NativeWindow;
 use parking_lot::Mutex;
 use std::{
     collections::VecDeque,
@@ -71,12 +73,15 @@ pub enum ScrollCaptureRequest {
 
 pub(super) static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 static EVENTS: Mutex<VecDeque<HostEvent>> = Mutex::new(VecDeque::new());
-/// While set, the activity reposts its Choreographer callback on every
-/// vsync, so only starting and stopping frames hop to the UI thread.
+/// Whether frames run. On the Java path the activity reposts its
+/// Choreographer callback on every vsync while it is set, so only starting
+/// and stopping frames hop to the UI thread.
 static FRAMES_WANTED: AtomicBool = AtomicBool::new(false);
 
+/// Must run on the GPUI thread, which owns the NDK frame source.
 pub(crate) fn initialize(app: &AndroidApp) {
     *APP.lock() = Some(app.clone());
+    vsync::initialize();
 }
 
 fn enqueue(event: HostEvent) {
@@ -90,10 +95,19 @@ pub(crate) fn drain() -> Vec<HostEvent> {
     EVENTS.lock().drain(..).collect()
 }
 
-/// Returns whether the activity should post the next vsync's callback.
+/// The Java path's vsync. Returns whether the activity should post the next
+/// vsync's callback.
 pub fn frame() -> bool {
     enqueue(HostEvent::Frame);
     FRAMES_WANTED.load(Ordering::Acquire)
+}
+
+/// The NDK path's vsync, called inside the GPUI thread's looper poll, which
+/// returns to the run loop afterwards, so the frame needs no wake.
+pub(super) fn vsync() {
+    if FRAMES_WANTED.load(Ordering::Acquire) {
+        EVENTS.lock().push_back(HostEvent::Frame);
+    }
 }
 
 pub fn refresh_rate(rate: f32) {
@@ -110,16 +124,38 @@ pub fn power_save_mode(enabled: bool) {
     enqueue(HostEvent::PowerSaveMode(enabled));
 }
 
+/// Called from the GPUI thread only, like everything below that drives frames.
 pub(crate) fn request_frame() {
-    if !FRAMES_WANTED.swap(true, Ordering::AcqRel) {
+    let starting = !FRAMES_WANTED.swap(true, Ordering::AcqRel);
+    if !vsync::with(Vsync::start) && starting {
         with_activity(jni_str!("gpuiRequestFrame"), jni_sig!(() -> void), vec![]);
     }
 }
 
 pub(crate) fn pause_frames() {
-    if FRAMES_WANTED.swap(false, Ordering::AcqRel) {
+    if FRAMES_WANTED.swap(false, Ordering::AcqRel) && !vsync::with(Vsync::stop) {
         with_activity(jni_str!("gpuiPauseFrames"), jni_sig!(() -> void), vec![]);
     }
+}
+
+/// The window renders to `surface` from now on; the next request starts
+/// frames on it.
+pub(crate) fn attach_surface(surface: &NativeWindow) {
+    if !vsync::with(|vsync| vsync.attach(surface.clone())) {
+        // The activity drops a start that arrives while it has no surface,
+        // so the next request must reach it again.
+        FRAMES_WANTED.store(false, Ordering::Release);
+    }
+}
+
+/// Must run before `TerminateWindow` returns, while the surface is valid.
+pub(crate) fn detach_surface() {
+    vsync::with(Vsync::detach);
+}
+
+/// The display's highest refresh rate, voted for while frames run.
+pub(crate) fn set_frame_rate(rate: f32) {
+    vsync::with(|vsync| vsync.set_rate(rate));
 }
 
 enum OwnedArgument {
