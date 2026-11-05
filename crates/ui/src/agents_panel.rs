@@ -188,7 +188,7 @@ impl Agents {
             store.latest_activity(id?).filter(|_| execution.running())
         };
         let mut native = Vec::new();
-        store.with_timeline_for(
+        store.with_entries_for(
             Some(parent_id),
             |timeline| {
                 for entry in &timeline.entries {
@@ -318,7 +318,7 @@ impl Agents {
         cx: &App,
     ) -> Self {
         let mut results = std::collections::HashMap::new();
-        store.with_timeline_for(
+        store.with_entries_for(
             Some(parent_id),
             |timeline| {
                 for entry in &timeline.entries {
