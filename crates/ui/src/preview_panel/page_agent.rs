@@ -26,10 +26,10 @@ pub(super) fn nonce() -> String {
 pub(super) use imp::install;
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
 pub(super) use imp::page_loads;
-#[cfg(target_os = "windows")]
-pub(super) use imp::prepare;
 #[cfg(target_os = "android")]
 pub(super) use imp::scripts;
+#[cfg(target_os = "windows")]
+pub(super) use imp::{devtools, prepare};
 pub(super) use imp::{forget, run};
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -418,7 +418,12 @@ mod imp {
         }
     }
 
-    async fn cdp(webview: &ICoreWebView2, method: &str, params: Value) -> Result<String, String> {
+    /// Call a DevTools method and await its result.
+    pub(crate) async fn devtools(
+        webview: &ICoreWebView2,
+        method: &str,
+        params: Value,
+    ) -> Result<String, String> {
         let (tx, rx) = async_channel::bounded(1);
         cdp_call(webview, method, params, move |result| {
             let _ = tx.try_send(result);
@@ -440,21 +445,21 @@ mod imp {
             &nonce,
             Capture::default(),
         );
-        cdp(&webview, "Page.enable", serde_json::json!({})).await?;
-        cdp(
+        devtools(&webview, "Page.enable", serde_json::json!({})).await?;
+        devtools(
             &webview,
             "Runtime.addBinding",
             serde_json::json!({ "name": BINDING, "executionContextName": WORLD }),
         )
         .await?;
-        cdp(
+        devtools(
             &webview,
             "Page.addScriptToEvaluateOnNewDocument",
             serde_json::json!({ "source": scripts.agent, "worldName": WORLD }),
         )
         .await?;
-        cdp(&webview, "Runtime.enable", serde_json::json!({})).await?;
-        cdp(&webview, "Network.enable", serde_json::json!({})).await?;
+        devtools(&webview, "Runtime.enable", serde_json::json!({})).await?;
+        devtools(&webview, "Network.enable", serde_json::json!({})).await?;
         Ok(())
     }
 

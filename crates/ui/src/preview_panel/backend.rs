@@ -38,15 +38,6 @@ const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
 
-/// The error `preview_screenshot` reports where native-webview snapshots have no
-/// implementation.
-#[cfg_attr(
-    any(target_os = "macos", target_os = "ios", target_os = "android"),
-    allow(dead_code)
-)]
-const SCREENSHOT_UNSUPPORTED: &str =
-    "preview_screenshot is only supported on macOS, iOS and Android";
-
 /// Whether the pointer is dragging a gpui-base resize handle. Base keeps the
 /// handle's drag payload private; the resize cursor its band hands the drag is
 /// the public sign of one.
@@ -947,7 +938,9 @@ impl PreviewPanel {
                 window,
                 cx,
             ),
-            PreviewRequest::Screenshot => self.screenshot(&key, reply, window, cx),
+            PreviewRequest::Screenshot { r#ref, full_page } => {
+                self.screenshot(&key, r#ref, full_page, reply, window, cx)
+            }
         }
     }
 
@@ -1181,166 +1174,32 @@ impl PreviewPanel {
         });
     }
 
-    /// Snapshot the native WKWebView in-process and answer with a base64 PNG.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    /// A picture of the page: what is on screen, the element `reference`
+    /// names, or the whole document.
     fn screenshot(
         &mut self,
         key: &str,
+        reference: Option<String>,
+        full_page: bool,
         reply: ReplyTx,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use block2::RcBlock;
-        #[cfg(target_os = "macos")]
-        use objc2_app_kit::NSImage as Image;
-        use objc2_foundation::NSError;
-        #[cfg(target_os = "ios")]
-        use objc2_ui_kit::UIImage as Image;
-        #[cfg(target_os = "ios")]
-        use wry::WebViewExtIOS as _;
-        #[cfg(target_os = "macos")]
-        use wry::WebViewExtMacOS as _;
-
-        let Some(view) = self.lifecycle_entity().read(cx).ready_view(key) else {
-            let _ = reply.try_send(Err("preview browser is not open".into()));
-            return;
-        };
-        let webview = view.read(cx).raw().webview();
-        // The native frame, not the GPUI bounds: a hidden browser has never
-        // been laid out by GPUI, only staged offscreen.
-        let frame = webview.frame();
-        if frame.size.width <= 0. || frame.size.height <= 0. {
-            let _ = reply.try_send(Err("preview browser has no visible area".into()));
+        if !self.ready_or_reply(key, &reply, window, cx) {
             return;
         }
-        let callback_reply = reply.clone();
-        let handler = RcBlock::new(move |image: *mut Image, error: *mut NSError| {
-            let result = if let Some(image) = unsafe { image.as_ref() } {
-                snapshot_reply(image)
-            } else if !error.is_null() {
-                Err("WKWebView snapshot failed".into())
-            } else {
-                Err("WKWebView snapshot returned no image".into())
-            };
-            let _ = callback_reply.try_send(result);
+        let pictured = self.lifecycle_entity().update(cx, |lifecycle, cx| {
+            lifecycle.screenshot(key, reference, full_page, cx)
         });
-        #[cfg(target_os = "macos")]
-        unsafe {
-            webview.takeSnapshotWithConfiguration_completionHandler(None, &handler);
-        }
-        // lb-wry's iOS WKWebView binding declares no snapshot method.
-        #[cfg(target_os = "ios")]
-        unsafe {
-            let () = objc2::msg_send![
-                &*webview,
-                takeSnapshotWithConfiguration: std::ptr::null::<objc2::runtime::AnyObject>(),
-                completionHandler: &*handler
-            ];
-        }
-
-        cx.spawn(async move |_, cx| {
-            cx.background_executor().timer(Duration::from_secs(5)).await;
-            let _ = reply.try_send(Err("WKWebView snapshot timed out after 5 seconds".into()));
+        cx.spawn(async move |_, _| {
+            let result = pictured
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("preview browser was closed".into()));
+            let _ = reply.send(result).await;
         })
         .detach();
     }
-
-    #[cfg(target_os = "android")]
-    fn screenshot(
-        &mut self,
-        key: &str,
-        reply: ReplyTx,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.lifecycle_entity().read(cx).is_shown(key) {
-            let _ = reply.try_send(Err(
-                "preview is not visible; open the Preview panel before taking a screenshot".into(),
-            ));
-            return;
-        }
-        let Some(view) = self.lifecycle_entity().read(cx).ready_view(key) else {
-            let _ = reply.try_send(Err("preview browser is not open".into()));
-            return;
-        };
-        let request = view.read(cx).raw().screenshot();
-        cx.spawn(async move |_, cx| {
-            use base64::Engine as _;
-            let result = futures::future::select(
-                Box::pin(request),
-                Box::pin(cx.background_executor().timer(Duration::from_secs(5))),
-            )
-            .await;
-            let result = match result {
-                futures::future::Either::Left((
-                    Ok(gpui_android::webview::Reply::Png(bytes)),
-                    _,
-                )) => Ok(PreviewResponse::Image {
-                    mime: "image/png".into(),
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                }),
-                futures::future::Either::Left((Err(error), _)) => Err(error),
-                futures::future::Either::Left(_) => {
-                    Err("preview screenshot returned no image".into())
-                }
-                futures::future::Either::Right(_) => {
-                    Err("preview screenshot timed out after 5 seconds".into())
-                }
-            };
-            let _ = reply.try_send(result);
-        })
-        .detach();
-    }
-
-    /// WebView2 capture is not implemented, so this is a plain tool error.
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
-    fn screenshot(
-        &mut self,
-        _key: &str,
-        reply: ReplyTx,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        let _ = reply.try_send(Err(SCREENSHOT_UNSUPPORTED.into()));
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn snapshot_reply(image: &objc2_app_kit::NSImage) -> Result<PreviewResponse, String> {
-    let cg_image =
-        unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
-            .ok_or_else(|| "failed to obtain CGImage from WKWebView snapshot".to_string())?;
-    png_reply(&cg_image)
-}
-
-#[cfg(target_os = "ios")]
-fn snapshot_reply(image: &objc2_ui_kit::UIImage) -> Result<PreviewResponse, String> {
-    let cg_image = unsafe { image.CGImage() }
-        .ok_or_else(|| "failed to obtain CGImage from WKWebView snapshot".to_string())?;
-    png_reply(&cg_image)
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn png_reply(cg_image: &objc2_core_graphics::CGImage) -> Result<PreviewResponse, String> {
-    use base64::Engine as _;
-    use objc2_core_foundation::{CFMutableData, CFString};
-    use objc2_image_io::CGImageDestination;
-
-    let data = CFMutableData::new(None, 0)
-        .ok_or_else(|| "failed to allocate PNG destination data".to_string())?;
-    let png_type = CFString::from_static_str("public.png");
-    let destination = unsafe { CGImageDestination::with_data(&data, &png_type, 1, None) }
-        .ok_or_else(|| "failed to create PNG image destination".to_string())?;
-    unsafe {
-        destination.add_image(cg_image, None);
-        if !destination.finalize() {
-            return Err("failed to finalize WKWebView snapshot PNG".into());
-        }
-    }
-    Ok(PreviewResponse::Image {
-        mime: "image/png".into(),
-        data_base64: base64::engine::general_purpose::STANDARD.encode(data.to_vec()),
-    })
 }
 
 /// The size the page is drawn at this frame, and the area it is laid out in.

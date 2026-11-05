@@ -566,6 +566,29 @@
       return { x: window.scrollX, y: window.scrollY };
     },
 
+    // An element's box in the viewport, for a picture of it: scrolled into
+    // view first when it is not wholly in view.
+    rect: (args) => {
+      const el = resolve(args);
+      let box = el.getBoundingClientRect();
+      if (box.top < 0 || box.left < 0 || box.bottom > innerHeight || box.right > innerWidth) {
+        el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+        box = el.getBoundingClientRect();
+      }
+      return {
+        x: box.left,
+        y: box.top,
+        width: box.width,
+        height: box.height,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        dpr: window.devicePixelRatio || 1,
+        viewportWidth: innerWidth,
+        viewportHeight: innerHeight,
+        target: describe(el),
+      };
+    },
+
     // Resolves once every DOM condition holds, or with what is still unmet
     // when `timeoutMs` runs out.
     wait: (args) =>
@@ -605,7 +628,7 @@
   };
   // Whether a method reads or acts on the document, so waits for it to be
   // parsed: the agent is ready at document start.
-  const OF_DOCUMENT = new Set(["snapshot", "click", "type", "press", "scroll", "wait"]);
+  const OF_DOCUMENT = new Set(["snapshot", "click", "type", "press", "scroll", "wait", "rect"]);
 
   const reply = (id, ok, payload) => send(ok ? { t: "reply", id, ok: true, value: payload } : { t: "reply", id, ok: false, error: payload });
   const call = (id, method, args) => {

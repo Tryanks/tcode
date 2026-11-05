@@ -48,6 +48,7 @@ native-preview = [
     "dep:objc2-foundation",
     "dep:webview2-com",
     "dep:webkit2gtk",
+    "dep:cairo-rs",
     "dep:gdk",
     "dep:windows-core",
     "dep:windows",
@@ -154,6 +155,8 @@ optional = true
 # to the version lb-wry resolves, so both drive the same WebKit objects.
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "=2.0.1", optional = true }
+# WebKitGTK's snapshots are cairo surfaces; the version webkit2gtk resolves.
+cairo-rs = { version = "0.18", features = ["png"], optional = true }
 # The X error trap that keeps a released webview from exiting the process.
 gdk = { version = "0.18.2", optional = true }
 
@@ -167,6 +170,8 @@ windows = { version = "0.61", optional = true, features = [
     "Win32_Globalization",
     "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_DirectComposition",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

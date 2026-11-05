@@ -204,6 +204,65 @@ async fn log_answer(
     result
 }
 
+/// A picture's pixel size, from its PNG header.
+async fn screenshot(
+    shell: &Entity<AppShell>,
+    reference: Option<String>,
+    full_page: bool,
+    cx: &mut AsyncApp,
+) -> Result<(u32, u32), String> {
+    let label = format!("screenshot {reference:?} full_page={full_page}");
+    let pictured = shell.update(cx, |shell, cx| {
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .update(cx, |lifecycle, cx| {
+                lifecycle.screenshot(AGENT_KEY, reference.clone(), full_page, cx)
+            })
+    });
+    let result = match pictured.recv().await {
+        Ok(Ok(tcode_protocol::PreviewResponse::Image { data_base64, .. })) => {
+            let bytes = base64_decode(&data_base64).unwrap_or_default();
+            // Where to keep the pictures, for a person to look at.
+            if let Ok(directory) = std::env::var("TCODE_SMOKE_SHOTS") {
+                let name = format!("{}-{full_page}.png", reference.as_deref().unwrap_or("page"));
+                let _ = std::fs::write(std::path::Path::new(&directory).join(name), &bytes);
+            }
+            png_size(&bytes).ok_or_else(|| "not a PNG".to_string())
+        }
+        Ok(Ok(other)) => Err(format!("not an image: {other:?}")),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err("dropped".into()),
+    };
+    log_line(&format!("preview-smoke: page-agent {label} -> {result:?}"));
+    result
+}
+
+fn base64_decode(data: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut bytes = Vec::with_capacity(data.len() / 4 * 3);
+    let (mut buffer, mut bits) = (0u32, 0);
+    for byte in data.bytes().filter(|byte| *byte != b'=') {
+        let value = ALPHABET.iter().position(|&candidate| candidate == byte)? as u32;
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buffer >> bits) as u8);
+        }
+    }
+    Some(bytes)
+}
+
+/// Width and height from a PNG's IHDR chunk.
+fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.get(1..4)? != b"PNG" {
+        return None;
+    }
+    let number = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    Some((number(16)?, number(20)?))
+}
+
 /// The ref the outline gives the first element with `role`.
 fn ref_of(outline: &str, role: &str) -> String {
     outline
@@ -267,6 +326,38 @@ async fn page_agent(shell: &Entity<AppShell>, window: AnyWindowHandle, cx: &mut 
     log_line(&format!("preview-smoke: page-agent summary {summary:?}"));
     let summary = summary.expect("preview-smoke: summary").to_string();
     assert!(summary.contains("smoke console error"), "{summary}");
+
+    // Pictures: what is on screen, one element, and the whole document
+    // where the engine can take it, of the page laid out hidden as an
+    // agent's page nobody looks at is.
+    shell.update(cx, |shell, cx| {
+        let lifecycle = shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window");
+        lifecycle.update(cx, |lifecycle, cx| lifecycle.hide_now(Some(AGENT_KEY), cx));
+        lifecycle.read(cx).stage_hidden(
+            AGENT_KEY,
+            Some(size(px(800.), px(600.))),
+            size(px(800.), px(600.)),
+            cx,
+        );
+    });
+    let viewport = screenshot(shell, None, false, cx)
+        .await
+        .expect("preview-smoke: viewport");
+    assert!(viewport.0 > 0 && viewport.1 > 0, "{viewport:?}");
+    let element = screenshot(shell, Some(button.clone()), false, cx)
+        .await
+        .expect("preview-smoke: element");
+    assert!(
+        element.0 < viewport.0 && element.1 < viewport.1,
+        "element {element:?} within viewport {viewport:?}"
+    );
+    let full = screenshot(shell, None, true, cx).await;
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    assert!(full.is_ok(), "{full:?}");
+    #[cfg(target_os = "macos")]
+    assert!(full.is_err_and(|error| error.contains("not supported")));
 
     // A call right after a navigation reads the new document, whose agent
     // knows none of the old one's refs.

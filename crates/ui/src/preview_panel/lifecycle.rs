@@ -25,9 +25,9 @@ use gpui::{App, AppContext as _, Context, Entity, EntityId, WeakEntity, Window};
 #[cfg(not(any(target_os = "android", target_os = "windows")))]
 use gpui_webview::WebView;
 use serde_json::Value;
-#[cfg(not(target_os = "android"))]
 use tcode_protocol::PreviewResponse;
 
+use super::capture;
 use super::events::{Answer, Event, LoadError, Outcome, PageEvents, WaitFor};
 use super::page_agent;
 use super::{ReplyTx, unavailable_message};
@@ -459,7 +459,7 @@ impl BrowserLifecycle {
     /// A browser that was never shown is otherwise laid out at 0×0, which
     /// leaves an agent driving a background conversation with an empty page.
     #[cfg(not(target_os = "android"))]
-    pub(super) fn stage_hidden(
+    pub fn stage_hidden(
         &self,
         key: &str,
         canvas: Option<gpui::Size<gpui::Pixels>>,
@@ -520,7 +520,7 @@ impl BrowserLifecycle {
 
     /// Hide `key`'s page, or every page, now, with no fade, for a pointer
     /// that must not reach one before the next frame.
-    pub(super) fn hide_now(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
+    pub fn hide_now(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
         self.shown
             .retain(|_, shown| key.is_some_and(|key| key != shown));
         for (_, slot) in self
@@ -877,6 +877,60 @@ impl BrowserLifecycle {
             .get(key)
             .and_then(WebViewSlot::page)
             .is_some_and(|page| page.events.settled())
+    }
+
+    /// A picture of `key`'s page: what is on screen, the element
+    /// `reference` names, or the whole document.
+    pub fn screenshot(
+        &mut self,
+        key: &str,
+        reference: Option<String>,
+        full_page: bool,
+        cx: &mut Context<Self>,
+    ) -> async_channel::Receiver<Result<PreviewResponse, String>> {
+        let (reply, pictured) = async_channel::bounded(1);
+        // Android draws a WebView only while it is on screen.
+        #[cfg(target_os = "android")]
+        if !self.is_shown(key) {
+            let _ = reply.try_send(Err(
+                "preview is not visible; open the Preview panel before taking a screenshot".into(),
+            ));
+            return pictured;
+        }
+        let Some(view) = self.ready_view(key) else {
+            let _ = reply.try_send(Err("preview browser is not open".into()));
+            return pictured;
+        };
+        let Some(reference) = reference else {
+            let region = if full_page {
+                capture::Region::FullPage
+            } else {
+                capture::Region::Viewport
+            };
+            capture::capture(&view, region, reply, cx);
+            return pictured;
+        };
+        let measured = self.call(key, "rect", serde_json::json!({ "ref": reference }), cx);
+        cx.spawn(async move |_, cx| {
+            let element = match measured.recv().await {
+                Ok(Ok(value)) => capture::ElementBox::from_agent(&value)
+                    .ok_or_else(|| "the page agent measured no box".to_string()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err("preview browser was closed".into()),
+            };
+            match element {
+                Ok(element) => {
+                    cx.update(|cx| {
+                        capture::capture(&view, capture::Region::Element(element), reply, cx)
+                    });
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error)).await;
+                }
+            }
+        })
+        .detach();
+        pictured
     }
 
     /// Whether a navigation is replacing `key`'s document.

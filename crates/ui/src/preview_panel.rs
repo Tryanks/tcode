@@ -91,6 +91,8 @@ pub fn preview_backend() -> bool {
 }
 
 #[cfg(preview_backend)]
+mod capture;
+#[cfg(preview_backend)]
 mod events;
 #[cfg(preview_backend)]
 pub(crate) mod lifecycle;
