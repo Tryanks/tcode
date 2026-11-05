@@ -12,13 +12,44 @@
 //! GPUI's opacity multiplies down through an element's children, so the
 //! frame and what it holds are siblings: each fades on its own.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Div, Element, ElementId, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, ParentElement as _, Pixels, SharedString,
     Styled as _, Window, div, px, size,
 };
+
+/// The response of the spring a surface grows out of its origin along, as
+/// gpui-base's `Spring::new` takes one: critically damped, so it never
+/// passes its place.
+pub(crate) const GROW: Duration = Duration::from_millis(400);
+
+/// How much of the spring's way is left when the surface is there.
+pub(crate) const GROW_REST: f32 = 0.001;
+
+/// The share of its way by which a surface growing out of its origin is
+/// opaque.
+pub(crate) const OPEN_SURFACE: f32 = 0.4;
+
+/// How much of its way a critically damped spring with gpui-base's
+/// `Spring::new(response)` has still to go, `elapsed` after it left from
+/// rest.
+///
+/// gpui-base's spring is stepped frame by frame toward the target it is
+/// given on a frame. A surface's phases carry on from where another left
+/// them and their fades read how far along the spring is, so this is the
+/// same spring's step response, in closed form.
+pub(crate) fn spring_left(elapsed: Duration, response: Duration) -> f32 {
+    let omega = std::f32::consts::TAU / response.as_secs_f32();
+    let t = omega * elapsed.as_secs_f32();
+    (1. + t) * (-t).exp()
+}
+
+/// How far `way` is from `from` to `to`, from 0 to 1.
+pub(crate) fn ramp(way: f32, from: f32, to: f32) -> f32 {
+    ((way - from) / (to - from)).clamp(0., 1.)
+}
 
 /// Where the origins of a view were drawn, by key; kept by the view and
 /// cloned into whatever draws them. Every clone is the same record.

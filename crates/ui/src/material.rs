@@ -274,6 +274,10 @@ pub fn radius_input(cx: &App) -> Pixels {
 pub fn radius_button(cx: &App) -> Pixels {
     cx.theme().tokens.radius.md
 }
+/// Selectable list rows.
+pub fn radius_row(cx: &App) -> Pixels {
+    cx.theme().tokens.radius.md
+}
 /// Chips and compact status badges.
 pub fn radius_chip(cx: &App) -> Pixels {
     cx.theme().tokens.radius.sm
@@ -1092,7 +1096,7 @@ where
         px(6.)
     };
     let inset = selectable_row_inset(compact);
-    let radius = theme.tokens.radius.md;
+    let radius = radius_row(cx);
     el.h(px(height))
         .relative()
         .flex()

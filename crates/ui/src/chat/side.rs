@@ -25,6 +25,7 @@ use super::ChatView;
 use crate::icon::IconName;
 use crate::material::CHAT_SIDE_GRIP;
 use crate::motion::Colour;
+use crate::motion::expand::{GROW, GROW_REST, OPEN_SURFACE, ramp, spring_left};
 use crate::motion::owned::Owned;
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
@@ -73,18 +74,11 @@ const SWAP: Duration = Duration::from_millis(200);
 const SHOW: Duration = Duration::from_millis(200);
 
 /// The response of the spring the agent's card grows out of what opened it
-/// along, or crosses to the other place along, as gpui-base's `Spring::new`
-/// takes one: critically damped, so it never passes its place.
-const EXPAND: Duration = Duration::from_millis(400);
+/// along ([`GROW`]), or crosses to the other place along.
+const EXPAND: Duration = GROW;
 
 /// The response of the same spring as the card shrinks back.
 const EXPAND_BACK: Duration = Duration::from_millis(300);
-
-/// How much of the spring's way is left when the card is there.
-const EXPAND_REST: f32 = 0.001;
-
-/// The share of its way by which the surface is opaque, growing.
-const OPEN_SURFACE: f32 = 0.4;
 
 /// The share of its way over which what it holds fades in, growing.
 const OPEN_CONTENT: (f32, f32) = (0.3, 0.8);
@@ -219,25 +213,6 @@ enum ExpandPhase {
     /// With motion reduced: the agent fading into the place it is drawn in
     /// since `at`, an empty surface fading out of `leaves`.
     Swapping { at: Instant, leaves: SideMode },
-}
-
-/// How much of its way a critically damped spring with gpui-base's
-/// `Spring::new(response)` has still to go, `elapsed` after it left from
-/// rest.
-///
-/// gpui-base's spring is stepped frame by frame toward the target it is
-/// given on a frame. The card's phases carry on from where another left
-/// them and their fades read how far along the spring is, so this is the
-/// same spring's step response, in closed form.
-fn spring_left(elapsed: Duration, response: Duration) -> f32 {
-    let omega = std::f32::consts::TAU / response.as_secs_f32();
-    let t = omega * elapsed.as_secs_f32();
-    (1. + t) * (-t).exp()
-}
-
-/// How far `way` is from `from` to `to`, from 0 to 1.
-fn ramp(way: f32, from: f32, to: f32) -> f32 {
-    ((way - from) / (to - from)).clamp(0., 1.)
 }
 
 fn mix(from: f32, to: f32, t: f32) -> f32 {
@@ -1003,7 +978,7 @@ impl ChatView {
                     crossing,
                     ..ExpandFrame::default()
                 },
-                left < EXPAND_REST || (crossing && expand.from.is_none()),
+                left < GROW_REST || (crossing && expand.from.is_none()),
             ),
             ExpandPhase::Leaving { at, .. } => {
                 let gone =
@@ -1026,7 +1001,7 @@ impl ChatView {
                     presence: Some(1.),
                     ..ExpandFrame::default()
                 },
-                left < EXPAND_REST,
+                left < GROW_REST,
             ),
             ExpandPhase::Crossing { .. } => (
                 ExpandFrame {

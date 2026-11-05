@@ -727,6 +727,12 @@ pub struct SessionsSidebar {
     last_selected: Option<String>,
     /// What the chat column shows, as its shell last told the list.
     shown: ShownThreads,
+    /// Where each thread row was last drawn, by its row key: what a pane
+    /// that takes the row's thread grows out of.
+    origins: crate::motion::expand::Origins,
+    /// The thread a row on screen was just pressed to show, and where that
+    /// row is with its corners, until the shell places the thread.
+    opened: Option<(String, (gpui::Bounds<gpui::Pixels>, gpui::Pixels))>,
     /// Optional project id filter for the session-local flat list.
     project_filter: Option<String>,
     settled_scope: Option<(SidebarLayout, Option<String>)>,
@@ -1200,6 +1206,8 @@ impl SessionsSidebar {
             arrange_flip: Default::default(),
             last_selected: None,
             shown: ShownThreads::default(),
+            origins: Default::default(),
+            opened: None,
             project_filter: None,
             settled_scope: None,
             renaming: None,
@@ -2954,6 +2962,19 @@ impl SessionsSidebar {
         Some(shown.fold_across_gap(ROW_GAP, glyph))
     }
 
+    /// Where the row pressed to show `session_id` is on screen, with its
+    /// corners, if a row was just pressed to show it; whatever a row was
+    /// pressed for is placed now.
+    pub(crate) fn take_opened(
+        &mut self,
+        session_id: &str,
+    ) -> Option<(gpui::Bounds<gpui::Pixels>, gpui::Pixels)> {
+        self.opened
+            .take()
+            .filter(|(opened, _)| opened == session_id)
+            .map(|(_, row)| row)
+    }
+
     /// The row of the current pane's thread.
     fn current_row(&self, cx: &App) -> Option<String> {
         let thread = crate::shell::current_thread(cx)?;
@@ -2972,6 +2993,7 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> crate::material::Clickable<gpui::Div> {
         let session_id = state.session_id.clone();
+        let row_key = state.row_key.clone();
         let row_id = SharedString::from(format!("{}-row", state.row_key));
         // The selected fill glides from the row left to the row chosen.
         let active = cx.theme().list_active;
@@ -3017,12 +3039,21 @@ impl SessionsSidebar {
                             return;
                         }
                         this.compact_model_dirty = true;
+                        this.opened = this
+                            .origins
+                            .resolve(&row_key)
+                            .map(|row| (session_id.clone(), row));
                         this.store.update(cx, |store, cx| {
                             store.show_thread(session_id.clone(), cx);
                         });
                         cx.notify();
                     }),
-                );
+                )
+                .child(self.origins.mark(
+                    state.row_key.clone(),
+                    crate::material::radius_row(cx),
+                    div().absolute().inset_0(),
+                ));
         let row = self.track_hover(row, &state.row_key);
         let row = match self
             .dragged_thread(meta, state, cx)
@@ -5463,6 +5494,9 @@ impl SessionsSidebar {
 
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.origins.begin_frame();
+        // A press the shell did not place a thread for is over.
+        self.opened = None;
         let scope = (
             self.store.read(cx).sidebar_layout(),
             self.project_filter.clone(),
