@@ -3,8 +3,8 @@
 //!
 //! The agent keeps refs, builds the accessibility outline, acts on the page
 //! with synthetic input, waits on DOM conditions, and reports the user's own
-//! input; where an engine has no native console or network source, a hook
-//! script in the page's world captures them. A client installs both through
+//! input; where an engine has no native console source, a hook script in the
+//! page's world captures it. A client installs both through
 //! its engine and drives the agent with [`call`]; the agent answers with
 //! [`Message`]s over the engine's script-message channel.
 
@@ -24,33 +24,22 @@ pub struct Transport<'a> {
     pub page_world: bool,
 }
 
-/// What the page agent captures by script, where the engine has no native
-/// source.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Capture {
-    pub console: bool,
-    pub network: bool,
-}
-
 /// The scripts to install at document start in the top frame.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Scripts {
     /// For the agent's world.
     pub agent: String,
-    /// For the page's world, when the agent has its own and something is
+    /// For the page's world, when the agent has its own and the console is
     /// captured by script.
     pub hooks: Option<String>,
 }
 
-pub fn scripts(transport: &Transport<'_>, nonce: &str, capture: Capture) -> Scripts {
-    let capture_json = serde_json::json!({
-        "console": capture.console,
-        "network": capture.network,
-    });
-    let hooked = capture.console || capture.network;
+/// `console`: capture the console by script, where the engine has no
+/// native source.
+pub fn scripts(transport: &Transport<'_>, nonce: &str, console: bool) -> Scripts {
     if transport.page_world {
-        let config = serde_json::json!({ "nonce": nonce, "capture": capture_json });
-        let hooks = if hooked { HOOKS } else { "null" };
+        let config = serde_json::json!({ "nonce": nonce });
+        let hooks = if console { HOOKS } else { "null" };
         return Scripts {
             agent: format!("{AGENT}(({}), {config}, {hooks});", transport.post),
             hooks: None,
@@ -61,20 +50,19 @@ pub fn scripts(transport: &Transport<'_>, nonce: &str, capture: Capture) -> Scri
     let event = format!("tcode-{nonce}");
     let config = serde_json::json!({
         "nonce": nonce,
-        "hooksEvent": hooked.then_some(event.as_str()),
-        "capture": capture_json,
+        "hooksEvent": console.then_some(event.as_str()),
     });
     let event = Value::String(event);
     Scripts {
         agent: format!("{AGENT}(({}), {config}, null);", transport.post),
-        hooks: hooked.then(|| {
+        hooks: console.then(|| {
             format!(
                 "(function () {{\n\
                  const dispatch = EventTarget.prototype.dispatchEvent;\n\
                  const Custom = CustomEvent;\n\
                  const stringify = JSON.stringify;\n\
                  const emit = (entry) => {{ try {{ dispatch.call(window, new Custom({event}, {{ detail: stringify(entry) }})); }} catch (_) {{}} }};\n\
-                 {HOOKS}(emit, {capture_json});\n\
+                 {HOOKS}(emit);\n\
                  }})();"
             )
         }),
@@ -133,7 +121,6 @@ pub enum Message {
         url: String,
     },
     Console(ConsoleEntry),
-    Network(NetworkEntry),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
@@ -143,31 +130,6 @@ pub struct ConsoleEntry {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
-pub struct NetworkEntry {
-    pub method: String,
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<u16>,
-    /// What asked for it: `fetch`, `xhr`, `script`, `img`, `document`, ….
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ms: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bytes: Option<u64>,
-    /// Why the request got no response.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed: Option<String>,
-}
-
-impl NetworkEntry {
-    /// No response, or an HTTP error.
-    pub fn is_failure(&self) -> bool {
-        self.failed.is_some() || self.status.is_some_and(|status| status >= 400)
-    }
 }
 
 /// Wrap an expression the agent asked to evaluate in the page's own world so
@@ -273,18 +235,6 @@ mod tests {
                     level: "error".into(),
                     text: "boom".into(),
                     location: Some("http://x/app.js:3".into()),
-                }),
-            ),
-            (
-                r#"{"t":"network","method":"GET","url":"http://x/api","status":500,"kind":"fetch","ms":12.5,"n":"k","doc":"d1"}"#,
-                Message::Network(NetworkEntry {
-                    method: "GET".into(),
-                    url: "http://x/api".into(),
-                    status: Some(500),
-                    kind: Some("fetch".into()),
-                    ms: Some(12.5),
-                    bytes: None,
-                    failed: None,
                 }),
             ),
         ];

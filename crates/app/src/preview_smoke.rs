@@ -123,12 +123,13 @@ fn create_once(
 }
 
 /// The page the page-agent phase drives: a field, a button whose click
-/// writes a line late and logs a console error, and a fetch that fails.
+/// writes a line late and logs a console error, and a link to a new window.
 const AGENT_PAGE: &str = r#"<!doctype html><title>Agent smoke</title>
 <h1>Preview smoke</h1>
 <label>Name <input id="name"></label>
 <button id="save" onclick="setTimeout(() => { document.getElementById('out').textContent = 'Saved ' + document.getElementById('name').value; console.error('smoke console error'); }, 50)">Save</button>
-<p id="out"></p>"#;
+<p id="out"></p>
+<a href="/two" target="_blank">Next</a>"#;
 const AGENT_KEY: &str = "preview-smoke-agent";
 
 /// Serve the page-agent phase's pages on loopback: `/` and `/two`.
@@ -358,6 +359,30 @@ async fn page_agent(shell: &Entity<AppShell>, window: AnyWindowHandle, cx: &mut 
     assert!(full.is_ok(), "{full:?}");
     #[cfg(target_os = "macos")]
     assert!(full.is_err_and(|error| error.contains("not supported")));
+
+    // A link to a new window loads in this page.
+    let link = ref_of(&outline, "link");
+    agent_call(shell, "click", json!({ "ref": link }), cx)
+        .await
+        .expect("preview-smoke: click link");
+    let opened = shell.update(cx, |shell, cx| {
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .update(cx, |lifecycle, cx| {
+                lifecycle.wait(
+                    AGENT_KEY,
+                    None,
+                    None,
+                    Some("/two".into()),
+                    Duration::from_secs(5),
+                    cx,
+                )
+            })
+    });
+    log_answer("wait /two", opened)
+        .await
+        .expect("preview-smoke: new window loads here");
 
     // A call right after a navigation reads the new document, whose agent
     // knows none of the old one's refs.

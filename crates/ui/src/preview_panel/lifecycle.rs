@@ -327,50 +327,8 @@ impl BrowserLifecycle {
         let availability = self.ensure(key, Some(url), window, cx);
         match &availability {
             Availability::Ready(webview) => {
-                // Calls wait for the next document now rather than from
-                // WebKit's asynchronous didStart, so a wait_for issued right
-                // after this navigation cannot read the old page or fail on
-                // its record.
-                if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
-                    let outcome = page.events.navigate();
-                    self.apply(key, outcome, cx);
-                }
-                let raw = webview.read(cx).raw();
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
-                let mapped = match self
-                    .remote_browser(key)
-                    .map(|remote| remote.navigate(url))
-                    .transpose()
-                {
-                    Ok(mapped) => mapped,
-                    Err(_) => {
-                        cx.notify();
-                        return availability;
-                    }
-                };
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
-                let url = mapped.as_deref().unwrap_or(url);
-                // lb-wry unwraps `NSURL URLWithString:`, which is nil for a
-                // string WebKit cannot load: report it as the page would.
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
-                if objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(
-                    url,
-                ))
-                .is_none()
-                {
-                    if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
-                        let outcome = page.events.handle(Event::Failed(LoadError {
-                            url: url.to_owned(),
-                            code: "InvalidURL".into(),
-                            message: "this is not a URL the browser can load".into(),
-                        }));
-                        self.apply(key, outcome, cx);
-                    }
-                    return availability;
-                }
-                if let Err(error) = raw.load_url(url) {
-                    log::warn!("preview: failed to navigate {key}: {error}");
-                }
+                let webview = webview.clone();
+                self.load(key, &webview, url, cx);
             }
             #[cfg(any(target_os = "windows", target_os = "android"))]
             Availability::Starting(_) => {
@@ -383,6 +341,52 @@ impl BrowserLifecycle {
             Availability::Unavailable => {}
         }
         availability
+    }
+
+    /// Load `url` into `key`'s page: calls wait for the document it loads.
+    fn load(&mut self, key: &str, webview: &Entity<WebView>, url: &str, cx: &mut Context<Self>) {
+        // Calls wait for the next document now rather than from
+        // WebKit's asynchronous didStart, so a wait_for issued right
+        // after this navigation cannot read the old page or fail on
+        // its record.
+        if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
+            let outcome = page.events.navigate();
+            self.apply(key, outcome, cx);
+        }
+        let raw = webview.read(cx).raw();
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let mapped = match self
+            .remote_browser(key)
+            .map(|remote| remote.navigate(url))
+            .transpose()
+        {
+            Ok(mapped) => mapped,
+            Err(_) => {
+                cx.notify();
+                return;
+            }
+        };
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let url = mapped.as_deref().unwrap_or(url);
+        // lb-wry unwraps `NSURL URLWithString:`, which is nil for a
+        // string WebKit cannot load: report it as the page would.
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(url))
+            .is_none()
+        {
+            if let Some(page) = self.slots.get_mut(key).and_then(WebViewSlot::page_mut) {
+                let outcome = page.events.handle(Event::Failed(LoadError {
+                    url: url.to_owned(),
+                    code: "InvalidURL".into(),
+                    message: "this is not a URL the browser can load".into(),
+                }));
+                self.apply(key, outcome, cx);
+            }
+            return;
+        }
+        if let Err(error) = raw.load_url(url) {
+            log::warn!("preview: failed to navigate {key}: {error}");
+        }
     }
 
     /// Show exactly `key` and let every other ready native child go.
@@ -738,10 +742,20 @@ impl BrowserLifecycle {
 
     fn page_event(&mut self, id: u64, event: Event, cx: &mut Context<Self>) {
         log::trace!("preview: page {id} {event:.300?}");
-        let Some((key, page)) = self.slots.iter_mut().find_map(|(key, slot)| {
-            let page = slot.page_mut()?;
-            (page.id == id).then_some((key.clone(), page))
-        }) else {
+        let Some(key) = self
+            .slots
+            .iter()
+            .find_map(|(key, slot)| (slot.page()?.id == id).then(|| key.clone()))
+        else {
+            return;
+        };
+        if let Event::NewWindow(url) = &event {
+            if let Some(view) = self.ready_view(&key) {
+                self.load(&key, &view, url, cx);
+            }
+            return;
+        }
+        let Some(page) = self.slots.get_mut(&key).and_then(WebViewSlot::page_mut) else {
             return;
         };
         let outcome = page.events.handle(event);
@@ -941,7 +955,7 @@ impl BrowserLifecycle {
             .is_some_and(|page| page.events.navigating())
     }
 
-    /// The console and network since `key`'s last navigation.
+    /// The console since `key`'s last navigation.
     pub fn page_summary(&self, key: &str) -> Option<Value> {
         Some(self.slots.get(key)?.page()?.events.summary())
     }
@@ -1216,10 +1230,9 @@ mod platform {
         // No first document: lb-wry holds evaluations back until a
         // navigation commits, and the page's evaluations wait for its first
         // document (`PageEvents`).
-        let (loads, on_load) = page_agent::page_loads();
-        let builder = wry::WebViewBuilder::new()
-            .with_devtools(true)
-            .with_on_page_load_handler(on_load);
+        let nonce = page_agent::nonce();
+        let (page, events, receiver) = lifecycle.open_page(nonce.clone(), false);
+        let builder = page_agent::observe(wry::WebViewBuilder::new().with_devtools(true), &events);
         let builder = match super::super::proxy::builder(builder, lifecycle.proxy.as_ref()) {
             Ok(builder) => builder,
             Err(error) => {
@@ -1235,9 +1248,6 @@ mod platform {
                 return Availability::Unavailable;
             }
         };
-        let nonce = page_agent::nonce();
-        let (page, events, receiver) = lifecycle.open_page(nonce.clone(), false);
-        *loads.borrow_mut() = Some(events.clone());
         page_agent::install(webview.read(cx).raw(), events, &nonce);
         lifecycle.watch_page(page.id, receiver, cx);
         #[cfg(target_os = "linux")]

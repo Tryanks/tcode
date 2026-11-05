@@ -1,15 +1,15 @@
 //! Each engine's half of the page agent: installing its scripts at document
 //! start in a world of Tcode's own where the engine has one, the channel it
 //! posts through, and the native sources of a page's [`Event`]s —
-//! navigation, failed loads, and the console and network where the engine
-//! reports them itself.
+//! navigation, failed loads, new-window requests, and the console where the
+//! engine reports it itself.
 //!
 //! Gap: gpui-webview and lb-wry expose neither script worlds, nor failed
-//! navigations, nor console or network events, so this reaches each engine
+//! navigations, nor console events, so this reaches each engine
 //! directly; their initialization scripts and IPC handler run in the page's
 //! own world, where the page could see and spoof them.
 
-use preview_mcp::page::{self, Capture, Transport};
+use preview_mcp::page::{self, Transport};
 
 use super::events::Event;
 
@@ -25,7 +25,7 @@ pub(super) fn nonce() -> String {
 #[cfg(not(target_os = "android"))]
 pub(super) use imp::install;
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
-pub(super) use imp::page_loads;
+pub(super) use imp::observe;
 #[cfg(target_os = "android")]
 pub(super) use imp::scripts;
 #[cfg(target_os = "windows")]
@@ -36,7 +36,6 @@ pub(super) use imp::{forget, run};
 mod imp {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::rc::Rc;
 
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, Imp, ProtocolObject, Sel};
@@ -55,7 +54,7 @@ mod imp {
     #[cfg(target_os = "macos")]
     use wry::WebViewExtMacOS as _;
 
-    use super::{Capture, Event, Events, Transport, page};
+    use super::{Event, Events, Transport, page};
     use crate::preview_panel::events::LoadError;
 
     const WORLD: &str = "tcode";
@@ -121,25 +120,30 @@ mod imp {
         }
     }
 
-    /// lb-wry's page-load callback, built into the page before it exists:
-    /// the end of a navigation, which no delegate method Tcode can add to
-    /// lb-wry's class reports.
-    pub(crate) fn page_loads() -> (
-        Rc<RefCell<Option<Events>>>,
-        impl Fn(wry::PageLoadEvent, String) + 'static,
-    ) {
-        let events: Rc<RefCell<Option<Events>>> = Rc::default();
-        let handler = {
-            let events = events.clone();
-            move |event, _url: String| {
-                if matches!(event, wry::PageLoadEvent::Finished)
-                    && let Some(events) = events.borrow().as_ref()
-                {
-                    let _ = events.try_send(Event::Finished);
+    /// lb-wry's callbacks, built into the page before it exists: the end of
+    /// a navigation, which no delegate method Tcode can add to lb-wry's class
+    /// reports, and a request for a new window, which loads in this page.
+    /// iOS: lb-wry has no UI delegate there, so such a request does nothing.
+    pub(crate) fn observe<'a>(
+        builder: wry::WebViewBuilder<'a>,
+        events: &Events,
+    ) -> wry::WebViewBuilder<'a> {
+        builder
+            .with_on_page_load_handler({
+                let events = events.clone();
+                move |event, _url| {
+                    if matches!(event, wry::PageLoadEvent::Finished) {
+                        let _ = events.try_send(Event::Finished);
+                    }
                 }
-            }
-        };
-        (events, handler)
+            })
+            .with_new_window_req_handler({
+                let events = events.clone();
+                move |url, _| {
+                    let _ = events.try_send(Event::NewWindow(url));
+                    wry::NewWindowResponse::Deny
+                }
+            })
     }
 
     pub(crate) fn install(raw: &wry::WebView, events: Events, nonce: &str) {
@@ -158,10 +162,7 @@ mod imp {
                 page_world: false,
             },
             nonce,
-            Capture {
-                console: true,
-                network: true,
-            },
+            true,
         );
         let manager = raw.manager();
         let script = |source: &str, world: &WKContentWorld| unsafe {
@@ -356,12 +357,13 @@ mod imp {
     use webview2_com::Microsoft::Web::WebView2::Win32::*;
     use webview2_com::{
         CallDevToolsProtocolMethodCompletedHandler, DevToolsProtocolEventReceivedEventHandler,
-        NavigationCompletedEventHandler, NavigationStartingEventHandler, take_pwstr,
+        NavigationCompletedEventHandler, NavigationStartingEventHandler,
+        NewWindowRequestedEventHandler, take_pwstr,
     };
     use windows_core::{HSTRING, Interface as _, PWSTR};
 
-    use super::{Capture, Event, Events, Transport, page};
-    use crate::preview_panel::events::{EngineRequest, LoadError};
+    use super::{Event, Events, Transport, page};
+    use crate::preview_panel::events::LoadError;
     use crate::preview_panel::webview2::RawWebView;
     use preview_mcp::page::ConsoleEntry;
 
@@ -434,8 +436,8 @@ mod imp {
     }
 
     /// Before the page's first navigation: the agent in its own world, the
-    /// binding it posts through, and the engine's console and network
-    /// records, which make the agent's own capture unnecessary.
+    /// binding it posts through, and the engine's console, which makes the
+    /// agent's own capture unnecessary.
     pub(crate) async fn prepare(webview: ICoreWebView2, nonce: String) -> Result<(), String> {
         let scripts = page::scripts(
             &Transport {
@@ -443,7 +445,7 @@ mod imp {
                 page_world: false,
             },
             &nonce,
-            Capture::default(),
+            false,
         );
         devtools(&webview, "Page.enable", serde_json::json!({})).await?;
         devtools(
@@ -459,7 +461,6 @@ mod imp {
         )
         .await?;
         devtools(&webview, "Runtime.enable", serde_json::json!({})).await?;
-        devtools(&webview, "Network.enable", serde_json::json!({})).await?;
         Ok(())
     }
 
@@ -540,6 +541,24 @@ mod imp {
         if let Err(error) = unsafe { webview.add_NavigationCompleted(&completed, &mut token) } {
             log::debug!("preview: failed to observe navigation completion: {error}");
         }
+        // A page asking for a window gets none: what it opens loads here.
+        let opened = NewWindowRequestedEventHandler::create(Box::new({
+            let events = events.clone();
+            move |_, args| {
+                if let Some(args) = args {
+                    let mut uri = windows_core::PWSTR::null();
+                    unsafe {
+                        args.SetHandled(true)?;
+                        args.Uri(&mut uri)?;
+                    }
+                    let _ = events.try_send(Event::NewWindow(take_pwstr(uri)));
+                }
+                Ok(())
+            }
+        }));
+        if let Err(error) = unsafe { webview.add_NewWindowRequested(&opened, &mut token) } {
+            log::debug!("preview: failed to observe new-window requests: {error}");
+        }
 
         receive(webview, "Runtime.bindingCalled", {
             let events = events.clone();
@@ -596,54 +615,6 @@ mod imp {
                     level: "error".into(),
                     text: text.into(),
                     location: location(details),
-                }));
-            }
-        });
-        receive(webview, "Network.requestWillBeSent", {
-            let events = events.clone();
-            move |params| {
-                let _ = events.try_send(Event::Network(EngineRequest::Sent {
-                    id: params["requestId"].as_str().unwrap_or_default().into(),
-                    method: params["request"]["method"].as_str().unwrap_or("GET").into(),
-                    url: params["request"]["url"].as_str().unwrap_or_default().into(),
-                    kind: params["type"].as_str().map(str::to_lowercase),
-                    at: params["timestamp"].as_f64().unwrap_or_default(),
-                }));
-            }
-        });
-        receive(webview, "Network.responseReceived", {
-            let events = events.clone();
-            move |params| {
-                let _ = events.try_send(Event::Network(EngineRequest::Response {
-                    id: params["requestId"].as_str().unwrap_or_default().into(),
-                    status: params["response"]["status"].as_u64().unwrap_or_default() as u16,
-                }));
-            }
-        });
-        receive(webview, "Network.loadingFinished", {
-            let events = events.clone();
-            move |params| {
-                let _ = events.try_send(Event::Network(EngineRequest::Finished {
-                    id: params["requestId"].as_str().unwrap_or_default().into(),
-                    at: params["timestamp"].as_f64().unwrap_or_default(),
-                    bytes: params["encodedDataLength"]
-                        .as_f64()
-                        .map(|bytes| bytes as u64),
-                }));
-            }
-        });
-        receive(webview, "Network.loadingFailed", {
-            let events = events.clone();
-            move |params| {
-                let error = params["errorText"].as_str().unwrap_or("failed");
-                let _ = events.try_send(Event::Network(EngineRequest::Failed {
-                    id: params["requestId"].as_str().unwrap_or_default().into(),
-                    at: params["timestamp"].as_f64().unwrap_or_default(),
-                    error: if params["canceled"] == true {
-                        format!("{error} (canceled)")
-                    } else {
-                        error.into()
-                    },
                 }));
             }
         });
@@ -743,8 +714,6 @@ mod imp {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use std::cell::RefCell;
-    use std::rc::Rc;
 
     use webkit2gtk::glib::{self, translate::ToGlibPtr as _};
     use webkit2gtk::{
@@ -753,7 +722,7 @@ mod imp {
     };
     use wry::WebViewExtUnix as _;
 
-    use super::{Capture, Event, Events, Transport, page};
+    use super::{Event, Events, Transport, page};
     use crate::preview_panel::events::LoadError;
 
     const WORLD: &str = "tcode";
@@ -769,13 +738,18 @@ mod imp {
         fn jsc_value_to_string(value: *mut std::ffi::c_void) -> *mut std::ffi::c_char;
     }
 
-    /// lb-wry's page-load callback is unused here: `load-changed` reports
-    /// the end of a navigation directly.
-    pub(crate) fn page_loads() -> (
-        Rc<RefCell<Option<Events>>>,
-        impl Fn(wry::PageLoadEvent, String) + 'static,
-    ) {
-        (Rc::default(), |_, _| {})
+    /// lb-wry's new-window callback, built into the page before it exists:
+    /// what a page opens loads in this page. `load-changed` reports
+    /// navigations directly.
+    pub(crate) fn observe<'a>(
+        builder: wry::WebViewBuilder<'a>,
+        events: &Events,
+    ) -> wry::WebViewBuilder<'a> {
+        let events = events.clone();
+        builder.with_new_window_req_handler(move |url, _| {
+            let _ = events.try_send(Event::NewWindow(url));
+            wry::NewWindowResponse::Deny
+        })
     }
 
     pub(crate) fn install(raw: &wry::WebView, events: Events, nonce: &str) {
@@ -834,10 +808,7 @@ mod imp {
                 page_world: false,
             },
             nonce,
-            Capture {
-                console: true,
-                network: true,
-            },
+            true,
         );
         manager.register_script_message_handler_in_world(HANDLER, WORLD);
         manager.connect_script_message_received(Some(HANDLER), move |_, result| {
@@ -909,7 +880,7 @@ mod imp {
 
 #[cfg(target_os = "android")]
 mod imp {
-    use super::{Capture, Transport, page};
+    use super::{Transport, page};
     use crate::preview_panel::android::RawWebView;
 
     /// `PreviewHost` installs the agent with
@@ -921,7 +892,8 @@ mod imp {
         "((listener) => (message) => listener.postMessage(message))(globalThis.tcodeAgent)";
 
     /// The agent's script for `PreviewHost`; Android reports the console
-    /// itself (`onConsoleMessage`).
+    /// itself (`onConsoleMessage`), and with one window a page's new-window
+    /// request loads in the page by default.
     pub(crate) fn scripts(nonce: &str) -> String {
         page::scripts(
             &Transport {
@@ -929,10 +901,7 @@ mod imp {
                 page_world: true,
             },
             nonce,
-            Capture {
-                console: false,
-                network: true,
-            },
+            false,
         )
         .agent
     }

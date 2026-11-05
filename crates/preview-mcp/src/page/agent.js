@@ -1,6 +1,7 @@
 // Tcode's page agent: installed at document start in the top frame, in a
 // script world of Tcode's own where the engine has one. `post` sends one
-// string to Tcode; `config` is { nonce, hooksEvent, hooks }.
+// string to Tcode; `config` is { nonce, hooksEvent }; `hooks`, where the
+// agent shares the page's world, captures the console.
 //
 // Every message carries the page's nonce and this document's id. Tcode calls
 // `globalThis.__tcodePage.call(id, method, args)`; each call is answered once
@@ -26,17 +27,15 @@
     return value.length > max ? value.slice(0, max) + "…" : value;
   };
 
-  // Console and network entries the main-world hooks see.
+  // Console entries the page-world hooks see.
   const relay = (entry) => {
-    if (!entry || (entry.t !== "console" && entry.t !== "network")) return;
-    const message = { t: entry.t };
-    for (const key of ["level", "text", "location", "method", "url", "status", "kind", "ms", "bytes", "failed"]) {
-      if (entry[key] != null) message[key] = typeof entry[key] === "string" ? clip(entry[key], MAX_TEXT) : entry[key];
-    }
+    if (!entry || entry.t !== "console") return;
+    const message = { t: "console", level: clip(entry.level, 16), text: clip(entry.text, MAX_TEXT) };
+    if (entry.location != null) message.location = clip(entry.location, MAX_TEXT);
     send(message);
   };
   if (hooks) {
-    hooks(relay, config.capture);
+    hooks(relay);
   } else if (config.hooksEvent) {
     window.addEventListener(config.hooksEvent, (event) => {
       try {
