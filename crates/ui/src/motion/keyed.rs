@@ -88,6 +88,32 @@ pub(crate) fn flip_offset(
     Point::new(follow("flip-x", jumps.x), follow("flip-y", jumps.y))
 }
 
+thread_local! {
+    /// How far the glides of the rows being prepainted draw them from their
+    /// places, summed over every gliding row around them.
+    static GLIDING: Cell<Point<Pixels>> = Cell::default();
+}
+
+/// Prepaints, with `prepaint`, a row drawn `offset` from its laid-out place
+/// as it glides there; what it holds can ask [`gliding`] how far.
+pub(crate) fn prepaint_gliding<R>(
+    offset: Point<Pixels>,
+    window: &mut Window,
+    prepaint: impl FnOnce(&mut Window) -> R,
+) -> R {
+    let around = GLIDING.get();
+    GLIDING.set(around + offset);
+    let prepainted = window.with_element_offset(offset, prepaint);
+    GLIDING.set(around);
+    prepainted
+}
+
+/// How far from where it is laid out what is being prepainted is drawn by
+/// the glides of the rows it is in ([`prepaint_gliding`]).
+pub(crate) fn gliding() -> Point<Pixels> {
+    GLIDING.get()
+}
+
 struct ListState<T> {
     /// The keys drawn last frame, in order, those leaving included.
     drawn: Vec<SharedString>,
@@ -511,7 +537,7 @@ impl gpui::Element for FlipRow {
             window,
             cx,
         );
-        window.with_element_offset(offset, |window| self.child.prepaint(window, cx));
+        prepaint_gliding(offset, window, |window| self.child.prepaint(window, cx));
     }
 
     fn paint(

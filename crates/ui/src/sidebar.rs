@@ -49,7 +49,7 @@ mod arrange;
 mod presence;
 mod swipe;
 pub(crate) use arrange::thread_carried;
-use arrange::{DropZone, ThreadDrag};
+use arrange::{DropZone, Landing, ThreadDrag};
 use gpui_base::dock::AnyDrag;
 
 /// How long a value drawn here takes to glide to a new one.
@@ -717,6 +717,7 @@ pub struct SessionsSidebar {
     reveal_pinned: Option<String>,
     row_swipes: swipe::RowSwipes,
     drag: Option<ThreadDrag>,
+    landing: Option<Landing>,
     /// The project the Arrange threads page shows; `None` is every project.
     arrange_scope: Option<String>,
     arrange_settled_expanded: bool,
@@ -838,10 +839,7 @@ impl SessionsSidebar {
             pinned,
             active,
             mut settled,
-        } = match &self.drag {
-            Some(drag) => drag.preview(scope, sections),
-            None => sections,
-        };
+        } = self.arranged(scope, sections);
         let settled_count = settled.len();
         self.limit_settled_rows(key, &mut settled);
         ThreadRows {
@@ -1198,6 +1196,7 @@ impl SessionsSidebar {
             reveal_pinned: None,
             row_swipes: Default::default(),
             drag: None,
+            landing: None,
             arrange_scope: None,
             arrange_settled_expanded: false,
             arrange_settled_fold: 0.,
@@ -1552,6 +1551,10 @@ impl SessionsSidebar {
             _ => None,
         };
         let store = self.store.clone();
+        let sessions: Vec<String> = commands
+            .iter()
+            .filter_map(|command| command.session_id().map(str::to_owned))
+            .collect();
         cx.spawn_in(window, async move |this, cx| {
             for command in commands {
                 let settling = matches!(command, Command::SettleSession { .. });
@@ -1568,6 +1571,7 @@ impl SessionsSidebar {
                 };
                 if let Err(error) = request.await {
                     let _ = this.update_in(cx, |this, window, cx| {
+                        this.lifecycle_answered(&sessions, false, cx);
                         if pinning {
                             this.reveal_pinned = None;
                         }
@@ -1585,6 +1589,7 @@ impl SessionsSidebar {
                     return;
                 }
             }
+            let _ = this.update(cx, |this, cx| this.lifecycle_answered(&sessions, true, cx));
             if let Some((kind, commands)) = undo {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.push_lifecycle_undo(kind, UndoEntry { commands, reopen }, window, cx);
@@ -6359,6 +6364,147 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A row dragged to another place and let go lands from where it was let
+    /// go: its ghost travels from there into the row's new place, which the
+    /// row holds from the drop on, while the host takes the move and after,
+    /// never going back to where it came from. A drag Escape cancels flies
+    /// back from where it was let go into the row's own place. With motion
+    /// reduced a dropped row is in its new place at once.
+    #[gpui::test]
+    fn a_dropped_row_lands_from_where_it_was_let_go(cx: &mut TestAppContext) {
+        let (sidebar, store, _, mut driver, host, root) =
+            sidebar_over_host(cx, "sidebar-drop-landing", &["newest", "middle", "oldest"]);
+        let (_, cx) =
+            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|_, cx| cx.set_reduce_motion(false));
+        cx.simulate_resize(size(px(320.), px(800.)));
+        crate::test_frames::draw_settled(cx);
+        let row = |id: &str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("sidebar-thread-{id}").leak())
+                .unwrap_or_else(|| panic!("{id} is drawn"))
+        };
+        let ghost = |id: &str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("drag-ghost-thread-{id}").leak())
+                .map(|ghost| ghost.top())
+        };
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+        };
+        let listed = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .flat_sessions()
+                    .iter()
+                    .map(|meta| meta.id.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let first = row("newest", cx).top();
+        let (left, none) = (gpui::MouseButton::Left, gpui::Modifiers::default());
+        // Carries `id` to `to` and returns where its ghost is drawn there.
+        let carry = |id: &str, to: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext| {
+            let place = row(id, cx);
+            cx.simulate_mouse_down(place.center(), left, none);
+            cx.simulate_mouse_move(place.center() + gpui::point(px(0.), px(8.)), left, none);
+            draw(cx);
+            if !cx.update(|_, cx| cx.reduce_motion()) {
+                assert_eq!(ghost(id, cx), Some(place.top()), "it lifts off its place");
+            }
+            cx.simulate_mouse_move(to, left, none);
+            for _ in 0..20 {
+                frame(cx);
+            }
+            ghost(id, cx).expect("the row is carried")
+        };
+
+        let newest = row("newest", cx);
+        let to = gpui::point(newest.center().x, newest.top() + px(4.));
+        let held = carry("oldest", to, cx);
+        let dropped = row("oldest", cx).top();
+        cx.simulate_mouse_up(to, left, none);
+        // The frame the release is drawn in, those before the host has taken
+        // the move, then those after.
+        draw(cx);
+        let (mut ghosts, mut rows) = (vec![ghost("oldest", cx)], vec![row("oldest", cx).top()]);
+        for _ in 0..4 {
+            frame(cx);
+            ghosts.push(ghost("oldest", cx));
+            rows.push(row("oldest", cx).top());
+        }
+        driver.wait_until(cx, &store, "the move", |cx| {
+            store.read_with(cx, |store, _| {
+                store.flat_sessions().first().map(|meta| meta.id.as_str()) == Some("oldest")
+            })
+        });
+        for _ in 0..20 {
+            frame(cx);
+            ghosts.push(ghost("oldest", cx));
+            rows.push(row("oldest", cx).top());
+        }
+        assert_eq!(ghosts[0], Some(held), "it lands from where it was let go");
+        // Pinned's empty target closes behind the drop, so the new place
+        // moves up as the row settles into it.
+        assert!(
+            rows[0] == dropped
+                && rows.windows(2).all(|pair| pair[1] <= pair[0])
+                && rows.last() == Some(&first),
+            "the row holds the place it was dropped into: {rows:?}"
+        );
+        assert!(
+            ghosts
+                .iter()
+                .flatten()
+                .all(|top| *top >= held && *top <= dropped + px(1.)),
+            "the ghost goes from where it was let go into that place: {ghosts:?}"
+        );
+        assert_eq!(ghosts.last(), Some(&None), "and has settled there");
+        assert_eq!(listed(cx), ["oldest", "newest", "middle"]);
+
+        let middle = row("middle", cx);
+        let to = gpui::point(middle.center().x, middle.bottom() - px(4.));
+        let held = carry("oldest", to, cx);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        let mut ghosts = vec![ghost("oldest", cx)];
+        for _ in 0..20 {
+            frame(cx);
+            ghosts.push(ghost("oldest", cx));
+        }
+        cx.simulate_mouse_up(to, left, none);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(
+            ghosts[0],
+            Some(held),
+            "Escape sends it back from where it was let go"
+        );
+        assert!(
+            ghosts
+                .iter()
+                .flatten()
+                .all(|top| *top <= held && *top >= first - px(1.)),
+            "into its own place: {ghosts:?}"
+        );
+        assert_eq!(ghost("oldest", cx), None);
+        assert_eq!(row("oldest", cx).top(), first);
+        assert_eq!(listed(cx), ["oldest", "newest", "middle"], "nothing moved");
+
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let oldest = row("oldest", cx);
+        let to = gpui::point(oldest.center().x, oldest.top() + px(4.));
+        carry("middle", to, cx);
+        cx.simulate_mouse_up(to, left, none);
+        frame(cx);
+        assert_eq!(ghost("middle", cx), None, "reduced motion sets it down");
+        assert_eq!(row("middle", cx).top(), first, "in its new place at once");
+
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[gpui::test]
     fn canceling_inline_rename_discards_the_unsaved_title(cx: &mut TestAppContext) {
         for compact in [false, true] {
@@ -8941,32 +9087,17 @@ mod tests {
         assert_eq!(session_id, "fresh");
         assert!("f" < key.as_str() && key.as_str() < "t", "{key}");
 
-        // The row lifts off its place and, cancelled, its ghost travels back
-        // into it rather than vanishing.
-        cx.update(|_, cx| cx.set_reduce_motion(false));
-        let ghost = |cx: &mut VisualTestContext| cx.debug_bounds("drag-ghost-thread-busy");
-        let busy = row(cx, "busy");
-        let start = busy.center();
+        let start = row(cx, "busy").center();
         cx.simulate_mouse_down(start, left, none);
         cx.simulate_mouse_move(start + gpui::point(px(0.), px(8.)), left, none);
         draw(cx);
-        assert_eq!(ghost(cx).map(|ghost| ghost.origin), Some(busy.origin));
         let target = row(cx, "pin-a");
         cx.simulate_mouse_move(target.center(), left, none);
-        cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         cx.simulate_keystrokes("escape");
         draw(cx);
-        let leaving = ghost(cx).expect("Escape sends the row back");
-        assert!(
-            leaving.top() < busy.top(),
-            "it starts back from the pointer"
-        );
         cx.simulate_mouse_up(target.center(), left, none);
-        crate::test_frames::draw_settled(cx);
-        assert_eq!(ghost(cx), None);
-        assert_eq!(row(cx, "busy"), busy, "it is back in its place");
-        cx.update(|_, cx| cx.set_reduce_motion(true));
+        draw(cx);
         assert_eq!(sent(cx, &mut driver, 0), vec![], "Escape cancels the drag");
 
         sidebar.update_in(cx, |sidebar, window, cx| {
