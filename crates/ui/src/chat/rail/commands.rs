@@ -1,21 +1,23 @@
 //! The commands the thread's agent ran in its latest turn.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
 use agent::ItemStatus;
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::session::Timeline;
 
 use super::RailView;
+use super::stack::{Fit, Fitted};
 use crate::chat::model::one_line_with_break_markers;
 use crate::chat::tools::shell;
 use crate::icon::IconName;
+use crate::material::CARD_INSET;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::spinner::Spinner;
@@ -25,9 +27,6 @@ const ROWS: Duration = Duration::from_millis(200);
 
 /// How long a row's mark takes to cross-fade to another state's.
 const CHANGE: Duration = Duration::from_millis(200);
-
-/// How many commands the card lists; the rest it counts.
-const SHOWN: usize = 6;
 
 /// How a command stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,8 +67,8 @@ struct Line {
 /// changes rather than every frame the rail is drawn.
 #[derive(Default)]
 pub(in crate::chat) struct Commands {
-    /// Running first, newest first within each group, at most [`SHOWN`].
-    lines: Vec<Line>,
+    /// Running first, newest first within each group.
+    lines: Rc<[Line]>,
     total: usize,
     running: usize,
     failed: usize,
@@ -117,7 +116,6 @@ impl Commands {
             .into_iter()
             .rev()
             .chain(settled.into_iter().rev())
-            .take(SHOWN)
             .collect();
     }
 }
@@ -149,34 +147,87 @@ pub(super) fn summary(rail: &RailView, _cx: &App) -> Option<SharedString> {
     )
 }
 
+/// The commands the card lists: the thread's, or while the card leaves,
+/// those it listed last.
+fn listed(rail: &RailView) -> Rc<[Line]> {
+    let last = rail
+        .motion
+        .keep::<Rc<RefCell<Rc<[Line]>>>>("rail-commands-lines");
+    if rail.commands.total > 0 {
+        last.replace(rail.commands.lines.clone());
+    }
+    last.borrow().clone()
+}
+
+fn fitted(rail: &RailView) -> Rc<Cell<Fitted>> {
+    rail.motion.keep("rail-commands-fitted")
+}
+
+/// The card's rows never scroll: in a rail too short for them all it
+/// shows as many as fit and counts the rest.
+pub(super) fn fit(rail: &RailView, cx: &App) -> Fit {
+    Fit {
+        rows: listed(rail).len(),
+        edge: f32::from(cx.theme().tokens.spacing.sm),
+        fitted: fitted(rail),
+    }
+}
+
 /// What the card shows below its header, laid out at the rail's width: a
-/// row for each command, running ones first, each with how it stands at its
-/// right, bringing its place in the timeline into view on a click; past
-/// [`SHOWN`], how many more. Commands that leave the list fold away as they
-/// stood.
+/// row for each command that fits the card's height, running ones first,
+/// each with how it stands at its right, bringing its place in the timeline
+/// into view on a click; then how many more. Commands that leave the list,
+/// or no longer fit, fold away as they stood.
 pub(super) fn body(
     rail: &RailView,
     window: &mut Window,
     cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
-    let last = rail
-        .motion
-        .keep::<Rc<RefCell<(Vec<Line>, usize)>>>("rail-commands-lines");
-    if rail.commands.total > 0 {
-        last.replace((
-            rail.commands.lines.clone(),
-            rail.commands.total - rail.commands.lines.len(),
-        ));
-    }
-    let (lines, more) = last.borrow().clone();
+    let lines = listed(rail);
     if lines.is_empty() {
         return None;
     }
-    let rows = lines
-        .into_iter()
-        .map(|line| (SharedString::from(line.entry_id.clone()), line));
-    let rows = crate::motion::keyed("rail-commands", rows, ROWS, window, cx, row)
-        .render(v_flex().w_full().min_w_0());
+    let fitted = fitted(rail);
+    let shown = fitted.get().shown.unwrap_or(lines.len()).min(lines.len());
+    let more = lines.len() - shown;
+    // The tallest row laid out this frame, noted once they all are.
+    let tallest = Rc::new(Cell::new(0f32));
+    let rows = lines[..shown]
+        .iter()
+        .map(|line| (SharedString::from(line.entry_id.clone()), line.clone()));
+    let rows = crate::motion::keyed(
+        "rail-commands",
+        rows,
+        ROWS,
+        window,
+        cx,
+        |key, line, window, cx| {
+            let tallest = tallest.clone();
+            // Folding, a row is laid out whole and clipped: this is its
+            // height at rest.
+            div()
+                .w_full()
+                .on_children_prepainted(move |bounds, _, _| {
+                    for row in bounds {
+                        tallest.set(tallest.get().max(f32::from(row.size.height)));
+                    }
+                })
+                .child(row(key, line, window, cx))
+                .into_any_element()
+        },
+    )
+    .render(v_flex().w_full().min_w_0().on_children_prepainted({
+        let fitted = fitted.clone();
+        move |_, _, _| {
+            let row = tallest.replace(0.);
+            if row > 0. {
+                fitted.set(Fitted {
+                    row: Some(row),
+                    ..fitted.get()
+                });
+            }
+        }
+    }));
     let more = crate::motion::shown(
         "rail-commands-more",
         (more > 0).then_some(more),
@@ -186,19 +237,35 @@ pub(super) fn body(
     )
     .map(|shown| {
         let count = shown.value;
+        let fitted = fitted.clone();
         shown.fold(
             div()
                 .w_full()
-                .px_1()
-                .pt_1()
-                .text_secondary(false, cx)
-                .child(crate::tr!("rail.commands_more", count = count)),
+                .on_children_prepainted(move |bounds, _, _| {
+                    if let Some(more) = bounds.first() {
+                        fitted.set(Fitted {
+                            more: Some(f32::from(more.size.height)),
+                            ..fitted.get()
+                        });
+                    }
+                })
+                .child(
+                    div()
+                        .debug_selector(|| "rail-commands-more".into())
+                        .w_full()
+                        .px_1()
+                        .pt_1()
+                        .text_secondary(false, cx)
+                        .child(crate::tr!("rail.commands_more", count = count)),
+                ),
         )
     });
     Some(
         v_flex()
             .w_full()
             .min_w_0()
+            .px(px(CARD_INSET))
+            .pb(cx.theme().tokens.spacing.sm)
             .child(rows)
             .children(more)
             .into_any_element(),

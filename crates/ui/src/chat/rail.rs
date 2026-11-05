@@ -441,6 +441,21 @@ impl RailCard {
         matches!(self, Self::Goal | Self::Screen)
     }
 
+    /// The rows of its body, when they never scroll: in less height than
+    /// they all take the card shows as many as fit and counts the rest. The
+    /// body holds the card's inset itself.
+    fn fit(self, rail: &RailView, cx: &App) -> Option<stack::Fit> {
+        match self {
+            Self::Commands => Some(commands::fit(rail, cx)),
+            Self::Goal
+            | Self::Plan
+            | Self::Agents
+            | Self::Screen
+            | Self::Changes
+            | Self::PullRequests => None,
+        }
+    }
+
     fn body(
         self,
         rail: &RailView,
@@ -646,7 +661,7 @@ impl RailView {
 
     /// One card, `presence` of the way in: its header names it and sums
     /// it up, and its body shows below in whatever height the rail gives
-    /// it, scrolling inside it.
+    /// it, scrolling inside it or fitting its rows to it.
     fn render_rail_card(
         &self,
         card: RailCard,
@@ -696,6 +711,7 @@ impl RailView {
                     )),
             )
             .into_any_element();
+        let fit = card.fit(self, cx);
         let body = card.body(self, window, cx).map(|body| {
             div()
                 .id(SharedString::from(format!("rail-card-body-{key}")))
@@ -707,7 +723,7 @@ impl RailView {
                 // under the rail.
                 .occlude()
                 .map(|region| {
-                    if card.lists_itself() {
+                    if card.lists_itself() || fit.is_some() {
                         region.child(body)
                     } else {
                         region.child(
@@ -736,6 +752,7 @@ impl RailView {
             header,
             body,
             rigid: card.rigid(),
+            fit,
             presence,
             scale: (card == RailCard::Screen).then(|| screen::scale(self)),
         }
@@ -902,10 +919,14 @@ mod tests {
         }
     }
 
+    /// The selector of the last step of [`timeline`]'s plan.
+    const LAST_STEP: &str = "plan-step-0:Step 13 of a plan long enough to fill its card";
+
     /// Cards with more to show than a short rail holds share its height:
     /// the rail never runs past its bottom, as a card comes in or once it
-    /// is in, and each card's body scrolls inside its share, on its card's
-    /// surface whatever height its share comes to.
+    /// is in, each card is on its surface whatever height its share comes
+    /// to, and a body of more than its share (the plan's) scrolls inside
+    /// it.
     #[gpui::test]
     fn cards_share_a_short_rail_and_scroll_inside_it(cx: &mut TestAppContext) {
         let (threads, cx) = short_rail(cx, || timeline(0));
@@ -948,12 +969,12 @@ mod tests {
             assert!(body.size.height > px(0.), "the {key} body has room");
         }
 
-        // The commands' body holds more rows than its share and scrolls.
-        let body = bounds(cx, "rail-card-body-commands").unwrap();
-        let oldest = bounds(cx, "rail-command-cmd-3").expect("the sixth row is listed");
+        // The plan's body holds more steps than its share and scrolls.
+        let body = bounds(cx, "rail-card-body-plan").unwrap();
+        let last = bounds(cx, LAST_STEP).expect("the last step is listed");
         assert!(
-            oldest.bottom() > body.bottom(),
-            "the commands body shows all its rows ({oldest:?} in {body:?}): nothing to scroll"
+            last.bottom() > body.bottom(),
+            "the plan body shows all its steps ({last:?} in {body:?}): nothing to scroll"
         );
         cx.simulate_mouse_move(body.center(), None, gpui::Modifiers::default());
         cx.simulate_event(gpui::ScrollEvent {
@@ -963,13 +984,13 @@ mod tests {
             ..Default::default()
         });
         draw_settled(cx);
-        let scrolled = bounds(cx, "rail-command-cmd-3").unwrap();
+        let scrolled = bounds(cx, LAST_STEP).unwrap();
         assert!(
-            scrolled.top() < oldest.top(),
-            "the commands body scrolls inside its card"
+            scrolled.top() < last.top(),
+            "the plan body scrolls inside its card"
         );
         assert_eq!(
-            bounds(cx, "rail-card-body-commands").unwrap(),
+            bounds(cx, "rail-card-body-plan").unwrap(),
             body,
             "the card stays where it is"
         );
@@ -979,6 +1000,88 @@ mod tests {
             AT_REST,
             "after scrolling",
         );
+    }
+
+    /// The commands card never scrolls: in a rail too short for every
+    /// command it shows, newest first, as many as fit whole in its share
+    /// above how many more there are, with room for no other; as the rail
+    /// grows it shows more, and all of them once they fit.
+    #[gpui::test]
+    fn the_commands_card_shows_the_commands_that_fit_and_counts_the_rest(cx: &mut TestAppContext) {
+        const COMMANDS: usize = 30;
+        let (_threads, cx) = short_rail(cx, || timeline(COMMANDS));
+        let pad = cx.update(|_, cx| cx.theme().tokens.spacing.sm);
+        // The rows shown, newest first, and the count below them, each
+        // whole inside the card's body.
+        let shown = |cx: &mut VisualTestContext, when: &str| {
+            let body = bounds(cx, "rail-card-body-commands").expect("the commands card shows");
+            let rows: Vec<_> = (0..COMMANDS)
+                .rev()
+                .map_while(|index| bounds(cx, &format!("rail-command-cmd-{index}")))
+                .collect();
+            let listed = (0..COMMANDS)
+                .filter(|index| bounds(cx, &format!("rail-command-cmd-{index}")).is_some())
+                .count();
+            assert_eq!(
+                listed,
+                rows.len(),
+                "{when}: the card lists the newest commands"
+            );
+            assert!(!rows.is_empty(), "{when}: the card lists a command");
+            let slack = px(0.5);
+            for row in &rows {
+                assert!(
+                    row.top() >= body.top() - slack && row.bottom() <= body.bottom() + slack,
+                    "{when}: a row {row:?} runs out of the body {body:?}"
+                );
+            }
+            let more = bounds(cx, "rail-commands-more");
+            if rows.len() == COMMANDS {
+                assert!(more.is_none(), "{when}: every command shows, none counted");
+                return (rows.len(), body);
+            }
+            let more = more.expect("the rest are counted");
+            let last = rows.last().unwrap();
+            assert!(
+                more.top() >= last.bottom() - slack && more.bottom() <= body.bottom() + slack,
+                "{when}: the count {more:?} is not whole below the rows in {body:?}"
+            );
+            assert!(
+                body.bottom() - pad - more.bottom() < last.size.height,
+                "{when}: another row fits above the count ({more:?} in {body:?})"
+            );
+            (rows.len(), body)
+        };
+
+        let (short, body) = shown(cx, "in a short rail");
+        assert!(short < COMMANDS, "a short rail holds only some commands");
+        let first = bounds(cx, &format!("rail-command-cmd-{}", COMMANDS - 1)).unwrap();
+        cx.simulate_mouse_move(body.center(), None, gpui::Modifiers::default());
+        cx.simulate_event(gpui::ScrollEvent {
+            position: body.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-400.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        draw_settled(cx);
+        assert_eq!(
+            bounds(cx, &format!("rail-command-cmd-{}", COMMANDS - 1)),
+            Some(first),
+            "the commands body has nothing to scroll"
+        );
+
+        cx.simulate_resize(size(px(1_400.), px(900.)));
+        draw_settled(cx);
+        let (taller, _) = shown(cx, "in a taller rail");
+        assert!(
+            taller > short,
+            "a taller rail shows more commands ({taller}, not {short})"
+        );
+
+        cx.simulate_resize(size(px(1_400.), px(2_400.)));
+        draw_settled(cx);
+        let (tall, _) = shown(cx, "in a rail with room for every command");
+        assert_eq!(tall, COMMANDS, "a rail with room shows every command");
     }
 
     /// A card whose body has a height of its own keeps all of it when a card
