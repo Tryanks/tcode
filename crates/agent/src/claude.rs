@@ -48,6 +48,10 @@ use crate::{
 /// expose `rewind_conversation` alongside the SDK's `rewind_files` request.
 const NATIVE_REWIND_MIN_VERSION: (u32, u32, u32) = (2, 1, 214);
 
+/// First Claude Code release with `--append-system-prompt-file` (a hidden
+/// option in the published 2.0.33 `cli.js`; 2.0.32 lacks it).
+const APPEND_SYSTEM_PROMPT_FILE_MIN_VERSION: (u32, u32, u32) = (2, 0, 33);
+
 /// Resolve the last permission-mode value on the effective argv. Provider
 /// launch arguments intentionally follow internal arguments and may use either
 /// CLI spelling, so the mode tracker must honor both.
@@ -221,9 +225,8 @@ fn inherit_settings(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let native_rewind = claude_version(opts.binary_path.as_deref(), &opts.launch_env)
-        .await
-        .is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
+    let version = claude_version(opts.binary_path.as_deref(), &opts.launch_env).await;
+    let native_rewind = version.is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
     // Absolute path: a bare name would be resolved against the session cwd we
     // set below, which breaks PATH lookup (see `resolve_binary`).
     let binary = crate::resolve_binary(opts.binary_path.as_deref(), "claude")?;
@@ -285,14 +288,23 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     }
     // Passed on every launch: the CLI records the rendered system prompt with the conversation
     // and renders it again from the current launch after a compaction.
-    let instructions = opts
-        .instructions
-        .as_deref()
-        .map(InstructionsFile::write)
-        .transpose()
-        .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?;
-    if let Some(instructions) = &instructions {
-        cmd.arg("--append-system-prompt-file").arg(&instructions.0);
+    // A file keeps the argument on one line for a Windows batch launcher; an
+    // older CLI, or one whose version is unknown, gets the text itself.
+    let file_supported =
+        version.is_some_and(|version| version >= APPEND_SYSTEM_PROMPT_FILE_MIN_VERSION);
+    let instructions_file = match opts.instructions.as_deref() {
+        Some(text) if file_supported => Some(
+            InstructionsFile::write(text)
+                .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?,
+        ),
+        Some(text) => {
+            cmd.arg("--append-system-prompt").arg(text);
+            None
+        }
+        None => None,
+    };
+    if let Some(file) = &instructions_file {
+        cmd.arg("--append-system-prompt-file").arg(&file.0);
     }
     // Settings → Providers "Launch arguments", appended last so the user can
     // override anything we set above.
@@ -347,7 +359,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let (line_tx, line_rx) = smol::channel::unbounded::<String>();
     smol::spawn(async move {
         // Kept until the CLI's output ends, so it reads the file whenever it likes.
-        let _instructions = instructions;
+        let _instructions = instructions_file;
         let mut lines = BufReader::new(stdout).lines();
         while let Some(line) = lines.next().await {
             match line {
@@ -4232,13 +4244,18 @@ mod tests {
         }
     }
 
-    /// A stand-in CLI that records its arguments, one per line, in `directory/argv`.
+    /// A stand-in CLI that records its arguments, each ended by a NUL, in `directory/argv`.
     #[cfg(unix)]
     fn recording_claude(directory: &std::path::Path) -> PathBuf {
+        recording_claude_at(directory, "2.1.200")
+    }
+
+    #[cfg(unix)]
+    fn recording_claude_at(directory: &std::path::Path, version: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::create_dir_all(directory).unwrap();
         let binary = directory.join("claude");
-        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\nprintf '%s\\0' \"$@\" > argv\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\nwhile IFS= read -r line; do :; done\n").unwrap();
+        std::fs::write(&binary, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '{version}\\n'; exit 0; fi\nprintf '%s\\0' \"$@\" > argv\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}}'\nwhile IFS= read -r line; do :; done\n")).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         binary
     }
@@ -4373,6 +4390,35 @@ mod tests {
                 assert!(args.contains(&"--mcp-config"));
                 shut_down(handle).await;
             }
+            // A CLI older than the file option is given the text itself.
+            let older = directory.join("older");
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: false,
+                binary_path: Some(recording_claude_at(&older, "2.0.32")),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: Some(instructions.into()),
+            })
+            .await
+            .unwrap();
+            while !matches!(
+                handle.events.recv().await.unwrap(),
+                AgentEvent::ProviderOptions { .. }
+            ) {}
+            let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
+            let args: Vec<_> = argv.trim_end_matches('\0').split('\0').collect();
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--append-system-prompt", instructions])
+            );
+            assert!(!args.contains(&"--append-system-prompt-file"));
+            shut_down(handle).await;
             std::fs::remove_dir_all(directory).unwrap();
         });
     }
