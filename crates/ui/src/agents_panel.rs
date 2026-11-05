@@ -652,10 +652,9 @@ fn compact(text: &str) -> String {
 /// Beside the lead, it comes out of `origin`, what was pressed to open it,
 /// as the host records it ([`ChatView::side_origins`]).
 ///
-/// `host` is the chat that drew what was pressed
-/// ([`ChatView::agent_host`]), not one found by the lead's
-/// id: a thread can show in one pane and beside its own lead in another,
-/// and the agent belongs in the pane the press came from.
+/// `host` is the chat that drew what was pressed, not one found by the
+/// lead's id: a thread can show in one pane and beside its own lead in
+/// another, and the agent belongs in the pane the press came from.
 pub(crate) fn open_agent(
     store: &Entity<WorkspaceStore>,
     id: String,

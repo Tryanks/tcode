@@ -242,20 +242,19 @@ pub struct ChatView {
     /// to, and where the timeline's rows record what opens an agent.
     list_state: ListState,
     timeline_origins: crate::motion::expand::Origins,
+    rail_origins: crate::motion::expand::Origins,
     /// Where what opens an agent beside the thread was drawn by this view
-    /// (the rail's agents, the agent's own surface), for the agent's card
-    /// to grow out of it and shrink back into it.
+    /// (the agent's own surface), for the agent's card to grow out of it
+    /// and shrink back into it. The timeline and the rail keep their own.
     side_origins: crate::motion::expand::Origins,
+    /// The side rail, in a view of its own: see [`rail::RailView`].
+    rail: Entity<rail::RailView>,
+    /// How the view last laid the rail out, as it handed it.
+    rail_layout: rail::RailLayout,
     /// The timeline's items as the rail last listed them from: its entries'
     /// revision, or stale after any other change of the store.
     entries_revision: Option<u64>,
     rail_stale: bool,
-    /// Open/closed keys of the rail's collapsibles.
-    expanded: HashSet<String>,
-    /// The screenshots the rail's Screen card steps through.
-    screen: rail::screen::Screenshots,
-    /// The commands the rail's Commands card lists.
-    commands: rail::commands::Commands,
     /// Holds the focus of everything the view draws, the composer included,
     /// so the selection knows when the focus has left it.
     focus_handle: gpui::FocusHandle,
@@ -429,6 +428,19 @@ impl ChatView {
             |chat: &mut ChatView, width| chat.width = width,
             cx,
         );
+        let composer_below_card = composer.read(cx).below_card();
+        let chat = cx.entity().downgrade();
+        let rail = cx.new(|_| {
+            rail::RailView::new(
+                workspace_store.clone(),
+                window_state.clone(),
+                session_id.clone(),
+                &scene,
+                chat,
+                timeline.clone(),
+                composer_below_card.clone(),
+            )
+        });
         Self {
             pull_requests,
             workspace_store,
@@ -447,7 +459,7 @@ impl ChatView {
             scene_at: cx.background_executor().now(),
             window_state,
             composer_layout: (compact, px(0.)),
-            composer_below_card: composer.read(cx).below_card(),
+            composer_below_card,
             composer,
             terminal_drawer,
             agents,
@@ -467,14 +479,14 @@ impl ChatView {
             drawer_agent: None,
             list_state: timeline.read(cx).list_state.clone(),
             timeline_origins: timeline.read(cx).side_origins.clone(),
+            rail_origins: rail.read(cx).origins.clone(),
             timeline,
             timeline_layout: TimelineLayout::default(),
             side_origins: crate::motion::expand::Origins::in_scene(&scene),
+            rail,
+            rail_layout: Default::default(),
             entries_revision: None,
             rail_stale: true,
-            expanded: HashSet::new(),
-            screen: Default::default(),
-            commands: Default::default(),
             focus_handle,
             commit_dialog: None,
             scene,
@@ -608,8 +620,9 @@ impl ChatView {
         self.timeline.update(cx, |timeline, cx| {
             timeline.set_session(session_id.clone(), cx)
         });
+        self.rail
+            .update(cx, |rail, cx| rail.set_session(session_id.clone(), cx));
         self.session_id = session_id;
-        self.expanded.clear();
         self.rail_stale = true;
         self.composer_drawn = false;
         // Not yet shown, for a host asking before the view next renders.
@@ -822,28 +835,18 @@ impl ChatView {
         !loading && (self.session_id.is_none() || self.timeline.read(cx).scene_ready(cx))
     }
 
-    /// List again what the rail's Screen and Commands cards show, once the
-    /// timeline's items or anything else of the store changed.
-    fn sync_rail(&mut self, cx: &App) {
-        let store = self.workspace_store.read(cx);
-        let revision = store.entries_revision_for(self.session_id.as_deref(), cx);
+    /// Has the rail list again what its Screen and Commands cards show,
+    /// once the timeline's items or anything else of the store changed.
+    fn sync_rail(&mut self, cx: &mut App) {
+        let revision = self
+            .workspace_store
+            .read(cx)
+            .entries_revision_for(self.session_id.as_deref(), cx);
         if !std::mem::take(&mut self.rail_stale) && revision == self.entries_revision {
             return;
         }
         self.entries_revision = revision;
-        let (screen, commands) = (&mut self.screen, &mut self.commands);
-        let listed = store.with_entries_for(
-            self.session_id.as_deref(),
-            |timeline| {
-                screen.sync(&timeline.entries);
-                commands.sync(timeline);
-            },
-            cx,
-        );
-        if listed.is_none() {
-            self.screen.sync(&[]);
-            self.commands = Default::default();
-        }
+        self.rail.update(cx, |rail, cx| rail.sync(cx));
     }
 }
 
@@ -896,7 +899,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
-        let rail_cards = self.rail_cards(cx);
+        let rail_cards = self.rail.read(cx).cards(cx);
         let layout =
             rail::BodyLayout::of(width, !rail_cards.is_empty(), self.side_share(cx), compact);
         // gpui-base has no transition that moves a laid-out column to a new
@@ -927,7 +930,14 @@ impl ChatView {
             self.composer
                 .update(cx, |composer, cx| composer.set_column_shift(shift, cx));
         }
-        let rail = self.render_rail(rail_cards, window, cx);
+        let rail_layout = rail::RailLayout {
+            body: self.body,
+            cards: rail_cards,
+        };
+        if rail_layout != self.rail_layout {
+            self.rail_layout = rail_layout.clone();
+            self.rail.update(cx, |rail, _| rail.set_layout(rail_layout));
+        }
         let mut side = self.render_side(window, cx);
         let track_inset = self.track_inset();
         let phone_strip = self.render_phone_strip(agents.as_ref(), window, cx);
@@ -1080,9 +1090,11 @@ impl ChatView {
         }
 
         let delivery_inset = gpui::rems(1.).to_pixels(window.rem_size());
-        let slots = rail::Slots {
+        // The agent's card is laid out after the rail, over it, as the two
+        // give way to each other in the slot.
+        let side_slot = rail::Slots {
             below_card: self.composer_below_card.clone(),
-            slots: rail.into_iter().chain(side.card.take()).collect(),
+            slots: side.card.take().into_iter().collect(),
         };
         let main = v_flex()
             .relative()
@@ -1146,7 +1158,8 @@ impl ChatView {
                     )
                     .child(composer),
             )
-            .child(slots);
+            .child(self.rail.clone())
+            .child(side_slot);
         let main = self.cover_with_side(main.into_any_element(), side);
 
         // Opening and closing the drawer glide; entering or leaving the

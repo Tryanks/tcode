@@ -11,28 +11,28 @@ use gpui::{
 use gpui_base::v_flex;
 use tcode_protocol::SessionPlan;
 
-use crate::chat::ChatView;
+use super::RailView;
 
-fn plan<'a>(chat: &ChatView, cx: &'a App) -> Option<&'a SessionPlan> {
-    chat.workspace_store
+fn plan<'a>(rail: &RailView, cx: &'a App) -> Option<&'a SessionPlan> {
+    rail.workspace_store
         .read(cx)
-        .session_plan_for(chat.session_id.as_deref(), cx)
+        .session_plan_for(rail.session_id.as_deref(), cx)
         .filter(|plan| !plan.steps.is_empty())
 }
 
-fn steps<'a>(chat: &ChatView, cx: &'a App) -> Option<&'a [PlanStep]> {
-    plan(chat, cx).map(|plan| plan.steps.as_slice())
+fn steps<'a>(rail: &RailView, cx: &'a App) -> Option<&'a [PlanStep]> {
+    plan(rail, cx).map(|plan| plan.steps.as_slice())
 }
 
-/// Whether the card has something to show for `chat`'s thread now.
-pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
-    steps(chat, cx).is_some()
+/// Whether the card has something to show for `rail`'s thread now.
+pub(super) fn present(rail: &RailView, cx: &App) -> bool {
+    steps(rail, cx).is_some()
 }
 
 /// The line the card's header shows beside its title: how far
 /// through the plan the agent is, and the step it is on.
-pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
-    let steps = steps(chat, cx)?;
+pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
+    let steps = steps(rail, cx)?;
     let done = steps
         .iter()
         .filter(|step| step.status == PlanStepStatus::Completed)
@@ -55,14 +55,14 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
 /// of it over them. A plan that empties while the card leaves is drawn as
 /// it last stood.
 pub(super) fn body(
-    chat: &ChatView,
+    rail: &RailView,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
-    let last = chat
+    let last = rail
         .motion
         .keep::<Rc<RefCell<(Option<String>, Vec<PlanStep>)>>>("rail-plan-steps");
-    if let Some(plan) = plan(chat, cx) {
+    if let Some(plan) = plan(rail, cx) {
         last.replace((crate::plan_panel::explanation(plan), plan.steps.clone()));
     }
     let (explanation, steps) = last.borrow().clone();

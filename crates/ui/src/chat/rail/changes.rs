@@ -7,7 +7,7 @@ use std::time::Duration;
 use agent::{ChangeCompleteness, FileChange};
 use gpui::{AnyElement, App, Context, SharedString, Window};
 
-use crate::chat::ChatView;
+use super::RailView;
 use crate::chat::components::changed_files::{ClickHandler, changed_file_rows};
 use crate::chat::model::diff_stats;
 
@@ -16,11 +16,11 @@ const CHANGE: Duration = Duration::from_millis(200);
 
 /// The thread's latest finished turn that changed files, by its index among
 /// the turns held.
-fn latest(chat: &ChatView, cx: &App) -> Option<usize> {
-    chat.workspace_store
+fn latest(rail: &RailView, cx: &App) -> Option<usize> {
+    rail.workspace_store
         .read(cx)
         .with_entries_for(
-            chat.session_id.as_deref(),
+            rail.session_id.as_deref(),
             |timeline| {
                 timeline.turns.iter().rposition(|turn| {
                     !turn.running
@@ -35,9 +35,9 @@ fn latest(chat: &ChatView, cx: &App) -> Option<usize> {
         .flatten()
 }
 
-/// Whether the card has something to show for `chat`'s thread now.
-pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
-    latest(chat, cx).is_some()
+/// Whether the card has something to show for `rail`'s thread now.
+pub(super) fn present(rail: &RailView, cx: &App) -> bool {
+    latest(rail, cx).is_some()
 }
 
 /// A turn's changes as the card last copied them, with what they were
@@ -50,13 +50,13 @@ type Totals = Rc<RefCell<Option<((usize, usize, usize), (u32, u32))>>>;
 /// The line the card's header shows beside its title: which turn it is and
 /// how long ago it finished, how many files it changed, whether that is all
 /// it changed, and how many lines it added and removed.
-pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
-    let turn = latest(chat, cx)?;
+pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
+    let turn = latest(rail, cx)?;
     // Counting lines reads every diff, so it is done once per turn and set
     // of diffs rather than every frame the header is drawn.
-    let totals = chat.motion.keep::<Totals>("rail-changes-totals");
-    let store = chat.workspace_store.read(cx);
-    let session = chat.session_id.as_deref();
+    let totals = rail.motion.keep::<Totals>("rail-changes-totals");
+    let store = rail.workspace_store.read(cx);
+    let session = rail.session_id.as_deref();
     let (files, partial, ended, (added, deleted)) = store
         .with_entries_for(
             session,
@@ -127,27 +127,27 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
 /// files cross-fade over an earlier one's; a card that leaves shows the turn
 /// it last showed.
 pub(super) fn body(
-    chat: &ChatView,
+    rail: &RailView,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
-    let last = chat
+    let last = rail
         .motion
         .keep::<Rc<Cell<Option<usize>>>>("rail-changes-turn");
-    if let Some(turn) = latest(chat, cx) {
+    if let Some(turn) = latest(rail, cx) {
         last.set(Some(turn));
     }
     let turn = last.get()?;
-    let motion = chat.motion.scope("rail-changes");
+    let motion = rail.motion.scope("rail-changes");
     Some(
-        chat.motion
+        rail.motion
             .cross_fade("rail-changes", turn, CHANGE, window, cx, |&turn, _, cx| {
                 let (changes, cwd) = {
-                    let store = chat.workspace_store.read(cx);
-                    let session = chat.session_id.as_deref();
+                    let store = rail.workspace_store.read(cx);
+                    let session = rail.session_id.as_deref();
                     // The card is drawn every frame, so the turn's changes,
                     // diffs and all, are copied out only when they change.
-                    let held = chat.motion.keep::<HeldChanges>("rail-changes-held");
+                    let held = rail.motion.keep::<HeldChanges>("rail-changes-held");
                     let changes = store
                         .with_entries_for(
                             session,
@@ -203,7 +203,7 @@ pub(super) fn body(
                     turn,
                     &cwd,
                     &changes,
-                    chat.expanded.contains(more_key),
+                    rail.expanded.contains(more_key),
                     open_files,
                     toggle_more,
                     &motion,

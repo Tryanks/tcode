@@ -12,7 +12,7 @@ use gpui::{
 use gpui_base::{h_flex, v_flex};
 use tcode_core::session::Timeline;
 
-use crate::chat::ChatView;
+use super::RailView;
 use crate::chat::model::one_line_with_break_markers;
 use crate::chat::tools::shell;
 use crate::icon::IconName;
@@ -122,15 +122,15 @@ impl Commands {
     }
 }
 
-/// Whether the card has something to show for `chat`'s thread now.
-pub(super) fn present(chat: &ChatView, _cx: &App) -> bool {
-    chat.commands.total > 0
+/// Whether the card has something to show for `rail`'s thread now.
+pub(super) fn present(rail: &RailView, _cx: &App) -> bool {
+    rail.commands.total > 0
 }
 
 /// The line the card's header shows beside its title: how
 /// many commands run, or how many ran, and how many of those failed.
-pub(super) fn summary(chat: &ChatView, _cx: &App) -> Option<SharedString> {
-    let commands = &chat.commands;
+pub(super) fn summary(rail: &RailView, _cx: &App) -> Option<SharedString> {
+    let commands = &rail.commands;
     let lead = match (commands.running, commands.total) {
         (0, 0) => return None,
         (0, 1) => crate::tr!("rail.commands_one").into_owned(),
@@ -155,17 +155,17 @@ pub(super) fn summary(chat: &ChatView, _cx: &App) -> Option<SharedString> {
 /// [`SHOWN`], how many more. Commands that leave the list fold away as they
 /// stood.
 pub(super) fn body(
-    chat: &ChatView,
+    rail: &RailView,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
-    let last = chat
+    let last = rail
         .motion
         .keep::<Rc<RefCell<(Vec<Line>, usize)>>>("rail-commands-lines");
-    if chat.commands.total > 0 {
+    if rail.commands.total > 0 {
         last.replace((
-            chat.commands.lines.clone(),
-            chat.commands.total - chat.commands.lines.len(),
+            rail.commands.lines.clone(),
+            rail.commands.total - rail.commands.lines.len(),
         ));
     }
     let (lines, more) = last.borrow().clone();
@@ -209,7 +209,7 @@ fn row(
     key: &SharedString,
     line: &Line,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> AnyElement {
     let theme = cx.theme();
     let (muted, danger, warning) = (theme.muted_foreground, theme.danger, theme.warning);
@@ -282,8 +282,8 @@ fn row(
             .children(trailing)
             .child(mark),
     )
-    .on_click(cx.listener(move |chat, _, _, cx| {
-        chat.timeline.update(cx, |timeline, cx| {
+    .on_click(cx.listener(move |rail, _, _, cx| {
+        rail.timeline.update(cx, |timeline, cx| {
             timeline.scroll_to_activity(turn, &entry_id, cx)
         });
     }))

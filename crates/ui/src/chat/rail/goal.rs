@@ -11,7 +11,7 @@ use gpui::{
 };
 use gpui_base::v_flex;
 
-use crate::chat::ChatView;
+use super::RailView;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
@@ -19,23 +19,23 @@ use crate::typography::TextRole as _;
 /// states, or to fold in or away.
 const CHANGE: Duration = Duration::from_millis(200);
 
-fn goal<'a>(chat: &ChatView, cx: &'a App) -> Option<&'a Goal> {
-    chat.workspace_store
+fn goal<'a>(rail: &RailView, cx: &'a App) -> Option<&'a Goal> {
+    rail.workspace_store
         .read(cx)
-        .session_status_for(chat.session_id.as_deref(), cx)?
+        .session_status_for(rail.session_id.as_deref(), cx)?
         .goal
         .as_ref()
 }
 
-/// Whether the card has something to show for `chat`'s thread now.
-pub(super) fn present(chat: &ChatView, cx: &App) -> bool {
-    goal(chat, cx).is_some()
+/// Whether the card has something to show for `rail`'s thread now.
+pub(super) fn present(rail: &RailView, cx: &App) -> bool {
+    goal(rail, cx).is_some()
 }
 
 /// The line the card's header shows beside its title: the
 /// goal's status, then the time, tokens and checks it has taken.
-pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
-    let goal = goal(chat, cx)?;
+pub(super) fn summary(rail: &RailView, cx: &App) -> Option<SharedString> {
+    let goal = goal(rail, cx)?;
     let status = crate::composer::goal_status_label(goal.status);
     let usage = crate::composer::goal_usage_line(goal);
     Some(
@@ -52,16 +52,16 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
 /// objective, and the latest check's verdict while the goal is not met; the
 /// header's summary says its status. A goal cleared while the card leaves is drawn as it stood.
 pub(super) fn body(
-    chat: &ChatView,
+    rail: &RailView,
     window: &mut Window,
-    cx: &mut Context<ChatView>,
+    cx: &mut Context<RailView>,
 ) -> Option<AnyElement> {
-    let last = chat.motion.keep::<Rc<RefCell<Option<Goal>>>>("rail-goal");
-    if let Some(goal) = goal(chat, cx) {
+    let last = rail.motion.keep::<Rc<RefCell<Option<Goal>>>>("rail-goal");
+    if let Some(goal) = goal(rail, cx) {
         last.replace(Some(goal.clone()));
     }
     let goal = last.borrow().clone()?;
-    let verdict = chat
+    let verdict = rail
         .motion
         .shown(
             "rail-goal-last-check",
@@ -86,7 +86,7 @@ pub(super) fn body(
                     )),
             )
         });
-    let objective = chat.motion.cross_fade_part(
+    let objective = rail.motion.cross_fade_part(
         "rail-goal-objective",
         goal.objective.clone(),
         CHANGE,

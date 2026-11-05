@@ -297,15 +297,15 @@ impl TimelineView {
     }
 
     /// The chat an agent opened from a row shows beside its thread: see
-    /// [`ChatView::agent_host`].
+    /// [`super::side::agent_host`].
     pub(in crate::chat) fn agent_host(&self, cx: &App) -> Option<Entity<ChatView>> {
-        if self.window_state.read(cx).compact {
-            return None;
-        }
-        match &self.lead {
-            Some(lead) => lead.upgrade(),
-            None => self.session_id.as_ref().and(self.chat.upgrade()),
-        }
+        super::side::agent_host(
+            &self.chat,
+            self.lead.as_ref(),
+            self.session_id.is_some(),
+            &self.window_state,
+            cx,
+        )
     }
 
     /// The jumped-to turn's mark goes; its colour transition fades it out.

@@ -11,16 +11,20 @@ pub(super) mod screen;
 mod stack;
 
 use std::borrow::Cow;
+use std::cell::Cell;
+use std::collections::HashSet;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    Pixels, SharedString, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Pixels, Render, SharedString, Styled as _, WeakEntity, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::StyledExt as _;
 use tcode_core::ui::RightTab;
 
-use super::ChatView;
+use super::{ChatView, TimelineView};
 use crate::icon::{Icon, IconName};
 use crate::material::{
     CARD_INSET, CHAT_CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING, CHAT_RAIL_EDGE, CHAT_RAIL_GAP,
@@ -28,8 +32,10 @@ use crate::material::{
 };
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
+use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
+use crate::window_state::WindowState;
 
 /// How long the rail, or a card in it, takes to come in or go.
 const SHOW: Duration = Duration::from_millis(200);
@@ -414,53 +420,182 @@ impl RailCard {
         }
     }
 
-    fn present(self, chat: &ChatView, cx: &App) -> bool {
+    fn present(self, rail: &RailView, cx: &App) -> bool {
         match self {
-            Self::Goal => goal::present(chat, cx),
-            Self::Plan => plan::present(chat, cx),
-            Self::Agents => agents::present(chat, cx),
-            Self::Commands => commands::present(chat, cx),
-            Self::Screen => screen::present(chat, cx),
-            Self::Changes => changes::present(chat, cx),
-            Self::PullRequests => pull_requests::present(chat, cx),
+            Self::Goal => goal::present(rail, cx),
+            Self::Plan => plan::present(rail, cx),
+            Self::Agents => agents::present(rail, cx),
+            Self::Commands => commands::present(rail, cx),
+            Self::Screen => screen::present(rail, cx),
+            Self::Changes => changes::present(rail, cx),
+            Self::PullRequests => pull_requests::present(rail, cx),
         }
     }
 
     /// What its header says beside its title, where that is a fact the
     /// top of its body does not already show.
-    fn summary(self, chat: &ChatView, cx: &App) -> Option<SharedString> {
+    fn summary(self, rail: &RailView, cx: &App) -> Option<SharedString> {
         match self {
-            Self::Goal => goal::summary(chat, cx),
-            Self::Plan => plan::summary(chat, cx),
-            Self::Agents => agents::summary(chat, cx),
-            Self::Commands => commands::summary(chat, cx),
-            Self::Changes => changes::summary(chat, cx),
+            Self::Goal => goal::summary(rail, cx),
+            Self::Plan => plan::summary(rail, cx),
+            Self::Agents => agents::summary(rail, cx),
+            Self::Commands => commands::summary(rail, cx),
+            Self::Changes => changes::summary(rail, cx),
             Self::Screen | Self::PullRequests => None,
         }
     }
 
     fn body(
         self,
-        chat: &ChatView,
+        rail: &RailView,
         window: &mut Window,
-        cx: &mut Context<ChatView>,
+        cx: &mut Context<RailView>,
     ) -> Option<AnyElement> {
         match self {
-            Self::Goal => goal::body(chat, window, cx),
-            Self::Plan => plan::body(chat, window, cx),
-            Self::Agents => agents::body(chat, window, cx),
-            Self::Commands => commands::body(chat, window, cx),
-            Self::Screen => screen::body(chat, window, cx),
-            Self::Changes => changes::body(chat, window, cx),
-            Self::PullRequests => pull_requests::body(chat, window, cx),
+            Self::Goal => goal::body(rail, window, cx),
+            Self::Plan => plan::body(rail, window, cx),
+            Self::Agents => agents::body(rail, window, cx),
+            Self::Commands => commands::body(rail, window, cx),
+            Self::Screen => screen::body(rail, window, cx),
+            Self::Changes => changes::body(rail, window, cx),
+            Self::PullRequests => pull_requests::body(rail, window, cx),
         }
     }
 }
 
-impl ChatView {
+/// The rail, drawn by a view of its own in the chat's body.
+///
+/// [`Slots`] and [`stack::RailStack`] lay the cards out as layouts of their
+/// own, in prepaint. gpui-fast builds a nested view again alone only where
+/// its layout hangs under the layout of the view around it, so a view drawn
+/// in a card (a running command's spinner, which turns every frame, and its
+/// clock, which ticks every second) builds the nearest view around those
+/// layouts again with it. That is this view, not the chat with its header,
+/// timeline and composer.
+pub(super) struct RailView {
+    workspace_store: Entity<WorkspaceStore>,
+    window_state: Entity<WindowState>,
+    session_id: Option<String>,
+    chat: WeakEntity<ChatView>,
+    /// The lead, while the chat is an agent's shown beside it.
+    lead: Option<WeakEntity<ChatView>>,
+    timeline: Entity<TimelineView>,
+    /// The motion of what the rail draws, in the chat's scene.
+    motion: crate::motion::owned::Owned,
+    /// Where the rail's agents were drawn, for an agent opened from one to
+    /// grow out of it. The chat resolves them with its own.
+    pub(super) origins: crate::motion::expand::Origins,
+    /// How the chat's body sits this frame and the cards it shows, as the
+    /// chat last handed them.
+    layout: RailLayout,
+    /// Where the composer's card ends: see [`Slots`].
+    below_card: Rc<Cell<Pixels>>,
+    /// Open/closed keys of the rail's collapsibles.
+    expanded: HashSet<String>,
+    /// The screenshots the Screen card steps through.
+    screen: screen::Screenshots,
+    /// The commands the Commands card lists.
+    commands: commands::Commands,
+}
+
+/// How the chat's body sits this frame ([`BodyLayout`]), and the cards
+/// the rail shows in it.
+#[derive(Clone, Default, PartialEq)]
+pub(super) struct RailLayout {
+    pub(super) body: BodyLayout,
+    pub(super) cards: Vec<RailCard>,
+}
+
+impl RailView {
+    pub(super) fn new(
+        workspace_store: Entity<WorkspaceStore>,
+        window_state: Entity<WindowState>,
+        session_id: Option<String>,
+        scene: &crate::motion::Epoch,
+        chat: WeakEntity<ChatView>,
+        timeline: Entity<TimelineView>,
+        below_card: Rc<Cell<Pixels>>,
+    ) -> Self {
+        Self {
+            workspace_store,
+            window_state,
+            session_id,
+            chat,
+            lead: None,
+            timeline,
+            motion: crate::motion::owned::Owned::in_scene(scene),
+            origins: crate::motion::expand::Origins::in_scene(scene),
+            layout: RailLayout::default(),
+            below_card,
+            expanded: HashSet::new(),
+            screen: Default::default(),
+            commands: Default::default(),
+        }
+    }
+
+    /// Show `session_id`'s thread, or none: its collapsibles start closed.
+    pub(super) fn set_session(&mut self, session_id: Option<String>, cx: &mut Context<Self>) {
+        self.session_id = session_id;
+        self.expanded.clear();
+        cx.notify();
+    }
+
+    /// The rail is an agent's shown beside `lead`.
+    pub(super) fn set_lead(&mut self, lead: WeakEntity<ChatView>) {
+        self.lead = Some(lead);
+    }
+
+    /// How the chat lays its body out this frame, and the cards it shows.
+    pub(super) fn set_layout(&mut self, layout: RailLayout) {
+        self.layout = layout;
+    }
+
+    /// List again what the Screen and Commands cards show, from the
+    /// thread's items as they are now.
+    pub(super) fn sync(&mut self, cx: &App) {
+        let (screen, commands) = (&mut self.screen, &mut self.commands);
+        let listed = self.workspace_store.read(cx).with_entries_for(
+            self.session_id.as_deref(),
+            |timeline| {
+                screen.sync(&timeline.entries);
+                commands.sync(timeline);
+            },
+            cx,
+        );
+        if listed.is_none() {
+            self.screen.sync(&[]);
+            self.commands = Default::default();
+        }
+    }
+
+    /// The chat an agent opened from the rail shows beside its thread: see
+    /// [`super::side::agent_host`].
+    fn agent_host(&self, cx: &App) -> Option<Entity<ChatView>> {
+        super::side::agent_host(
+            &self.chat,
+            self.lead.as_ref(),
+            self.session_id.is_some(),
+            &self.window_state,
+            cx,
+        )
+    }
+}
+
+impl Render for RailView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        self.motion.sweep();
+        self.origins.begin_frame();
+        Slots {
+            below_card: self.below_card.clone(),
+            slots: self.render_rail(window, cx).into_iter().collect(),
+        }
+    }
+}
+
+impl RailView {
     /// The cards the rail shows for the thread now: those the host reports
     /// something for, less any whose tab the right panel shows beside it.
-    pub(super) fn rail_cards(&self, cx: &App) -> Vec<RailCard> {
+    pub(super) fn cards(&self, cx: &App) -> Vec<RailCard> {
         let store = self.workspace_store.read(cx);
         let panel = Some(store.panel_state_for(self.session_id.as_deref()))
             .filter(|panel| panel.right_panel_open);
@@ -476,17 +611,13 @@ impl ChatView {
     }
 
     /// The rail in the slot right of the column, sliding and fading in and
-    /// out with the layout's presence; `cards` are those it shows now.
-    pub(super) fn render_rail(
-        &self,
-        cards: Vec<RailCard>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let presence = self.body.presence;
+    /// out with the layout's presence, showing the cards the chat handed.
+    fn render_rail(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let RailLayout { body, cards } = &self.layout;
+        let presence = body.presence;
         // Laid out from the frame it starts to come in, unseen: an agent
         // closing shrinks toward its row from the frame after.
-        if (presence <= 0. && !self.body.rail) || self.window_state.read(cx).compact {
+        if (presence <= 0. && !body.rail) || self.window_state.read(cx).compact {
             return None;
         }
         // A card that goes keeps its place while it folds away.
@@ -509,10 +640,10 @@ impl ChatView {
             gap: cx.theme().tokens.spacing.sm,
         };
         Some(
-            slot(self.body.width, presence)
+            slot(body.width, presence)
                 .debug_selector(|| "chat-rail".into())
                 .child(crate::motion::faded::faded(presence, stack))
-                .when(!self.body.rail, |rail| rail.child(crate::motion::shield()))
+                .when(!body.rail, |rail| rail.child(crate::motion::shield()))
                 .into_any_element(),
         )
     }
