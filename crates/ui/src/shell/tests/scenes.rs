@@ -916,8 +916,8 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
 /// How light the last frame is at `probe`, by relative luminance, over a
 /// black or a white `backdrop` (what the window's translucent canvas lets
 /// through): every solid fill and every shadow drawn there, composited in
-/// the order they were drawn. A shadow counts where its blur has reached
-/// its full strength, so `probe` lies well inside what it shades.
+/// the order they were drawn, a shadow as strong there as its blur makes it
+/// (GPUI's own Gaussian, its corners taken as square).
 fn luminance_at(
     window: &gpui::Window,
     probe: gpui::Point<gpui::ScaledPixels>,
@@ -928,16 +928,33 @@ fn luminance_at(
         .filter(|quad| quad.bounds.contains(&probe) && quad.content_mask.bounds.contains(&probe))
         .filter_map(|quad| Some((quad.order, quad.background.as_solid()?)))
         .collect();
+    // Abramowitz and Stegun's 7.1.26.
+    let erf = |x: f32| {
+        let t = 1. / (1. + 0.327_591_1 * x.abs());
+        let poly = t
+            * (0.254_829_6
+                + t * (-0.284_496_7 + t * (1.421_413_8 + t * (-1.453_152 + t * 1.061_405_4))));
+        (1. - poly * (-x * x).exp()).copysign(x)
+    };
+    let across = |at: f32, from: f32, to: f32, sigma: f32| {
+        if sigma <= 0. {
+            return if (from..to).contains(&at) { 1. } else { 0. };
+        }
+        let scale = std::f32::consts::FRAC_1_SQRT_2 / sigma;
+        0.5 * (erf((to - at) * scale) - erf((from - at) * scale))
+    };
     drawn.extend(
         crate::test_frames::painted_shadows(window)
             .iter()
-            .filter(|shadow| {
-                let full = shadow
-                    .bounds
-                    .dilate(gpui::ScaledPixels(-3. * shadow.blur_radius.0));
-                full.contains(&probe) && shadow.content_mask.bounds.contains(&probe)
-            })
-            .map(|shadow| (shadow.order, shadow.color)),
+            .filter(|shadow| shadow.content_mask.bounds.contains(&probe))
+            .map(|shadow| {
+                let (bounds, sigma) = (shadow.bounds, shadow.blur_radius.0);
+                let strength = across(probe.x.0, bounds.left().0, bounds.right().0, sigma)
+                    * across(probe.y.0, bounds.top().0, bounds.bottom().0, sigma);
+                let mut colour = shadow.color;
+                colour.a *= strength;
+                (shadow.order, colour)
+            }),
     );
     drawn.sort_by_key(|(order, _)| *order);
     let [r, g, b] = drawn.iter().fold([backdrop; 3], |under, (_, colour)| {
@@ -1025,6 +1042,80 @@ fn the_rail_cards_of_a_thread_switched_to_fade_in_through_nothing_darker(cx: &mu
                             ));
                         }
                     }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A thread's menu fades in over the sidebar, and out again, from what lies
+/// under it to the menu and back, through nothing darker than either, in
+/// either theme: its shadow does not show through its fill while the fill
+/// is faint, though what fades it is the popover it is drawn in.
+#[gpui::test]
+fn a_menu_fades_in_and_out_through_nothing_darker(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (_shell, _host, cx) = mount_panes(cx);
+    settle_frames(cx);
+    let light = |at: gpui::Point<Pixels>, cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            let probe = at.scale(window.scale_factor());
+            [0., 1.].map(|backdrop| luminance_at(window, probe, backdrop))
+        })
+    };
+    let row = cx
+        .debug_bounds("sidebar-thread-thread-2")
+        .expect("thread-2's row")
+        .center();
+    let (right, plain) = (gpui::MouseButton::Right, gpui::Modifiers::none());
+    let menu = |cx: &mut VisualTestContext| cx.debug_bounds("tcode-popup-menu");
+    let mut failures = Vec::new();
+    for mode in [
+        crate::theme::ThemeMode::Light,
+        crate::theme::ThemeMode::Dark,
+    ] {
+        cx.update(|window, cx| crate::theme::change_mode(mode, Some(window), cx));
+        settle_frames(cx);
+        // Where the menu rests, and what it covers there.
+        cx.simulate_mouse_down(row, right, plain);
+        cx.simulate_mouse_up(row, right, plain);
+        settle_frames(cx);
+        let at = menu(cx).expect("thread-2's menu").center();
+        let open = light(at, cx);
+        cx.simulate_keystrokes("escape");
+        settle_frames(cx);
+        assert!(menu(cx).is_none(), "the menu closed");
+        let under = light(at, cx);
+
+        cx.simulate_mouse_down(row, right, plain);
+        cx.simulate_mouse_up(row, right, plain);
+        draw(cx);
+        let mut seen = Vec::new();
+        for _ in 0..30 {
+            seen.push(light(at, cx));
+            display_frame(cx);
+        }
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        for _ in 0..30 {
+            seen.push(light(at, cx));
+            display_frame(cx);
+        }
+        assert_eq!(
+            light(at, cx),
+            under,
+            "the menu left what it covered as it was"
+        );
+        for (frame, lit) in seen.iter().enumerate() {
+            for (backdrop, name) in ["black", "white"].iter().enumerate() {
+                let floor = under[backdrop].min(open[backdrop]);
+                if lit[backdrop] < floor - 0.005 {
+                    failures.push(format!(
+                        "{mode:?}, frame {frame}: the menu at {:.4} over {name}, under both \
+                         what it covers {:.4} and the menu {:.4}",
+                        lit[backdrop], under[backdrop], open[backdrop]
+                    ));
                 }
             }
         }

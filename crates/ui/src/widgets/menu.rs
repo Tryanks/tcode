@@ -371,7 +371,7 @@ impl Render for PopupMenu {
         if self.is_empty() {
             // An empty menu is being dismissed by menu_popover; render nothing
             // rather than a bare strip for its final frame.
-            return div().id("tcode-popup-menu");
+            return crate::material::raised(div()).id("tcode-popup-menu");
         }
         let root = crate::material::overlay_contour(div(), cx)
             .rounded(crate::material::radius_overlay(cx))
@@ -765,7 +765,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             let surface = div()
                 .opacity(progress)
                 .top(crate::motion::lift(progress))
-                .child(menu.clone());
+                .child(crate::motion::faded::faded(progress, menu.clone()));
             let surface = if closing {
                 // Above the menu: a leaving menu takes no hover or press.
                 surface.child(div().absolute().inset_0().occlude())

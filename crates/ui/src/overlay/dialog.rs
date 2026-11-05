@@ -507,7 +507,7 @@ impl RenderOnce for Dialog {
         // already gone back to the opener, so its focus trap confines nothing;
         // the occluding scrim and the shield over the card keep the pointer
         // from its controls, from focusing it, and from what lies beneath.
-        let popup = popup.when(exiting, |el| {
+        let popup = crate::material::raised(popup).when(exiting, |el| {
             el.child(
                 div()
                     .absolute()

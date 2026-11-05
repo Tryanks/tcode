@@ -4952,10 +4952,11 @@ impl AppShell {
                         (PresencePhase::Exiting, Some(_)) => (width * -0.25 * page.progress(), 1.),
                         _ => (px(0.), 1.),
                     };
-                    page.left(offset)
-                        .right(px(0.) - offset)
-                        .opacity(opacity)
-                        .into_any_element()
+                    crate::motion::faded::faded(
+                        opacity,
+                        page.left(offset).right(px(0.) - offset).opacity(opacity),
+                    )
+                    .into_any_element()
                 })
                 .into_any_element()
         };

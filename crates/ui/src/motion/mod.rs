@@ -17,6 +17,7 @@ pub(crate) mod shared;
 pub(crate) mod focus_ring;
 
 pub(crate) mod drag_ghost;
+pub(crate) mod faded;
 mod hover;
 mod image_fade;
 pub(crate) mod keyed;
@@ -273,7 +274,7 @@ impl<T> Shown<T> {
         div()
             .relative()
             .opacity(self.progress)
-            .child(content)
+            .child(faded::faded(self.progress, content))
             .when(self.leaving, |frame| {
                 frame.child(div().absolute().inset_0().occlude())
             })
@@ -572,13 +573,18 @@ fn draw_change(
     at_rest
         .noting(div(), generation, 0, drawn)
         .relative()
-        .child(div().id(slot(generation)).opacity(progress).child(current))
+        .child(
+            div()
+                .id(slot(generation))
+                .opacity(progress)
+                .child(faded::faded(progress, current)),
+        )
         .when_some(previous, |frame, (previous, generation)| {
             frame.child(
                 at_rest
                     .leaving(generation, div().id(slot(generation)))
                     .opacity(1. - progress)
-                    .child(previous)
+                    .child(faded::faded(1. - progress, previous))
                     .when(shield, |previous| {
                         previous.child(div().absolute().inset_0().occlude())
                     }),
@@ -734,7 +740,7 @@ impl CrossFade {
                             el
                         }
                     })
-                    .child(content)
+                    .child(faded::faded(self.opacity[layer], content))
                     .when(leaving, |el| {
                         el.child(shield().when_some(keyboard.clone(), |shield, focus| {
                             // As GPUI's own focus-on-press: a press something
