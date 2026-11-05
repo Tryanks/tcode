@@ -42,7 +42,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tcode_core::session::{EntryContent, TimelineEntry};
 
-use super::ChatView;
+use super::timeline::TimelineView;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 
@@ -444,8 +444,8 @@ pub(in crate::chat) enum ElidedOutput {
 
 /// The chat services a window's body reaches, and only through here.
 pub(in crate::chat) struct ToolCtx<'a, 'b> {
-    pub(in crate::chat) chat: &'a mut ChatView,
-    pub(in crate::chat) cx: &'a mut Context<'b, ChatView>,
+    pub(in crate::chat) chat: &'a mut TimelineView,
+    pub(in crate::chat) cx: &'a mut Context<'b, TimelineView>,
     pub(in crate::chat) cwd: &'a Path,
     /// A completed call's images show as tiles above its row, so its body
     /// leaves them out.

@@ -193,7 +193,9 @@ pub(super) fn body(
                     .map(|change| {
                         let path = change.path.clone();
                         Box::new(cx.listener(move |this, _, _, cx| {
-                            this.open_diff(turn, Some(path.clone()), cx);
+                            this.timeline.update(cx, |timeline, cx| {
+                                timeline.open_diff(turn, Some(path.clone()), cx)
+                            });
                         })) as ClickHandler
                     })
                     .collect();

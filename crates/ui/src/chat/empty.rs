@@ -1,58 +1,9 @@
 use super::*;
 
-/// How long what is drawn here only some of the time takes to come in or go.
-const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
-
 /// How long a row drawn here takes to fold in or out, or to move to a new place.
 const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl ChatView {
-    /// The phone's "new thread" empty state: which project the thread
-    /// starts in, and which provider/model the first message reaches.
-    pub(super) fn render_compact_draft_empty(
-        &self,
-        cwd: &std::path::Path,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let store = self.workspace_store.read(cx);
-        let project = store
-            .projects()
-            .into_iter()
-            .find(|project| project.root == cwd)
-            .map(|project| project.name)
-            .unwrap_or_else(|| {
-                cwd.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            });
-        let composer = store.composer_state_for(self.session_id.as_deref(), cx);
-        let model = composer
-            .active_model
-            .as_ref()
-            .map(|active| {
-                let name = composer
-                    .active_model_spec
-                    .as_ref()
-                    .map(|spec| spec.display_name.clone())
-                    .or_else(|| active.model.clone())
-                    .unwrap_or_default();
-                let provider = crate::settings::provider_label(active.provider);
-                if name.is_empty() {
-                    provider.to_string()
-                } else {
-                    format!("{provider} · {name}")
-                }
-            })
-            .unwrap_or_default();
-        crate::material::empty_state(
-            Icon::empty().path("icons/message-square.svg"),
-            crate::tr!("mobile.draft_empty_title", project = project),
-            crate::tr!("mobile.draft_empty_body", model = model),
-            cx,
-        )
-        .into_any_element()
-    }
-
     pub(super) fn render_empty_state(
         &self,
         window: &mut Window,
@@ -213,50 +164,6 @@ impl ChatView {
             .justify_center()
             .child(content)
             .into_any_element()
-    }
-
-    /// The jump to the latest row, rising in while the reader is away from
-    /// it and sinking out once they are back.
-    pub(super) fn render_scroll_pill(
-        &self,
-        shown: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let shown =
-            self.motion
-                .shown("scroll-to-end-pill", shown.then_some(()), SHOW, window, cx)?;
-        // Absolute positioning ignores mx_auto without pinned horizontal
-        // insets; span the region and center with flex instead, clear of
-        // the side rail as the column is.
-        let pill = floating_backing(crate::material::radius_button(cx), cx).child(
-            Button::new("scroll-to-end")
-                .motion(&self.motion)
-                .debug_selector(|| "scroll-to-end".into())
-                .outline()
-                .small()
-                .icon(IconName::ChevronDown)
-                .label(crate::tr!("chat.scroll_end"))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.list_scroll.scroll_to(
-                        &this.list_state,
-                        crate::motion::ScrollTarget::End,
-                        cx,
-                    );
-                    cx.notify();
-                })),
-        );
-        Some(
-            div()
-                .absolute()
-                .bottom(px(12.) + self.phone_strip_height)
-                .left_0()
-                .right(self.body.shift())
-                .flex()
-                .justify_center()
-                .child(shown.fade(pill))
-                .into_any_element(),
-        )
     }
 }
 

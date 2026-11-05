@@ -8771,6 +8771,8 @@ pub(crate) mod tests {
                 .read(cx)
                 .chat()
                 .read(cx)
+                .timeline()
+                .read(cx)
                 .capture_viewport()
                 .expect("the lead's timeline")
         })
@@ -14191,7 +14193,9 @@ pub(crate) mod tests {
             cx.executor().advance_clock(Duration::from_millis(250));
             draw(cx);
             if destination == Destination::Thread {
-                let viewport = chat.read_with(cx, |chat, _| chat.capture_viewport().unwrap());
+                let viewport = chat
+                    .read_with(cx, |chat, _| chat.timeline())
+                    .read_with(cx, |chat, _| chat.capture_viewport().unwrap());
                 cx.simulate_event(gpui::ScrollEvent {
                     position: viewport.center(),
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1000.))),

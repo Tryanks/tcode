@@ -3653,6 +3653,12 @@ impl WorkspaceStore {
             .map(read)
     }
 
+    /// Moves on with every change to `session_id`'s timeline items, read as
+    /// a view depending on them: see [`Self::with_entries_for`].
+    pub(crate) fn entries_revision_for(&self, session_id: Option<&str>, cx: &App) -> Option<u64> {
+        Some(self.thread(session_id)?.watch(Part::Entries, cx))
+    }
+
     /// Moves on with every change to `session_id`'s timeline, read as a view
     /// depending on it: the store is not notified of a record streamed in.
     pub(crate) fn timeline_revision_for(&self, session_id: Option<&str>, cx: &App) -> Option<u64> {

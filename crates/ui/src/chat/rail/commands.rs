@@ -283,7 +283,9 @@ fn row(
             .child(mark),
     )
     .on_click(cx.listener(move |chat, _, _, cx| {
-        chat.scroll_to_activity(turn, &entry_id, cx);
+        chat.timeline.update(cx, |timeline, cx| {
+            timeline.scroll_to_activity(turn, &entry_id, cx)
+        });
     }))
     .into_any_element()
 }

@@ -134,7 +134,7 @@ pub(in crate::chat) struct PendingMarkdownBuild {
     desired_text: String,
 }
 
-impl ChatView {
+impl TimelineView {
     pub(in crate::chat) fn sync_markdown_residency(
         &mut self,
         one_shot_row_target: Option<usize>,
@@ -456,12 +456,12 @@ fn entry_markdown(entry: &TimelineEntry) -> Option<String> {
 /// their timeline indices, read from their resident Markdown when they have
 /// one and parsed from the timeline when they are not resident.
 pub(in crate::chat) fn transcript_selection(
-    chat: gpui::WeakEntity<ChatView>,
+    timeline: gpui::WeakEntity<TimelineView>,
     cx: &mut App,
 ) -> Entity<SelectionDocument> {
     cx.new(|_| {
         SelectionDocument::new(Rc::new(move |range, cx| {
-            let Some(chat) = chat.upgrade() else {
+            let Some(chat) = timeline.upgrade() else {
                 return Vec::new();
             };
             let chat = chat.read(cx);
@@ -525,7 +525,7 @@ fn markdown_entries_for_residency(
     entries
 }
 
-/// What the rows a frame painted change; see [`ChatView::painted_rows_change`].
+/// What the rows a frame painted change; see [`TimelineView::painted_rows_change`].
 pub(in crate::chat) struct PaintedRowsChange {
     tail_start: Option<usize>,
     visible: Option<Range<usize>>,

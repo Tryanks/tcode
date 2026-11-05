@@ -1,4 +1,5 @@
 use super::*;
+use gpui::WeakEntity;
 
 #[cfg(test)]
 mod catch_up;
@@ -25,6 +26,580 @@ pub(super) struct LeftRow {
     pub(super) row: TimelineRow,
     pub(super) turn: TurnMeta,
     pub(super) own: Vec<Arc<TimelineEntry>>,
+}
+
+/// A conversation's timeline: its rows in their virtual list, everything
+/// that moves them (arrivals, folds, the followed tail, a reveal, a glide to
+/// a turn or to the end), and the state they are drawn from.
+///
+/// A view of its own, which the chat embeds: gpui-fast builds a view again
+/// when it asks for a frame or something it read changes, and draws the
+/// views around it from last frame. A row's motion or a record streamed in
+/// builds the timeline alone, not the chat's header, composer or rail.
+pub(crate) struct TimelineView {
+    pub(in crate::chat) workspace_store: Entity<WorkspaceStore>,
+    pub(in crate::chat) window_state: Entity<WindowState>,
+    /// The thread the timeline shows, the chat's.
+    pub(in crate::chat) session_id: Option<String>,
+    /// The chat that embeds the timeline, and for an agent's chat shown
+    /// beside its lead, the lead's: what an agent opened from a row shows
+    /// beside, and whose drawer a diff opens in.
+    chat: WeakEntity<ChatView>,
+    lead: Option<WeakEntity<ChatView>>,
+    /// Where the chat lays the timeline out, as it last handed it.
+    layout: TimelineLayout,
+    /// The chat's scene, which the messages' reveals are drawn in.
+    pub(in crate::chat) scene: crate::motion::Epoch,
+    /// The motion of everything the timeline draws, in the chat's scene;
+    /// see [`ChatView::motion`].
+    pub(in crate::chat) motion: crate::motion::owned::Owned,
+    pub(in crate::chat) list_state: ListState,
+    /// The timeline changed since the list last mirrored it. GPUI's list
+    /// resolves wheel and pan packets against the row indices it painted, so
+    /// rows are only spliced during a frame, never between two frames.
+    pub(in crate::chat) timeline_stale: bool,
+    /// The store's revision of the thread's timeline as the list last
+    /// mirrored it: a record streamed in moves it on without notifying the
+    /// store.
+    timeline_revision: Option<u64>,
+    pub(in crate::chat) history_placeholder_height: gpui::Pixels,
+    /// Distance to scroll back once a page has filled the reservation the
+    /// reader had scrolled into. Applied by the render after the frame that
+    /// measured the page, never between frames: GPUI resolves the wheel and
+    /// pan packets of a moving finger against the anchor it painted, so a
+    /// scroll applied between two frames is either overwritten by the next
+    /// packet or would have to give up when one arrived first.
+    pub(in crate::chat) reservation_scroll_back: Option<ReservationScrollBack>,
+    /// The anchor was carried into rows not yet measured.
+    pub(in crate::chat) carried_anchor: bool,
+    pub(in crate::chat) rows: Vec<TimelineRow>,
+    pub(in crate::chat) turn_index_cache: TurnIndexCache,
+    /// Rows that arrived or left while the reader looked, by identity,
+    /// until they have risen in or folded away.
+    pub(in crate::chat) rows_motion: crate::motion::list_rows::ListRows<bool, LeftRow>,
+    /// The folds of the rows that left below the row being drawn, for a
+    /// collapsed live Work Log to draw between its header and its live
+    /// window, where they stood; whatever it leaves goes below the row.
+    pub(in crate::chat) row_folds: Vec<AnyElement>,
+    /// Where the timeline's shared elements (a steer, a turn's status) were
+    /// drawn, so one that moves to another row travels there.
+    pub(in crate::chat) shared: crate::motion::shared::SharedMoves,
+    /// Where what opens an agent beside the thread was drawn in the rows,
+    /// for the agent's card to grow out of it and shrink back into it. The
+    /// chat keeps its own for what it draws, and resolves in both.
+    pub(in crate::chat) side_origins: crate::motion::expand::Origins,
+    /// The store's fold count for the thread at the last sync: a different
+    /// one means the rows came from a fold, not from a live record.
+    pub(in crate::chat) timeline_folds: u64,
+    /// A Work Log was expanded or collapsed since the last sync, so the rows
+    /// it gains or loses are the reader's own doing, not arrivals.
+    pub(in crate::chat) rows_regrouped: bool,
+    /// The delivery bubbles the chat drew as of the last frame: the timeline
+    /// row that replaces one is the same message, already on screen.
+    pub(in crate::chat) shown_deliveries: Vec<String>,
+    /// The plan item whose block carries the decision its agent waits on.
+    /// The row signature does not see approvals, so a change remeasures the
+    /// rows of the plans gaining and losing it.
+    pub(in crate::chat) deciding_plan: Option<String>,
+    pub(in crate::chat) md_states: HashMap<String, MdState>,
+    /// The transcript's one text selection, across its messages; each
+    /// message is the entry at its index in the timeline. It goes when the
+    /// focus leaves the whole chat.
+    pub(in crate::chat) selection: Entity<SelectionDocument>,
+    pub(in crate::chat) pending_md_builds: HashMap<String, PendingMarkdownBuild>,
+    pub(in crate::chat) next_md_build_generation: u64,
+    pub(in crate::chat) markdown_visible_rows: Range<usize>,
+    pub(in crate::chat) markdown_scroll_top: Option<usize>,
+    /// The rows the timeline paints in the frame being drawn: GPUI's list
+    /// prepaints only the rows on screen.
+    pub(in crate::chat) painted_rows: Rc<Cell<Option<(usize, usize)>>>,
+    /// The first row painted while following the tail.
+    pub(in crate::chat) painted_tail_start: Option<usize>,
+    /// Open/closed keys for collapsibles other than activity details.
+    pub(in crate::chat) expanded: HashSet<String>,
+    pub(in crate::chat) auto_activity_expansions: AutoActivityExpansions,
+    pub(in crate::chat) command_panels: RefCell<CommandPanelCache>,
+    pub(in crate::chat) inline_diffs: InlineDiffCache,
+    pub(in crate::chat) tool_texts: tools::DerivedTexts,
+    /// Whole tool outputs fetched for the open session, by item id.
+    pub(in crate::chat) full_outputs: HashMap<String, FullOutput>,
+    /// The output a Copy waits for, copied once it has loaded.
+    pub(in crate::chat) copy_when_loaded: Option<String>,
+    /// The timeline item the pointer is over: a message whose actions fade
+    /// in, or a header, a row or a link whose hover fill or underline does.
+    pub(in crate::chat) hover: crate::motion::ListHover,
+    /// The timeline's glide to a turn or to its end; the reader's own
+    /// scroll stops it.
+    pub(in crate::chat) list_scroll: crate::motion::ListScroll,
+    /// The thread and delivery key of a message sent while the reader was
+    /// scrolled back, until it gets through or is refused.
+    pub(in crate::chat) sent_message: Option<(String, String)>,
+    pub(in crate::chat) session_key: Option<String>,
+    /// The turn the reader jumped to (a palette hit, a thread anchor), by
+    /// its turn number in the whole thread: a history page moves the held
+    /// window's turn indices under it. Marked until the thread changes, the
+    /// keyboard is put to use elsewhere, or a press lands inside it.
+    pub(in crate::chat) highlighted_turn: Option<usize>,
+    /// Keyed `plan`, `user:<id>`, `assistant:<id>` or `error:<id>`.
+    pub(in crate::chat) copied: CopiedMark,
+    /// A system scrolling screenshot is driving the timeline: where it was
+    /// before the capture moved it. History paging and tail following stay
+    /// off until the capture ends so the origin keeps meaning the same pixel.
+    pub(in crate::chat) capture: Option<CaptureSession>,
+    _subscriptions: Vec<Subscription>,
+}
+
+/// Where the chat lays its timeline out this frame, handed by the chat as
+/// its body is laid out, before the rows are.
+#[derive(Clone, Default, PartialEq)]
+pub(in crate::chat) struct TimelineLayout {
+    /// The body's width, and how far past its right edge the list runs,
+    /// under the panel: see [`ChatView::list_overhang`].
+    pub(in crate::chat) width: gpui::Pixels,
+    pub(in crate::chat) overhang: gpui::Pixels,
+    /// How far the column's centre moves left, clear of the rail or the
+    /// agent's card.
+    pub(in crate::chat) shift: gpui::Pixels,
+    /// The right inset of the scrollbar's track.
+    pub(in crate::chat) track_inset: gpui::Pixels,
+    /// Height of the phone row floating over the foot of the timeline, as
+    /// far as it has risen in: zero while it is absent. The last row's
+    /// padding holds it so the tail clears it.
+    pub(in crate::chat) strip: gpui::Pixels,
+    pub(in crate::chat) cwd: PathBuf,
+    pub(in crate::chat) is_draft: bool,
+}
+
+impl TimelineView {
+    pub(in crate::chat) fn new(
+        workspace_store: Entity<WorkspaceStore>,
+        window_state: Entity<WindowState>,
+        session_id: Option<String>,
+        scene: &crate::motion::Epoch,
+        chat: WeakEntity<ChatView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Measure enough rows to establish the six-screen window even when
+        // distant rows still have unknown heights in ListState's summary.
+        let height = f32::from(window.bounds().size.height);
+        let overdraw =
+            timeline_overdraw(height).max(height * (crate::store::HISTORY_WINDOW_SCREENS + 1.));
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
+        list_state.set_follow_mode(FollowMode::Tail);
+        let timeline = cx.entity().downgrade();
+        let list_scroll = crate::motion::ListScroll::default();
+        let glide = list_scroll.clone();
+        list_state.set_scroll_handler(move |event, window, cx| {
+            glide.cancel();
+            let visible_rows = event.visible_range.clone();
+            let timeline = timeline.clone();
+            window.defer(cx, move |_, cx| {
+                let _ = timeline.update(cx, |timeline, cx| {
+                    timeline.set_markdown_visible_rows(visible_rows, cx);
+                });
+            });
+        });
+        let selection = transcript_selection(cx.entity().downgrade(), cx);
+        let subscriptions = vec![cx.observe(&workspace_store, |this, _, cx| {
+            this.timeline_stale = true;
+            cx.notify();
+        })];
+        let mut this = Self {
+            workspace_store,
+            window_state,
+            session_id,
+            chat,
+            lead: None,
+            layout: TimelineLayout::default(),
+            motion: crate::motion::owned::Owned::in_scene(scene),
+            scene: scene.clone(),
+            list_state,
+            timeline_stale: false,
+            timeline_revision: None,
+            history_placeholder_height: px(0.),
+            reservation_scroll_back: None,
+            carried_anchor: false,
+            rows: Vec::new(),
+            turn_index_cache: TurnIndexCache::default(),
+            rows_motion: crate::motion::list_rows::ListRows::over(ROWS_IN).in_scene(scene),
+            row_folds: Vec::new(),
+            shared: crate::motion::shared::SharedMoves::in_scene(scene),
+            side_origins: crate::motion::expand::Origins::in_scene(scene),
+            timeline_folds: 0,
+            rows_regrouped: false,
+            shown_deliveries: Vec::new(),
+            deciding_plan: None,
+            md_states: HashMap::new(),
+            selection,
+            pending_md_builds: HashMap::new(),
+            next_md_build_generation: 0,
+            markdown_visible_rows: 0..0,
+            markdown_scroll_top: None,
+            painted_rows: Rc::default(),
+            painted_tail_start: None,
+            expanded: HashSet::new(),
+            auto_activity_expansions: AutoActivityExpansions::default(),
+            command_panels: RefCell::new(CommandPanelCache::new()),
+            inline_diffs: InlineDiffCache::new(),
+            tool_texts: tools::DerivedTexts::default(),
+            full_outputs: HashMap::new(),
+            copy_when_loaded: None,
+            hover: crate::motion::ListHover::new(crate::material::HOVER).in_scene(scene),
+            list_scroll,
+            sent_message: None,
+            session_key: None,
+            highlighted_turn: None,
+            copied: CopiedMark::default(),
+            capture: None,
+            _subscriptions: subscriptions,
+        };
+        this.sync_markdown_states(cx);
+        this
+    }
+
+    /// Show `session_id`'s thread, or none; the next sync finds the thread
+    /// changed.
+    pub(in crate::chat) fn set_session(
+        &mut self,
+        session_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.session_id = session_id;
+        self.timeline_stale = true;
+        cx.notify();
+    }
+
+    /// The timeline is an agent's shown beside `lead`.
+    pub(in crate::chat) fn set_lead(&mut self, lead: WeakEntity<ChatView>) {
+        self.lead = Some(lead);
+    }
+
+    /// Where the chat lays the timeline out this frame.
+    pub(in crate::chat) fn set_layout(&mut self, layout: TimelineLayout, cx: &mut Context<Self>) {
+        if layout.strip != self.layout.strip
+            && let Some(last) = self.rows.len().checked_sub(1)
+        {
+            self.list_state.remeasure_items(last..last + 1);
+        }
+        self.layout = layout;
+        cx.notify();
+    }
+
+    /// Whether the timeline is an agent's shown beside its lead.
+    pub(in crate::chat) fn is_side(&self) -> bool {
+        self.lead.is_some()
+    }
+
+    /// The lead of the agent whose timeline this is.
+    pub(in crate::chat) fn side_lead(&self) -> Option<Entity<ChatView>> {
+        self.lead.as_ref()?.upgrade()
+    }
+
+    /// The chat an agent opened from a row shows beside its thread: see
+    /// [`ChatView::agent_host`].
+    pub(in crate::chat) fn agent_host(&self, cx: &App) -> Option<Entity<ChatView>> {
+        if self.window_state.read(cx).compact {
+            return None;
+        }
+        match &self.lead {
+            Some(lead) => lead.upgrade(),
+            None => self.session_id.as_ref().and(self.chat.upgrade()),
+        }
+    }
+
+    /// The jumped-to turn's mark goes; its colour transition fades it out.
+    pub(in crate::chat) fn dismiss_highlight(&mut self, cx: &mut Context<Self>) {
+        if self.highlighted_turn.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Land every message's reveal: the chat's scene shows, and what arrived
+    /// while it readied itself unseen is there as it is on its first frame.
+    pub(in crate::chat) fn settle_reveals(&self, cx: &mut App) {
+        for md in self.md_states.values() {
+            md.settle(cx);
+        }
+    }
+
+    /// Whether the timeline can be drawn at rest for the chat's scene: its
+    /// thread held whole (not loading, not catching up) and mirrored, its
+    /// rows drawn (measured, at their anchor) and the Markdown of the ones
+    /// on screen built, its diagrams drawn. The chat reads it only until its
+    /// scene shows, drawing itself again with the timeline meanwhile.
+    pub(in crate::chat) fn scene_ready(&self, cx: &App) -> bool {
+        let Some(session_id) = self.session_id.as_deref() else {
+            return true;
+        };
+        let store = self.workspace_store.read(cx);
+        store.timeline_settled_for(session_id)
+            && !self.timeline_stale
+            && store.timeline_revision_for(Some(session_id), cx) == self.timeline_revision
+            && (self.rows.is_empty() || self.painted_rows.get().is_some())
+            && self.pending_md_builds.is_empty()
+            && !self
+                .md_states
+                .values()
+                .any(|md| md.state.read(cx).drawing_first_diagrams())
+            && !self.carried_anchor
+            && self.reservation_scroll_back.is_none()
+    }
+}
+
+impl Render for TimelineView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.motion.sweep();
+        self.side_origins.begin_frame();
+        let revision = self
+            .workspace_store
+            .read(cx)
+            .timeline_revision_for(self.session_id.as_deref(), cx);
+        if revision != self.timeline_revision {
+            self.timeline_revision = revision;
+            self.timeline_stale = true;
+        }
+        if self.timeline_stale {
+            self.sync_markdown_states(cx);
+        }
+        self.land_sent_message(cx);
+        self.inline_diffs.sweep();
+        self.tool_texts.sweep(&cx.theme().highlight_theme);
+        for key in self.rows_motion.settle(window, cx) {
+            if let Some(row) = self.rows.iter().position(|row| row.identity == key) {
+                self.list_state.remeasure_items(row..row + 1);
+            }
+        }
+        self.painted_rows.set(None);
+        self.shared
+            .begin_frame(self.list_state.viewport_bounds(), cx);
+        if self.carried_anchor {
+            self.carried_anchor = !settle_carried_anchor(&self.list_state);
+            if self.carried_anchor {
+                // The next frame may be idle otherwise; make it render.
+                let timeline = cx.entity().downgrade();
+                window.on_next_frame(move |_, cx| {
+                    let _ = timeline.update(cx, |_, cx| cx.notify());
+                });
+            }
+        }
+        self.list_scroll.step(&self.list_state, window, cx);
+        // The jump goes as soon as the glide it starts is under way.
+        let show_jump_to_latest =
+            jump_to_latest_visible(&self.list_state) && !self.list_scroll.running();
+        self.sync_markdown_scroll_position(cx);
+        self.apply_reservation_scroll_back(window, cx);
+        // Measure after this frame's list layout, including the initial tail
+        // frame and frames caused by prepends. No scroll event is required.
+        // Deferred, it runs once the frame being drawn is done, with no frame
+        // of its own: a next-frame callback would wake the display for one
+        // more frame after every render. The timeline is only read, and the
+        // store updated only when the report changes it: an update of either
+        // builds the timeline again.
+        let timeline = cx.entity().downgrade();
+        window.defer(cx, move |_, cx| {
+            let Some(timeline) = timeline.upgrade() else {
+                return;
+            };
+            let timeline = timeline.read(cx);
+            if timeline.capture.is_some() {
+                return;
+            }
+            let Some(screens) =
+                history_screens_covered(&timeline.list_state, timeline.leading_space())
+            else {
+                return;
+            };
+            let following_tail = timeline.list_state.is_following_tail();
+            let store = timeline.workspace_store.clone();
+            let session_id = timeline.session_id.clone();
+            if store.read(cx).history_window_changes_for(
+                session_id.as_deref(),
+                screens,
+                following_tail,
+            ) {
+                store.update(cx, |store, cx| {
+                    store.update_history_window_for(
+                        session_id.as_deref(),
+                        screens,
+                        following_tail,
+                        cx,
+                    );
+                });
+            }
+        });
+        // A screen's height: the window's, which this render already knows.
+        // The list's own height is only measured by this frame's layout.
+        let placeholder = if self
+            .workspace_store
+            .read(cx)
+            .history_available_for(self.session_id.as_deref())
+        {
+            window.viewport_size().height
+        } else {
+            px(0.)
+        };
+        if placeholder != self.history_placeholder_height && !self.rows.is_empty() {
+            let anchor = self.list_state.logical_scroll_top();
+            let following = self.list_state.is_following_tail();
+            self.list_state.remeasure_items(0..1);
+            if anchor.item_ix == 0 && !following {
+                self.list_state.scroll_to(ListOffset {
+                    item_ix: 0,
+                    offset_in_item: (anchor.offset_in_item + placeholder
+                        - self.history_placeholder_height)
+                        .max(px(0.)),
+                });
+            }
+            self.history_placeholder_height = placeholder;
+        }
+        let element = self.render_timeline(window, cx);
+        // What a row replacing a bubble is checked against, at its next sync.
+        self.shown_deliveries = self
+            .workspace_store
+            .read(cx)
+            .delivery_messages_for(self.session_id.as_deref(), cx)
+            .into_iter()
+            .map(|(key, ..)| key)
+            .collect();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .child(element)
+            .child(self.render_settle_canvas(show_jump_to_latest, cx))
+            .children(self.render_scroll_pill(show_jump_to_latest, window, cx))
+    }
+}
+
+impl TimelineView {
+    /// The list under its scrollbar, or a fresh phone draft's empty state.
+    fn render_timeline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
+        let TimelineLayout {
+            width,
+            overhang,
+            track_inset,
+            ref cwd,
+            is_draft,
+            ..
+        } = self.layout;
+        let cwd = cwd.clone();
+        // A fresh phone draft shows its project/model context above the focused composer.
+        if compact && is_draft && self.rows.is_empty() {
+            return self.render_compact_draft_empty(&cwd, cx);
+        }
+        let timeline = self.render_timeline_list(&cwd, cx);
+        // GPUI's scrollbar extent excludes List padding, while wheel and
+        // tail-resume calculations include it. Keep the inset outside the
+        // list so every input path shares the same bottom and pixel offset.
+        v_flex()
+            .when(self.is_side(), |timeline| {
+                timeline.debug_selector(|| "chat-side-timeline".into())
+            })
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .when(overhang > px(0.), |timeline| timeline.w(width + overhang))
+            .pb(timeline_bottom_inset(cx))
+            .child(
+                self.motion
+                    .keep::<crate::motion::bounce::BounceState>("timeline-bounce")
+                    .render(
+                        "timeline-bounce",
+                        SelectionArea::new(&self.selection, timeline)
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0(),
+                        |content| {
+                            crate::scroll::page_viewport(
+                                "timeline-bounce",
+                                &self.list_state,
+                                content,
+                            )
+                        },
+                    ),
+            )
+            .when(!window.is_inspector_picking(cx), |timeline| {
+                let side = self.is_side();
+                timeline.child(
+                    div()
+                        .debug_selector(move || {
+                            if side {
+                                "chat-side-track"
+                            } else {
+                                "chat-track"
+                            }
+                            .into()
+                        })
+                        .absolute()
+                        .top_0()
+                        .bottom(timeline_bottom_inset(cx))
+                        .right(track_inset + overhang)
+                        .w(TRACK)
+                        .child(
+                            Scrollbar::vertical(&self.list_state)
+                                .id("timeline-scrollbar")
+                                .motion(&self.motion)
+                                .viewport_from_layout(),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// After the list's layout: the jump to the latest row follows the
+    /// geometry the list's prepaint settled on, the command panels their
+    /// screens, and the Markdown the rows the frame painted.
+    fn render_settle_canvas(
+        &self,
+        show_jump_to_latest: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Canvas<()> {
+        let list = self.list_state.clone();
+        let glide = self.list_scroll.clone();
+        let view = cx.entity().downgrade();
+        let painted = self.painted_rows.clone();
+        gpui::canvas(
+            move |_, window, cx| {
+                // List prepaint may change geometry after render
+                // (resize, splice, or markdown remeasurement).
+                // Reconcile the sibling control after that layout.
+                if (jump_to_latest_visible(&list) && !glide.running()) != show_jump_to_latest {
+                    let view = view.clone();
+                    window.defer(cx, move |_, cx| {
+                        let _ = view.update(cx, |_, cx| cx.notify());
+                    });
+                }
+                // Only update the timeline when the frame changed something:
+                // an update builds it again.
+                let painted = painted.get();
+                window.defer(cx, move |_, cx| {
+                    let Some(view) = view.upgrade() else {
+                        return;
+                    };
+                    let timeline = view.read(cx);
+                    let panels = timeline.command_panels.borrow_mut().settle();
+                    let painted =
+                        painted.and_then(|(start, end)| timeline.painted_rows_change(start..end));
+                    if panels.is_empty() && painted.is_none() {
+                        return;
+                    }
+                    view.update(cx, |timeline, cx| {
+                        timeline.apply_command_panel_changes(panels, cx);
+                        if let Some(painted) = painted {
+                            timeline.adopt_painted_rows(painted, cx);
+                        }
+                    });
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
+    }
 }
 
 /// Vertical rhythm between turns. Turns are separated by space and typographic
@@ -115,7 +690,7 @@ pub struct CaptureScroll {
 /// the timeline scrolls there as far as measured content allows, and the
 /// platform reads back the next painted frame. The history reservation above
 /// the first turn is blank and never captured.
-impl ChatView {
+impl TimelineView {
     /// The timeline's on-screen rectangle, when it has something to capture.
     pub(crate) fn capture_viewport(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
         let bounds = self.list_state.viewport_bounds();
@@ -208,7 +783,7 @@ impl ChatView {
     }
 }
 
-impl ChatView {
+impl TimelineView {
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     pub(super) fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
         self.timeline_stale = false;
@@ -269,8 +844,6 @@ impl ChatView {
                         &self.expanded,
                         continuity,
                     );
-                    self.screen.sync(&timeline.entries);
-                    self.commands.sync(timeline);
                     let activity_snapshot_keys = awaiting_activity_snapshot
                         .then(|| auto_activity_snapshot_keys(&timeline.entries));
                     (list_sync, activity_snapshot_keys)
@@ -278,8 +851,6 @@ impl ChatView {
                 cx,
             )
             .unwrap_or_else(|| {
-                self.screen.sync(&[]);
-                self.commands = Default::default();
                 let list_sync = self.turn_index_cache.sync(
                     &mut self.rows,
                     &[],
@@ -301,7 +872,7 @@ impl ChatView {
             .as_deref()
             .and_then(|session_id| self.workspace_store.read(cx).pending_chat_turn(session_id));
         if session_changed {
-            self.start_scene(cx);
+            self.painted_rows.set(None);
             self.md_states.clear();
             self.selection
                 .update(cx, |selection, cx| selection.clear(cx));
@@ -593,7 +1164,7 @@ impl ChatView {
 }
 
 /// The walk back into a page that replaced the reservation the reader had
-/// scrolled into. See [`ChatView::apply_reservation_scroll_back`].
+/// scrolled into. See [`TimelineView::apply_reservation_scroll_back`].
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ReservationScrollBack {
     distance: gpui::Pixels,
@@ -602,7 +1173,7 @@ pub(super) struct ReservationScrollBack {
     measured: bool,
 }
 
-impl ChatView {
+impl TimelineView {
     /// Space above the first turn's content: the edge padding plus the history
     /// reservation. Both move to the new first row when a page lands.
     pub(super) fn leading_space(&self) -> gpui::Pixels {
@@ -741,18 +1312,19 @@ mod tests {
         cx.simulate_click(header.center(), Modifiers::default());
         draw_settled(cx);
         // The reader rests two activities into the live window.
-        view.update(cx, |chat, cx| {
-            let live = chat
-                .rows
-                .iter()
-                .position(|row| row.part == RowPart::WorkLogLive)
-                .expect("an expanded live work log");
-            chat.list_state.scroll_to(ListOffset {
-                item_ix: live,
-                offset_in_item: px(70.),
+        view.read_with(cx, |chat, _| chat.timeline())
+            .update(cx, |chat, cx| {
+                let live = chat
+                    .rows
+                    .iter()
+                    .position(|row| row.part == RowPart::WorkLogLive)
+                    .expect("an expanded live work log");
+                chat.list_state.scroll_to(ListOffset {
+                    item_ix: live,
+                    offset_in_item: px(70.),
+                });
+                cx.notify();
             });
-            cx.notify();
-        });
         draw_settled(cx);
         let reading = cx
             .debug_bounds("activity-row-tool-18")
@@ -982,16 +1554,18 @@ mod tests {
 
         let opened = |cx: &mut VisualTestContext| {
             let view = chat.clone();
-            let (row, highlighted, first) = view.read_with(cx, |chat, cx| {
-                let row = chat.list_state.logical_scroll_top().item_ix;
-                (
-                    chat.rows.get(row).map(|row| row.turn),
-                    chat.highlighted_turn,
-                    chat.workspace_store
-                        .read(cx)
-                        .absolute_turn_for(chat.session_id.as_deref(), 0),
-                )
-            });
+            let (row, highlighted, first) = view
+                .read_with(cx, |chat, _| chat.timeline())
+                .read_with(cx, |chat, cx| {
+                    let row = chat.list_state.logical_scroll_top().item_ix;
+                    (
+                        chat.rows.get(row).map(|row| row.turn),
+                        chat.highlighted_turn,
+                        chat.workspace_store
+                            .read(cx)
+                            .absolute_turn_for(chat.session_id.as_deref(), 0),
+                    )
+                });
             let turn = row.filter(|turn| highlighted == Some(first + *turn))?;
             store
                 .read_with(cx, |store, cx| {
@@ -2308,7 +2882,10 @@ mod tests {
             draw(cx);
             cx.run_until_parked();
         }
-        assert!(view.read_with(cx, |chat, _| chat.capture_settled()));
+        assert!(
+            view.read_with(cx, |chat, _| chat.timeline())
+                .read_with(cx, |chat, _| chat.capture_settled())
+        );
         let list = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(list.is_following_tail());
         assert!(
@@ -2320,6 +2897,7 @@ mod tests {
         let settle = |offset: gpui::Pixels, cx: &mut gpui::VisualTestContext| {
             for _ in 0..8 {
                 let scroll = view
+                    .read_with(cx, |chat, _| chat.timeline())
                     .update(cx, |chat, cx| chat.capture_scroll(offset, cx))
                     .expect("a capture is in progress");
                 if !scroll.moved {
@@ -2331,8 +2909,13 @@ mod tests {
         };
 
         // Following the tail: the capture starts at the bottom.
-        assert!(view.update(cx, |chat, cx| chat.capture_begin(cx)));
-        let viewport = view.read_with(cx, |chat, _| chat.capture_viewport());
+        assert!(
+            view.read_with(cx, |chat, _| chat.timeline())
+                .update(cx, |chat, cx| chat.capture_begin(cx))
+        );
+        let viewport = view
+            .read_with(cx, |chat, _| chat.timeline())
+            .read_with(cx, |chat, _| chat.capture_viewport());
         assert!(viewport.is_some_and(|bounds| bounds.size.height > px(0.)));
         assert!(
             !list.is_following_tail(),
@@ -2359,10 +2942,12 @@ mod tests {
             "the tile above the first turn stops at the top: {top:?}"
         );
         assert_eq!(list.logical_scroll_top().item_ix, 0);
-        view.update(cx, |chat, cx| chat.capture_end(cx));
+        view.read_with(cx, |chat, _| chat.timeline())
+            .update(cx, |chat, cx| chat.capture_end(cx));
         assert!(list.is_following_tail());
         assert_eq!(
-            view.update(cx, |chat, cx| chat.capture_scroll(px(0.), cx)),
+            view.read_with(cx, |chat, _| chat.timeline())
+                .update(cx, |chat, cx| chat.capture_scroll(px(0.), cx)),
             None,
             "tiles after the end are refused"
         );
@@ -2376,11 +2961,15 @@ mod tests {
         list.scroll_to(anchor);
         view.update(cx, |_, cx| cx.notify());
         draw(cx);
-        assert!(view.update(cx, |chat, cx| chat.capture_begin(cx)));
+        assert!(
+            view.read_with(cx, |chat, _| chat.timeline())
+                .update(cx, |chat, cx| chat.capture_begin(cx))
+        );
         assert_eq!(settle(px(0.), cx), px(0.));
         assert_eq!(settle(px(300.), cx), px(300.));
         assert!(list.logical_scroll_top().item_ix >= 10);
-        view.update(cx, |chat, cx| chat.capture_end(cx));
+        view.read_with(cx, |chat, _| chat.timeline())
+            .update(cx, |chat, cx| chat.capture_end(cx));
         let restored = list.logical_scroll_top();
         assert_eq!(restored.item_ix, anchor.item_ix);
         assert_eq!(restored.offset_in_item, anchor.offset_in_item);
@@ -2419,13 +3008,15 @@ mod tests {
             view.update(cx, |_, cx| cx.notify());
             draw_settled(cx);
         }
-        let (list, placeholder, leading) = view.read_with(cx, |chat, _| {
-            (
-                chat.list_state.clone(),
-                chat.history_placeholder_height,
-                chat.leading_space(),
-            )
-        });
+        let (list, placeholder, leading) =
+            view.read_with(cx, |chat, _| chat.timeline())
+                .read_with(cx, |chat, _| {
+                    (
+                        chat.list_state.clone(),
+                        chat.history_placeholder_height,
+                        chat.leading_space(),
+                    )
+                });
         assert!(placeholder > px(0.), "earlier history is still unloaded");
         list.set_follow_mode(FollowMode::Normal);
         list.scroll_to(ListOffset {
@@ -2542,15 +3133,16 @@ mod tests {
             scroll(height * 3., cx);
             while frame(&mut thread, cx).is_some() {
                 pages_away += 1;
-                view.read_with(cx, |chat, cx| {
-                    assert!(
-                        !chat
-                            .workspace_store
-                            .read(cx)
-                            .chat_loading_for(chat.session_id.as_deref(), cx)
-                    );
-                    assert!(!chat.rows.is_empty(), "the conversation stays on screen");
-                });
+                view.read_with(cx, |chat, _| chat.timeline())
+                    .read_with(cx, |chat, cx| {
+                        assert!(
+                            !chat
+                                .workspace_store
+                                .read(cx)
+                                .chat_loading_for(chat.session_id.as_deref(), cx)
+                        );
+                        assert!(!chat.rows.is_empty(), "the conversation stays on screen");
+                    });
             }
             assert!(!list.is_following_tail());
         }
@@ -2680,13 +3272,15 @@ mod tests {
             });
             cx.simulate_resize(gpui::size(px(393.), px(852.)));
             draw_settled(cx);
-            let (list, placeholder, leading) = view.read_with(cx, |chat, _| {
-                (
-                    chat.list_state.clone(),
-                    chat.history_placeholder_height,
-                    chat.leading_space(),
-                )
-            });
+            let (list, placeholder, leading) = view
+                .read_with(cx, |chat, _| chat.timeline())
+                .read_with(cx, |chat, _| {
+                    (
+                        chat.list_state.clone(),
+                        chat.history_placeholder_height,
+                        chat.leading_space(),
+                    )
+                });
             assert!(placeholder > px(100.));
             list.set_follow_mode(FollowMode::Normal);
             list.scroll_to(ListOffset {

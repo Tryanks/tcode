@@ -37,7 +37,7 @@ pub(in crate::chat) struct ActivityRow {
     pub(in crate::chat) images_inline: bool,
 }
 
-impl ChatView {
+impl TimelineView {
     /// Render one timeline row: the segment it spans (a message, an error, a
     /// Work Log run or a part of an expanded one) and, on the turn's last
     /// row, the turn's trailer.
@@ -1900,7 +1900,7 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             use gpui::{ParentElement as _, Styled as _};
-            let hover = self.chat.read(cx).hover.clone();
+            let hover = self.chat.read(cx).timeline.read(cx).hover.clone();
             for key in self.keys {
                 let fill = hover.reveal(key, window, cx);
                 self.drawn.borrow_mut().insert(key, fill);
@@ -2040,7 +2040,9 @@ mod tests {
             cx.notify();
         });
         draw_settled(cx);
-        let last = view.read_with(cx, |chat, _| chat.rows.len() - 1);
+        let last = view
+            .read_with(cx, |chat, _| chat.timeline())
+            .read_with(cx, |chat, _| chat.rows.len() - 1);
         let measured = |cx: &mut VisualTestContext| {
             view.read_with(cx, |chat, _| {
                 chat.list_state.bounds_for_item(last).is_some()
