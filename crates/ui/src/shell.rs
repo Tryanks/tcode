@@ -5059,9 +5059,10 @@ impl AppShell {
         })
     }
 
-    /// The wide Hosts route's top strip: the page title and (on Windows) the
-    /// caption cluster this route's content column owns. The sidebar switches
-    /// wide routes, so this strip deliberately has no Back control.
+    /// The wide Hosts route's top strip: the page title, its close, and (on
+    /// Windows) the caption cluster this route's content column owns, which
+    /// sends the close to a row under the strip. The sidebar switches wide
+    /// routes, so Machines has no Back control.
     fn render_hosts_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Hosts,
@@ -5116,6 +5117,14 @@ impl AppShell {
                         });
                     }))
             });
+        let (close, below_caption) = if hosts_caption {
+            (
+                None,
+                close.map(|close| window_caption::below_caption(close, cx)),
+            )
+        } else {
+            (close, None)
+        };
         // The column is centred in the strip; whatever holds the strip's
         // right end is kept clear of it.
         let right_end = if hosts_caption {
@@ -5127,7 +5136,7 @@ impl AppShell {
         } else {
             0.
         };
-        window_drag_area(
+        let strip = window_drag_area(
             "hosts-header-drag",
             crate::settings_rows::content_header(
                 crate::material::bar("hosts-header", crate::material::Bar::Strip, false, cx),
@@ -5155,8 +5164,13 @@ impl AppShell {
                 .when(!hosts_caption, |end| end.pr(cx.theme().tokens.spacing.sm))
                 .children(close)
                 .children(hosts_caption.then(|| window_caption::caption_controls(window, cx))),
-        )
-        .into_any_element()
+        );
+        v_flex()
+            .flex_none()
+            .w_full()
+            .child(strip)
+            .children(below_caption)
+            .into_any_element()
     }
 
     /// The wide window: the workspace it is attached to, rising over the
@@ -15212,6 +15226,48 @@ pub(crate) mod tests {
             cx.debug_bounds("hosts-pair-error").is_none(),
             "the error does not follow the user back to Machines"
         );
+    }
+
+    /// The wide Machines and pairing pages' close is the page's own control:
+    /// where the window draws its own caption buttons it sits under them, a
+    /// gap below and over their Close, never beside them in the strip; where
+    /// it does not, the close holds the strip's right end.
+    #[gpui::test]
+    fn the_wide_hosts_close_sits_below_the_window_caption_buttons(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        crate::test_frames::draw_settled(cx);
+        for page in ["Machines", "pairing"] {
+            if page == "pairing" {
+                let paste = cx
+                    .debug_bounds("hosts-pair")
+                    .expect("Machines offers pasting an invitation");
+                cx.simulate_click(paste.center(), gpui::Modifiers::default());
+                crate::test_frames::draw_settled(cx);
+            }
+            let close = cx
+                .debug_bounds("hosts-close")
+                .unwrap_or_else(|| panic!("the {page} page opened over a thread can close"));
+            match cx.debug_bounds("window-caption-close") {
+                Some(caption) => {
+                    assert!(
+                        close.top() > caption.bottom(),
+                        "the {page} close sits a gap below the caption buttons: {close:?} vs {caption:?}"
+                    );
+                    assert!(
+                        close.left() >= caption.left() && close.right() <= caption.right(),
+                        "the {page} close is right-aligned under the caption Close: {close:?} vs {caption:?}"
+                    );
+                }
+                None => assert!(
+                    close.bottom() <= px(window_caption::CAPTION_STRIP_HEIGHT),
+                    "without caption buttons the {page} close stays in the top strip: {close:?}"
+                ),
+            }
+        }
     }
 
     /// A store selection can come from the sidebar or palette. In wide layout
