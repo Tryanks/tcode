@@ -139,20 +139,40 @@ impl Element for MarkdownView {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let state = self.state.clone();
-        state.update(cx, |state, cx| {
-            if let Some((document, entry)) = &self.selection_entry {
-                state.set_selection_entry(document, *entry, cx);
-            } else if let Some(selectable) = self.selectable {
-                state.set_selectable(selectable, cx);
-            }
-            state.clear_own_selection_on_focus_out(window, cx);
-            if let Some(compact) = self.compact_headings {
-                state.set_compact_headings(compact, cx);
-            }
-            if let Some(base_dir) = &self.base_dir {
-                state.set_base_dir(Some(base_dir.clone()), cx);
-            }
-        });
+        // Updating the state while the frame draws counts as changing it,
+        // which builds the view drawing it again: the state is only updated
+        // when it does not hold what this view asks of it already.
+        let holds = {
+            let current = state.read(cx);
+            (match (&self.selection_entry, self.selectable) {
+                (Some((document, entry)), _) => current.is_selection_entry(document, *entry),
+                (None, Some(selectable)) => selectable == current.selection.is_some(),
+                (None, None) => true,
+            }) && !current.wants_focus_out_watch()
+                && self
+                    .compact_headings
+                    .is_none_or(|compact| compact == current.compact_headings)
+                && self
+                    .base_dir
+                    .as_ref()
+                    .is_none_or(|base_dir| current.base_dir.as_ref() == Some(base_dir))
+        };
+        if !holds {
+            state.update(cx, |state, cx| {
+                if let Some((document, entry)) = &self.selection_entry {
+                    state.set_selection_entry(document, *entry, cx);
+                } else if let Some(selectable) = self.selectable {
+                    state.set_selectable(selectable, cx);
+                }
+                state.clear_own_selection_on_focus_out(window, cx);
+                if let Some(compact) = self.compact_headings {
+                    state.set_compact_headings(compact, cx);
+                }
+                if let Some(base_dir) = &self.base_dir {
+                    state.set_base_dir(Some(base_dir.clone()), cx);
+                }
+            });
+        }
         let focus_handle = state.read(cx).focus_handle.clone();
         let element = div()
             .key_context(super::CONTEXT)
@@ -320,9 +340,9 @@ impl Element for MarkdownView {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        request_layout.0.read(cx).begin_frame();
         request_layout.1.prepaint(window, cx);
         request_layout.0.read(cx).measure_unrevealed();
+        request_layout.0.read(cx).register_edges(cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         if let Some(membership) = &request_layout.0.read(cx).selection {
             membership.document.read(cx).register_participant(

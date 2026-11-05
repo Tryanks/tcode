@@ -341,22 +341,14 @@ impl Element for Inline {
                 .collect(),
         );
         let view = self.view.read(cx);
-        if let (Some(origin), Some(membership)) = (&self.origin, &view.selection) {
+        if let (Some(origin), Some(_)) = (&self.origin, &view.selection) {
             self.selected = view.selected_range(origin, self.text.len(), cx);
-            if let Some(selected) = &self.selected {
-                membership.document.read(cx).register_edge(
-                    membership.entry,
-                    origin,
-                    selected,
-                    &self.text_layout,
-                    window.content_mask().bounds,
-                );
-            }
             view.register_run(PaintedRun {
                 origin: origin.clone(),
                 text: self.text.clone(),
                 layout: self.text_layout.clone(),
                 bounds,
+                visible: window.content_mask().bounds,
             });
         }
         hitbox

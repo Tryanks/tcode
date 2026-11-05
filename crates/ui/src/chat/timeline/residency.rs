@@ -273,10 +273,15 @@ impl TimelineView {
                 cx,
             )
             .unwrap_or_default();
+        // Updating a message while the timeline renders counts as changing
+        // it, which builds it again: only a message moved in the
+        // selection's order is.
         for (state, entry) in places {
-            state.update(cx, |state, cx| {
-                state.set_selection_entry(&self.selection, entry, cx)
-            });
+            if !state.read(cx).is_selection_entry(&self.selection, entry) {
+                state.update(cx, |state, cx| {
+                    state.set_selection_entry(&self.selection, entry, cx)
+                });
+            }
         }
     }
 
