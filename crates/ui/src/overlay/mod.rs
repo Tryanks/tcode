@@ -174,36 +174,12 @@ impl Overlays {
 
 impl gpui_base::RootPlugin for Overlays {
     fn style(&self, surface: &mut Stateful<Div>, _window: &mut Window, cx: &mut App) {
-        let style = StyleRefinement::default()
-            .text_color(cx.theme().foreground)
-            .font_family(cx.theme().font_family.clone());
-        // Where a page lies beneath GPUI, the canvas is a fill that leaves
-        // it unpainted, drawn under the surface by `decorate`.
-        let style = if cfg!(all(preview_backend, target_os = "windows")) {
-            style
-        } else {
-            style.bg(crate::material::canvas(cx))
-        };
-        surface.style().refine(&style);
-    }
-
-    fn decorate(
-        &self,
-        surface: gpui::AnyElement,
-        _root: &gpui_base::Root,
-        _window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        if !cfg!(all(preview_backend, target_os = "windows")) {
-            return surface;
-        }
-        use crate::material::SurfaceFill as _;
-        div()
-            .relative()
-            .size_full()
-            .surface_bg(crate::material::canvas(cx))
-            .child(surface)
-            .into_any_element()
+        surface.style().refine(
+            &StyleRefinement::default()
+                .bg(crate::material::canvas(cx))
+                .text_color(cx.theme().foreground)
+                .font_family(cx.theme().font_family.clone()),
+        );
     }
 }
 
@@ -260,6 +236,35 @@ impl Render for Overlays {
         // change of layout moves them: a resize within one keeps them where
         // it anchors them.
         let place = self.toast_place.scope(u64::from(compact)).in_window();
+        let toasts = div()
+            .debug_selector(|| "notification-position".into())
+            .absolute()
+            .when(compact, |el| {
+                el.left(seam.left + inset)
+                    .right(seam.right + inset)
+                    .bottom(seam.bottom + inset)
+                    .flex()
+                    .justify_center()
+            })
+            .when(!compact, |el| {
+                el.top_0()
+                    .right_0()
+                    .mt(seam.top + inset)
+                    .mr(seam.right + inset)
+            });
+        // Toasts on screen are a deferred draw, so they are on the window's
+        // overlay surface, above a web page composed beneath it; none is
+        // deferred while there are none (a deferred draw makes the window
+        // build its whole shell again for any change inside it).
+        let toasts = if self.notifications.read(cx).is_empty() {
+            toasts.child(self.notifications.clone()).into_any_element()
+        } else {
+            // Only toasts on screen glide: an empty list moving between the
+            // layouts carries nothing a toast arriving later should start
+            // from.
+            gpui::deferred(toasts.child(place.part("toasts", self.notifications.clone())))
+                .into_any_element()
+        };
         let root = div()
             .absolute()
             .inset_0()
@@ -276,34 +281,7 @@ impl Render for Overlays {
                         .children(dialogs),
                 )
             })
-            .child(
-                div()
-                    .debug_selector(|| "notification-position".into())
-                    .absolute()
-                    .when(compact, |el| {
-                        el.left(seam.left + inset)
-                            .right(seam.right + inset)
-                            .bottom(seam.bottom + inset)
-                            .flex()
-                            .justify_center()
-                    })
-                    .when(!compact, |el| {
-                        el.top_0()
-                            .right_0()
-                            .mt(seam.top + inset)
-                            .mr(seam.right + inset)
-                    })
-                    // Only toasts on screen glide: an empty list moving
-                    // between the layouts carries nothing a toast arriving
-                    // later should start from.
-                    .map(|position| {
-                        if self.notifications.read(cx).is_empty() {
-                            position.child(self.notifications.clone())
-                        } else {
-                            position.child(place.part("toasts", self.notifications.clone()))
-                        }
-                    }),
-            );
+            .child(toasts);
         place.render(root)
     }
 }

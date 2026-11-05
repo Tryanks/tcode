@@ -22,8 +22,10 @@ use std::time::Duration;
 
 #[cfg(target_os = "android")]
 use super::android::WebView;
+#[cfg(target_os = "windows")]
+use super::webview2::WebView;
 use gpui::{App, AppContext as _, Context, Entity, EntityId, Window};
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "windows")))]
 use gpui_webview::WebView;
 #[cfg(not(target_os = "android"))]
 use preview_mcp::js;
@@ -115,7 +117,7 @@ impl WebViewSlot {
 enum Creator {
     Available(platform::Adapter),
     Unavailable {
-        /// Preserve an initialized WebContext for already-ready Windows views.
+        /// Preserve an initialized WebView2 environment for already-ready Windows views.
         adapter: Option<platform::Adapter>,
         error: String,
     },
@@ -140,6 +142,8 @@ pub struct BrowserLifecycle {
     #[cfg(not(target_os = "android"))]
     panel_size: Option<gpui::Size<gpui::Pixels>>,
     creator: Creator,
+    /// Windows gives the proxy to its WebView2 environment, in the adapter.
+    #[cfg(not(target_os = "windows"))]
     proxy: Option<tcode_traverse::preview::ProxyEntry>,
     endpoint: Option<tcode_traverse::preview::PreviewEndpoint>,
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
@@ -205,6 +209,7 @@ impl BrowserLifecycle {
         };
         Self {
             owner,
+            #[cfg(not(target_os = "windows"))]
             proxy: proxy.ok().flatten(),
             endpoint,
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "android"))]
@@ -336,10 +341,11 @@ impl BrowserLifecycle {
     ///
     /// On macOS and iOS a page fades in and out (`PreviewPanel::native_fade`).
     /// Gap: on Windows, Linux and Android it shows and hides at once.
-    /// gpui-webview has no opacity, and their child surfaces (a
-    /// WebView2 controller, an X11 child window, an Android view) are not
-    /// faded here; a snapshot drawn by GPUI in the page's place is the open
-    /// alternative.
+    /// gpui-fast-windows' native surface has no opacity (its
+    /// `DCompositionCreateDevice` visual is not an `IDCompositionVisual3`),
+    /// gpui-webview has none, and an X11 child window or an Android view is
+    /// not faded here; a snapshot drawn by GPUI in the page's place is the
+    /// open alternative.
     pub fn set_visible(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
         self.shown.clear();
         self.show_for(cx.entity_id(), key, cx);
@@ -419,10 +425,14 @@ impl BrowserLifecycle {
         let own = Some(view.bounds().size)
             .filter(|size| size.width > gpui::px(0.) && size.height > gpui::px(0.));
         let size = canvas.or(self.panel_size).or(own).unwrap_or(fallback);
+        #[cfg(target_os = "windows")]
+        view.stage(size);
+        #[cfg(not(target_os = "windows"))]
         let rect = wry::Rect {
             position: wry::dpi::LogicalPosition::new(-20000., -20000.).into(),
             size: wry::dpi::LogicalSize::new(f64::from(size.width), f64::from(size.height)).into(),
         };
+        #[cfg(not(target_os = "windows"))]
         if let Err(error) = view.set_bounds(rect) {
             log::debug!("preview: failed to size hidden webview {key}: {error}");
         }
@@ -469,8 +479,6 @@ impl BrowserLifecycle {
         {
             if let Some(view) = slot.ready() {
                 view.update(cx, |view, _| set_webview_visible(view, false));
-                #[cfg(target_os = "windows")]
-                super::page_holes::forget(view.entity_id(), cx);
             }
         }
     }
@@ -786,11 +794,20 @@ impl BrowserLifecycle {
         &mut self,
         key: String,
         pending_url: Option<String>,
-        raw: wry::WebView,
+        controller: webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CompositionController,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        load_error::install(&raw);
+        let prepared = match WebView::prepare(controller.clone(), window) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                super::webview2::discard(&controller);
+                self.record_unavailable(error, cx);
+                return;
+            }
+        };
+        let raw = prepared.raw();
+        load_error::install(raw);
         let warm = if let Some(url) = &pending_url {
             match raw.load_url(url) {
                 Ok(()) => true,
@@ -802,11 +819,7 @@ impl BrowserLifecycle {
         } else {
             false
         };
-        let webview = cx.new(|cx| {
-            let mut view = WebView::new(raw, window, cx);
-            set_webview_visible(&mut view, false);
-            view
-        });
+        let webview = cx.new(|cx| WebView::new(prepared, window, cx));
         self.slots
             .insert(key.clone(), WebViewSlot::Ready { view: webview });
         if warm {
@@ -827,8 +840,6 @@ fn leave(view: &Entity<WebView>, cx: &mut App) {
             set_webview_visible(view, false);
         }
     });
-    #[cfg(target_os = "windows")]
-    super::page_holes::forget(view.entity_id(), cx);
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -985,56 +996,26 @@ mod platform {
     use std::future::Future as _;
     use std::rc::Rc;
 
-    use raw_window_handle::HasWindowHandle as _;
-
+    use super::super::webview2;
     use super::*;
 
     const SMOKE_CREATION_PAUSE: Duration = Duration::from_millis(50);
 
     pub(super) struct Adapter {
-        web_context: Rc<async_lock::Mutex<(wry::WebContext, Option<tempfile::TempDir>)>>,
+        environment: Rc<webview2::Environment>,
+        /// Whether pages are in-private: those of an attached browser.
+        private: bool,
         next_creation_id: u64,
         smoke_creation_pause: bool,
     }
 
     impl Adapter {
         pub(super) fn new(
-            _proxy: Option<&tcode_traverse::preview::ProxyEntry>,
+            proxy: Option<&tcode_traverse::preview::ProxyEntry>,
         ) -> Result<Self, String> {
-            // Proxy arguments include an attachment-specific loopback port.
-            // WebView2 cannot share a user-data directory between environments
-            // with different arguments, even while an old creation is finishing.
-            let local_profile = crate::client_data_dir()
-                .ok_or_else(|| "client data directory was not set at startup".to_string())?
-                .join("WebView2");
-            let temporary = if _proxy.is_some() {
-                Some(
-                    tempfile::Builder::new()
-                        .prefix("tcode-preview-")
-                        .tempdir()
-                        .map_err(|error| error.to_string())?,
-                )
-            } else {
-                None
-            };
-            let user_data_dir = temporary
-                .as_ref()
-                .map_or(local_profile, |directory| directory.path().to_path_buf());
-            std::fs::create_dir_all(&user_data_dir).map_err(|error| {
-                format!(
-                    "failed to create WebView2 user-data directory {}: {error}",
-                    user_data_dir.display()
-                )
-            })?;
-            log::debug!(
-                "preview: using WebView2 user-data directory {}",
-                user_data_dir.display()
-            );
             Ok(Self {
-                web_context: Rc::new(async_lock::Mutex::new((
-                    wry::WebContext::new(Some(user_data_dir)),
-                    temporary,
-                ))),
+                environment: Rc::new(webview2::Environment::new(proxy)?),
+                private: proxy.is_some(),
                 next_creation_id: 0,
                 // Preserve the harness's deterministic in-flight cancellation
                 // window without putting smoke routing state back in the panel.
@@ -1050,26 +1031,26 @@ mod platform {
         window: &mut Window,
         cx: &mut Context<BrowserLifecycle>,
     ) -> Availability {
-        let (web_context, creation_id, smoke_creation) = match &mut lifecycle.creator {
+        let (environment, private, creation_id, smoke_creation) = match &mut lifecycle.creator {
             Creator::Available(adapter) => {
                 adapter.next_creation_id = adapter.next_creation_id.wrapping_add(1).max(1);
                 (
-                    adapter.web_context.clone(),
+                    adapter.environment.clone(),
+                    adapter.private,
                     adapter.next_creation_id,
                     adapter.smoke_creation_pause,
                 )
             }
             Creator::Unavailable { .. } => return Availability::Unavailable,
         };
-        let parent = match window.window_handle() {
-            Ok(handle) => handle.as_raw(),
+        let parent = match webview2::parent_window(window) {
+            Ok(parent) => parent,
             Err(error) => {
-                lifecycle.record_unavailable(error.to_string(), cx);
+                lifecycle.record_unavailable(error, cx);
                 return Availability::Unavailable;
             }
         };
 
-        let proxy = lifecycle.proxy.clone();
         let creation_key = key.to_string();
         lifecycle.slots.insert(
             creation_key.clone(),
@@ -1081,10 +1062,6 @@ mod platform {
         );
 
         cx.spawn_in(window, async move |lifecycle, cx| {
-            // WebViewBuilder borrows WebContext mutably for the lifetime of its
-            // future. Serialize that borrow without blocking GPUI; a cancelled
-            // queued slot is discarded before wry is ever polled.
-            let mut web_context = web_context.lock().await;
             let slot_is_live = lifecycle
                 .read_with(cx, |lifecycle, _| {
                     lifecycle.owner_is_live() && lifecycle.has_creation(creation_id)
@@ -1101,50 +1078,35 @@ mod platform {
                 return;
             }
 
-            // SAFETY: this task is confined to GPUI's UI thread and just
-            // revalidated the owning GPUI window without yielding. wry reads
-            // the handle synchronously on the first poll, before awaiting
-            // WebView2's environment/controller callbacks. The HWND may be
-            // destroyed after that await by design; the async path then
-            // completes with either an error or a raw child we immediately
-            // discard unless the same window/panel/generation are still live.
-            let parent = unsafe { raw_window_handle::WindowHandle::borrow_raw(parent) };
-            let built = {
-                let builder = wry::WebViewBuilder::new_with_web_context(&mut web_context.0)
-                    .with_devtools(true)
-                    .with_url("about:blank");
-                let builder = match super::super::proxy::builder(builder, proxy.as_ref()) {
-                    Ok(builder) => builder,
-                    Err(error) => { let _ = lifecycle.update(cx, |lifecycle, cx| lifecycle.record_unavailable(error, cx)); return; }
-                };
-                let mut build = Box::pin(builder.build_as_child_async(&parent));
-                let first_poll = std::future::poll_fn(|task_cx| {
-                    std::task::Poll::Ready(match build.as_mut().poll(task_cx) {
-                        std::task::Poll::Ready(result) => Some(result),
-                        std::task::Poll::Pending => None,
-                    })
+            // The HWND may be destroyed while WebView2 builds the controller
+            // by design; creation then fails, or completes with a controller
+            // discarded unless the same window/panel/generation are still live.
+            let mut build = Box::pin(webview2::create(environment, parent, private));
+            let first_poll = std::future::poll_fn(|task_cx| {
+                std::task::Poll::Ready(match build.as_mut().poll(task_cx) {
+                    std::task::Poll::Ready(result) => Some(result),
+                    std::task::Poll::Pending => None,
                 })
-                .await;
-                match first_poll {
-                    Some(result) => result,
-                    None => {
-                        let _ = lifecycle.update(cx, |lifecycle, cx| {
-                            if lifecycle.mark_creation_in_flight(creation_id) {
-                                cx.notify();
-                            }
-                        });
-                        if smoke_creation {
-                            cx.background_executor().timer(SMOKE_CREATION_PAUSE).await;
+            })
+            .await;
+            let built = match first_poll {
+                Some(result) => result,
+                None => {
+                    let _ = lifecycle.update(cx, |lifecycle, cx| {
+                        if lifecycle.mark_creation_in_flight(creation_id) {
+                            cx.notify();
                         }
-                        build.as_mut().await
+                    });
+                    if smoke_creation {
+                        cx.background_executor().timer(SMOKE_CREATION_PAUSE).await;
                     }
+                    build.as_mut().await
                 }
             };
-            drop(web_context);
 
             match built {
-                Ok(raw) => {
-                    let mut raw = Some(raw);
+                Ok(controller) => {
+                    let mut controller = Some(controller);
                     let installed = matches!(
                         cx.update(|window, app| {
                             lifecycle.update(app, |lifecycle, cx| {
@@ -1159,7 +1121,7 @@ mod platform {
                                 lifecycle.install_created_webview(
                                     key,
                                     pending_url,
-                                    raw.take().expect("raw webview already consumed"),
+                                    controller.take().expect("controller already consumed"),
                                     window,
                                     cx,
                                 );
@@ -1168,8 +1130,8 @@ mod platform {
                         }),
                         Ok(Ok(true))
                     );
-                    if let Some(raw) = raw {
-                        drop_raw_webview(raw, &creation_key, "creation cancellation");
+                    if let Some(controller) = controller {
+                        webview2::discard(&controller);
                     }
                     if !installed {
                         log::debug!(
@@ -1178,7 +1140,6 @@ mod platform {
                     }
                 }
                 Err(error) => {
-                    let error = error.to_string();
                     let recorded = matches!(
                         cx.update(|_, app| {
                             lifecycle.update(app, |lifecycle, cx| {
@@ -1204,13 +1165,6 @@ mod platform {
         .detach();
 
         Availability::Starting(CreationPhase::Queued)
-    }
-
-    fn drop_raw_webview(raw: wry::WebView, key: &str, reason: &str) {
-        load_error::forget(&raw);
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(raw))).is_err() {
-            log::error!("preview: raw webview drop panicked for {key} after {reason}");
-        }
     }
 }
 
