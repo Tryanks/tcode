@@ -89,6 +89,33 @@ pub fn preview_backend() -> bool {
 pub(crate) mod lifecycle;
 #[cfg(preview_backend)]
 mod load_error;
+#[cfg(all(preview_backend, target_os = "windows"))]
+mod page_holes;
+
+/// Where pages show in `window`, which the surfaces painted beneath them
+/// leave unpainted: only on Windows, where a page lies beneath all of GPUI
+/// (see `page_holes`). Elsewhere a page is above the surfaces under it.
+pub(crate) fn page_holes(
+    #[cfg_attr(
+        not(all(preview_backend, target_os = "windows")),
+        expect(unused_variables, reason = "only Windows pages lie beneath GPUI")
+    )]
+    window: &Window,
+    #[cfg_attr(
+        not(all(preview_backend, target_os = "windows")),
+        expect(unused_variables, reason = "only Windows pages lie beneath GPUI")
+    )]
+    cx: &mut App,
+) -> Vec<gpui::Bounds<gpui::Pixels>> {
+    #[cfg(all(preview_backend, target_os = "windows"))]
+    {
+        page_holes::in_window(window, cx)
+    }
+    #[cfg(not(all(preview_backend, target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}
 
 /// The reply channel a broker request is answered on.
 type ReplyTx = async_channel::Sender<Result<PreviewResponse, String>>;

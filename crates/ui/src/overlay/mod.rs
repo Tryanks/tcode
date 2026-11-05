@@ -174,12 +174,36 @@ impl Overlays {
 
 impl gpui_base::RootPlugin for Overlays {
     fn style(&self, surface: &mut Stateful<Div>, _window: &mut Window, cx: &mut App) {
-        surface.style().refine(
-            &StyleRefinement::default()
-                .bg(crate::material::canvas(cx))
-                .text_color(cx.theme().foreground)
-                .font_family(cx.theme().font_family.clone()),
-        );
+        let style = StyleRefinement::default()
+            .text_color(cx.theme().foreground)
+            .font_family(cx.theme().font_family.clone());
+        // Where a page lies beneath GPUI, the canvas is a fill that leaves
+        // it unpainted, drawn under the surface by `decorate`.
+        let style = if cfg!(all(preview_backend, target_os = "windows")) {
+            style
+        } else {
+            style.bg(crate::material::canvas(cx))
+        };
+        surface.style().refine(&style);
+    }
+
+    fn decorate(
+        &self,
+        surface: gpui::AnyElement,
+        _root: &gpui_base::Root,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        if !cfg!(all(preview_backend, target_os = "windows")) {
+            return surface;
+        }
+        use crate::material::SurfaceFill as _;
+        div()
+            .relative()
+            .size_full()
+            .surface_bg(crate::material::canvas(cx))
+            .child(surface)
+            .into_any_element()
     }
 }
 

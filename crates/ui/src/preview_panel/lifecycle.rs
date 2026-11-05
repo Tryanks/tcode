@@ -469,6 +469,8 @@ impl BrowserLifecycle {
         {
             if let Some(view) = slot.ready() {
                 view.update(cx, |view, _| set_webview_visible(view, false));
+                #[cfg(target_os = "windows")]
+                super::page_holes::forget(view.entity_id(), cx);
             }
         }
     }
@@ -825,6 +827,8 @@ fn leave(view: &Entity<WebView>, cx: &mut App) {
             set_webview_visible(view, false);
         }
     });
+    #[cfg(target_os = "windows")]
+    super::page_holes::forget(view.entity_id(), cx);
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

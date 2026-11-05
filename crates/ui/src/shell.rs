@@ -21,6 +21,7 @@ use std::time::Instant;
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
+use crate::material::SurfaceFill as _;
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -2220,10 +2221,12 @@ impl AppShell {
             return gpui::Empty.into_any_element();
         };
         let area = attachment.thread_panes.read(cx).bounds();
-        let column = div()
-            .size_full()
-            .bg(crate::material::content_surface(cx))
-            .shadow_sm();
+        let column = crate::material::raised(
+            div()
+                .size_full()
+                .surface_bg(crate::material::content_surface(cx))
+                .shadow_sm(),
+        );
         crate::window_seam::inset_from_seam(
             column,
             "chat-column-seam",
@@ -3627,7 +3630,7 @@ fn page_surface(window: &mut Window, cx: &mut App) -> Div {
     crate::window_seam::inset_from_seam(
         v_flex()
             .size_full()
-            .bg(crate::material::content_surface(cx)),
+            .surface_bg(crate::material::content_surface(cx)),
         "page-seam",
         gpui::Edges::all(true),
         window,
@@ -4964,7 +4967,7 @@ impl AppShell {
             .id("app-shell")
             .relative()
             .size_full()
-            .bg(crate::material::content_surface(cx))
+            .surface_bg(crate::material::content_surface(cx))
             .text_color(cx.theme().foreground)
             .when(cfg!(target_os = "android"), |mut element| {
                 // Android's cosmic-text fallback has no script preferences. These
