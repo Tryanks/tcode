@@ -19,7 +19,7 @@ const CHANGE: Duration = Duration::from_millis(200);
 fn latest(chat: &ChatView, cx: &App) -> Option<usize> {
     chat.workspace_store
         .read(cx)
-        .with_timeline_for(
+        .with_entries_for(
             chat.session_id.as_deref(),
             |timeline| {
                 timeline.turns.iter().rposition(|turn| {
@@ -58,7 +58,7 @@ pub(super) fn summary(chat: &ChatView, cx: &App) -> Option<SharedString> {
     let store = chat.workspace_store.read(cx);
     let session = chat.session_id.as_deref();
     let (files, partial, ended, (added, deleted)) = store
-        .with_timeline_for(
+        .with_entries_for(
             session,
             |timeline| {
                 let at = timeline.turns.get(turn)?;
@@ -149,7 +149,7 @@ pub(super) fn body(
                     // diffs and all, are copied out only when they change.
                     let held = chat.motion.keep::<HeldChanges>("rail-changes-held");
                     let changes = store
-                        .with_timeline_for(
+                        .with_entries_for(
                             session,
                             |timeline| {
                                 let changes = &timeline.turns.get(turn)?.changes.as_ref()?.changes;

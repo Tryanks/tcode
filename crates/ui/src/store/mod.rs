@@ -1321,11 +1321,19 @@ impl WorkspaceStore {
                         | agent::AgentEvent::RewindCompleted { .. }
                         | agent::AgentEvent::PlanUpdated { .. }
                 );
-                if !self.apply_live_record(session_id, &envelope_topic, record) {
+                let Some(items) = self.apply_live_record(session_id, &envelope_topic, record)
+                else {
                     return Reach::Store;
-                }
+                };
                 if within_turn {
-                    reach = Reach::Thread(session_id.clone(), &[Part::Timeline]);
+                    reach = Reach::Thread(
+                        session_id.clone(),
+                        if items {
+                            &[Part::Timeline, Part::Entries]
+                        } else {
+                            &[Part::Timeline]
+                        },
+                    );
                 }
                 None
             }
@@ -1610,7 +1618,7 @@ impl WorkspaceStore {
                             {
                                 reach = Reach::Thread(
                                     session_id.clone(),
-                                    &[Part::Status, Part::Timeline],
+                                    &[Part::Status, Part::Timeline, Part::Entries],
                                 );
                             }
                             // The host owns the drawer, which lives only with its
@@ -1798,20 +1806,23 @@ impl WorkspaceStore {
     }
 
     /// One record streamed live into an open thread: whether it applied.
-    fn apply_live_record(&mut self, session_id: &str, topic: &Topic, record: StoredEvent) -> bool {
+    /// Apply a record streamed into an open thread's log: `None` when it was
+    /// not, else whether it changed the fold's items ([`Part::Entries`]).
+    fn apply_live_record(
+        &mut self,
+        session_id: &str,
+        topic: &Topic,
+        record: StoredEvent,
+    ) -> Option<bool> {
         let baseline = self.baseline_topics.contains(topic);
-        let Some(thread) = self.open_thread_mut(session_id) else {
-            return false;
-        };
+        let thread = self.open_thread_mut(session_id)?;
         // Until its window arrives the thread may hold an earlier
         // visit's records, which the window continues: a record sent
         // before the window is part of it.
         if thread.catching_up || !baseline || thread.timeline.is_none() {
-            return false;
+            return None;
         }
-        let Some(held) = thread.history.as_ref() else {
-            return false;
-        };
+        let held = thread.history.as_ref()?;
         let after = held.end + 1;
         self.host.remember_after(topic, after);
         // A new turn means the user moved on; the recovery card for the
@@ -1822,8 +1833,13 @@ impl WorkspaceStore {
         }
         self.apply_conversation_event(session_id, &record.event);
         let thread = self.threads.get_mut(session_id).expect("open thread");
+        // Text streamed into an item it continues changes no item; a delta
+        // that brings its item first does.
+        let mut items = !matches!(record.event, agent::AgentEvent::Delta { .. });
         if let Some(mut timeline) = thread.timeline.take() {
+            let entries = timeline.entries.len();
             timeline.apply_stored(&record);
+            items |= timeline.entries.len() != entries;
             thread.settle_running_turn(&mut timeline);
             thread.total_turns = Some(thread.turn_offset + timeline.turns.len());
             thread.timeline = Some(timeline);
@@ -1833,7 +1849,7 @@ impl WorkspaceStore {
             .as_mut()
             .expect("held above")
             .extend(vec![record], after);
-        true
+        Some(items)
     }
 
     pub(crate) fn set_conversation_on_screen(&mut self, on_screen: bool, cx: &mut Context<Self>) {
@@ -3619,6 +3635,22 @@ impl WorkspaceStore {
         cx: &App,
     ) -> Option<R> {
         self.thread_timeline(session_id, cx).map(read)
+    }
+
+    /// Reads `session_id`'s timeline as a view depending on its items alone
+    /// ([`Part::Entries`]): text streamed into an item does not draw such a
+    /// view again, so `read` must not look at a message's, a thought's or a
+    /// command output's text.
+    pub fn with_entries_for<R>(
+        &self,
+        session_id: Option<&str>,
+        read: impl FnOnce(&Timeline) -> R,
+        cx: &App,
+    ) -> Option<R> {
+        self.watched(session_id, Part::Entries, cx)?
+            .timeline
+            .as_ref()
+            .map(read)
     }
 
     /// Moves on with every change to `session_id`'s timeline, read as a view

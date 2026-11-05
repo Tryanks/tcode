@@ -39,6 +39,10 @@ impl Revision {
 pub(super) enum Part {
     /// The held log and its fold: every live record.
     Timeline,
+    /// The fold's entries and turns as items: every live record but text
+    /// streamed into an item already there, which changes no item's kind,
+    /// status or place.
+    Entries,
     /// Status, plan and Git, and what the thread's status topic carries
     /// besides (a rewind's prefill, a classifier stop).
     Status,
@@ -48,6 +52,7 @@ pub(super) enum Part {
 
 pub(super) struct Revisions {
     timeline: Entity<Revision>,
+    entries: Entity<Revision>,
     status: Entity<Revision>,
     outputs: Entity<Revision>,
 }
@@ -56,6 +61,7 @@ impl Revisions {
     fn new(cx: &mut App) -> Self {
         Self {
             timeline: Revision::new(cx),
+            entries: Revision::new(cx),
             status: Revision::new(cx),
             outputs: Revision::new(cx),
         }
@@ -64,6 +70,7 @@ impl Revisions {
     pub(super) fn of(&self, part: Part) -> &Entity<Revision> {
         match part {
             Part::Timeline => &self.timeline,
+            Part::Entries => &self.entries,
             Part::Status => &self.status,
             Part::Outputs => &self.outputs,
         }
