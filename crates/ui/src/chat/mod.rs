@@ -725,6 +725,14 @@ impl ChatView {
         cx.notify();
     }
 
+    /// The view was taken down and is put up anew (a phone's thread page
+    /// pushed again after the reader left it): what it shows is a new
+    /// scene, nothing it left moving carried into it.
+    pub(crate) fn restart_scene(&mut self, cx: &mut Context<Self>) {
+        self.scene.restart();
+        cx.notify();
+    }
+
     /// The view shows another thread from this frame. Its motion is the
     /// new scene's ([`Self::scene`]); what is left is that it shows once it
     /// can be drawn at rest, from rows the new thread painted.
@@ -908,8 +916,16 @@ impl Render for ChatView {
         // What the view was bound to shows once it can be drawn at rest;
         // until then nothing does, and the skeleton only once that has
         // taken longer than a glance.
-        if !self.scene_shown {
-            self.scene_shown = self.scene_ready(loading, rows_drawn, cx);
+        if !self.scene_shown && self.scene_ready(loading, rows_drawn, cx) {
+            self.scene_shown = true;
+            // What arrived while the thread readied itself unseen (a
+            // catch-up's text, the rail it brought) is there as it is on
+            // the first frame the reader sees.
+            for md in self.md_states.values() {
+                md.settle(cx);
+            }
+            self.motion.forget("chat-rail");
+            self.motion.forget("chat-side");
         }
         if self.held {
             self.motion.forget("chat-surface");

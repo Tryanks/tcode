@@ -539,6 +539,16 @@ enum Holding {
     Subagent,
     /// A turn under way, its answer streaming in.
     Streaming,
+    /// A turn under way, its answer streaming in and still revealing as the
+    /// pane leaves; while away the turn finishes the answer and goes on
+    /// past it, which the host sends once the pane is back.
+    StreamedOn,
+}
+
+/// What [`Holding::StreamedOn`]'s answer has streamed by the time the pane
+/// leaves: the first part, and the part it is revealing as it leaves.
+fn streamed_on(part: usize) -> String {
+    format!("Part {part} reads `the build` and `the tests` that cover them. ").repeat(6)
 }
 
 /// `id`'s status and log as it holds `holding`.
@@ -547,7 +557,7 @@ fn serve_holding(host: &MountedShell, id: &str, holding: Holding) {
     let mut events = vec![started(), asked(id)];
     let running = matches!(
         holding,
-        Holding::Steers | Holding::Subagent | Holding::Streaming
+        Holding::Steers | Holding::Subagent | Holding::Streaming | Holding::StreamedOn
     );
     if running {
         status.activity.working = true;
@@ -599,11 +609,78 @@ fn serve_holding(host: &MountedShell, id: &str, holding: Holding) {
             kind: agent::DeltaKind::AssistantText,
             text: "Reading the build files, then the tests that cover them. ".repeat(4),
         }),
+        Holding::StreamedOn => events.push(answer_delta(id, streamed_on(0))),
         Holding::Plain | Holding::RightPanel | Holding::AgentsPanel => {}
     }
     if !running {
         events.push(completed());
     }
+    serve_log(host, status, events);
+}
+
+fn answer_delta(id: &str, text: String) -> agent::AgentEvent {
+    agent::AgentEvent::Delta {
+        item_id: format!("{id}-answer"),
+        kind: agent::DeltaKind::AssistantText,
+        text,
+    }
+}
+
+/// `id`'s log once [`Holding::StreamedOn`]'s turn went on while the pane
+/// was away: the answer it left streaming finished, then a thought, a
+/// command and another answer, the turn still under way.
+fn serve_streamed_on(host: &MountedShell, id: &str) {
+    let mut status = session_status(id, std::path::Path::new(PANES_CWD));
+    status.activity.working = true;
+    status.activity.turn_running = true;
+    status.running_turn = Some(tcode_core::session::RunningTurn {
+        turn: 0,
+        started_at: Some(crate::time::now_millis()),
+    });
+    let item = |id: String, content| {
+        agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+            id,
+            parent_item_id: None,
+            content,
+        })
+    };
+    let answer = (0..3).map(streamed_on).collect::<String>();
+    let events = vec![
+        started(),
+        asked(id),
+        answer_delta(id, streamed_on(0)),
+        answer_delta(id, streamed_on(1)),
+        answer_delta(id, streamed_on(2)),
+        item(
+            format!("{id}-answer"),
+            agent::ItemContent::AssistantMessage {
+                text: answer,
+                summarized: false,
+            },
+        ),
+        item(
+            format!("{id}-thought"),
+            agent::ItemContent::Reasoning {
+                text: "Which of the tests cover the build?".into(),
+            },
+        ),
+        item(
+            format!("{id}-command"),
+            agent::ItemContent::CommandExecution {
+                command: "cargo test".into(),
+                output: "ok\n".into(),
+                exit_code: Some(0),
+                status: agent::ItemStatus::Completed,
+            },
+        ),
+        item(
+            format!("{id}-next"),
+            agent::ItemContent::AssistantMessage {
+                text: "The tests pass, `all of them`.".into(),
+                summarized: false,
+            },
+        ),
+    ];
     serve_log(host, status, events);
 }
 
@@ -690,7 +767,9 @@ fn differences(a: &[[i32; 4]], b: &[[i32; 4]]) -> (Vec<[i32; 4]>, Vec<[i32; 4]>)
 /// as large as it rests, whatever the thread left was showing (its steers,
 /// its right panel, its terminal drawer, its agents, an agent's window, an
 /// answer streaming in) and whatever the thread shown had when it was last
-/// on screen. Only the thread's fade in, which moves nothing, plays.
+/// on screen, an answer it left still revealing included, which the thread
+/// finished while away. Only the thread's fade in, which moves nothing,
+/// plays.
 #[gpui::test]
 fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppContext) {
     let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -705,6 +784,7 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
         Holding::AgentsPanel,
         Holding::Subagent,
         Holding::Streaming,
+        Holding::StreamedOn,
     ] {
         serve_holding(&host, "thread-1", holding);
         switch(&shell, "secondary-1", "thread-1", cx);
@@ -725,13 +805,39 @@ fn a_thread_switched_to_starts_at_rest_whatever_either_holds(cx: &mut TestAppCon
         if opened {
             settle_frames(cx);
         }
+        if holding == Holding::StreamedOn {
+            // More of the answer streams in, and the pane leaves on the
+            // frame after.
+            send_events(
+                &host,
+                vec![(
+                    Topic::SessionEvents {
+                        session_id: "thread-1".into(),
+                    },
+                    ServerEvent::SessionEvent(answer_delta("thread-1", streamed_on(1)).into()),
+                )],
+            );
+            arrive(&shell, cx);
+            display_frame(cx);
+        }
         for (key, id) in [("secondary-2", "thread-2"), ("secondary-1", "thread-1")] {
-            if id == "thread-1" {
-                serve_holding(&host, id, holding);
-            } else {
-                serve_other(&host);
+            match (id, holding) {
+                // The pane draws what the thread held as it left until the
+                // host has sent what it did since.
+                ("thread-1", Holding::StreamedOn) => {
+                    switch(&shell, key, id, cx);
+                    serve_streamed_on(&host, id);
+                    arrive(&shell, cx);
+                }
+                ("thread-1", _) => {
+                    serve_holding(&host, id, holding);
+                    switch(&shell, key, id, cx);
+                }
+                _ => {
+                    serve_other(&host);
+                    switch(&shell, key, id, cx);
+                }
             }
-            switch(&shell, key, id, cx);
             // The first frame that shows the thread, however little.
             for _ in 0..10 {
                 if bubble_fill(id, cx).is_some_and(|fill| fill > 0.) {
@@ -820,5 +926,110 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
         "card {:?} -> {:?}; first frame only {moving:?}; at rest only {resting:?}",
         first.1,
         rest.1
+    );
+}
+
+/// What every conversation row painted in the last frame draws, against its
+/// row: each row's size and the quads painted within it, from its origin.
+fn rows_painted(cx: &mut VisualTestContext) -> Vec<(usize, [i32; 2], Vec<[i32; 4]>)> {
+    let rows: Vec<_> = (0..64)
+        .filter_map(|row| {
+            let bounds = cx.debug_bounds(format!("timeline-row-{row}").leak())?;
+            Some((row, bounds))
+        })
+        .collect();
+    cx.update(|window, _| {
+        let quads = crate::test_frames::painted_quads(window);
+        rows.into_iter()
+            .map(|(row, bounds)| {
+                let bounds = bounds.scale(window.scale_factor());
+                let mut inside: Vec<[i32; 4]> = quads
+                    .iter()
+                    .filter(|quad| {
+                        within(&quad.bounds, &bounds)
+                            && quad
+                                .background
+                                .as_solid()
+                                .is_some_and(|colour| colour.a > 0.)
+                    })
+                    .map(|quad| {
+                        [
+                            quad.bounds.origin.x.0 - bounds.origin.x.0,
+                            quad.bounds.origin.y.0 - bounds.origin.y.0,
+                            quad.bounds.size.width.0,
+                            quad.bounds.size.height.0,
+                        ]
+                        .map(|value| value.round() as i32)
+                    })
+                    .collect();
+                inside.sort_unstable();
+                let size = [bounds.size.width.0, bounds.size.height.0].map(|v| v.round() as i32);
+                (row, size, inside)
+            })
+            .collect()
+    })
+}
+
+/// On a phone, a thread gone back from while its answer was still
+/// revealing, and opened again once its turn finished the answer and went
+/// on past it, comes in with every message as it rests: none reveals what
+/// it gained while the reader was away.
+#[gpui::test]
+fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_panes(cx);
+    as_mobile(cx);
+    cx.simulate_resize(gpui::size(px(393.), px(852.)));
+    serve_holding(&host, "thread-1", Holding::StreamedOn);
+    settle_frames(cx);
+    let live = |event: agent::AgentEvent| {
+        (
+            Topic::SessionEvents {
+                session_id: "thread-1".into(),
+            },
+            ServerEvent::SessionEvent(event.into()),
+        )
+    };
+    send_events(&host, vec![live(answer_delta("thread-1", streamed_on(1)))]);
+    arrive(&shell, cx);
+    display_frame(cx);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx)));
+    settle_frames(cx);
+
+    send_events(
+        &host,
+        vec![
+            live(answer_delta("thread-1", streamed_on(2))),
+            live(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "thread-1-next".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::AssistantMessage {
+                    text: "The tests pass, `all of them`.".into(),
+                    summarized: false,
+                },
+            })),
+        ],
+    );
+    arrive(&shell, cx);
+    settle_frames(cx);
+    store_of(&shell, cx).update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+    arrive(&shell, cx);
+    // The frame the page lands on: its question stays where it is.
+    let mut question = cx.debug_bounds(bubble("thread-1"));
+    for _ in 0..60 {
+        display_frame(cx);
+        let now = cx.debug_bounds(bubble("thread-1"));
+        if now.is_some() && now == question {
+            break;
+        }
+        question = now;
+    }
+    let landed = rows_painted(cx);
+    settle_frames(cx);
+    let rest = rows_painted(cx);
+    assert!(rest.len() > 1, "thread-1's rows: {rest:?}");
+    assert_eq!(
+        landed, rest,
+        "a row still moved or revealed once its page landed"
     );
 }

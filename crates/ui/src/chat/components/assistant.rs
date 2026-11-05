@@ -54,6 +54,12 @@ impl MdState {
         }
     }
 
+    /// The message drawn in `scene`'s scenes.
+    pub(crate) fn in_scene(self, scene: &crate::motion::Epoch, cx: &mut App) -> Self {
+        self.state.update(cx, |state, _| state.set_scene(scene));
+        self
+    }
+
     /// Whether the entry's text is still arriving.
     pub(crate) fn set_streaming(&self, streaming: bool, cx: &mut App) {
         // Updating the state while the chat renders counts as writing it,
@@ -61,6 +67,14 @@ impl MdState {
         if self.streaming.replace(streaming) != streaming {
             self.state
                 .update(cx, |state, cx| state.set_streaming(streaming, cx));
+        }
+    }
+
+    /// Land the text's reveal, for a reader who did not watch it arrive.
+    pub(crate) fn settle(&self, cx: &mut App) {
+        // Only a reveal under way is written, as in `set_streaming`.
+        if self.state.read(cx).revealing() {
+            self.state.update(cx, |state, cx| state.settle(cx));
         }
     }
 
