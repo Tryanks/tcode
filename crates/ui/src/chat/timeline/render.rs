@@ -21,10 +21,10 @@ pub(in crate::chat) enum FullOutput {
 }
 
 /// A timeline row as drawn: what its segment shows, and on the turn's last
-/// row the turn's trailer below it, with whether a gap separates the two.
+/// row the turn's trailer below it, the gap between the two its own.
 pub(in crate::chat) struct RenderedRow {
     pub(in crate::chat) content: AnyElement,
-    pub(in crate::chat) trailer: Option<(gpui::Div, bool)>,
+    pub(in crate::chat) trailer: Option<gpui::Div>,
 }
 
 /// How one activity row is drawn where it stands.
@@ -52,7 +52,7 @@ impl TimelineView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> RenderedRow {
-        let (row, turn, cwd, own, entries, pinned) = args;
+        let (row, turn, cwd, own, entries, trailer_gap, pinned) = args;
         let index = row.turn;
         let mut column = v_flex().w_full().gap(px(SEGMENT_GAP));
 
@@ -400,6 +400,8 @@ impl TimelineView {
         }
         let mut column = v_flex().w_full().gap(px(SEGMENT_GAP));
         let mut trailing = false;
+        // The gap between the row's segment and the trailer.
+        let gap_above = (!segments.is_empty()).then(|| px(SEGMENT_GAP) * trailer_gap);
 
         // Changed-file evidence is the turn's settled summary: while the turn
         // still runs, the live per-file rows inside the work log carry this
@@ -485,7 +487,14 @@ impl TimelineView {
             let motion = self.motion.clone();
             let indicator_motion = motion.clone();
             let hover = self.hover.clone();
-            status = Some(self.shared.element(
+            // The footer is one hover with the message whose actions it
+            // draws, the gap above it included when it leads the trailer:
+            // the pointer crossing from the message to Copy never leaves it.
+            let on_hover = ending
+                .as_ref()
+                .and_then(|(actions, _)| actions.on_hover(&hover));
+            let status_gap = gap_above.filter(|_| changes.is_none());
+            let footer = self.shared.element(
                 status_key,
                 motion.cross_fade(
                     format!("turn-status-{index}"),
@@ -516,9 +525,6 @@ impl TimelineView {
                             });
                             actions.render(&hover, &indicator_motion, on_copy, window, cx)
                         });
-                        let on_hover = ending
-                            .as_ref()
-                            .and_then(|(actions, _)| actions.on_hover(&hover));
                         components::indicator::finished_turn_time(
                             finished_at,
                             &turn,
@@ -526,12 +532,22 @@ impl TimelineView {
                             actions,
                             cx,
                         )
-                        .when_some(on_hover, |footer, on_hover| footer.on_hover(on_hover))
                         .into_any_element()
                     },
                 ),
-            ));
+            );
+            status = Some(
+                v_flex()
+                    .id(("turn-status", index))
+                    .w_full()
+                    .when_some(status_gap, |status, gap| status.pt(gap))
+                    .when_some(on_hover, |status, on_hover| status.on_hover(on_hover))
+                    .child(footer),
+            );
         }
+
+        // Without the footer to lead it, the trailer keeps the gap above it.
+        let lead_gap = gap_above.filter(|_| changes.is_some() || status.is_none());
 
         // Pending steers float below every live transcript/work-log element.
         // They are read from the whole turn, not this row's segment, so FIFO
@@ -603,10 +619,11 @@ impl TimelineView {
         RenderedRow {
             content,
             trailer: trailing.then(|| {
-                (
-                    v_flex().w_full().children(changes).child(column),
-                    !segments.is_empty(),
-                )
+                v_flex()
+                    .w_full()
+                    .when_some(lead_gap, |trailer, gap| trailer.pt(gap))
+                    .children(changes)
+                    .child(column)
             }),
         }
     }
@@ -1889,7 +1906,7 @@ mod tests {
     /// the hover fill of each of `keys` is.
     struct HoverProbe {
         chat: gpui::Entity<ChatView>,
-        keys: [&'static str; 2],
+        keys: &'static [&'static str],
         drawn: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<&'static str, f32>>>,
     }
 
@@ -1901,7 +1918,7 @@ mod tests {
         ) -> impl gpui::IntoElement {
             use gpui::{ParentElement as _, Styled as _};
             let hover = self.chat.read(cx).timeline.read(cx).hover.clone();
-            for key in self.keys {
+            for &key in self.keys {
                 let fill = hover.reveal(key, window, cx);
                 self.drawn.borrow_mut().insert(key, fill);
             }
@@ -1918,7 +1935,7 @@ mod tests {
         use gpui::{AppContext as _, Modifiers, VisualTestContext, point, px, size};
         use std::time::Duration;
 
-        let keys = ["worklog-header-0-command-0", "activity-row-command-0"];
+        let keys: &[&str] = &["worklog-header-0-command-0", "activity-row-command-0"];
         for reduce in [false, true] {
             let mut timeline = Timeline::default();
             timeline.turns = vec![TurnMeta::default()];
@@ -1984,6 +2001,63 @@ mod tests {
                 }
             }
             cx.update(|_, cx| cx.set_reduce_motion(false));
+        }
+    }
+
+    /// The Copy of the message a finished turn ends on, drawn in the turn's
+    /// footer, stays in as the pointer goes down from the message's text,
+    /// across the space between them, onto Copy: the message and its footer
+    /// are one hover.
+    #[gpui::test]
+    fn the_pointer_going_from_a_message_to_its_footer_keeps_copy_in(cx: &mut TestAppContext) {
+        use gpui::{AppContext as _, Modifiers, VisualTestContext, point, px, size};
+        use std::time::Duration;
+
+        const KEYS: &[&str] = &["assistant-answer"];
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            end_ts: Some(1_700_000_000),
+            ..TurnMeta::default()
+        }];
+        timeline.entries.push(entry("question", user_item("go")));
+        timeline.entries.push(entry(
+            "answer",
+            assistant("The first line.\n\nThe second line."),
+        ));
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let drawn = std::rc::Rc::default();
+        let (_, cx) = cx.add_window_view(|window, cx| HoverProbe {
+            chat: cx.new(|cx| {
+                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+            }),
+            keys: KEYS,
+            drawn: std::rc::Rc::clone(&drawn),
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        draw_settled(cx);
+
+        let message = cx
+            .debug_bounds("timeline-row-1")
+            .expect("the message's row");
+        let copy = cx
+            .debug_bounds("copy-assistant:answer")
+            .expect("the footer's Copy");
+        let x = copy.center().x;
+        cx.simulate_mouse_move(point(x, message.top() + px(4.)), None, Modifiers::default());
+        draw_settled(cx);
+        assert_eq!(drawn.borrow()[KEYS[0]], 1., "the message's Copy is in");
+
+        // A pixel at a time, a frame apart, as a slow pointer moves.
+        let mut y = message.top() + px(4.);
+        while y < copy.center().y {
+            y += px(1.);
+            cx.simulate_mouse_move(point(x, y), None, Modifiers::default());
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+            let reveal = drawn.borrow()[KEYS[0]];
+            assert_eq!(reveal, 1., "Copy faded with the pointer at {y:?}: {reveal}");
         }
     }
 
