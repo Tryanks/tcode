@@ -588,3 +588,93 @@ pub fn profile_glyph(
         profile_id.unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider));
     provider_glyph(provider).text_color(rgb(store.provider_profile_color(profile_id)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext, point, size};
+    use tcode_runtime::pipe::{HostServices, spawn_host};
+    use tcode_services::store::SessionStore;
+
+    use crate::store::WorkspaceAttachment;
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+    }
+
+    /// A window shorter than the dialog's form leaves its actions in place
+    /// below the form, which scrolls between the title and them.
+    #[gpui::test]
+    fn the_provider_dialog_scrolls_its_form_above_its_actions(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = crate::store::tests::scratch_root("provider-dialog-scroll");
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                host.link(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        let profile = tcode_core::settings::Settings::builtin_profile_id(ProviderKind::ClaudeCode);
+        let mut card_handle = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let card = cx
+                .new(|cx| ProviderCard::new(store.clone(), ProviderKind::ClaudeCode, profile, cx));
+            card_handle = Some(card.clone());
+            gpui_base::Root::new(card, window, cx)
+        });
+        let card = card_handle.unwrap();
+        cx.update(|window, cx| card.update(cx, |card, cx| card.open_dialog(window, cx)));
+        for (width, height) in [(1000., 480.), (393., 600.)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            draw(cx);
+            let body = cx.debug_bounds("provider-dialog-body").unwrap();
+            let form = cx.debug_bounds("provider-dialog-form").unwrap();
+            let save = cx.debug_bounds("provider-save").unwrap();
+            assert!(
+                form.bottom() > body.bottom(),
+                "the form {form:?} must not fit the body {body:?} at {height}"
+            );
+            assert!(
+                body.bottom() < save.top(),
+                "the body {body:?} must end above the actions {save:?}"
+            );
+            assert!(save.bottom() < px(height));
+
+            let at = body.center();
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+            for (phase, delta) in [
+                (gpui::TouchPhase::Started, 0.),
+                (gpui::TouchPhase::Moved, -120.),
+                (gpui::TouchPhase::Ended, 0.),
+            ] {
+                cx.simulate_event(gpui::ScrollEvent {
+                    position: at,
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
+                    touch_phase: phase,
+                    ..Default::default()
+                });
+                draw(cx);
+            }
+            let scrolled = cx.debug_bounds("provider-dialog-form").unwrap();
+            assert!(
+                scrolled.top() < form.top(),
+                "a wheel over the body must move the form, {form:?} -> {scrolled:?}"
+            );
+            assert_eq!(cx.debug_bounds("provider-save").unwrap(), save);
+        }
+        crate::store::tests::shutdown_test_host(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

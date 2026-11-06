@@ -928,12 +928,12 @@ impl Render for ProviderDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("provider-dialog-body")
-            .w_full()
-            .flex_1()
-            .min_h_0()
+            .debug_selector(|| "provider-dialog-body".into())
+            .size_full()
             .overflow_y_scroll_area()
             .child(
                 v_flex()
+                    .debug_selector(|| "provider-dialog-form".into())
                     .w_full()
                     .gap(crate::material::section_gap(cx))
                     .child(self.render_identity(window, cx))
@@ -1015,6 +1015,7 @@ pub fn render_footer(dialog: &Entity<ProviderDialog>, cx: &mut App) -> AnyElemen
         )
         .child(
             Button::new("provider-save")
+                .debug_selector(|| "provider-save".into())
                 .primary()
                 .label(crate::tr!("settings.save").into_owned())
                 .on_click(move |_, window, cx| {
