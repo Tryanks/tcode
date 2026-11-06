@@ -13,6 +13,23 @@ use tcode_protocol::{
 
 use super::*;
 use crate::app::test_support::*;
+
+/// Sends one command and runs the host until it answers.
+fn acked(
+    state: &TestEntity,
+    cx: &mut TestAppContext,
+    id: u64,
+    command: Command,
+) -> (
+    Result<tcode_protocol::CommandResponse, tcode_protocol::ProtocolError>,
+    Vec<HostMessage>,
+) {
+    state.dispatch_command(cx, id, command);
+    cx.run_until_sent(|message| match message {
+        HostMessage::Ack { id: acked, result } if *acked == id => Some(result.clone()),
+        _ => None,
+    })
+}
 use crate::app::{Runtime, scripted_provider};
 
 /// A thread of `provider`, installed and selected.
@@ -169,13 +186,15 @@ fn a_cold_rewind_answers_the_client_that_asked_and_lets_the_provider_go() {
     ));
 }
 
-/// Messages waiting when a rewind is made stay queued until the user sends
-/// the next one, which goes before them; a rewind the harness refuses is
-/// written into the thread and leaves the queue going.
+/// A rewind the harness refuses is written into the thread and changes
+/// nothing else; a message sent while a rewind is made waits for it and goes
+/// to the conversation it leaves; and a client that saw another restore
+/// point at a turn index the cut reused is refused rather than rewinding the
+/// prompt that took its place.
 #[test]
-fn a_rewind_holds_the_queue_until_the_next_send_and_a_refusal_is_recorded() {
+fn a_send_waits_for_the_rewind_and_a_stale_target_or_refusal_changes_nothing() {
     let cx = &mut TestAppContext::default();
-    let store = TestStore::new("tcode-rewind-queue");
+    let store = TestStore::new("tcode-rewind-sends");
     let cwd = store.root().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let state = cx.new_entity(TestClientState::new((*store).clone()));
@@ -184,8 +203,10 @@ fn a_rewind_holds_the_queue_until_the_next_send_and_a_refusal_is_recorded() {
         install(state, ProviderKind::ClaudeCode, cwd, Runtime::Live(sender));
         checkpoint_two_turns(state, cx);
     });
+    let status = |state: &TestEntity| {
+        state.read(|state| state.session_status_snapshot("rewound-thread").unwrap())
+    };
 
-    // A refusal changes nothing; the queue goes on as before.
     state.dispatch_command(cx, 1, rewind_command("desktop"));
     cx.run_until_parked();
     assert!(matches!(
@@ -205,14 +226,22 @@ fn a_rewind_holds_the_queue_until_the_next_send_and_a_refusal_is_recorded() {
             },
             cx,
         );
-        let session = &state.residents.live["rewound-thread"];
-        assert!(!session.queue_held);
-        assert!(session.timeline.entries.iter().any(|entry| matches!(
-            &entry.content,
-            EntryContent::RewindFailed { failure, .. }
-                if failure.reason == RewindFailureReason::ConversationChanged
-        )));
     });
+    cx.run_until_parked();
+    assert!(state.read(|state| {
+        state.residents.live["rewound-thread"]
+            .timeline
+            .entries
+            .iter()
+            .any(|entry| {
+                matches!(
+                    &entry.content,
+                    EntryContent::RewindFailed { failure, .. }
+                        if failure.reason == RewindFailureReason::ConversationChanged
+                )
+            })
+    }));
+    assert!(status(&state).rewind.unwrap().pending.is_none());
 
     state.dispatch_command(cx, 2, rewind_command("desktop"));
     cx.run_until_parked();
@@ -220,47 +249,56 @@ fn a_rewind_holds_the_queue_until_the_next_send_and_a_refusal_is_recorded() {
         next_command(&commands),
         Ok(SessionCommand::Rewind { .. })
     ));
-    // Another thread's agent queues a message while the rewind is made.
-    state.update(cx, |state, cx| {
-        state.queue_automatic_turn(
-            "rewound-thread",
-            |session| {
-                session.push_queued("from an agent".into(), Vec::new());
-            },
-            cx,
-        );
-        state.on_event("rewound-thread", completed("the second prompt"), cx);
-    });
-    cx.run_until_parked();
-    assert!(next_command(&commands).is_err(), "the queue waits");
-    assert!(
-        state
-            .read(|state| state.session_status_snapshot("rewound-thread").unwrap())
-            .queue_held
-    );
-
     state.dispatch_command(
         cx,
         3,
         Command::SendTurn {
             session_id: "rewound-thread".into(),
-            text: "from the user".into(),
+            text: "sent while it rewinds".into(),
             attachment_paths: Vec::new(),
         },
     );
     cx.run_until_parked();
+    assert!(next_command(&commands).is_err(), "the send waits");
+    state.update(cx, |state, cx| {
+        state.on_event("rewound-thread", completed("the second prompt"), cx);
+    });
+    cx.run_until_parked();
     assert!(matches!(
         next_command(&commands),
-        Ok(SessionCommand::SendTurn { text, .. }) if text.contains("from the user")
+        Ok(SessionCommand::SendTurn { text, .. }) if text.contains("sent while it rewinds")
     ));
-    let queue: Vec<_> = state.read(|state| {
-        state.residents.live["rewound-thread"]
-            .queue
-            .iter()
-            .map(|message| message.text.clone())
-            .collect()
+    assert!(!status(&state).queue_held);
+
+    // The cut reused turn 1 for what follows; a client still showing the old
+    // prompt there names its restore point and is refused.
+    state.update(cx, |state, cx| {
+        state.record_event(
+            "rewound-thread",
+            &AgentEvent::TurnCheckpoint {
+                turn_id: "turn-3".into(),
+                checkpoint_id: "checkpoint-3".into(),
+            },
+            cx,
+        );
     });
-    assert_eq!(queue.last().map(String::as_str), Some("from an agent"));
+    let (result, _) = acked(
+        &state,
+        cx,
+        4,
+        serde_json::from_value(json!({
+            "type": "rewind_turn",
+            "content": {
+                "session_id": "rewound-thread",
+                "turn": 1,
+                "checkpoint_id": "checkpoint-2",
+                "mode": "conversation",
+            }
+        }))
+        .unwrap(),
+    );
+    assert_eq!(result.unwrap_err().code, "rewind_unavailable");
+    assert!(next_command(&commands).is_err());
 }
 
 /// A fork's harness session is a new one, so none of the restore points it
@@ -429,6 +467,32 @@ fn a_rewind_during_a_running_turn_keeps_the_queued_message_waiting() {
     let status = state.read(|state| state.session_status_snapshot("rewound-thread").unwrap());
     assert!(status.queue_held);
     assert_eq!(status.queued_messages.len(), 1);
+
+    // The user's next message goes first, and the held one follows it.
+    state.dispatch_command(
+        cx,
+        3,
+        Command::SendTurn {
+            session_id: "rewound-thread".into(),
+            text: "the next message".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    cx.run_until_parked();
+    assert!(matches!(
+        next_command(&commands),
+        Ok(SessionCommand::SendTurn { text, .. }) if text.contains("the next message")
+    ));
+    let status = state.read(|state| state.session_status_snapshot("rewound-thread").unwrap());
+    assert!(!status.queue_held);
+    assert_eq!(
+        status
+            .queued_messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        ["the next message", "queued behind the turn"]
+    );
 }
 
 /// A Harness that answers a conversation rewind without the prompt (Codex's

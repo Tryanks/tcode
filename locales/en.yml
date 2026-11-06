@@ -186,7 +186,7 @@ rewind:
   undo_failed: "Undoing the rewind failed: %{reason}"
   reason:
     turn_running: "a turn is running."
-    busy: "the Harness still has input waiting."
+    busy: "%{harness} still has input waiting."
     target_not_found: "this message is no longer in the conversation (it may have been compacted)."
     conversation_changed: "the conversation changed in the meantime."
     cannot_cut_here: "the conversation cannot be cut at this message."
@@ -194,10 +194,10 @@ rewind:
     conflicts: "files were changed outside the agent since."
     usage_limited: "the usage limit is reached."
     expired: "the request expired."
-    save_failed: "the Harness could not save the result."
+    save_failed: "%{harness} could not save the result."
     unsupported: "this thread's session cannot be rewound."
-    process_gone: "the Harness stopped before it answered."
-    other: "the Harness refused."
+    process_gone: "%{harness} stopped before it answered."
+    other: "%{harness} refused."
 rail:
   commands: "%{count} commands"
   commands_one: "1 command"

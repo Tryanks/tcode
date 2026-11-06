@@ -226,6 +226,9 @@ impl AppState {
         self.resume_pull_request_watches(target_id, cx);
 
         let default_window = self.default_context_window(target_id);
+        let rewinding = self
+            .resident(target_id)
+            .is_some_and(|active| self.rewind_requests.contains_key(&active.meta.id));
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -252,7 +255,8 @@ impl AppState {
         }
 
         let model_changed = active.model_changed_while_live();
-        let restart_deferred = active.settings_restart_deferred();
+        // A restart would drop the rewind's answer.
+        let restart_deferred = active.settings_restart_deferred() || rewinding;
         if active.launch_settings_changed_while_live() {
             if restart_deferred {
                 log::info!(
@@ -545,7 +549,12 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
         };
-        if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
+        // A message sent while a rewind is made goes to the conversation the
+        // rewind leaves.
+        if active.turn_in_flight
+            || !matches!(active.runtime, Runtime::Live(_))
+            || self.rewind_requests.contains_key(&active.meta.id)
+        {
             return Ok(false);
         }
         self.hand_off_conversation(target_id, cx);
@@ -598,7 +607,8 @@ impl AppState {
             return;
         };
         parked.turn_in_flight = false;
-        if !parked.queue.is_empty() && parked.launch_settings_changed_while_live() {
+        let waiting = !parked.queue.is_empty() && !parked.queue_held;
+        if waiting && parked.launch_settings_changed_while_live() {
             if parked.background_task_count > 0 {
                 log::info!(
                     "parked session {session_id}: deferring settings restart for {} background task(s)",
@@ -610,7 +620,7 @@ impl AppState {
             self.ensure_session_started(session_id, cx);
             return;
         }
-        if parked.queue.is_empty() {
+        if !waiting {
             if parked.cwd_changed_while_live() && parked.background_task_count == 0 {
                 parked.shutdown_to_idle();
             }

@@ -328,8 +328,9 @@ pub use wire::{
 // env is EnvVar rows and AcpAgentPatch has SetLaunchArgs and SetEnv instead
 // of SetLaunchOptions; ProviderLogin's AwaitingDevice and the MissingApiKey
 // probe diagnostic.
-// Rewind follows each harness's own: RewindTurn takes an optional steer and
-// client_id; the PreviewRewind command (answered with
+// Rewind follows each harness's own: RewindTurn takes an optional steer,
+// checkpoint_id and client_id (PreviewRewind a steer and checkpoint_id); the
+// PreviewRewind command (answered with
 // CommandResponse::RewindPreview) and the UndoRewind command are new;
 // ServerEvent::NativeRewindPrefill becomes RewindPrefill (client_id,
 // attachments); SessionStatus drops native_rewind_blocked,

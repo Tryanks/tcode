@@ -1089,18 +1089,30 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             session_id,
             turn,
             steer,
+            checkpoint_id,
             mode,
             client_id,
         } => {
-            app.rewind_turn(&session_id, turn, steer.as_deref(), mode, client_id, cx);
+            let at = crate::app::RewindAt {
+                turn,
+                steer: steer.as_deref(),
+                checkpoint: checkpoint_id.as_deref(),
+            };
+            app.rewind_turn(&session_id, at, mode, client_id, cx);
         }
         Command::PreviewRewind {
             session_id,
             turn,
             steer,
+            checkpoint_id,
             mode,
         } => {
-            let answer = app.preview_rewind(&session_id, turn, steer.as_deref(), mode, cx);
+            let at = crate::app::RewindAt {
+                turn,
+                steer: steer.as_deref(),
+                checkpoint: checkpoint_id.as_deref(),
+            };
+            let answer = app.preview_rewind(&session_id, at, mode, cx);
             return CommandOutcome::Pending(cx.spawn_background(async move {
                 answer
                     .recv()
@@ -1429,6 +1441,7 @@ mod tests {
                     session_id: id.clone(),
                     turn: 999,
                     steer: None,
+                    checkpoint_id: None,
                     mode: agent::RewindMode::Files,
                     client_id: None,
                 },

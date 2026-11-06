@@ -885,16 +885,20 @@ impl WorkspaceStore {
             answers,
         });
     }
+    /// Rewind to the message at `turn` (or the steer in it) whose restore
+    /// point this client saw as `checkpoint_id`.
     pub fn rewind_turn_for(
         &mut self,
         session_id: String,
         turn: usize,
         steer: Option<String>,
+        checkpoint_id: Option<String>,
         mode: RewindMode,
     ) {
         let client_id = Some(self.client_id().to_owned());
         self.dispatch(Command::RewindTurn {
             steer,
+            checkpoint_id,
             client_id,
             turn: self.absolute_turn_for(Some(&session_id), turn),
             session_id,

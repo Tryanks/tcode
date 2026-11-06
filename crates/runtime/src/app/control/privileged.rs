@@ -427,8 +427,12 @@ impl AppState {
             return Answer::Now(Err(format!("refused: {blocked:?}")));
         }
         let mut agent_cx = agent_cx(cx);
-        let Some(answer) = self.rewind_turn(&target, params.turn, None, mode, None, &mut agent_cx)
-        else {
+        let at = super::super::rewind::RewindAt {
+            turn: params.turn,
+            steer: None,
+            checkpoint: None,
+        };
+        let Some(answer) = self.rewind_turn(&target, at, mode, None, &mut agent_cx) else {
             return Answer::Now(Err(format!(
                 "refused: turn {} of thread {target} cannot be restored as {:?}",
                 params.turn, params.mode
