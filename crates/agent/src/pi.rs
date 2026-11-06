@@ -2,7 +2,7 @@
 //!
 //! RPC records are framed by LF only. Extension confirmation UI is transported generically.
 
-use crate::{RewindFailure, RewindFailureReason};
+use crate::{LaterHistory, RewindFailure, RewindFailureReason, RewindMode};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -299,6 +299,9 @@ async fn run_actor(
         pending_steers: HashMap::new(),
         requested_model: opts.model.clone(),
         stderr_tail,
+        requests: HashMap::new(),
+        entries_cursor: None,
+        session_file: None,
     };
     let startup = actor.initialize().await;
     if let Err(err) = startup {
@@ -341,6 +344,38 @@ struct PiActor {
     pending_steers: HashMap<String, String>,
     requested_model: Option<String>,
     stderr_tail: crate::process::StderrTail,
+    /// RPC requests whose responses carry a rewind's or a restore point's
+    /// next step, by request id.
+    requests: HashMap<String, PiRequest>,
+    /// The last session entry `get_entries` returned; the next read starts
+    /// after it.
+    entries_cursor: Option<String>,
+    /// The session file pi works in now: what a fork leaves, to return to.
+    session_file: Option<String>,
+}
+
+/// What a pi RPC response settles.
+enum PiRequest {
+    /// The session's new entries: the first user message after the cursor is
+    /// the prompt of `turn`, when one just finished.
+    Entries { turn: Option<String> },
+    /// `fork` before the user message `checkpoint_id`, leaving `previous`.
+    Fork {
+        checkpoint_id: String,
+        previous: Option<String>,
+        /// The fork stops a running turn, which ends interrupted.
+        stops_turn: bool,
+    },
+    /// `get_state` after a fork: the new session the conversation goes on in.
+    Forked {
+        checkpoint_id: String,
+        prefill: Option<String>,
+        previous: Option<String>,
+    },
+    /// `switch_session` back to the branch a fork left.
+    Return { checkpoint_id: String },
+    /// `get_state` after returning.
+    Returned { checkpoint_id: String },
 }
 
 impl SessionActor for PiActor {
@@ -457,9 +492,47 @@ impl SessionActor for PiActor {
                 send_json(&mut self.stdin, &response).map_err(|err| err.to_string())?;
                 Ok(())
             }
-            command @ (SessionCommand::Rewind { .. }
-            | SessionCommand::PreviewRewind { .. }
-            | SessionCommand::UndoRewind { .. }) => {
+            SessionCommand::Rewind {
+                checkpoint_id,
+                mode: RewindMode::Conversation,
+            } => {
+                // pi's fork aborts a running turn; its end may not be told.
+                let stops_turn =
+                    self.mapper.current_turn.is_some() && !self.mapper.interrupt_pending;
+                if stops_turn {
+                    self.mapper.interrupt_pending = true;
+                }
+                let id = self.request_id();
+                send_json(
+                    &mut self.stdin,
+                    &json!({"id":id,"type":"fork","entryId":checkpoint_id}),
+                )
+                .map_err(|err| err.to_string())?;
+                self.requests.insert(
+                    id,
+                    PiRequest::Fork {
+                        checkpoint_id,
+                        previous: self.session_file.clone(),
+                        stops_turn,
+                    },
+                );
+                Ok(())
+            }
+            SessionCommand::UndoRewind {
+                checkpoint_id,
+                undo_token,
+            } => {
+                let id = self.request_id();
+                send_json(
+                    &mut self.stdin,
+                    &json!({"id":id,"type":"switch_session","sessionPath":undo_token}),
+                )
+                .map_err(|err| err.to_string())?;
+                self.requests
+                    .insert(id, PiRequest::Return { checkpoint_id });
+                Ok(())
+            }
+            command @ (SessionCommand::Rewind { .. } | SessionCommand::PreviewRewind { .. }) => {
                 if let Some(event) = command
                     .rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
                 {
@@ -544,6 +617,10 @@ impl PiActor {
             cursor.insert("session_file".into(), Value::String(path.to_owned()));
         }
         let model = model_wire_id(data.get("model"));
+        self.session_file = data
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         self.events
             .emit(AgentEvent::SessionStarted {
                 provider_session_id: session_id,
@@ -551,6 +628,16 @@ impl PiActor {
                 model,
             })
             .await;
+
+        // Restore points are the user messages entered from here on.
+        send_json(
+            &mut self.stdin,
+            &json!({"id":"tcode-entries","type":"get_entries"}),
+        )?;
+        match self.wait_response("tcode-entries").await {
+            Ok(response) => self.entries_cursor = last_entry_id(&response),
+            Err(err) => log::debug!("pi get_entries unavailable: {err}"),
+        }
 
         send_json(
             &mut self.stdin,
@@ -611,6 +698,196 @@ impl PiActor {
         }
     }
 
+    /// The session pi works in now, from a `get_state` response.
+    async fn adopt_session(&mut self, state: &Value) {
+        let data = state.get("data").unwrap_or(&Value::Null);
+        let Some(session_id) = data.get("sessionId").and_then(Value::as_str) else {
+            return;
+        };
+        let mut cursor = serde_json::Map::new();
+        cursor.insert("session_id".into(), Value::String(session_id.to_owned()));
+        self.session_file = data
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(path) = &self.session_file {
+            cursor.insert("session_file".into(), Value::String(path.clone()));
+        }
+        self.events
+            .emit(AgentEvent::SessionStarted {
+                provider_session_id: session_id.to_owned(),
+                resume: ResumeCursor(Value::Object(cursor)),
+                model: model_wire_id(data.get("model")),
+            })
+            .await;
+    }
+
+    /// Read the entries after the cursor; `turn` names the turn that just
+    /// finished, whose prompt they hold.
+    fn read_entries(&mut self, turn: Option<String>) -> Result<(), String> {
+        let id = self.request_id();
+        let mut request = json!({"id":id,"type":"get_entries"});
+        if let Some(cursor) = &self.entries_cursor {
+            request["since"] = json!(cursor);
+        }
+        send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
+        self.requests.insert(id, PiRequest::Entries { turn });
+        Ok(())
+    }
+
+    fn request(&mut self, command: &str, request: PiRequest) -> Result<(), String> {
+        let id = self.request_id();
+        send_json(&mut self.stdin, &json!({"id":id,"type":command}))
+            .map_err(|err| err.to_string())?;
+        self.requests.insert(id, request);
+        Ok(())
+    }
+
+    /// A response a rewind, its undo or a restore point waited for.
+    async fn settle_request(&mut self, request: PiRequest, message: &Value) {
+        let success = message
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let data = message.get("data").unwrap_or(&Value::Null);
+        let cancelled = data.get("cancelled").and_then(Value::as_bool) == Some(true);
+        let failure = |reason| RewindFailure::new(reason, response_error(message));
+        match request {
+            PiRequest::Entries { turn } => {
+                if !success {
+                    // The cursor names an entry this session lacks: start over.
+                    log::debug!("pi get_entries failed: {}", response_error(message));
+                    self.entries_cursor = None;
+                    return;
+                }
+                if let Some(cursor) = last_entry_id(message) {
+                    self.entries_cursor = Some(cursor);
+                }
+                let prompt = data
+                    .get("entries")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|entry| {
+                        entry.get("type").and_then(Value::as_str) == Some("message")
+                            && entry.pointer("/message/role").and_then(Value::as_str)
+                                == Some("user")
+                    })
+                    .and_then(|entry| entry.get("id").and_then(Value::as_str));
+                if let (Some(turn_id), Some(checkpoint_id)) = (turn, prompt) {
+                    self.events
+                        .emit(AgentEvent::TurnCheckpoint {
+                            turn_id,
+                            checkpoint_id: checkpoint_id.to_owned(),
+                        })
+                        .await;
+                }
+            }
+            PiRequest::Fork {
+                checkpoint_id,
+                previous,
+                stops_turn,
+            } => {
+                if !success || cancelled {
+                    // Nothing was forked, so a running turn goes on.
+                    if stops_turn {
+                        self.mapper.interrupt_pending = false;
+                    }
+                    let reason = if !success && response_error(message).contains("Invalid entry") {
+                        RewindFailureReason::TargetNotFound
+                    } else {
+                        RewindFailureReason::Other
+                    };
+                    let mut failure = failure(reason);
+                    if cancelled {
+                        failure.detail = Some("an extension cancelled the fork".into());
+                    }
+                    self.events
+                        .emit(AgentEvent::RewindFailed {
+                            checkpoint_id,
+                            mode: RewindMode::Conversation,
+                            failure,
+                        })
+                        .await;
+                    return;
+                }
+                self.end_aborted_turn().await;
+                let prefill = data.get("text").and_then(Value::as_str).map(str::to_owned);
+                if let Err(err) = self.request(
+                    "get_state",
+                    PiRequest::Forked {
+                        checkpoint_id,
+                        prefill,
+                        previous,
+                    },
+                ) {
+                    log::warn!("pi get_state after a fork not sent: {err}");
+                }
+            }
+            PiRequest::Forked {
+                checkpoint_id,
+                prefill,
+                previous,
+            } => {
+                self.adopt_session(message).await;
+                self.entries_cursor = None;
+                let _ = self.read_entries(None);
+                self.events
+                    .emit(AgentEvent::RewindCompleted {
+                        checkpoint_id,
+                        mode: RewindMode::Conversation,
+                        prefill,
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Branch,
+                        files: None,
+                        incomplete: None,
+                        // The session the fork left stays on disk, to return to.
+                        undo_token: previous
+                            .filter(|previous| Some(previous) != self.session_file.as_ref()),
+                    })
+                    .await;
+            }
+            PiRequest::Return { checkpoint_id } => {
+                if !success || cancelled {
+                    let mut failure = failure(RewindFailureReason::Other);
+                    if cancelled {
+                        failure.detail = Some("an extension cancelled the switch".into());
+                    }
+                    self.events
+                        .emit(AgentEvent::RewindUndoFailed {
+                            checkpoint_id,
+                            failure,
+                        })
+                        .await;
+                    return;
+                }
+                if let Err(err) = self.request("get_state", PiRequest::Returned { checkpoint_id }) {
+                    log::warn!("pi get_state after returning not sent: {err}");
+                }
+            }
+            PiRequest::Returned { checkpoint_id } => {
+                self.adopt_session(message).await;
+                self.entries_cursor = None;
+                let _ = self.read_entries(None);
+                self.events
+                    .emit(AgentEvent::RewindUndone { checkpoint_id })
+                    .await;
+            }
+        }
+    }
+
+    /// A turn the fork aborted ends interrupted, whether or not pi said so.
+    async fn end_aborted_turn(&mut self) {
+        if self.mapper.current_turn.is_none() {
+            return;
+        }
+        self.mapper.interrupt_pending = true;
+        let _ = self.cancel_pending_ui();
+        for event in self.mapper.complete_turn() {
+            self.events.emit(event).await;
+        }
+    }
+
     async fn handle_line(&mut self, line: &str) {
         let message: Value = match serde_json::from_str(line) {
             Ok(message) => message,
@@ -624,6 +901,14 @@ impl PiActor {
             }
         };
         if message.get("type").and_then(Value::as_str) == Some("response") {
+            if let Some(request) = message
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| self.requests.remove(id))
+            {
+                self.settle_request(request, &message).await;
+                return;
+            }
             let success = message
                 .get("success")
                 .and_then(Value::as_bool)
@@ -653,14 +938,19 @@ impl PiActor {
             return;
         }
         let events = self.mapper.on_message(&message);
-        let turn_completed = events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
+        let turn_completed = events.iter().find_map(|event| match event {
+            AgentEvent::TurnCompleted { turn_id, .. } => Some(turn_id.clone()),
+            _ => None,
+        });
         for event in events {
             self.events.emit(event).await;
         }
-        if turn_completed {
+        if let Some(turn_id) = turn_completed {
             let _ = self.cancel_pending_ui();
+            // Its prompt is now an entry: a point a fork can go back before.
+            if let Err(err) = self.read_entries(Some(turn_id)) {
+                log::warn!("pi get_entries not sent: {err}");
+            }
         }
     }
 
@@ -1556,6 +1846,17 @@ fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
     .collect()
 }
 
+/// The id of the last entry a `get_entries` response holds.
+fn last_entry_id(response: &Value) -> Option<String> {
+    response
+        .pointer("/data/entries")?
+        .as_array()?
+        .last()?
+        .get("id")?
+        .as_str()
+        .map(str::to_owned)
+}
+
 fn ensure_success(message: &Value) -> Result<(), AgentError> {
     if message
         .get("success")
@@ -2133,5 +2434,151 @@ mod tests {
                 ..
             })] if provider_kind == "pi-extension" && summary == "first\nsecond"
         ));
+    }
+
+    /// A stand-in for `pi --mode rpc` 1.5.0 answering with its documented
+    /// shapes (docs/rpc-commands.md: get_state, get_entries, fork,
+    /// switch_session): session `a` until a fork before entry `u1` moves to
+    /// `b`, and `switch_session` back to `a`'s file.
+    #[cfg(unix)]
+    const RPC_STAND_IN: &str = r#"#!/bin/sh
+file=/s/a.jsonl
+session=a
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"get_state"'*)
+      printf '{"id":"%s","type":"response","command":"get_state","success":true,"data":{"sessionId":"%s","sessionFile":"%s"}}\n' "$id" "$session" "$file" ;;
+    *'"get_commands"'*)
+      printf '{"id":"%s","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}\n' "$id" ;;
+    *'"get_entries"'*)
+      if [ "$prompted" = 1 ]; then
+        prompted=
+        printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":"first prompt"}},{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":[]}}],"leafId":"a1"}}\n' "$id"
+      else
+        printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":null}}\n' "$id"
+      fi ;;
+    *'"prompt"'*)
+      prompted=1
+      printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
+      printf '{"type":"agent_start"}\n{"type":"agent_settled"}\n' ;;
+    *'"fork"'*'"entryId":"u1"'*|*'"entryId":"u1"'*'"fork"'*)
+      file=/s/b.jsonl; session=b
+      printf '{"id":"%s","type":"response","command":"fork","success":true,"data":{"text":"first prompt","cancelled":false}}\n' "$id" ;;
+    *'"fork"'*)
+      printf '{"id":"%s","type":"response","command":"fork","success":false,"error":"Invalid entry ID for forking"}\n' "$id" ;;
+    *'"sessionPath":"/s/a.jsonl"'*)
+      file=/s/a.jsonl; session=a
+      printf '{"id":"%s","type":"response","command":"switch_session","success":true,"data":{"cancelled":false}}\n' "$id" ;;
+  esac
+done
+"#;
+
+    /// pi rewinds by forking: each finished turn's prompt entry is a restore
+    /// point; a rewind forks before it into a new session the thread then
+    /// resumes, with the prompt to edit and the old session to go back to;
+    /// returning switches back to it. An entry pi does not know is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_rewind_forks_before_the_prompt_and_returns_to_the_branch_it_left() {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agent-pi-fork-{nonce}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("pi");
+        std::fs::write(&bin, RPC_STAND_IN).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        smol::block_on(async {
+            let handle = start(SessionOptions {
+                cwd: dir.clone(),
+                model: None,
+                resume: None,
+                fork: false,
+                binary_path: Some(bin.clone()),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            let next = async |kind: &str| loop {
+                let event = handle.events.recv().await.unwrap();
+                let value = serde_json::to_value(&event).unwrap();
+                if value["type"] == kind {
+                    return value;
+                }
+            };
+            next("session_started").await;
+            handle
+                .commands
+                .send(SessionCommand::SendTurn {
+                    delivery_id: 1,
+                    text: "first prompt".into(),
+                    options: None,
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let completed = next("turn_completed").await;
+            assert_eq!(
+                next("turn_checkpoint").await,
+                json!({"type": "turn_checkpoint", "turn_id": completed["turn_id"], "checkpoint_id": "u1"})
+            );
+
+            handle
+                .commands
+                .send(SessionCommand::Rewind {
+                    checkpoint_id: "unknown".into(),
+                    mode: RewindMode::Conversation,
+                })
+                .await
+                .unwrap();
+            let failed = next("rewind_failed").await;
+            assert_eq!(failed["failure"]["reason"], "target_not_found");
+
+            handle
+                .commands
+                .send(SessionCommand::Rewind {
+                    checkpoint_id: "u1".into(),
+                    mode: RewindMode::Conversation,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                next("session_started").await["resume"],
+                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
+            );
+            assert_eq!(
+                next("rewind_completed").await,
+                json!({"type": "rewind_completed", "checkpoint_id": "u1", "mode": "conversation",
+                       "prefill": "first prompt", "later_history": "branch",
+                       "undo_token": "/s/a.jsonl"})
+            );
+
+            handle
+                .commands
+                .send(SessionCommand::UndoRewind {
+                    checkpoint_id: "u1".into(),
+                    undo_token: "/s/a.jsonl".into(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                next("session_started").await["resume"],
+                json!({"session_id": "a", "session_file": "/s/a.jsonl"})
+            );
+            assert_eq!(
+                next("rewind_undone").await,
+                json!({"type": "rewind_undone", "checkpoint_id": "u1"})
+            );
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+        });
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

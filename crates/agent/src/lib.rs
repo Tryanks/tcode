@@ -366,7 +366,18 @@ impl ProviderKind {
             ProviderKind::Pi => Caps {
                 supports_steering: true,
                 supports_fork: false,
-                rewind: None,
+                // RPC `fork` goes on in a new session file from before a user
+                // message and keeps the old one, which `switch_session` returns
+                // to; files are not pi's to restore.
+                rewind: Some(RewindControl {
+                    modes: &[RewindMode::Conversation],
+                    first_turn_conversation: true,
+                    steer_targets: false,
+                    later_history: LaterHistory::Branch,
+                    preview: RewindPreviewKind::None,
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    restores_command_edits: false,
+                }),
                 manual_compaction: true,
                 goals: None,
                 per_turn_effort: false,
