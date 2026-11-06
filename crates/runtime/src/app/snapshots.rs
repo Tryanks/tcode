@@ -918,7 +918,7 @@ impl AppState {
                         }
                         tcode_protocol::ScopedProviderChoice {
                             provider: kind,
-                            name: self.settings.profile_display_name(&profile.id),
+                            name: self.profile_display_name(&profile.id),
                             profile_id: Some(profile.id),
                             models,
                         }
@@ -992,6 +992,7 @@ impl AppState {
             self.provider_plugin_catalogs(),
         );
         self.flag_shared_credentials(&mut status.provider_snapshots);
+        status.harnesses = self.harness_descriptions();
         status
     }
 

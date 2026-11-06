@@ -2061,6 +2061,7 @@ impl WorkspaceStore {
                         enabled: true,
                         ..Default::default()
                     },
+                    shared_env: Vec::new(),
                 })
                 .collect();
         }
@@ -2918,7 +2919,38 @@ impl WorkspaceStore {
         if let Some(choice) = self.scoped_choice(profile_id) {
             return choice.name.clone();
         }
-        self.settings_replica.profile_display_name(profile_id)
+        let email = self
+            .provider_profile_snapshot(profile_id)
+            .as_ref()
+            .and_then(crate::provider_status::signed_in_account)
+            .and_then(|auth| auth.email.clone());
+        self.settings_replica
+            .profile_display_name_as(profile_id, email.as_deref())
+    }
+
+    /// What the host says each harness is: the native ones, then each
+    /// installed ACP agent.
+    pub fn harness_descriptions(&self) -> &[tcode_protocol::HarnessDescription] {
+        &self.providers_replica.harnesses
+    }
+
+    /// A user profile's own settings, without what it takes from its
+    /// harness; `None` for a built-in profile.
+    pub fn provider_profile_own_settings(&self, profile_id: &str) -> Option<ProviderSettings> {
+        self.settings_replica
+            .profiles
+            .get(profile_id)
+            .map(|profile| profile.settings.clone())
+    }
+
+    /// The threads that run on `profile_id` and fall back to the default
+    /// account once it is deleted.
+    pub fn threads_using_profile(&self, profile_id: &str) -> usize {
+        self.index_replica
+            .0
+            .iter()
+            .filter(|meta| meta.profile_id.as_deref() == Some(profile_id))
+            .count()
     }
 
     pub fn provider_profile_supports_account_login(&self, profile_id: &str) -> bool {

@@ -263,7 +263,13 @@ pub struct ProviderSettings {
     /// Environment variables merged into every child process for this provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
-    /// Override for the CLI binary (`None` = resolve from PATH).
+    /// On a built-in card, the variables every account and endpoint profile
+    /// of its harness gets before its own `env`, whose values win. Sensitive
+    /// values are stored under [`harness_secret_id`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_env: Vec<EnvVar>,
+    /// Override for the CLI binary (`None` = resolve from PATH). On a user
+    /// profile, a binary of its own instead of its harness's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary_path: Option<PathBuf>,
     /// The provider's config-directory variable ([`agent::LaunchEnv::home`]),
@@ -284,28 +290,34 @@ pub struct ProviderSettings {
     pub hidden_models: Vec<String>,
 }
 
-/// Serializable edits the UI can make to one provider profile.
+/// Serializable edits the UI can make to one provider profile, one field at
+/// a time. The harness-wide fields (binary, launch arguments, shared
+/// environment, switches) are edits of its built-in profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ProfileSettingsPatch {
-    SetEnabled { enabled: bool },
-    ReplaceConfiguration(Box<ProfileConfigurationPatch>),
-}
-
-/// The provider-dialog configuration payload of
-/// [`ProfileSettingsPatch::ReplaceConfiguration`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileConfigurationPatch {
-    pub display_name: Option<String>,
-    pub accent_color: Option<String>,
-    pub env: Vec<EnvVar>,
-    pub binary_path: Option<PathBuf>,
-    pub home_path: Option<PathBuf>,
-    pub launch_args: Option<String>,
-    #[serde(flatten)]
-    pub pi: PiProviderSettings,
-    pub custom_models: Vec<String>,
-    pub hidden_models: Vec<String>,
+    SetEnabled {
+        enabled: bool,
+    },
+    /// Every profile of the harness at once.
+    SetHarnessEnabled {
+        enabled: bool,
+    },
+    SetDisplayName(Option<String>),
+    SetAccentColor(Option<String>),
+    SetEnv(Vec<EnvVar>),
+    SetSharedEnv(Vec<EnvVar>),
+    SetBinaryPath(Option<PathBuf>),
+    /// Only a built-in profile's config directory is the user's to move; a
+    /// profile's own directory holds its sign-in.
+    SetHomePath(Option<PathBuf>),
+    SetLaunchArgs(Option<String>),
+    SetToggle {
+        id: String,
+        enabled: bool,
+    },
+    SetCustomModels(Vec<String>),
+    SetHiddenModels(Vec<String>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +338,7 @@ impl Default for ProviderSettings {
             display_name: None,
             accent_color: None,
             env: Vec::new(),
+            shared_env: Vec::new(),
             binary_path: None,
             home_path: None,
             launch_args: None,
@@ -344,6 +357,20 @@ impl ProviderSettings {
         (hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
             .then(|| u32::from_str_radix(hex, 16).ok())
             .flatten()
+    }
+
+    /// The state of a harness switch by its [`agent::HarnessFacts::toggles`] id.
+    pub fn toggle(&self, id: &str) -> bool {
+        match id {
+            agent::harness::TRUST_PROJECT_EXTENSIONS => self.pi.trust_project_extensions,
+            _ => false,
+        }
+    }
+
+    pub fn set_toggle(&mut self, id: &str, enabled: bool) {
+        if id == agent::harness::TRUST_PROJECT_EXTENSIONS {
+            self.pi.trust_project_extensions = enabled;
+        }
     }
 
     /// A native provider's `Launch arguments` field, split on whitespace.
@@ -387,8 +414,12 @@ pub struct ResolvedProfile {
     pub id: String,
     /// The protocol this profile drives.
     pub kind: ProviderKind,
-    /// The effective card settings.
+    /// The effective card settings: a user profile's binary and launch
+    /// arguments fall back to its harness's, and its switches are the
+    /// harness's.
     pub settings: ProviderSettings,
+    /// The harness's shared variables, which `settings.env` follows.
+    pub shared_env: Vec<EnvVar>,
 }
 
 impl ResolvedProfile {
@@ -400,47 +431,40 @@ impl ResolvedProfile {
 
     /// Whether this endpoint/auth configuration can query native account limits.
     pub fn supports_account_usage(&self) -> bool {
-        let (endpoint_key, native_endpoint, credentials, backends): (&str, &str, &[&str], &[&str]) =
-            match self.kind {
-                ProviderKind::ClaudeCode => (
-                    "ANTHROPIC_BASE_URL",
-                    "https://api.anthropic.com",
-                    &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
-                    &[
-                        "CLAUDE_CODE_USE_BEDROCK",
-                        "CLAUDE_CODE_USE_VERTEX",
-                        "CLAUDE_CODE_USE_FOUNDRY",
-                    ],
-                ),
-                ProviderKind::Codex => (
-                    "OPENAI_BASE_URL",
-                    "https://api.openai.com/v1",
-                    &["OPENAI_API_KEY", "CODEX_API_KEY"],
-                    &[],
-                ),
-                _ => return false,
-            };
+        let Some(endpoint) = self.kind.harness().endpoint else {
+            return false;
+        };
+        let env: Vec<&EnvVar> = self.shared_env.iter().chain(&self.settings.env).collect();
         // Secret presence is enough to classify API-key auth; never inspect or
         // replicate secret values. Missing native sign-in remains a probe error.
-        !self.settings.env.iter().enumerate().any(|(index, env)| {
+        !env.iter().enumerate().any(|(index, var)| {
             // LaunchEnv uses the last occurrence of a repeated environment key.
-            if self.settings.env[index + 1..]
-                .iter()
-                .any(|later| later.name == env.name)
-            {
+            if env[index + 1..].iter().any(|later| later.name == var.name) {
                 return false;
             }
-            let configured = env.sensitive || !env.value.trim().is_empty();
+            let configured = var.sensitive || !var.value.trim().is_empty();
             configured
-                && (credentials.contains(&env.name.as_str())
-                    || (backends.contains(&env.name.as_str())
-                        && env.value != "0"
-                        && env.value != "false")
-                    || (env.name == endpoint_key
-                        && (env.sensitive
-                            || env.value.trim().trim_end_matches('/').to_ascii_lowercase()
-                                != native_endpoint)))
+                && (endpoint.key_envs.contains(&var.name.as_str())
+                    || (endpoint.backend_switches.contains(&var.name.as_str())
+                        && var.value != "0"
+                        && var.value != "false")
+                    || (var.name == endpoint.base_url_env
+                        && (var.sensitive
+                            || var.value.trim().trim_end_matches('/').to_ascii_lowercase()
+                                != endpoint.native_base_url)))
         })
+    }
+
+    /// Whether this profile is an endpoint profile: one that reaches a model
+    /// API through its own variables rather than an account.
+    pub fn is_endpoint_profile(&self) -> bool {
+        let Some(endpoint) = self.kind.harness().endpoint else {
+            return false;
+        };
+        !Settings::is_builtin_profile_id(&self.id)
+            && self.settings.env.iter().any(|var| {
+                var.name == endpoint.base_url_env || endpoint.key_envs.contains(&var.name.as_str())
+            })
     }
 }
 
@@ -1343,35 +1367,72 @@ impl Settings {
     /// a user-created `profiles` entry. `None` for an unknown id.
     pub fn resolved_profile(&self, id: &str) -> Option<ResolvedProfile> {
         if let Some(kind) = Self::builtin_kind_from_id(id) {
+            let settings = self.provider(kind);
             return Some(ResolvedProfile {
                 id: id.to_string(),
                 kind,
-                settings: self.provider(kind),
+                shared_env: settings.shared_env.clone(),
+                settings,
             });
         }
-        self.profiles.get(id).map(|profile| ResolvedProfile {
+        let profile = self.profiles.get(id)?;
+        Some(self.resolve_user_profile(id, profile))
+    }
+
+    /// A user profile on top of its harness: the harness's binary, launch
+    /// arguments and switches unless the profile has a binary or arguments
+    /// of its own.
+    fn resolve_user_profile(&self, id: &str, profile: &ProviderProfile) -> ResolvedProfile {
+        let harness = self.provider(profile.kind);
+        let mut settings = profile.settings.clone();
+        settings.binary_path = settings.binary_path.or(harness.binary_path);
+        settings.launch_args = settings.launch_args.or(harness.launch_args);
+        settings.pi = harness.pi;
+        settings.shared_env = Vec::new();
+        ResolvedProfile {
             id: id.to_string(),
             kind: profile.kind,
-            settings: profile.settings.clone(),
-        })
+            settings,
+            shared_env: harness.shared_env,
+        }
+    }
+
+    /// The secrets key of a harness's shared variables.
+    pub fn harness_secret_id(kind: ProviderKind) -> String {
+        format!("harness:{}", provider_key(kind))
+    }
+
+    /// The secrets key of an installed ACP agent's variables.
+    pub fn acp_secret_id(agent_id: &str) -> String {
+        acp_color_key(agent_id)
+    }
+
+    /// Whether `id` keys secrets: a profile, a harness's shared variables or
+    /// an installed ACP agent's.
+    pub fn owns_secrets(&self, id: &str) -> bool {
+        self.resolved_profile(id).is_some()
+            || ProviderKind::NATIVE
+                .into_iter()
+                .any(|kind| Self::harness_secret_id(kind) == id)
+            || id
+                .strip_prefix("acp:")
+                .is_some_and(|agent| self.acp_agents.contains_key(agent))
     }
 
     /// Every selectable profile that drives `kind`: the built-in first, then any
     /// user profiles of that kind in id order. This is what the provider/model
     /// picker iterates.
     pub fn profiles_for_kind(&self, kind: ProviderKind) -> Vec<ResolvedProfile> {
+        let builtin = self.provider(kind);
         let mut out = vec![ResolvedProfile {
             id: Self::builtin_profile_id(kind).to_string(),
             kind,
-            settings: self.provider(kind),
+            shared_env: builtin.shared_env.clone(),
+            settings: builtin,
         }];
         for (id, profile) in &self.profiles {
             if profile.kind == kind {
-                out.push(ResolvedProfile {
-                    id: id.clone(),
-                    kind,
-                    settings: profile.settings.clone(),
-                });
+                out.push(self.resolve_user_profile(id, profile));
             }
         }
         out
@@ -1381,17 +1442,38 @@ impl Settings {
     /// a named or user-created profile by its display name (else its id) in
     /// parentheses, so an account never reads as a provider of its own.
     pub fn profile_display_name(&self, id: &str) -> String {
+        self.profile_display_name_as(id, None)
+    }
+
+    /// [`Self::profile_display_name`], given the email the profile is signed
+    /// in as. Once its harness has a second account or endpoint profile, an
+    /// unnamed built-in account is named for that email's local part, so
+    /// two accounts never both read as the bare product name.
+    pub fn profile_display_name_as(&self, id: &str, signed_in_as: Option<&str>) -> String {
         let Some(profile) = self.resolved_profile(id) else {
             return id.to_string();
         };
         let product = provider_label(profile.kind);
+        let builtin = Self::is_builtin_profile_id(id);
+        let account = signed_in_as
+            .filter(|_| {
+                builtin
+                    && self
+                        .profiles
+                        .values()
+                        .any(|other| other.kind == profile.kind)
+            })
+            .and_then(|email| email.split('@').next())
+            .map(str::trim)
+            .filter(|local| !local.is_empty());
         let qualifier = profile
             .settings
             .display_name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
-            .or_else(|| (!Self::is_builtin_profile_id(id)).then_some(id));
+            .or(account)
+            .or_else(|| (!builtin).then_some(id));
         match qualifier {
             Some(name) => format!("{product} ({name})"),
             None => product.to_string(),
@@ -1477,6 +1559,23 @@ impl Settings {
                 if entry.binary_path.is_none() {
                     entry.binary_path = Some(path);
                 }
+            }
+        }
+        // A binary and launch arguments belong to the harness. Earlier builds
+        // copied the built-in's into each new account; a copy is dropped, and
+        // only a value of the profile's own stays, as its override.
+        let harnesses = self.providers.clone();
+        for profile in self.profiles.values_mut() {
+            let harness = harnesses
+                .get(provider_key(profile.kind))
+                .cloned()
+                .unwrap_or_default();
+            let own = &mut profile.settings;
+            if own.binary_path == harness.binary_path {
+                own.binary_path = None;
+            }
+            if own.launch_args == harness.launch_args {
+                own.launch_args = None;
             }
         }
     }
@@ -1755,21 +1854,6 @@ mod tests {
         let serialized = serde_json::to_value(&settings).unwrap();
         assert_eq!(serialized["pi_trust_project_extensions"], true);
         assert!(serialized.get("pi").is_none());
-
-        let legacy_patch: ProfileConfigurationPatch = serde_json::from_str(
-            r#"{
-                "display_name": null,
-                "accent_color": null,
-                "env": [],
-                "binary_path": null,
-                "home_path": null,
-                "launch_args": null,
-                "custom_models": [],
-                "hidden_models": []
-            }"#,
-        )
-        .unwrap();
-        assert!(!legacy_patch.pi.trust_project_extensions);
     }
 
     #[test]
@@ -2065,6 +2149,85 @@ mod account_usage_tests {
         assert!(
             custom.supports_account_usage(),
             "a custom profile using native account auth remains eligible, even signed out"
+        );
+    }
+}
+
+#[cfg(test)]
+mod harness_settings_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// Earlier builds copied the built-in binary and launch arguments into
+    /// each new account. A settings file from then loads with the copies
+    /// dropped, so the account follows its harness, while a binary or
+    /// arguments of the account's own stay its override.
+    #[test]
+    fn account_copies_of_the_harness_binary_are_dropped_and_their_own_kept() {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{
+                "providers": {"claude": {"binary_path": "/a/claude", "launch_args": "--chrome"}},
+                "profiles": {
+                    "work": {"kind": "claude_code", "display_name": "Work",
+                             "binary_path": "/a/claude", "launch_args": "--debug"},
+                    "kimi": {"kind": "claude_code", "binary_path": "/b/claude",
+                             "launch_args": "--chrome"}
+                }
+            }"#,
+        )
+        .unwrap();
+        settings.migrate_legacy();
+        let own = |id: &str| settings.profiles[id].settings.clone();
+        assert_eq!(own("work").binary_path, None);
+        assert_eq!(own("work").launch_args.as_deref(), Some("--debug"));
+        assert_eq!(
+            own("kimi").binary_path.as_deref(),
+            Some(Path::new("/b/claude"))
+        );
+        assert_eq!(own("kimi").launch_args, None);
+
+        // The harness's binary moves, and the account without its own moves with it.
+        settings.provider_mut(ProviderKind::ClaudeCode).binary_path = Some("/c/claude".into());
+        let work = settings.resolved_profile("work").unwrap().settings;
+        assert_eq!(work.binary_path.as_deref(), Some(Path::new("/c/claude")));
+        assert_eq!(work.launch_args.as_deref(), Some("--debug"));
+        let kimi = settings.resolved_profile("kimi").unwrap().settings;
+        assert_eq!(kimi.binary_path.as_deref(), Some(Path::new("/b/claude")));
+        assert_eq!(kimi.launch_args.as_deref(), Some("--chrome"));
+    }
+
+    /// An unnamed default account reads as its harness alone until the
+    /// harness has another account or endpoint profile; then it is named for
+    /// the local part of the email it is signed in as, unless the user named
+    /// it.
+    #[test]
+    fn the_default_account_is_named_for_its_email_beside_another() {
+        let mut settings = Settings::default();
+        let email = Some("tryanks@example.com");
+        assert_eq!(
+            settings.profile_display_name_as("claude", email),
+            "Claude Code"
+        );
+        settings.profiles.insert(
+            "kimi".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings::default(),
+            },
+        );
+        assert_eq!(
+            settings.profile_display_name_as("claude", email),
+            "Claude Code (tryanks)"
+        );
+        assert_eq!(
+            settings.profile_display_name_as("claude", None),
+            "Claude Code"
+        );
+        assert_eq!(settings.profile_display_name_as("codex", email), "Codex");
+        settings.provider_mut(ProviderKind::ClaudeCode).display_name = Some("Mine".into());
+        assert_eq!(
+            settings.profile_display_name_as("claude", email),
+            "Claude Code (Mine)"
         );
     }
 }

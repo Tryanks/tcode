@@ -22,9 +22,9 @@ use gpui::{
 };
 use gpui_base::{InteractiveElementExt as _, v_flex};
 
-use crate::acp_panel::{AcpAgentCard, AcpPanel};
+use crate::acp_panel::AcpPanel;
+use crate::harness_dialog::{HarnessDialog, HarnessId, ManagePlugins};
 use crate::plugins_settings::PluginsSettingsPanel;
-use crate::provider_card::{ManagePlugins, ProviderCard};
 use crate::provider_model_picker::ProviderModelPicker;
 use crate::settings::{
     ImageMode, LANGUAGE_ENGLISH, LANGUAGE_JAPANESE, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode,
@@ -97,6 +97,8 @@ enum Section {
     Threads,
     ProjectThreadRules,
     Providers,
+    /// One harness's settings, on a compact window.
+    Harness,
     SourceControl,
     /// One platform of Git Platforms, managed on a phone's pushed page.
     SourceControlHost,
@@ -287,6 +289,7 @@ impl Section {
             | Self::SourceControl
             | Self::SourceControlHost
             | Self::Providers
+            | Self::Harness
             | Self::Usage
             | Self::Browser
             | Self::ComputerUse
@@ -320,6 +323,7 @@ impl Section {
             | Self::SourceControl
             | Self::SourceControlHost
             | Self::Providers
+            | Self::Harness
             | Self::Usage
             | Self::ComputerUse
             | Self::Control
@@ -344,6 +348,7 @@ impl Section {
             Self::SourceControl => "settings-nav-source-control",
             Self::SourceControlHost => "settings-nav-source-control-host",
             Self::Providers => "settings-nav-providers",
+            Self::Harness => "settings-nav-harness",
             Self::Usage => "settings-nav-usage",
             Self::Browser => "settings-nav-browser",
             Self::ComputerUse => "settings-nav-computer-use",
@@ -367,7 +372,7 @@ impl Section {
             Self::General => IconName::Settings,
             Self::Threads | Self::ProjectThreadRules => IconName::MessageSquare,
             Self::SourceControl | Self::SourceControlHost => IconName::Github,
-            Self::Providers => IconName::Bot,
+            Self::Providers | Self::Harness => IconName::Bot,
             Self::Usage => IconName::ChartPie,
             Self::Browser => IconName::Globe,
             Self::ComputerUse => IconName::LayoutDashboard,
@@ -393,7 +398,7 @@ impl Section {
             Self::SourceControl | Self::SourceControlHost => {
                 crate::tr!("settings.source_control")
             }
-            Self::Providers => crate::tr!("settings.providers"),
+            Self::Providers | Self::Harness => crate::tr!("settings.providers"),
             Self::Usage => crate::tr!("settings.usage"),
             Self::Browser => crate::tr!("settings.browser"),
             Self::ComputerUse => crate::tr!("settings.computer_use"),
@@ -471,9 +476,11 @@ pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
 pub struct SettingsPage {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
-    /// One card per native profile, keyed by profile id (built-in + user).
-    provider_cards: Vec<(String, Entity<ProviderCard>)>,
-    provider_card_subscriptions: Vec<Subscription>,
+    /// The harness shown as a page of the compact settings stack.
+    harness_page: Option<Entity<HarnessDialog>>,
+    harness_page_scroll: ScrollHandle,
+    /// The open harness dialog's or page's requests to this page.
+    harness_subscriptions: Vec<Subscription>,
     /// Long-lived state for the modal ACP marketplace and custom form.
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
@@ -487,8 +494,6 @@ pub struct SettingsPage {
     title_model_picker: Entity<ProviderModelPicker>,
     /// Editable name this client presents to machines it connects to.
     device_name_input: SettingsInput,
-    /// Stable entities keep expanded state and lazily-created inputs across rerenders.
-    acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     section: Section,
     /// Whether this page holds the store's archived threads.
     archived_held: bool,
@@ -711,8 +716,9 @@ impl SettingsPage {
         let mut page = Self {
             store,
             window_state,
-            provider_cards: Vec::new(),
-            provider_card_subscriptions: Vec::new(),
+            harness_page: None,
+            harness_page_scroll: ScrollHandle::new(),
+            harness_subscriptions: Vec::new(),
             acp_panel,
             plugins_panel,
             source_control_panel,
@@ -724,7 +730,6 @@ impl SettingsPage {
                 pushed: device_name,
                 dirty: false,
             },
-            acp_cards: Vec::new(),
             section,
             archived_held: false,
             maintenance_held: false,
@@ -801,8 +806,6 @@ impl SettingsPage {
                 }
             },
         ));
-        page.build_provider_cards(cx);
-        page.sync_acp_cards(window, cx);
         page.hydrate_inputs(window, cx);
         page._subscriptions.push(cx.on_release(|this, cx| {
             this.store.update(cx, |store, _| {
@@ -886,51 +889,43 @@ impl SettingsPage {
         );
     }
 
-    fn build_provider_cards(&mut self, cx: &mut Context<Self>) {
-        let profiles = self.store.read(cx).all_provider_profiles();
-        self.provider_cards = profiles
-            .into_iter()
-            .map(|profile| {
-                let store = self.store.clone();
-                let kind = profile.kind;
-                let id = profile.id.clone();
-                let card = cx.new(|cx| ProviderCard::new(store, kind, id, cx));
-                (profile.id, card)
-            })
-            .collect();
-        self.provider_card_subscriptions = self
-            .provider_cards
-            .iter()
-            .map(|(_, card)| {
-                cx.subscribe(card, |this, _, ManagePlugins(profile_id), cx| {
-                    this.select_section(Section::Plugins, cx);
-                    let profile_id = profile_id.clone();
-                    this.plugins_panel
-                        .update(cx, |panel, cx| panel.focus_profile(profile_id, cx));
-                })
-            })
-            .collect();
-    }
-
-    /// Reconcile card entities by installed id, preserving editors for agents
-    /// that were not installed or removed since the previous render.
-    fn sync_acp_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let installed: Vec<_> = self.store.read(cx).settings_installed_acp_agents();
-        let mut old = std::mem::take(&mut self.acp_cards);
-        self.acp_cards = installed
-            .into_iter()
-            .map(|agent| {
-                let card = old
-                    .iter()
-                    .position(|(id, _)| id == &agent.id)
-                    .map(|index| old.swap_remove(index).1)
-                    .unwrap_or_else(|| {
-                        let store = self.store.clone();
-                        cx.new(|cx| AcpAgentCard::new(store, &agent, window, cx))
-                    });
-                (agent.id, card)
-            })
-            .collect();
+    /// Open a harness's settings: a dialog on a wide window, a page of the
+    /// settings stack on a compact one.
+    fn open_harness(&mut self, harness: HarnessId, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = self.window_state.read(cx).compact;
+        let store = self.store.clone();
+        let dialog = if compact {
+            let page = cx.new(|cx| HarnessDialog::new(store, harness, true, window, cx));
+            self.harness_page = Some(page.clone());
+            self.section = Section::Harness;
+            self.window_state.update(cx, |state, cx| {
+                state.go(crate::window_state::Destination::SettingsHarness, cx)
+            });
+            page
+        } else {
+            crate::harness_dialog::open(store, harness, window, cx)
+        };
+        self.harness_subscriptions = vec![
+            cx.subscribe(&dialog, |this, _, ManagePlugins(profile_id), cx| {
+                if this.section == Section::Harness {
+                    this.window_state.update(cx, |state, cx| state.back(cx));
+                    this.harness_page = None;
+                }
+                this.select_section(Section::Plugins, cx);
+                let profile_id = profile_id.clone();
+                this.plugins_panel
+                    .update(cx, |panel, cx| panel.focus_profile(profile_id, cx));
+            }),
+            cx.subscribe(&dialog, |this, _, _: &gpui::DismissEvent, cx| {
+                if this.section == Section::Harness {
+                    this.window_state.update(cx, |state, cx| state.back(cx));
+                    this.section = Section::Providers;
+                    this.harness_page = None;
+                    cx.notify();
+                }
+            }),
+        ];
+        cx.notify();
     }
 
     fn open_acp_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1044,6 +1039,20 @@ impl SettingsPage {
             && let Some(editor) = &self.project_rules_editor
         {
             return editor.read(cx).project.name.clone().into();
+        }
+        if self.section == Section::Harness {
+            if self.window_state.read(cx).destination()
+                != crate::window_state::Destination::SettingsHarness
+            {
+                return Section::Providers.label();
+            }
+            if let Some(page) = &self.harness_page {
+                return crate::harness_dialog::harness_name(
+                    self.store.read(cx),
+                    page.read(cx).harness(),
+                )
+                .into();
+            }
         }
         self.section.label()
     }
@@ -1479,6 +1488,7 @@ impl SettingsPage {
             Section::SourceControl => self.render_source_control(cx),
             Section::SourceControlHost => v_flex().children(self.source_control_host.clone()),
             Section::Providers => self.render_providers(window, cx),
+            Section::Harness => v_flex().children(self.harness_page.clone()),
             Section::Usage => self.render_usage(window, cx),
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(window, cx),
@@ -1507,12 +1517,11 @@ impl SettingsPage {
         } else {
             v_flex().opacity(entering).child(column)
         };
-        let scroll = if self.section == Section::ProjectThreadRules {
-            &self.project_rules_scroll
-        } else if self.section == Section::SourceControlHost {
-            &self.source_control_host_scroll
-        } else {
-            &self.content_scroll
+        let scroll = match self.section {
+            Section::ProjectThreadRules => &self.project_rules_scroll,
+            Section::SourceControlHost => &self.source_control_host_scroll,
+            Section::Harness => &self.harness_page_scroll,
+            _ => &self.content_scroll,
         };
         self.render_content_column(column, scroll, window, cx)
     }
@@ -1854,25 +1863,6 @@ impl SettingsPage {
     /// Settings → Harnesses: native providers and installed ACP agents share one
     /// bordered list. The marketplace lives behind the Add agent dialog.
     fn render_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
-        self.sync_acp_cards(window, cx);
-        // Reconcile the profile cards with the current profile set: creating or
-        // deleting a profile changes it, and the card list must follow (else a
-        // deleted profile's card lingers and its Delete looks like a no-op).
-        let current_ids: Vec<String> = self
-            .store
-            .read(cx)
-            .all_provider_profiles()
-            .into_iter()
-            .map(|profile| profile.id)
-            .collect();
-        let card_ids: Vec<String> = self
-            .provider_cards
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect();
-        if current_ids != card_ids {
-            self.build_provider_cards(cx);
-        }
         let checked_at = self.store.read(cx).providers_checked_at();
         let checking = self.store.read(cx).providers_checking();
         let run = self.store.read(cx).provider_update_run();
@@ -1985,26 +1975,44 @@ impl SettingsPage {
             |store, checked| store.set_provider_update_checks_disabled(!checked),
         )];
 
-        let provider_rows = self
-            .provider_cards
-            .iter()
-            .map(|(id, card)| (SharedString::from(id.clone()), card.clone()));
+        // One row per harness: each native one this client sees, then each
+        // installed ACP agent.
+        let harnesses: Vec<(SharedString, HarnessId)> = {
+            let store = self.store.read(cx);
+            let profiles = store.all_provider_profiles();
+            agent::ProviderKind::NATIVE
+                .into_iter()
+                .filter(|kind| profiles.iter().any(|profile| profile.kind == *kind))
+                .map(HarnessId::Native)
+                .chain(
+                    store
+                        .settings_installed_acp_agents()
+                        .into_iter()
+                        .map(|agent| HarnessId::Acp(agent.id)),
+                )
+                .map(|harness| (SharedString::from(harness.key()), harness))
+                .collect()
+        };
+        let page = cx.entity().downgrade();
+        let store = self.store.clone();
         let provider_rows = crate::settings_rows::grouped_keyed(
-            "provider-cards",
-            provider_rows,
+            "harness-rows",
+            harnesses,
             window,
             cx,
-            |_, card, _, _| card.clone().into_any_element(),
+            |_, harness, _, cx| {
+                let page = page.clone();
+                let open = harness.clone();
+                crate::provider_card::harness_row(
+                    &store,
+                    harness,
+                    move |_, window, cx| {
+                        _ = page.update(cx, |page, cx| page.open_harness(open.clone(), window, cx));
+                    },
+                    cx,
+                )
+            },
         );
-        // A card carries the gap above it, so the gap leaves with it.
-        let acp_cards = self
-            .acp_cards
-            .iter()
-            .map(|(id, card)| (SharedString::from(id.clone()), card.clone()));
-        let acp_cards =
-            crate::motion::keyed("acp-cards", acp_cards, ROWS, window, cx, |_, card, _, _| {
-                div().w_full().pt_3().child(card.clone()).into_any_element()
-            });
 
         let mut section = v_flex().w_full().gap_3().child(header);
         if let Some(shown) = crate::motion::shown("provider-update-run", run, SHOW, window, cx) {
@@ -2036,12 +2044,7 @@ impl SettingsPage {
                 ),
             );
         }
-        section = section.child(
-            v_flex()
-                .w_full()
-                .child(crate::material::group(cx).child(provider_rows))
-                .child(acp_cards.render(v_flex().w_full())),
-        );
+        section = section.child(crate::material::group(cx).child(provider_rows));
         // The update toggle follows the cards it governs; above them its caption
         // would stack straight under the page's own header row.
         section.child(div().pt(crate::material::section_gap(cx)).child(
@@ -3168,6 +3171,21 @@ impl SettingsPage {
         {
             self.section = Section::Threads;
             self.project_rules_editor = None;
+        }
+        // The harness list under a harness's page, likewise.
+        if destination == crate::window_state::Destination::SettingsSection
+            && self.window_state.read(cx).destination()
+                == crate::window_state::Destination::SettingsHarness
+        {
+            let column = self.render_providers(window, cx);
+            return self.render_content_column(column, &self.content_scroll, window, cx);
+        }
+        if self.section == Section::Harness
+            && self.window_state.read(cx).destination()
+                != crate::window_state::Destination::SettingsHarness
+        {
+            self.section = Section::Providers;
+            self.harness_page = None;
         }
         self.render_content(window, cx)
     }

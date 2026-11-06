@@ -1,564 +1,256 @@
-//! One Settings → Harnesses list row.
+//! One Settings → Harnesses row per harness, and the glyphs harnesses and
+//! their profiles are drawn with.
 //!
-//! A compact, non-expanding row: driver glyph, name, `v<version>`,
-//! an update icon when a newer CLI exists, the status summary line, a gear button
-//! and the enable switch. The row body and the gear both open the per-profile
-//! settings dialog, a transactional modal form.
+//! A row says only what its title cannot: how many accounts the harness
+//! has, the plan its one account is on, that it is off or an ACP agent. A
+//! chip appears only when something is wrong. The whole row opens the
+//! harness's settings; its switch turns the harness on or off.
 
 use crate::icon::Icon;
-use crate::widgets::TooltipTrigger as _;
-use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
-    icon::IconName,
-    overlay::{DialogButtons, OverlayExt as _},
-    provider_dialog::ProviderDialog,
-    provider_status::{EMAIL_SLOT, ProviderSnapshot, StatusDot, redact_email, signed_in_account},
-    sizing::Sizable as _,
-    store::{TopicKind, WorkspaceStore, observe_store_topics},
+    harness_dialog::{HarnessId, describe, harness_name, harness_profiles, set_harness_enabled},
+    provider_status::ProviderSnapshot,
+    store::WorkspaceStore,
     theme::ActiveTheme as _,
     typography::TextRole as _,
-    widgets::{
-        button::{Button, ButtonVariant, ButtonVariants as _},
-        switch::Switch,
-    },
+    widgets::TooltipTrigger as _,
+    widgets::switch::Switch,
 };
 use gpui::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement as _,
-    Render, StatefulInteractiveElement as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, rgb,
 };
-use gpui::{Styled as _, rgb};
-use gpui_base::motion::transition;
 use gpui_base::{h_flex, v_flex};
 
 use agent::ProviderKind;
-use tcode_core::provider_status::AuthStatus;
-use tcode_core::settings::builtin_provider_color;
+use tcode_core::provider_status::{AuthStatus, ProviderProbeDiagnostic, ProviderStatusKind};
+use tcode_core::settings::{ResolvedProfile, builtin_provider_color};
+use tcode_protocol::HarnessDescription;
 
-/// How long a value drawn here takes to glide to a new one.
-const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// How long what is drawn here only some of the time takes to come in or go.
-const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// How long a part drawn here takes to cross-fade to another of its states.
-const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// The card's dialog asked to manage this profile's plugins.
-pub struct ManagePlugins(pub String);
-
-pub struct ProviderCard {
-    store: Entity<WorkspaceStore>,
-    /// The protocol this card's profile drives (glyph, shared model catalog /
-    /// status / version are all keyed on it).
-    provider: ProviderKind,
-    /// Which profile this row represents: a built-in native-provider id or a
-    /// user profile slug. Status/config/secret lookups key on this.
-    profile_id: String,
-    /// Whether the account email in the summary line is revealed.
-    email_revealed: bool,
-    _subscription: Subscription,
+/// What is wrong with a harness, as its row's chip says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trouble {
+    NotInstalled,
+    Failed,
+    SignedOut,
+    NeedsAttention,
 }
 
-impl gpui::EventEmitter<ManagePlugins> for ProviderCard {}
-
-impl ProviderCard {
-    pub fn new(
-        store: Entity<WorkspaceStore>,
-        provider: ProviderKind,
-        profile_id: impl Into<String>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let subscription =
-            observe_store_topics(&store, &[TopicKind::Settings, TopicKind::Providers], cx);
-        Self {
-            store,
-            provider,
-            profile_id: profile_id.into(),
-            email_revealed: false,
-            _subscription: subscription,
-        }
+/// A harness row's second line and its chip, from the host's description
+/// of the harness and what was probed of each of its profiles.
+pub(crate) fn row_summary(
+    description: &HarnessDescription,
+    profiles: &[(ResolvedProfile, Option<ProviderSnapshot>)],
+    enabled: bool,
+) -> (String, Option<Trouble>) {
+    if description.acp_agent_id.is_some() {
+        let line = if enabled {
+            "ACP".to_owned()
+        } else {
+            crate::tr!("providers.status.disabled").into_owned()
+        };
+        return (line, None);
     }
-
-    /// Open the per-profile settings modal (the transactional editor).
-    fn open_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let store = self.store.clone();
-        let provider = self.provider;
-        let profile_id = self.profile_id.clone();
-        let title = self
-            .store
-            .read(cx)
-            .provider_profile_display_name(&profile_id);
-        let card = cx.entity().downgrade();
-        let manage_id = profile_id.clone();
-        let manage_plugins: std::rc::Rc<dyn Fn(&mut gpui::App)> = std::rc::Rc::new(move |cx| {
-            _ = card.update(cx, |_, cx| cx.emit(ManagePlugins(manage_id.clone())));
-        });
-        let dialog = cx.new(|cx| {
-            ProviderDialog::new(
-                store.clone(),
-                provider,
-                profile_id.clone(),
-                manage_plugins,
-                window,
-                cx,
-            )
-        });
-        window.open_dialog(cx, move |dlg, _, cx| {
-            let content = dialog.clone();
-            dlg.title(title.clone())
-                .wide()
-                .content(move |content_el, _window, _cx| content_el.child(content.clone()))
-                .footer(crate::provider_dialog::render_footer(&dialog, cx))
-        });
-    }
-
-    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let provider = self.provider;
-        // Update checks target the built-in installation; a custom profile can
-        // launch another binary with a different package-manager environment.
-        let store = self.store.read(cx);
-        let name = store.provider_profile_display_name(&self.profile_id);
-        let enabled = store.provider_profile_settings(&self.profile_id).enabled;
-        let snapshot = store.provider_profile_snapshot(&self.profile_id);
-        let same_account_as = snapshot
-            .as_ref()
-            .and_then(|snapshot| same_account_profile(store, &self.profile_id, provider, snapshot));
-        let summary = crate::provider_status::summarize(
-            provider,
-            snapshot.as_ref(),
-            enabled,
-            same_account_as.as_deref(),
-        );
-        let provider_version = (self.profile_id
-            == tcode_core::settings::Settings::builtin_profile_id(provider))
-        .then(|| store.provider_version_status(provider))
-        .flatten();
-        let version = snapshot
-            .as_ref()
-            .and_then(|s| s.version.clone())
-            .or_else(|| provider_version.as_ref().and_then(|v| v.installed.clone()));
-        let update_available = provider_version
-            .as_ref()
-            .is_some_and(|v| v.update_available);
-        let glyph = div().flex_none().text_body(false, cx).child(profile_glyph(
-            store,
-            provider,
-            Some(&self.profile_id),
-        ));
-
-        let title = h_flex()
-            .gap_2()
-            .items_center()
-            .child(div().text_title(cx).child(name.clone()))
-            .when_some(version, |this, version| {
-                this.child(
-                    div()
-                        .text_meta_mono(false, cx)
-                        .child(format!("v{}", version.trim_start_matches('v'))),
+    let builtin = profiles.first().and_then(|(_, snapshot)| snapshot.as_ref());
+    let Some(builtin) = builtin.filter(|snapshot| !snapshot.checking && snapshot.status.is_some())
+    else {
+        return (crate::tr!("providers.status.checking").into_owned(), None);
+    };
+    let trouble = if !builtin.installed {
+        Some(Trouble::NotInstalled)
+    } else if builtin.diagnostic == Some(ProviderProbeDiagnostic::FailedCli) {
+        Some(Trouble::Failed)
+    } else {
+        profiles
+            .iter()
+            .filter_map(|(_, snapshot)| snapshot.as_ref())
+            .find_map(|snapshot| match (snapshot.diagnostic, snapshot.status) {
+                (Some(ProviderProbeDiagnostic::Unauthenticated), _) => Some(Trouble::SignedOut),
+                (
+                    Some(
+                        ProviderProbeDiagnostic::MissingApiKey
+                        | ProviderProbeDiagnostic::SharedCredentials
+                        | ProviderProbeDiagnostic::IndeterminateAuth,
+                    ),
+                    _,
                 )
-            });
+                | (_, Some(ProviderStatusKind::Warning | ProviderStatusKind::Error)) => {
+                    Some(Trouble::NeedsAttention)
+                }
+                _ => None,
+            })
+    };
+    let line = if !enabled {
+        crate::tr!("providers.status.disabled").into_owned()
+    } else if profiles.len() > 1 {
+        crate::tr!("providers.harness.profile_count", count = profiles.len()).into_owned()
+    } else {
+        builtin
+            .auth
+            .as_ref()
+            .filter(|auth| auth.status == AuthStatus::Authenticated)
+            .and_then(|auth| auth.label.clone())
+            .unwrap_or_default()
+    };
+    (line, trouble)
+}
 
-        // The row body (glyph + text) is the primary "configure" affordance;
-        // the update popover, gear and switch trail it as their own controls.
-        let body = crate::material::accessible_clickable(
-            h_flex(),
-            gpui::SharedString::from(format!("configure-{}", self.profile_id)),
-            gpui::Role::Button,
-            crate::tr!("providers.configure", name = name.clone()),
-            cx,
-        )
-        .flex_1()
-        .min_w_0()
-        .gap_3()
-        .items_center()
-        .cursor_pointer()
-        .child(glyph)
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_0p5()
-                .child(title)
-                .child(self.render_summary_line(&summary, window, cx))
-                .when(!provider.caps().mcp_servers, |this| {
-                    this.child(
+/// The row of `harness` in Settings → Harnesses.
+pub(crate) fn harness_row(
+    store: &Entity<WorkspaceStore>,
+    harness: &HarnessId,
+    on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    let state = store.read(cx);
+    let description = describe(state, harness);
+    let name = harness_name(state, harness);
+    let profiles: Vec<(ResolvedProfile, Option<ProviderSnapshot>)> =
+        harness_profiles(state, harness)
+            .into_iter()
+            .map(|profile| {
+                let snapshot = state.provider_profile_snapshot(&profile.id);
+                (profile, snapshot)
+            })
+            .collect();
+    let (enabled, version, update) = match harness {
+        HarnessId::Native(kind) => {
+            let versions = state.provider_version_status(*kind);
+            (
+                profiles.iter().any(|(profile, _)| profile.settings.enabled),
+                profiles
+                    .first()
+                    .and_then(|(_, snapshot)| snapshot.as_ref()?.version.clone())
+                    .or_else(|| versions.as_ref().and_then(|v| v.installed.clone())),
+                versions.is_some_and(|v| v.update_available),
+            )
+        }
+        HarnessId::Acp(id) => {
+            let agent = state.installed_acp_agent(id);
+            (
+                agent.as_ref().is_some_and(|agent| agent.enabled),
+                agent.map(|agent| agent.version).filter(|v| !v.is_empty()),
+                description.registry_update.is_some(),
+            )
+        }
+    };
+    let (line, trouble) = row_summary(&description, &profiles, enabled);
+    let glyph = match harness {
+        HarnessId::Native(kind) => provider_glyph(*kind),
+        HarnessId::Acp(_) => Icon::empty().path("icons/box.svg"),
+    };
+    let key = harness.key();
+    let chip = trouble.map(|trouble| {
+        let theme = cx.theme();
+        let (label, bg, fg) = match trouble {
+            Trouble::NotInstalled => (
+                "providers.harness.not_installed",
+                theme.danger,
+                theme.danger_foreground,
+            ),
+            Trouble::Failed => (
+                "providers.harness.failed",
+                theme.danger,
+                theme.danger_foreground,
+            ),
+            Trouble::SignedOut => (
+                "providers.harness.signed_out",
+                theme.warning,
+                theme.warning_foreground,
+            ),
+            Trouble::NeedsAttention => (
+                "providers.status.needs_attention",
+                theme.warning,
+                theme.warning_foreground,
+            ),
+        };
+        crate::material::semantic_chip(crate::tr!(label).into_owned(), bg.opacity(0.12), fg, cx)
+            .flex_none()
+    });
+    let store = store.clone();
+    let toggled = harness.clone();
+    let body = crate::material::accessible_clickable(
+        h_flex(),
+        SharedString::from(format!("harness-row-{key}")),
+        gpui::Role::Button,
+        crate::tr!("providers.configure", name = name.clone()),
+        cx,
+    )
+    .debug_selector({
+        let key = key.clone();
+        move || format!("harness-row-{key}")
+    })
+    .flex_1()
+    .min_w_0()
+    .gap_3()
+    .items_center()
+    .cursor_pointer()
+    .child(div().flex_none().text_body(false, cx).child(glyph))
+    .child(
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_0p5()
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(
                         div()
-                            .text_secondary(false, cx)
-                            .child(crate::tr!("providers.mcp_unavailable")),
+                            .min_w_0()
+                            .truncate()
+                            .text_title(cx)
+                            .child(name.clone()),
+                    )
+                    .children(version.map(|version| {
+                        div()
+                            .flex_none()
+                            .text_meta_mono(false, cx)
+                            .child(format!("v{}", version.trim_start_matches('v')))
+                    })),
+            )
+            .when(!line.is_empty(), |column| {
+                column.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_secondary(false, cx)
+                        .child(line),
+                )
+            }),
+    )
+    .children(chip)
+    .when(update, |row| {
+        row.child(
+            div()
+                .id(SharedString::from(format!("harness-update-{key}")))
+                .flex_none()
+                .child(
+                    Icon::empty()
+                        .path("icons/download.svg")
+                        .text_color(cx.theme().info),
+                )
+                .with_tooltip(|_, _| {
+                    crate::widgets::tooltip::Tooltip::new(
+                        crate::tr!("providers.update_title").into_owned(),
                     )
                 }),
         )
-        .with_tooltip({
-            let name = name.clone();
-            move |_, _| {
-                let label = crate::tr!("providers.configure", name = name.clone()).into_owned();
-                crate::widgets::tooltip::Tooltip::new(label)
-            }
-        })
-        .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx)));
-
-        crate::material::group_row(cx)
-            .child(body)
-            .children(
-                crate::motion::shown(
-                    "update-available-slot",
-                    update_available.then_some(()),
-                    SHOW,
-                    window,
-                    cx,
-                )
-                .map(|update| update.fade(self.render_update_popover(cx))),
-            )
-            .child(
-                Button::new("configure-profile")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Settings)
-                    .tooltip(crate::tr!("providers.configure", name = name.clone()))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_dialog(window, cx))),
-            )
-            .child(
-                Switch::new("enable-provider")
-                    .checked(enabled)
-                    .tooltip(crate::tr!("providers.enable", name = name))
-                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                        let checked = *checked;
-                        let profile_id = this.profile_id.clone();
-                        this.store.update(cx, |store, _cx| {
-                            store.update_profile_settings(
-                                profile_id,
-                                tcode_core::settings::ProfileSettingsPatch::SetEnabled {
-                                    enabled: checked,
-                                },
-                            );
-                            store.reload_provider();
-                        });
-                    })),
-            )
-            .into_any_element()
-    }
-
-    /// The status summary: headline (with a click-to-reveal email when the probe
-    /// found one) followed by the probe's diagnostic detail.
-    fn render_summary_line(
-        &self,
-        summary: &crate::provider_status::StatusSummary,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let (status_bg, status_fg) = match summary.dot {
-            StatusDot::Loading => (cx.theme().muted.opacity(0.), muted),
-            StatusDot::Success => (
-                cx.theme().success.opacity(0.12),
-                cx.theme().success_foreground,
-            ),
-            StatusDot::Warning => (
-                cx.theme().warning.opacity(0.12),
-                cx.theme().warning_foreground,
-            ),
-            StatusDot::Error => (
-                cx.theme().danger.opacity(0.12),
-                cx.theme().danger_foreground,
-            ),
-            StatusDot::Amber => (cx.theme().muted, muted),
-        };
-        let settle = || gpui_base::motion::Transition::new(GLIDE);
-        let status_bg = transition(("provider-status", "bg"), status_bg, settle(), window, cx);
-        let status_fg = transition(("provider-status", "fg"), status_fg, settle(), window, cx);
-        let (lead, email) = match &summary.email {
-            Some(email) => match summary.headline.split_once(EMAIL_SLOT) {
-                Some((prefix, suffix)) => (
-                    prefix.trim_end().to_string(),
-                    Some((email.clone(), suffix.trim_start().to_string())),
-                ),
-                None => (
-                    summary.headline.clone(),
-                    Some((email.clone(), String::new())),
-                ),
-            },
-            None => (summary.headline.clone(), None),
-        };
-        let revealed = self.email_revealed;
-        let card = cx.entity().downgrade();
-        let text = crate::motion::cross_fade(
-            "provider-status-text",
-            (lead, email, summary.detail.clone()),
-            CHANGE,
-            window,
-            cx,
-            move |(lead, email, detail), _, _| {
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(lead.clone())
-                    .when_some(email.clone(), |line, (email, suffix)| {
-                        let shown = if revealed {
-                            email
-                        } else {
-                            redact_email(&email)
-                        };
-                        let card = card.clone();
-                        line.child(
-                            Button::new("reveal-email")
-                                .text()
-                                .xsmall()
-                                .label(shown)
-                                .tooltip(if revealed {
-                                    crate::tr!("providers.hide_email")
-                                } else {
-                                    crate::tr!("providers.reveal_email")
-                                })
-                                .on_click(move |_, _, cx| {
-                                    // The card body around this line opens the
-                                    // editor on click; this press is not for it.
-                                    cx.stop_propagation();
-                                    _ = card.update(cx, |this, cx| {
-                                        this.email_revealed = !this.email_revealed;
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                        .child(div().child(suffix))
-                    })
-                    .when(!detail.is_empty(), |line| {
-                        line.child(div().child(format!("· {detail}")))
-                    })
-                    .into_any_element()
-            },
-        );
-        let line = crate::material::chip_surface(status_bg, status_fg, cx)
-            .overflow_hidden()
-            .child(text);
-        // Row wrapper so the chip left-aligns and hugs its content instead of
-        // being stretched to the column width by the surrounding v_flex.
-        h_flex()
-            .w_full()
-            .min_w_0()
-            .gap_2()
-            .items_center()
-            .child(line)
-            .children(self.render_account_action(cx))
-            .into_any_element()
-    }
-
-    /// Sign in or out, where Tcode runs the profile's own account sign-in.
-    /// Its press stops propagating so the card body does not also open the
-    /// editor.
-    fn render_account_action(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let store = self.store.read(cx);
-        if !store.provider_profile_supports_account_login(&self.profile_id) {
-            return None;
-        }
-        let snapshot = store.provider_profile_snapshot(&self.profile_id)?;
-        let button = match snapshot.auth.map(|auth| auth.status) {
-            Some(AuthStatus::Authenticated) => Button::new("provider-sign-out")
-                .ghost()
-                .label(crate::tr!("providers.login.sign_out"))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.confirm_sign_out(window, cx);
-                })),
-            Some(AuthStatus::Unauthenticated) | None if snapshot.installed => {
-                Button::new("provider-sign-in")
-                    .label(crate::tr!("providers.login.sign_in"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        crate::provider_login_dialog::open(
-                            this.store.clone(),
-                            this.provider,
-                            this.profile_id.clone(),
-                            window,
-                            cx,
-                        );
-                    }))
-            }
-            _ => return None,
-        };
-        Some(button.xsmall().into_any_element())
-    }
-
-    fn confirm_sign_out(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let store = self.store.clone();
-        let profile_id = self.profile_id.clone();
-        let name = store.read(cx).provider_profile_display_name(&profile_id);
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let store = store.clone();
-            let profile_id = profile_id.clone();
-            alert
-                .title(
-                    crate::tr!("providers.login.sign_out_confirm_title", name = name).into_owned(),
-                )
-                .description(crate::tr!("providers.login.sign_out_confirm_body"))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(crate::tr!("providers.login.sign_out"))
-                        .cancel_text(crate::tr!("settings.cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, _, cx| {
-                    let profile_id = profile_id.clone();
-                    store.update(cx, |store, _| store.logout_provider(profile_id));
-                    true
-                })
-        });
-    }
-
-    /// The update-available icon + its popover.
-    fn render_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
-        let provider = self.provider;
-        let version = self.store.read(cx).provider_version_status(provider);
-        let updating = version.as_ref().is_some_and(|v| v.updating);
-        let requires_terminal = version.as_ref().is_some_and(|v| v.update_requires_terminal);
-        let command = version.as_ref().and_then(|v| v.update_command.clone());
-        let summary = version
-            .as_ref()
-            .and_then(|v| v.update_command_summary.clone());
-        let store = self.store.clone();
-
-        crate::material::overlay_popover("update-popover", cx)
-            .p_3()
-            .trigger(
-                Button::new("update-available")
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::empty().path("icons/download.svg"))
-                    .tooltip(crate::tr!("providers.update_aria")),
-            )
-            .content(move |_, _, cx| {
-                let store = store.clone();
-                let command = command.clone();
-                // The Popover panel supplies the fill, border, shadow and p_3
-                // padding; the pane itself stays transparent (single surface).
-                let mut pane = v_flex()
-                    .w(px(320.))
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_title(cx)
-                            .child(crate::tr!("providers.update_title")),
-                    )
-                    .child(div().text_secondary(false, cx).child(if command.is_none() {
-                        crate::tr!("providers.update_unmanaged")
-                    } else if requires_terminal {
-                        crate::tr!(
-                            "providers.update_terminal",
-                            name = crate::settings::provider_label(provider)
-                        )
-                    } else {
-                        crate::tr!("providers.update_message")
-                    }));
-                if command.is_some() && !requires_terminal {
-                    pane = pane.child(
-                        Button::new("update-now")
-                            .primary()
-                            .small()
-                            .loading(updating)
-                            .label(if updating {
-                                crate::tr!("providers.updating")
-                            } else {
-                                crate::tr!("providers.update_now")
-                            })
-                            .on_click({
-                                let store = store.clone();
-                                move |_, _, cx| {
-                                    store.update(cx, |store, _cx| {
-                                        store.update_providers(vec![provider]);
-                                    });
-                                }
-                            }),
-                    );
-                }
-                if let Some(command) = command {
-                    let copy = command.clone();
-                    pane = pane
-                        .child(div().pt_1().text_caption(cx).child(if requires_terminal {
-                            crate::tr!("providers.update_command")
-                        } else {
-                            crate::tr!("providers.update_manual")
-                        }))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .gap_1()
-                                .items_center()
-                                .rounded(crate::material::radius_input(cx))
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().muted)
-                                .px_2()
-                                .py_1()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_code(cx)
-                                        .child(crate::widgets::fade_text(
-                                            summary.clone().unwrap_or_else(|| command.clone()),
-                                        )),
-                                )
-                                .child(
-                                    Button::new("copy-command")
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(IconName::Copy)
-                                        .tooltip(crate::tr!("providers.copy_command"))
-                                        .on_click(move |_, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                copy.clone(),
-                                            ));
-                                        }),
-                                )
-                                .context_menu({
-                                    let command = command.clone();
-                                    move |menu, _, _| {
-                                        menu.menu(
-                                            crate::tr!("providers.copy_command").into_owned(),
-                                            Box::new(CopyText(command.clone())),
-                                        )
-                                    }
-                                }),
-                        );
-                }
-                pane
-            })
-            .into_any_element()
-    }
-}
-
-impl Render for ProviderCard {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().w_full().child(self.render_header(window, cx))
-    }
-}
-
-/// The name of another profile of `provider` signed in to the account this
-/// profile's snapshot is.
-fn same_account_profile(
-    store: &WorkspaceStore,
-    profile_id: &str,
-    provider: ProviderKind,
-    snapshot: &ProviderSnapshot,
-) -> Option<String> {
-    let email = |snapshot: &ProviderSnapshot| {
-        signed_in_account(snapshot)
-            .and_then(|auth| auth.email.as_deref())
-            .map(|email| email.trim().to_lowercase())
-    };
-    let account = email(snapshot)?;
-    store
-        .all_provider_profiles()
-        .into_iter()
-        .filter(|profile| profile.kind == provider && profile.id != profile_id)
-        .find(|profile| {
-            store
-                .provider_profile_snapshot(&profile.id)
-                .is_some_and(|other| email(&other).as_ref() == Some(&account))
-        })
-        .map(|profile| store.provider_profile_display_name(&profile.id))
+    })
+    .on_click(on_open);
+    crate::material::group_row(cx)
+        .child(body)
+        .child(
+            Switch::new(SharedString::from(format!("harness-enable-{key}")))
+                .checked(enabled)
+                .tooltip(crate::tr!("providers.enable", name = name))
+                .on_click(move |checked: &bool, _, cx| {
+                    set_harness_enabled(&store, &toggled, *checked, cx)
+                }),
+        )
+        .into_any_element()
 }
 
 /// The provider's glyph. Claude's is pre-tinted with its brand color; the
@@ -590,94 +282,4 @@ pub fn profile_glyph(
     let profile_id =
         profile_id.unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider));
     provider_glyph(provider).text_color(rgb(store.provider_profile_color(profile_id)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{TestAppContext, VisualTestContext, point, size};
-    use tcode_runtime::pipe::{HostServices, spawn_host};
-    use tcode_services::store::SessionStore;
-
-    use crate::store::WorkspaceAttachment;
-
-    fn draw(cx: &mut VisualTestContext) {
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-    }
-
-    /// A window shorter than the dialog's form leaves its actions in place
-    /// below the form, which scrolls between the title and them.
-    #[gpui::test]
-    fn the_provider_dialog_scrolls_its_form_above_its_actions(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root("provider-dialog-scroll");
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.link(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        let profile = tcode_core::settings::Settings::builtin_profile_id(ProviderKind::ClaudeCode);
-        let mut card_handle = None;
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let card = cx
-                .new(|cx| ProviderCard::new(store.clone(), ProviderKind::ClaudeCode, profile, cx));
-            card_handle = Some(card.clone());
-            gpui_base::Root::new(card, window, cx)
-        });
-        let card = card_handle.unwrap();
-        cx.update(|window, cx| card.update(cx, |card, cx| card.open_dialog(window, cx)));
-        for (width, height) in [(1000., 480.), (393., 600.)] {
-            cx.simulate_resize(size(px(width), px(height)));
-            draw(cx);
-            let body = cx.debug_bounds("provider-dialog-body").unwrap();
-            let form = cx.debug_bounds("provider-dialog-form").unwrap();
-            let save = cx.debug_bounds("provider-save").unwrap();
-            assert!(
-                form.bottom() > body.bottom(),
-                "the form {form:?} must not fit the body {body:?} at {height}"
-            );
-            assert!(
-                body.bottom() < save.top(),
-                "the body {body:?} must end above the actions {save:?}"
-            );
-            assert!(save.bottom() < px(height));
-
-            let at = body.center();
-            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
-            for (phase, delta) in [
-                (gpui::TouchPhase::Started, 0.),
-                (gpui::TouchPhase::Moved, -120.),
-                (gpui::TouchPhase::Ended, 0.),
-            ] {
-                cx.simulate_event(gpui::ScrollEvent {
-                    position: at,
-                    delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
-                    touch_phase: phase,
-                    ..Default::default()
-                });
-                draw(cx);
-            }
-            let scrolled = cx.debug_bounds("provider-dialog-form").unwrap();
-            assert!(
-                scrolled.top() < form.top(),
-                "a wheel over the body must move the form, {form:?} -> {scrolled:?}"
-            );
-            assert_eq!(cx.debug_bounds("provider-save").unwrap(), save);
-        }
-        crate::store::tests::shutdown_test_host(cx, &store, &host);
-        let _ = std::fs::remove_dir_all(root);
-    }
 }

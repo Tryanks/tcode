@@ -334,7 +334,7 @@ impl AppState {
     /// backend change it is.
     pub(super) fn provider_label(&self, provider: ProviderKind, profile: Option<&str>) -> String {
         match profile {
-            Some(id) => self.settings.profile_display_name(id),
+            Some(id) => self.profile_display_name(id),
             None => provider.display_name().to_string(),
         }
     }

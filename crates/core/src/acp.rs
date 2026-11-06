@@ -1,7 +1,9 @@
 //! Persisted Agent Client Protocol configuration.
 
 use agent::AcpLaunch;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::settings::EnvVar;
 
 /// An installed agent, as persisted in settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17,8 +19,10 @@ pub struct InstalledAcpAgent {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Extra environment for this agent's process (Settings → Harnesses).
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
+    /// Sensitive values are stored under
+    /// [`Settings::acp_secret_id`](crate::settings::Settings::acp_secret_id).
+    #[serde(default, deserialize_with = "env_rows")]
+    pub env: Vec<EnvVar>,
     /// Extra CLI arguments appended at launch.
     #[serde(default)]
     pub launch_args: Option<String>,
@@ -28,13 +32,31 @@ pub struct InstalledAcpAgent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AcpAgentPatch {
-    SetEnabled {
-        enabled: bool,
-    },
-    SetLaunchOptions {
-        env: Vec<(String, String)>,
-        launch_args: Option<String>,
-    },
+    SetEnabled { enabled: bool },
+    SetLaunchArgs { launch_args: Option<String> },
+    SetEnv { env: Vec<EnvVar> },
+}
+
+/// The agent's variables, also as the `[name, value]` pairs earlier builds
+/// wrote.
+fn env_rows<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<EnvVar>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Row {
+        Var(EnvVar),
+        Pair(String, String),
+    }
+    Ok(Vec::<Row>::deserialize(deserializer)?
+        .into_iter()
+        .map(|row| match row {
+            Row::Var(var) => var,
+            Row::Pair(name, value) => EnvVar {
+                name,
+                value,
+                sensitive: false,
+            },
+        })
+        .collect())
 }
 
 fn default_true() -> bool {
@@ -55,5 +77,36 @@ impl InstalledAcpAgent {
             .as_deref()
             .map(|args| args.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An agent saved by a build that kept its variables as pairs loads with
+    /// them as plain rows.
+    #[test]
+    fn an_agent_saved_with_variable_pairs_loads_them_as_rows() {
+        let agent: InstalledAcpAgent = serde_json::from_str(
+            r#"{"id":"gemini","name":"Gemini CLI","launch":{"kind":"custom","command":"gemini","args":[],"env":[]},
+                "env":[["GEMINI_MODEL","gemini-3-pro"],["A","b=c"]]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            agent.env,
+            vec![
+                EnvVar {
+                    name: "GEMINI_MODEL".into(),
+                    value: "gemini-3-pro".into(),
+                    sensitive: false,
+                },
+                EnvVar {
+                    name: "A".into(),
+                    value: "b=c".into(),
+                    sensitive: false,
+                },
+            ]
+        );
     }
 }

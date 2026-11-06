@@ -67,7 +67,7 @@ use tcode_services::git::{
 use tcode_services::import::{
     ExternalRoots, ImportOutcome, existing_external_ids, import_thread, scan_recent_dirs,
 };
-use tcode_services::provider_probe::{default_program, probe_provider, run_capture_env};
+use tcode_services::provider_probe::{probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::{CommandsCacheKey, SessionStore, now_millis, now_secs};
@@ -287,9 +287,10 @@ use active_session::{
     wire_text_with_placeholder,
 };
 use orchestrate::McpWiring;
+pub use providers::NewEndpointProfile;
 pub use providers::ProviderCatalog;
 use providers::{
-    McpServers, computer_use_attaches, effort_selection, normalized_selections,
+    McpServers, computer_use_attaches, effort_selection, named, normalized_selections,
     provider_secret_names, session_options,
 };
 pub use revisioned::{Revisioned, RevisionedMap};

@@ -490,15 +490,7 @@ async fn latest<P: Probe>(probe: &P, query: &LatestQuery) -> Option<String> {
 }
 
 fn binary_name(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::ClaudeCode => "claude",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Cursor => "cursor-agent",
-        ProviderKind::Grok => "grok",
-        ProviderKind::Acp => "",
-    }
+    provider.harness().binary_name
 }
 
 fn within<P: Probe>(context: &Context<'_, P>, path: &Path, root: &Path) -> bool {

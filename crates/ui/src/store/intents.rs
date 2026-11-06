@@ -1223,6 +1223,7 @@ impl WorkspaceStore {
     }
     pub fn create_third_party_profile(
         &mut self,
+        provider: ProviderKind,
         name: String,
         base_url: String,
         model: Option<String>,
@@ -1230,6 +1231,7 @@ impl WorkspaceStore {
         inherit_config: bool,
     ) {
         self.dispatch(Command::CreateThirdPartyProfile {
+            provider,
             name,
             base_url,
             model,
@@ -1323,18 +1325,11 @@ impl WorkspaceStore {
     pub fn remove_acp_agent(&mut self, id: String) {
         self.dispatch(Command::RemoveAcpAgent { id });
     }
-    pub fn add_custom_acp_agent(
-        &mut self,
-        name: String,
-        command: String,
-        args: Vec<String>,
-        env: Vec<(String, String)>,
-    ) {
+    pub fn add_custom_acp_agent(&mut self, name: String, command: String, args: Vec<String>) {
         self.dispatch(Command::AddCustomAcpAgent {
             name,
             command,
             args,
-            env,
         });
     }
     pub fn update_acp_agent(&mut self, id: String, patch: AcpAgentPatch) {

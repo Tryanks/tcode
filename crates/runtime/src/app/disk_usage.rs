@@ -34,6 +34,7 @@ impl AppState {
                     let launch_env = launch_env_for_profile(
                         &settings,
                         &profile.id,
+                        secrets.profile_secrets(&Settings::harness_secret_id(profile.kind)),
                         secrets.profile_secrets(&profile.id),
                     );
                     Account {

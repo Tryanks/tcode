@@ -291,6 +291,18 @@ async fn initialize(
 
 /// Codex's home: `CODEX_HOME` as the CLI launched with `launch_env` sees it,
 /// else `~/.codex`.
+// What a new account copies of another's home: never `auth.json`, the
+// sessions or the history, which belong to the account they were made in.
+const INHERITED_CONFIG: [&str; 4] = ["config.toml", "AGENTS.md", "prompts", "skills"];
+
+/// Copy the user's configuration from one `CODEX_HOME` into another. Blocking.
+pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut ancestors = std::collections::HashSet::new();
+    INHERITED_CONFIG.iter().try_for_each(|name| {
+        crate::claude::copy_resolved(&from.join(name), &to.join(name), &mut ancestors)
+    })
+}
+
 pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
         .child_path(ProviderKind::Codex, "CODEX_HOME")
