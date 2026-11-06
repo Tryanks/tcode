@@ -78,10 +78,13 @@ impl TurnBoundaries {
         self.turns.last().is_some_and(|turn| !turn.closed)
     }
 
+    /// The turn the provider names `id`: the latest so named, since a
+    /// provider process numbers its turns from scratch (Claude Code's and an
+    /// ACP agent's `turn-1`, …) and a thread outlives its processes.
     pub fn provider_turn(&self, id: &str) -> Option<usize> {
         self.turns
             .iter()
-            .position(|turn| turn.provider.as_deref() == Some(id))
+            .rposition(|turn| turn.provider.as_deref() == Some(id))
             .or(self.current())
     }
 

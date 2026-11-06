@@ -26,7 +26,7 @@ pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
-pub const TURN_INDEX_FOLD_VERSION: u32 = 4;
+pub const TURN_INDEX_FOLD_VERSION: u32 = 5;
 
 fn synthetic_entry_id(
     prefix: &str,
@@ -2637,6 +2637,43 @@ mod tests {
             &timeline.entries[2].content,
             EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "replacement prompt"
         ));
+    }
+
+    /// A thread outlives its provider processes, and a process numbers its
+    /// turns from scratch (Claude Code's and an ACP agent's `turn-1`, …). A
+    /// restore point a later process reports lands on that process's turn,
+    /// not on the thread's first turn of the same name, or rewinding the
+    /// first turn would cut at the later prompt.
+    #[test]
+    fn a_restore_point_lands_on_the_latest_turn_its_provider_named() {
+        let mut events = Vec::new();
+        for (prompt, checkpoint) in [("first", "uuid-first"), ("second", "uuid-second")] {
+            // Each prompt reaches a freshly started provider process.
+            events.extend([
+                user_msg(prompt, prompt),
+                AgentEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                },
+                AgentEvent::TurnCheckpoint {
+                    turn_id: "turn-1".into(),
+                    checkpoint_id: checkpoint.into(),
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            ]);
+        }
+        let timeline = Timeline::fold_events(events);
+        assert_eq!(
+            timeline
+                .turns
+                .iter()
+                .map(|turn| turn.provider_checkpoint_id.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("uuid-first"), Some("uuid-second")]
+        );
     }
 
     fn undoable_rewind(checkpoint: &str) -> AgentEvent {
