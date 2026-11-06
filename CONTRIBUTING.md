@@ -159,7 +159,7 @@ Platform prerequisites:
   `WAYLAND_DISPLAY= cargo run` to get it through XWayland.
 
 Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`,
-`cursor-agent`, `grok`) and can be overridden in **Settings → Providers**.
+`cursor-agent`, `grok`) and can be overridden in **Settings → Harnesses**.
 
 ### Before you open a pull request
 

@@ -1,4 +1,4 @@
-//! One Settings → Providers list row.
+//! One Settings → Harnesses list row.
 //!
 //! A compact, non-expanding row: driver glyph, name, `v<version>`,
 //! an update icon when a newer CLI exists, the status summary line, a gear button
@@ -443,7 +443,10 @@ impl ProviderCard {
                     .child(div().text_secondary(false, cx).child(if command.is_none() {
                         crate::tr!("providers.update_unmanaged")
                     } else if requires_terminal {
-                        crate::tr!("providers.update_terminal")
+                        crate::tr!(
+                            "providers.update_terminal",
+                            name = crate::settings::provider_label(provider)
+                        )
                     } else {
                         crate::tr!("providers.update_message")
                     }));

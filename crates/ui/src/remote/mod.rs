@@ -1595,17 +1595,17 @@ mod tests {
             connection_label(&ConnectionState::Offline {
                 reason: unreachable.clone()
             }),
-            "Offline · Host unreachable",
+            "Offline · Machine unreachable",
             "the status line has no room for the cause"
         );
         assert_eq!(
             failure_description(&unreachable),
-            "Host unreachable: No addressing information available: Address lookup failed",
+            "Machine unreachable: No addressing information available: Address lookup failed",
             "the machine row says why"
         );
         assert_eq!(
             failure_description(&ConnectionFailure::Unreachable(None)),
-            "Host unreachable"
+            "Machine unreachable"
         );
     }
 

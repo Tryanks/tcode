@@ -882,7 +882,7 @@ pub struct SessionOptions {
     pub option_selections: Vec<OptionSelection>,
     /// Enabled tcode HTTP MCP servers to register with this session.
     pub mcp_servers: Vec<McpRegistration>,
-    /// Per-provider environment (Settings → Providers): extra variables merged
+    /// Per-provider environment (Settings → Harnesses): extra variables merged
     /// into the child's environment, plus the config-directory override. See
     /// [`LaunchEnv`].
     pub launch_env: LaunchEnv,
@@ -897,7 +897,7 @@ pub struct SessionOptions {
     pub instructions: Option<String>,
 }
 
-/// The per-provider environment configured in Settings → Providers, applied to
+/// The per-provider environment configured in Settings → Harnesses, applied to
 /// every child process we spawn for that provider (sessions, `list_models`, and
 /// version/auth probes alike).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1384,7 +1384,7 @@ pub(crate) fn resolve_binary(
     }
     find_on_path(default_name).ok_or_else(|| {
         AgentError::Spawn(format!(
-            "`{default_name}` not found on PATH (set its path in Settings → Providers)"
+            "`{default_name}` not found on PATH (set its path in Settings → Harnesses)"
         ))
     })
 }
@@ -1650,7 +1650,7 @@ impl std::fmt::Display for AgentError {
             }
             Self::BatchLineBreak { program } => write!(
                 formatter,
-                "failed to spawn provider process: `{}` is a batch file, which cannot be given an argument that spans lines; install the CLI's native build or set its executable in Settings → Providers",
+                "failed to spawn provider process: `{}` is a batch file, which cannot be given an argument that spans lines; install the CLI's native build or set its executable in Settings → Harnesses",
                 program.display()
             ),
             Self::Protocol(message) => write!(formatter, "protocol error: {message}"),

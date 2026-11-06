@@ -289,7 +289,7 @@ fn space_index_and_scope_project_only_the_members_projects() {
         .iter()
         .find(|choice| choice.profile_id.as_deref() == Some("shared-profile"))
         .unwrap();
-    assert_eq!(profile.name, "Team model");
+    assert_eq!(profile.name, "Codex (Team model)");
     assert!(profile.models.iter().any(|model| model.id == "team-model"));
     let wire = serde_json::to_string(&scope).unwrap();
     assert!(!wire.contains("private-endpoint"));

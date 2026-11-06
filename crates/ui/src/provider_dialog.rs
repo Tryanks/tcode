@@ -1,4 +1,4 @@
-//! The per-profile provider settings dialog (Settings → Providers → gear).
+//! The per-profile provider settings dialog (Settings → Harnesses → gear).
 //!
 //! A transactional editor: it seeds a draft from the profile's current
 //! [`ProviderSettings`] plus its effective launch env (for secret placeholders),
@@ -119,8 +119,14 @@ impl ProviderDialog {
                 })
             };
 
+        // Left empty, a built-in profile is named by its provider alone and a
+        // user-created one by its id.
         let display_name = text_input(
-            provider_label(provider).to_string(),
+            if tcode_core::settings::Settings::is_builtin_profile_id(&profile_id) {
+                String::new()
+            } else {
+                profile_id.clone()
+            },
             settings.display_name.clone().unwrap_or_default(),
             window,
             cx,
@@ -945,11 +951,12 @@ impl Render for ProviderDialog {
 
 /// The dialog footer: Delete (user profiles only, left) + Cancel / Save (right).
 pub fn render_footer(dialog: &Entity<ProviderDialog>, cx: &mut App) -> AnyElement {
-    let (is_user, profile_id, store, manage_plugins) = {
+    let (is_user, profile_id, provider, store, manage_plugins) = {
         let d = dialog.read(cx);
         (
             d.is_user_profile(),
             d.profile_id.clone(),
+            d.provider,
             d.store.clone(),
             d.manage_plugins.clone(),
         )
@@ -978,12 +985,18 @@ pub fn render_footer(dialog: &Entity<ProviderDialog>, cx: &mut App) -> AnyElemen
                 .on_click(move |_, window, cx| {
                     let delete_id = delete_id.clone();
                     let delete_store = delete_store.clone();
+                    let name = delete_store
+                        .read(cx)
+                        .provider_profile_display_name(&delete_id);
                     window.open_alert_dialog(cx, move |alert, _, _| {
                         let delete_id = delete_id.clone();
                         let delete_store = delete_store.clone();
                         alert
-                            .title(crate::tr!("providers.delete_confirm_title"))
-                            .description(crate::tr!("providers.delete_confirm_body"))
+                            .title(crate::tr!("providers.delete_confirm_title", name = name))
+                            .description(crate::tr!(
+                                "providers.delete_confirm_body",
+                                provider = provider_label(provider)
+                            ))
                             .button_props(
                                 DialogButtons::default()
                                     .ok_variant(ButtonVariant::Danger)

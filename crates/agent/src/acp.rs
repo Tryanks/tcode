@@ -342,7 +342,7 @@ fn auth_hint(agent: &AcpAgent, init: &acp::InitializeResponse) -> String {
         format!(" It offers: {}.", methods.join("; "))
     };
     format!(
-        "`{}` requires authentication.{offered} Sign in with the agent's own CLI, or set its API-key environment variables in Settings → Providers → ACP Agents → {}.",
+        "`{}` requires authentication.{offered} Sign in with the agent's own CLI, or set its API-key environment variables in Settings → Harnesses → {}.",
         agent.name, agent.name
     )
 }

@@ -103,16 +103,16 @@ impl Composer {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
                 // fuzzily filtered by the `$` query with no item cap.
                 let composer = self.composer_state(cx);
+                let harness = harness_name(&composer);
                 let commands = &composer.provider_commands;
                 let rows =
                     filter_provider_commands(commands, ProviderCommandKind::Skill, &trigger.query)
                         .into_iter()
                         .map(|c| MenuRow {
                             primary: format!("${}", c.name),
-                            secondary: c
-                                .description
-                                .clone()
-                                .unwrap_or_else(|| crate::tr!("composer.run_skill").into_owned()),
+                            secondary: c.description.clone().unwrap_or_else(|| {
+                                crate::tr!("composer.run_skill", provider = harness).into_owned()
+                            }),
                             icon: MenuIcon::Skill,
                             accept: MenuAccept::InsertSkill(c.name.clone()),
                             group: Some("composer.group_skills"),
@@ -122,6 +122,7 @@ impl Composer {
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
                 let composer = self.composer_state(cx);
+                let harness = harness_name(&composer);
                 let compact_offered = compact_offered(&composer);
                 let goal_offered = goal_offered(&composer).is_some();
                 let mut builtins: Vec<(&str, &str, MenuAccept)> = vec![
@@ -147,7 +148,7 @@ impl Composer {
                     .filter(|(name, _, _)| fuzzy_score(&trigger.query, name).is_some())
                     .map(|(name, desc, accept)| MenuRow {
                         primary: format!("/{name}"),
-                        secondary: crate::tr!(desc).into_owned(),
+                        secondary: crate::tr!(desc, provider = harness).into_owned(),
                         icon: MenuIcon::Command,
                         accept,
                         group: Some("composer.group_builtin"),
@@ -171,7 +172,8 @@ impl Composer {
                     .map(|c| MenuRow {
                         primary: format!("/{}", c.name),
                         secondary: c.description.clone().unwrap_or_else(|| {
-                            crate::tr!("composer.run_provider_command").into_owned()
+                            crate::tr!("composer.run_provider_command", provider = harness)
+                                .into_owned()
                         }),
                         icon: MenuIcon::Command,
                         accept: MenuAccept::InsertCommand(c.name.clone()),
@@ -315,91 +317,90 @@ impl Composer {
         } = menu.clone();
 
         let compact = self.compact;
-        let list = if rows.is_empty() {
-            let text: gpui::SharedString = if loading {
-                crate::tr!("composer.searching").into_owned().into()
+        let harness = harness_name(&self.composer_state(cx));
+        let list =
+            if rows.is_empty() {
+                let text: gpui::SharedString = if loading {
+                    crate::tr!("composer.searching").into_owned().into()
+                } else {
+                    empty_text.into()
+                };
+                let (motion, key) = (self.motion.clone(), self.motion_key("trigger-empty"));
+                crate::motion::Sampled::new(move |window, cx| {
+                    motion.cross_fade(key, text, CHANGE, window, cx, |text, _, cx| {
+                        crate::material::empty_row(text.clone(), cx).into_any_element()
+                    })
+                })
+                .into_any_element()
             } else {
-                empty_text.into()
-            };
-            let (motion, key) = (self.motion.clone(), self.motion_key("trigger-empty"));
-            crate::motion::Sampled::new(move |window, cx| {
-                motion.cross_fade(key, text, CHANGE, window, cx, |text, _, cx| {
-                    crate::material::empty_row(text.clone(), cx).into_any_element()
-                })
-            })
-            .into_any_element()
-        } else {
-            // Group headers are not selectable: each opens the row that starts
-            // its group, so keyboard selection indexes `rows` directly.
-            let mut last_group: Option<&'static str> = None;
-            let headers: Vec<Option<&'static str>> = rows
-                .iter()
-                .map(|row| {
-                    let group = row.group.filter(|group| last_group != Some(*group));
-                    if group.is_some() {
-                        last_group = group;
+                // Group headers are not selectable: each opens the row that starts
+                // its group, so keyboard selection indexes `rows` directly.
+                let mut last_group: Option<&'static str> = None;
+                let headers: Vec<Option<&'static str>> = rows
+                    .iter()
+                    .map(|row| {
+                        let group = row.group.filter(|group| last_group != Some(*group));
+                        if group.is_some() {
+                            last_group = group;
+                        }
+                        group
+                    })
+                    .collect();
+                let count = rows.len();
+                let keys: Rc<[u64]> = rows.iter().map(menu_row_key).collect();
+                {
+                    let mut seen = self.menu_rows_seen.borrow_mut();
+                    for (key, row) in keys.iter().zip(&rows) {
+                        seen.entry(*key).or_insert_with(|| row.clone());
                     }
-                    group
-                })
-                .collect();
-            let count = rows.len();
-            let keys: Rc<[u64]> = rows.iter().map(menu_row_key).collect();
-            {
-                let mut seen = self.menu_rows_seen.borrow_mut();
-                for (key, row) in keys.iter().zip(&rows) {
-                    seen.entry(*key).or_insert_with(|| row.clone());
                 }
-            }
-            let leaving = {
-                let seen = self.menu_rows_seen.clone();
-                let composer = cx.entity();
-                move |key: u64, _: &mut Window, cx: &mut App| {
-                    let row = seen.borrow().get(&key).cloned()?;
-                    Some(composer.update(cx, |_, cx| {
-                        render_menu_row(&row, usize::MAX, false, compact, cx).into_any_element()
-                    }))
-                }
+                let leaving = {
+                    let seen = self.menu_rows_seen.clone();
+                    let composer = cx.entity();
+                    move |key: u64, _: &mut Window, cx: &mut App| {
+                        let row = seen.borrow().get(&key).cloned()?;
+                        Some(composer.update(cx, |_, cx| {
+                            render_menu_row(&row, usize::MAX, false, compact, cx).into_any_element()
+                        }))
+                    }
+                };
+                let rows: Rc<[MenuRow]> = rows.into();
+                crate::scroll::VirtualList::measured(
+                    "composer-trigger-rows",
+                    count,
+                    cx.processor(move |_, index: usize, _, cx| {
+                        div().when(index + 1 < count, |row| row.pb_0p5()).child(
+                            v_flex()
+                                .gap_0p5()
+                                .when_some(headers[index], |col, group| {
+                                    col.child(
+                                        div().px_2().pt_1p5().pb_0p5().text_caption(cx).child(
+                                            crate::tr!(group, provider = harness).into_owned(),
+                                        ),
+                                    )
+                                })
+                                .child(render_menu_row(
+                                    &rows[index],
+                                    index,
+                                    index == highlight,
+                                    compact,
+                                    cx,
+                                )),
+                        )
+                    }),
+                )
+                .reveal(Some(highlight))
+                // Each keystroke's results fold in and out as the rows that
+                // still match glide to their places.
+                .keyed(keys, crate::motion::KEYSTROKE, leaving)
+                .w_full()
+                // About ten rows before the list scrolls, so the menu never
+                // covers the conversation; no owner sizes an in-flow menu. The
+                // menu's border sits outside this cap.
+                .max_h(px(286.))
+                .p_1()
+                .into_any_element()
             };
-            let rows: Rc<[MenuRow]> = rows.into();
-            crate::scroll::VirtualList::measured(
-                "composer-trigger-rows",
-                count,
-                cx.processor(move |_, index: usize, _, cx| {
-                    div().when(index + 1 < count, |row| row.pb_0p5()).child(
-                        v_flex()
-                            .gap_0p5()
-                            .when_some(headers[index], |col, group| {
-                                col.child(
-                                    div()
-                                        .px_2()
-                                        .pt_1p5()
-                                        .pb_0p5()
-                                        .text_caption(cx)
-                                        .child(crate::tr!(group).into_owned()),
-                                )
-                            })
-                            .child(render_menu_row(
-                                &rows[index],
-                                index,
-                                index == highlight,
-                                compact,
-                                cx,
-                            )),
-                    )
-                }),
-            )
-            .reveal(Some(highlight))
-            // Each keystroke's results fold in and out as the rows that
-            // still match glide to their places.
-            .keyed(keys, crate::motion::KEYSTROKE, leaving)
-            .w_full()
-            // About ten rows before the list scrolls, so the menu never
-            // covers the conversation; no owner sizes an in-flow menu. The
-            // menu's border sits outside this cap.
-            .max_h(px(286.))
-            .p_1()
-            .into_any_element()
-        };
 
         crate::material::overlay_contour(div(), cx)
             .rounded(crate::material::radius_overlay(cx))
@@ -418,6 +419,14 @@ fn menu_row_key(row: &MenuRow) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (&row.primary, &row.secondary, row.group).hash(&mut hasher);
     hasher.finish()
+}
+
+/// The product name of the thread's provider, which names its own commands and
+/// skills in the menu.
+fn harness_name(composer: &crate::store::ComposerState) -> &'static str {
+    composer
+        .provider
+        .map_or("Harness", crate::settings::provider_label)
 }
 
 fn render_menu_row(

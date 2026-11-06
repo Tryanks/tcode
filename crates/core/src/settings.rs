@@ -192,16 +192,13 @@ pub fn acp_color_key(agent_id: &str) -> String {
     format!("acp:{agent_id}")
 }
 
-/// The provider's short display name used for card titles and picker labels.
+/// The provider's product name used for card titles and picker labels. ACP
+/// agents are named by their own registry entry, so their kind reads as the
+/// protocol alone.
 pub fn provider_label(provider: ProviderKind) -> &'static str {
     match provider {
-        ProviderKind::Codex => "Codex",
-        ProviderKind::ClaudeCode => "Claude",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "OpenCode",
-        ProviderKind::Cursor => "Cursor",
-        ProviderKind::Grok => "Grok",
         ProviderKind::Acp => "ACP",
+        provider => provider.display_name(),
     }
 }
 
@@ -220,7 +217,7 @@ pub struct EnvVar {
     pub sensitive: bool,
 }
 
-/// Per-provider configuration (Settings → Providers card).
+/// Per-provider configuration (Settings → Harnesses card).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderSettings {
     /// Whether the provider may be used for new sessions.
@@ -327,7 +324,7 @@ impl ProviderSettings {
     }
 }
 
-/// A user-created provider profile (Settings → Providers "+ New profile").
+/// A user-created provider profile (Settings → Harnesses "+ New profile").
 ///
 /// A profile pairs a *protocol* ([`ProviderKind`] — which native CLI/adapter
 /// spawns it) with a full [`ProviderSettings`] card. Several profiles may share
@@ -568,7 +565,7 @@ impl Default for ComputerUseSettings {
     }
 }
 
-/// Settings for the embedded preview browser (Settings → Browser) and the
+/// Settings for the embedded preview browser (Settings → Preview) and the
 /// `tcode_preview` MCP server it backs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowserSettings {
@@ -850,7 +847,7 @@ pub struct Settings {
     /// None follows the operating-system language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// Per-provider cards (Settings → Providers), keyed by [`provider_key`].
+    /// Per-provider cards (Settings → Harnesses), keyed by [`provider_key`].
     /// These are the built-in native-provider profiles.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderSettings>,
@@ -1326,25 +1323,24 @@ impl Settings {
         out
     }
 
-    /// A profile's card title: its display-name override, else — for built-ins —
-    /// the driver label, else the id. Used by the sidebar / picker / status row.
+    /// A profile as the UI names it: the provider's product name, followed for
+    /// a named or user-created profile by its display name (else its id) in
+    /// parentheses, so an account never reads as a provider of its own.
     pub fn profile_display_name(&self, id: &str) -> String {
         let Some(profile) = self.resolved_profile(id) else {
             return id.to_string();
         };
-        if let Some(name) = profile
+        let product = provider_label(profile.kind);
+        let qualifier = profile
             .settings
             .display_name
             .as_deref()
             .map(str::trim)
             .filter(|name| !name.is_empty())
-        {
-            return name.to_string();
-        }
-        if Self::is_builtin_profile_id(id) {
-            provider_label(profile.kind).to_string()
-        } else {
-            id.to_string()
+            .or_else(|| (!Self::is_builtin_profile_id(id)).then_some(id));
+        match qualifier {
+            Some(name) => format!("{product} ({name})"),
+            None => product.to_string(),
         }
     }
 
@@ -1833,9 +1829,15 @@ mod tests {
             ProviderKind::OpenCode
         );
 
-        // Display names: built-in falls back to label; user shows its name.
-        assert_eq!(settings.profile_display_name("claude"), "Claude");
-        assert_eq!(settings.profile_display_name(&id), "Klaude Kode");
+        // Display names: the product name, then the display name in parentheses.
+        assert_eq!(
+            settings.profile_display_name("claude"),
+            "Claude Code (Claude)"
+        );
+        assert_eq!(
+            settings.profile_display_name(&id),
+            "Claude Code (Klaude Kode)"
+        );
         assert_eq!(settings.resolved_profile("nope"), None);
 
         // A second profile of the same name gets a distinct id.

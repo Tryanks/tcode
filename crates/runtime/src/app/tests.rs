@@ -3189,7 +3189,7 @@ fn reopened_command_cache_seeds_a_draft_before_provider_start() {
     assert!(matches!(draft.runtime, Runtime::Idle));
 }
 
-/// Settings → Providers env/home/launch-args must reach the spawn options,
+/// Settings → Harnesses env/home/launch-args must reach the spawn options,
 /// and the home override must land on the provider's own variable.
 #[test]
 fn provider_binary_home_and_launch_arguments_follow_the_selected_profile() {
@@ -4110,7 +4110,7 @@ fn child_native_approval_callback_and_respond_approval_preserve_options_and_scop
                 ("parent", None, None, false, "never both"),
             ];
             // In manual mode the approval is the user's, whatever the lead asks.
-            let manual_refusal = [("parent", None, Some("Reject:Native"), false, "child approval is manual")];
+            let manual_refusal = [("parent", None, Some("Reject:Native"), false, "subagent approvals is manual")];
             for (caller, approval, option, cancel, error) in if manual { &manual_refusal[..] } else { &refusals[..] } {
                 let refused = respond(state, cx, caller, *approval, *option, *cancel).unwrap_err();
                 assert!(refused.contains(error), "{refused}");

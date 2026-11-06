@@ -589,7 +589,10 @@ impl PullRequestView {
                 .label(crate::tr!("pull_requests.review.entry"))
                 .disabled(merged)
                 .when(merged, |button| {
-                    button.tooltip(crate::tr!("pull_requests.review.merged_disabled"))
+                    button.tooltip(crate::tr!(
+                        "pull_requests.review.merged_disabled",
+                        pr = self.noun(cx).pr
+                    ))
                 })
                 .on_click(cx.listener(|this, _, window, cx| this.open_review(window, cx)))
         });
@@ -1041,6 +1044,7 @@ impl PullRequestView {
                 .into_any_element()
         };
         let host_name = view.read(cx).host_name(cx);
+        let noun = view.read(cx).noun(cx);
         let stale_notice = stale.map(|(old, new)| {
             let move_view = view.clone();
             let mut actions = vec![
@@ -1162,11 +1166,11 @@ impl PullRequestView {
                     .compact(compact)
                     .choices(segments),
             )
-            .child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!(caption, host_name = host_name.clone())),
-            )
+            .child(div().text_secondary(compact, cx).child(crate::tr!(
+                caption,
+                host_name = host_name.clone(),
+                pr = noun.pr.clone()
+            )))
             .when(unplaced > 0, |sheet| {
                 sheet.child(
                     div()

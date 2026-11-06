@@ -570,7 +570,7 @@ fn sync_error(link: &ThreadPullRequestLink, host_name: &str) -> String {
         Some(PullRequestSyncError::Failed) => {
             crate::tr!("pull_requests.notice_failed").into_owned()
         }
-        None => crate::tr!("pull_requests.waiting_for_host").into_owned(),
+        None => crate::tr!("pull_requests.waiting_for_host", host_name = host_name).into_owned(),
     }
 }
 #[derive(Action, Clone, PartialEq, Deserialize)]
@@ -704,6 +704,34 @@ pub(crate) fn host_terms(store: &WorkspaceStore, host: &str) -> &'static HostTer
 /// The pull request host at `host` as a person reads it.
 pub(crate) fn host_name(store: &WorkspaceStore, host: &str) -> String {
     host_terms(store, host).display_name(host)
+}
+
+/// A host kind's name in keys: `github`, `forgejo`, `gitea`, `azure_devops`.
+pub(crate) fn host_key(terms: &HostTerms) -> String {
+    terms.name.to_ascii_lowercase().replace(' ', "_")
+}
+
+/// What a pull request is called on one host, which differs by kind and locale (a GitLab
+/// merge request): `pr` in running text, `title` at the start of a sentence or label.
+#[derive(Clone)]
+pub(crate) struct Noun {
+    pub(crate) pr: String,
+    pub(crate) title: String,
+}
+
+impl Noun {
+    pub(crate) fn of(terms: &HostTerms) -> Self {
+        let key = host_key(terms);
+        Self {
+            pr: crate::tr!(&format!("pull_requests.noun.{key}")).into_owned(),
+            title: crate::tr!(&format!("pull_requests.noun_title.{key}")).into_owned(),
+        }
+    }
+
+    /// The pull request host at `host`'s noun.
+    pub(crate) fn at(store: &WorkspaceStore, host: &str) -> Self {
+        Self::of(host_terms(store, host))
+    }
 }
 
 /// The row's menu: Open on the host, Copy link, the watch, what can become of the pull request,
@@ -958,6 +986,7 @@ impl PullRequestsPanel {
                 None,
                 None,
                 busy,
+                Noun::at(store, &key.host),
             )
         }
     }

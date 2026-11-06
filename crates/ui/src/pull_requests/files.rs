@@ -1338,7 +1338,7 @@ impl PullRequestView {
             return material::empty_state(
                 Icon::new(IconName::File),
                 crate::tr!("pull_requests.files.empty_title").into_owned(),
-                crate::tr!("pull_requests.files.empty_desc").into_owned(),
+                crate::tr!("pull_requests.files.empty_desc", pr = self.noun(cx).pr).into_owned(),
                 cx,
             )
             .into_any_element();
@@ -1375,10 +1375,11 @@ impl PullRequestView {
                         "pull_requests.files.partial",
                         shown = listed.to_string(),
                         total = files.changed_files.to_string(),
-                        host_name = self.host_name(cx)
+                        host_name = self.host_name(cx),
+                        pr = self.noun(cx).pr
                     )
                 } else {
-                    crate::tr!("pull_requests.files.partial_unknown")
+                    crate::tr!("pull_requests.files.partial_unknown", pr = self.noun(cx).pr)
                 }
                 .into_owned()
             }),

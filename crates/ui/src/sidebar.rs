@@ -1345,7 +1345,15 @@ impl SessionsSidebar {
         let refusal = match self.store.read(cx).fork_availability(&action.0) {
             ForkAvailability::Available => None,
             ForkAvailability::Unsupported => {
-                Some(crate::tr!("sidebar.fork_unsupported").into_owned())
+                let store = self.store.read(cx);
+                let provider = store
+                    .sidebar_sessions()
+                    .iter()
+                    .find(|meta| meta.id == action.0)
+                    .map_or("Harness", |meta| {
+                        crate::settings::provider_label(meta.provider)
+                    });
+                Some(crate::tr!("sidebar.fork_unsupported", provider = provider).into_owned())
             }
             ForkAvailability::Empty => Some(crate::tr!("sidebar.fork_empty").into_owned()),
             ForkAvailability::Running => Some(crate::tr!("sidebar.fork_running").into_owned()),

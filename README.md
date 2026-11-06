@@ -83,11 +83,11 @@ and a live plan/task panel.
 
 **Everything else, over [ACP](https://agentclientprotocol.com).** Tcode ships a
 marketplace backed by the official ACP registry.
-Install one from **Settings → Providers**, or point Tcode at any command that
+Install one from **Settings → Harnesses**, or point Tcode at any command that
 speaks ACP.
 
 <div align="center">
-<img src="docs/images/acp-marketplace.png" width="720" alt="ACP agent marketplace in Settings → Providers">
+<img src="docs/images/acp-marketplace.png" width="720" alt="ACP agent marketplace in Settings → Harnesses">
 </div>
 
 > ACP entries that duplicate a native integration are deliberately hidden from

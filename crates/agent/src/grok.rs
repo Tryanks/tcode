@@ -527,7 +527,7 @@ impl Dialect for Grok {
                 Ok(()) => describe(err),
             };
             AgentError::Provider(format!(
-                "Grok requires authentication: {detail}. Set XAI_API_KEY in Settings → Providers → Grok, or sign in with `grok login`."
+                "Grok requires authentication: {detail}. Set XAI_API_KEY in Settings → Harnesses → Grok, or sign in with `grok login`."
             ))
         };
 

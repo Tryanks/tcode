@@ -810,7 +810,7 @@ impl PreviewPanel {
 
 impl Render for PreviewPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // When the embedded browser is turned off in Settings → Browser, hide
+        // When the embedded browser is turned off in Settings → Preview, hide
         // the chrome and webview entirely and show a quiet placeholder.
         if !self.store.read(cx).preview_browser_settings().enabled {
             return v_flex().size_full().child(material::empty_state(

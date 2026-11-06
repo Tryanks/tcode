@@ -1,4 +1,4 @@
-//! Settings → Source Control: every host Tcode reads pull requests from, whatever its kind. The
+//! Settings → Git Platforms: every host Tcode reads pull requests from, whatever its kind. The
 //! host decides which hosts exist, where each credential comes from and what is wrong; this
 //! panel shows it and sends the user's choices.
 
@@ -56,7 +56,7 @@ struct ChooseKind {
 
 /// A host kind's name in keys: `github`, `forgejo`, `gitea`, `azure_devops`.
 fn slug(kind: HostKind) -> String {
-    kind.terms().name.to_ascii_lowercase().replace(' ', "_")
+    crate::pull_requests::host_key(kind.terms())
 }
 
 /// What Add host's input holds for a kind before anything is typed: its public host, or

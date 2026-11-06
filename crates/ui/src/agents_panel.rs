@@ -1086,8 +1086,13 @@ impl Entries {
                 .child(summary.clone())
                 .into_any_element(),
             Entry::Row(row) => self.render_row(row, compact, window, cx),
-            Entry::NativeCaption => material::list_caption(
-                crate::tr!("agents.provider_subagents").into_owned().into(),
+            Entry::NativeCaption(provider) => material::list_caption(
+                crate::tr!(
+                    "agents.provider_subagents",
+                    provider = provider.unwrap_or("Harness")
+                )
+                .into_owned()
+                .into(),
                 compact,
                 cx,
             )
@@ -1478,12 +1483,18 @@ impl Render for AgentsPanel {
 /// One entry of the agents list.
 #[derive(Clone)]
 enum Entry {
-    SettleAll { disabled: bool },
+    SettleAll {
+        disabled: bool,
+    },
     Summary(String),
     Row(Box<AgentRow>),
-    NativeCaption,
+    /// Names the provider that runs the native subagents listed under it.
+    NativeCaption(Option<&'static str>),
     ReadOnly(&'static str),
-    SettledHeader { count: usize, expanded: bool },
+    SettledHeader {
+        count: usize,
+        expanded: bool,
+    },
 }
 
 impl AgentsPanel {
@@ -1522,7 +1533,8 @@ impl AgentsPanel {
                 .map(row),
         );
         if !agents.native.is_empty() {
-            entries.push(("native-caption".into(), Entry::NativeCaption));
+            let provider = agents.native.first().and_then(|row| row.managed_by);
+            entries.push(("native-caption".into(), Entry::NativeCaption(provider)));
             entries.extend(agents.native.iter().map(row));
             if let Some(provider) = agents.native.first().and_then(|row| row.managed_by) {
                 entries.push(("native-readonly".into(), Entry::ReadOnly(provider)));

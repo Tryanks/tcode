@@ -1805,7 +1805,7 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Settings → Providers: native providers and installed ACP agents share one
+    /// Settings → Harnesses: native providers and installed ACP agents share one
     /// bordered list. The marketplace lives behind the Add agent dialog.
     fn render_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         self.sync_acp_cards(window, cx);
