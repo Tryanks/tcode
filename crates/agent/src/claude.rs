@@ -50,6 +50,10 @@ use crate::{
 /// First Claude Code build whose headless control protocol is verified to
 /// expose `rewind_conversation` alongside the SDK's `rewind_files` request.
 const NATIVE_REWIND_MIN_VERSION: (u32, u32, u32) = (2, 1, 214);
+/// The release whose `rewind_files` `dry_run` was read to restore nothing.
+/// An older CLI that ignored the flag would restore files when the panel
+/// merely opens, so it is not asked.
+const REWIND_PREVIEW_MIN_VERSION: (u32, u32, u32) = (2, 1, 318);
 
 /// First Claude Code release with `--append-system-prompt-file` (a hidden
 /// option in the published 2.0.33 `cli.js`; 2.0.32 lacks it).
@@ -293,6 +297,7 @@ fn inherit_settings(from: &Path, to: &Path) -> std::io::Result<()> {
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let version = claude_version(opts.binary_path.as_deref(), &opts.launch_env).await;
     let native_rewind = version.is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
+    let rewind_preview = version.is_some_and(|version| version >= REWIND_PREVIEW_MIN_VERSION);
     // Absolute path: a bare name would be resolved against the session cwd we
     // set below, which breaks PATH lookup (see `resolve_binary`).
     let binary = crate::resolve_binary(opts.binary_path.as_deref(), "claude")?;
@@ -476,7 +481,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         event_tx,
         session_config,
         applied_permission_mode,
-        native_rewind,
+        (native_rewind, rewind_preview),
         stderr_tail,
         stderr_task,
     ))
@@ -775,11 +780,12 @@ async fn actor_loop(
     event_tx: smol::channel::Sender<AgentEvent>,
     config: SessionConfig,
     applied_permission_mode: String,
-    native_rewind: bool,
+    (native_rewind, rewind_preview): (bool, bool),
     stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
     let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind);
+    mapper.rewind_preview = rewind_preview;
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
     let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
@@ -1260,26 +1266,27 @@ async fn handle_command(
             checkpoint_id,
             mode,
         } => {
-            let failure = if !mapper.native_rewind {
-                Some(RewindFailure::new(RewindFailureReason::Unsupported, None))
-            } else {
-                match mapper.begin_preview(checkpoint_id.clone(), mode) {
-                    Some(request) => write_line(stdin, &request).await.err().map(|error| {
-                        RewindFailure::new(RewindFailureReason::ProcessGone, error.to_string())
-                    }),
-                    // Restoring the conversation alone changes no file.
-                    None => {
-                        let _ = event_tx
-                            .send(AgentEvent::RewindPreviewed {
-                                checkpoint_id: checkpoint_id.clone(),
-                                mode,
-                                result: RewindPreviewResult::Ready(RewindPreview::default()),
-                            })
-                            .await;
-                        None
+            let failure =
+                if !mapper.native_rewind || (mode.includes_files() && !mapper.rewind_preview) {
+                    Some(RewindFailure::new(RewindFailureReason::Unsupported, None))
+                } else {
+                    match mapper.begin_preview(checkpoint_id.clone(), mode) {
+                        Some(request) => write_line(stdin, &request).await.err().map(|error| {
+                            RewindFailure::new(RewindFailureReason::ProcessGone, error.to_string())
+                        }),
+                        // Restoring the conversation alone changes no file.
+                        None => {
+                            let _ = event_tx
+                                .send(AgentEvent::RewindPreviewed {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    mode,
+                                    result: RewindPreviewResult::Ready(RewindPreview::default()),
+                                })
+                                .await;
+                            None
+                        }
                     }
-                }
-            };
+                };
             if let Some(failure) = failure {
                 let _ = event_tx
                     .send(AgentEvent::RewindPreviewed {
@@ -1839,6 +1846,8 @@ pub(crate) struct Mapper {
     /// replayed echo makes them conversation restore points.
     steer_uuids: HashMap<String, String>,
     native_rewind: bool,
+    /// The CLI's `rewind_files` `dry_run` is known to restore nothing.
+    rewind_preview: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
     /// Latest structured stop reason for the active turn.
@@ -1891,6 +1900,7 @@ impl Mapper {
             rewind_previews: HashMap::new(),
             steer_uuids: HashMap::new(),
             native_rewind,
+            rewind_preview: native_rewind,
             last_served_model: None,
             stop_reason: None,
             limit_resets_at: None,

@@ -339,12 +339,28 @@ impl AppState {
                 ));
             }
             Command::RewindTurn {
-                turn, steer, mode, ..
+                turn,
+                steer,
+                checkpoint_id,
+                mode,
+                ..
             }
             | Command::PreviewRewind {
-                turn, steer, mode, ..
+                turn,
+                steer,
+                checkpoint_id,
+                mode,
+                ..
             } if self
-                .rewind_checkpoint(active, *turn, steer.as_deref(), *mode)
+                .rewind_checkpoint(
+                    active,
+                    &super::rewind::RewindAt {
+                        turn: *turn,
+                        steer: steer.as_deref(),
+                        checkpoint: checkpoint_id.as_deref(),
+                    },
+                    *mode,
+                )
                 .is_none() =>
             {
                 return Err(error(

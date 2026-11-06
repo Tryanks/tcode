@@ -186,7 +186,7 @@ rewind:
   undo_failed: "巻き戻しの取り消しに失敗しました：%{reason}"
   reason:
     turn_running: "ターンの実行中です。"
-    busy: "Harness にまだ処理されていない入力があります。"
+    busy: "%{harness} にまだ処理されていない入力があります。"
     target_not_found: "このメッセージは現在の会話にありません（圧縮された可能性があります）。"
     conversation_changed: "その間に会話が変わりました。"
     cannot_cut_here: "このメッセージの位置では会話を切れません。"
@@ -194,10 +194,10 @@ rewind:
     conflicts: "その後、エージェントの外でファイルが変更されました。"
     usage_limited: "使用量の上限に達しています。"
     expired: "リクエストの期限が切れました。"
-    save_failed: "Harness が結果を保存できませんでした。"
+    save_failed: "%{harness} が結果を保存できませんでした。"
     unsupported: "このスレッドのセッションは巻き戻せません。"
-    process_gone: "Harness が応答する前に停止しました。"
-    other: "Harness が拒否しました。"
+    process_gone: "%{harness} が応答する前に停止しました。"
+    other: "%{harness} が拒否しました。"
 rail:
   commands: "%{count} 件のコマンド"
   commands_one: "1 件のコマンド"

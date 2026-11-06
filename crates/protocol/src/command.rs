@@ -633,6 +633,10 @@ pub enum Command {
         turn: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steer: Option<String>,
+        /// The restore point the client saw there; the host refuses when its
+        /// own differs (a turn index is reused once a rewind cuts).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_id: Option<String>,
         mode: RewindMode,
         /// The client that asked: it alone puts the restored prompt in its
         /// composer.
@@ -647,6 +651,8 @@ pub enum Command {
         turn: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         steer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint_id: Option<String>,
         mode: RewindMode,
     },
     /// Undo the thread's latest rewind while its harness keeps it undoable

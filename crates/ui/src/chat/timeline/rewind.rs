@@ -51,7 +51,14 @@ impl TimelineView {
             {
                 previews.insert(mode, PreviewState::Checking);
                 let preview = self.workspace_store.update(cx, |store, cx| {
-                    store.preview_rewind_for(session_id.clone(), turn, steer.clone(), mode, cx)
+                    store.preview_rewind_for(
+                        session_id.clone(),
+                        turn,
+                        steer.clone(),
+                        target.checkpoint_id.clone(),
+                        mode,
+                        cx,
+                    )
                 });
                 let key = key.clone();
                 tasks.push(cx.spawn(async move |this, cx| {
@@ -139,9 +146,10 @@ impl TimelineView {
             cx.notify();
             return;
         };
+        let checkpoint_id = Some(target.checkpoint_id.clone());
         let mode = panel_from(&state, target).selected;
         self.workspace_store.update(cx, |store, _| {
-            store.rewind_turn_for(session_id, state.turn, state.steer, mode)
+            store.rewind_turn_for(session_id, state.turn, state.steer, checkpoint_id, mode)
         });
         cx.notify();
     }

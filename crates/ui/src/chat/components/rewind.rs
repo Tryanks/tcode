@@ -190,7 +190,7 @@ pub(crate) fn panel_body(
     let preview = panel
         .preview
         .as_ref()
-        .map(|preview| preview_block(preview, panel.files_expanded, &actions, cx));
+        .map(|preview| preview_block(preview, &harness, panel.files_expanded, &actions, cx));
     let includes_files = panel.selected.includes_files();
     let target = &panel.target;
     let notes = [
@@ -367,6 +367,7 @@ fn path_list(rows: Vec<AnyElement>, id: &'static str) -> AnyElement {
 
 fn preview_block(
     preview: &PreviewState,
+    harness: &str,
     expanded: bool,
     actions: &PanelActions,
     cx: &App,
@@ -390,7 +391,7 @@ fn preview_block(
             .child(
                 crate::tr!(
                     "rewind.preview.unavailable",
-                    reason = super::dividers::rewind_reason(failure.reason)
+                    reason = super::dividers::rewind_reason(failure.reason, harness)
                 )
                 .into_owned(),
             )
@@ -536,10 +537,10 @@ pub(crate) fn rewound_divider(
     cx: &App,
 ) -> AnyElement {
     let EntryContent::Rewound(rewound) = &entry.content else {
-        return super::dividers::rewind_divider(entry, cx);
+        return super::dividers::rewind_divider(entry, &harness, cx);
     };
     let key = entry.id.clone();
-    let label = super::dividers::rewound_label(rewound);
+    let label = super::dividers::rewound_label(rewound, &harness);
     let tint = if rewound.incomplete.is_some() {
         cx.theme().warning
     } else {

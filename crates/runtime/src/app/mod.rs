@@ -265,6 +265,7 @@ mod pull_request_watch;
 mod pull_requests;
 mod revisioned;
 mod rewind;
+pub use rewind::RewindAt;
 mod send;
 mod session_index;
 mod sessions;

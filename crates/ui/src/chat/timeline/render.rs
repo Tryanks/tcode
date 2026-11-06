@@ -676,10 +676,11 @@ impl TimelineView {
         entry: &TimelineEntry,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let EntryContent::Rewound(rewound) = &entry.content else {
-            return components::dividers::rewind_divider(entry, cx);
-        };
         let store = self.workspace_store.read(cx);
+        let harness = store.harness_name_for(self.session_id.as_deref(), cx);
+        let EntryContent::Rewound(rewound) = &entry.content else {
+            return components::dividers::rewind_divider(entry, &harness, cx);
+        };
         let status = store
             .session_status_for(self.session_id.as_deref(), cx)
             .and_then(|status| status.rewind.as_ref());
@@ -707,7 +708,6 @@ impl TimelineView {
                     }
                     _ => None,
                 });
-        let harness = store.harness_name_for(self.session_id.as_deref(), cx);
         let key = format!("rewound:{}", entry.id);
         let expanded = self.expanded.contains(&key);
         let on_toggle: components::rewind::Handler = Rc::new(move |_, cx| {

@@ -186,7 +186,7 @@ rewind:
   undo_failed: "撤销回退失败：%{reason}"
   reason:
     turn_running: "有轮次正在运行。"
-    busy: "Harness 还有未处理的输入。"
+    busy: "%{harness} 还有未处理的输入。"
     target_not_found: "这条消息已不在当前对话中（可能已被压缩）。"
     conversation_changed: "对话在此期间发生了变化。"
     cannot_cut_here: "对话无法在这条消息处截断。"
@@ -194,10 +194,10 @@ rewind:
     conflicts: "此后有文件在代理之外被修改。"
     usage_limited: "已达到用量上限。"
     expired: "请求已过期。"
-    save_failed: "Harness 未能保存结果。"
+    save_failed: "%{harness} 未能保存结果。"
     unsupported: "此线程的会话不支持回退。"
-    process_gone: "Harness 在回应前已停止。"
-    other: "Harness 拒绝了此次回退。"
+    process_gone: "%{harness} 在回应前已停止。"
+    other: "%{harness} 拒绝了此次回退。"
 rail:
   commands: "%{count} 条命令"
   commands_one: "1 条命令"

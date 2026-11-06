@@ -48,6 +48,15 @@ impl RewindRequest {
     }
 }
 
+/// The message a rewind goes to before: the prompt that opened absolute
+/// turn `turn`, or the steer `steer` in it, with the restore point the asker
+/// saw there when it says.
+pub struct RewindAt<'a> {
+    pub turn: usize,
+    pub steer: Option<&'a str>,
+    pub checkpoint: Option<&'a str>,
+}
+
 /// A client waiting for what a rewind would restore.
 pub(super) struct PreviewRequest {
     checkpoint_id: String,
@@ -98,16 +107,15 @@ impl AppState {
     pub(super) fn rewind_checkpoint(
         &self,
         active: &ActiveSession,
-        turn: usize,
-        steer: Option<&str>,
+        at: &RewindAt<'_>,
         mode: RewindMode,
     ) -> Option<String> {
         let status = self.rewind_status(active)?;
-        if status.blocked.is_some() || !status.offers(mode, turn, steer.is_some()) {
+        if status.blocked.is_some() || !status.offers(mode, at.turn, at.steer.is_some()) {
             return None;
         }
-        let turn = active.timeline.turns.get(turn)?;
-        match steer {
+        let turn = active.timeline.turns.get(at.turn)?;
+        match at.steer {
             None => turn.provider_checkpoint_id.clone(),
             Some(steer) => turn
                 .steer_checkpoints
@@ -115,6 +123,7 @@ impl AppState {
                 .find(|(id, _)| id == steer)
                 .map(|(_, checkpoint)| checkpoint.clone()),
         }
+        .filter(|checkpoint| at.checkpoint.is_none_or(|seen| seen == checkpoint))
     }
 
     /// The undo token of the thread's latest rewind to `checkpoint_id`, while
@@ -146,14 +155,13 @@ impl AppState {
     pub fn rewind_turn(
         &mut self,
         target_id: &str,
-        turn: usize,
-        steer: Option<&str>,
+        at: RewindAt<'_>,
         mode: RewindMode,
         client_id: Option<String>,
         cx: &mut HostCx,
     ) -> Option<smol::channel::Receiver<AgentEvent>> {
         let active = self.resident(target_id)?;
-        let checkpoint_id = self.rewind_checkpoint(active, turn, steer, mode)?;
+        let checkpoint_id = self.rewind_checkpoint(active, &at, mode)?;
         self.begin_rewind_request(
             target_id,
             RewindRequest {
@@ -206,7 +214,10 @@ impl AppState {
     ) -> Option<smol::channel::Receiver<AgentEvent>> {
         let active = self.resident_mut(target_id)?;
         let session_id = active.meta.id.clone();
-        if request.undo_token.is_none() {
+        // What was queued when the rewind was asked for waits for the
+        // user's next message; what is queued later only waits for the
+        // rewind itself.
+        if request.undo_token.is_none() && !active.queue.is_empty() {
             active.queue_held = true;
         }
         let live = match &active.runtime {
@@ -238,8 +249,7 @@ impl AppState {
     pub fn preview_rewind(
         &mut self,
         target_id: &str,
-        turn: usize,
-        steer: Option<&str>,
+        at: RewindAt<'_>,
         mode: RewindMode,
         cx: &mut HostCx,
     ) -> smol::channel::Receiver<RewindPreviewResult> {
@@ -256,7 +266,7 @@ impl AppState {
             .rewind
             .is_some_and(|control| control.preview != agent::RewindPreviewKind::None);
         let Some(checkpoint_id) = self
-            .rewind_checkpoint(active, turn, steer, mode)
+            .rewind_checkpoint(active, &at, mode)
             .filter(|_| previews)
         else {
             let _ = reply.try_send(refused(RewindFailureReason::Unsupported));
@@ -387,7 +397,7 @@ impl AppState {
         if let AgentEvent::RewindCompleted {
             checkpoint_id,
             mode,
-            prefill: prefill @ None,
+            prefill,
             prefill_attachments,
             ..
         } = &mut event
@@ -398,9 +408,12 @@ impl AppState {
         {
             // A Harness that answers without the prompt (Codex) has its own
             // client refill it from the transcript it keeps; Tcode refills it
-            // from the one it stored.
-            *prefill = Some(text);
-            *prefill_attachments = attachments;
+            // from the one it stored. The images Tcode sent with it come back
+            // whatever the Harness kept of them.
+            prefill.get_or_insert(text);
+            if prefill_attachments.is_empty() {
+                *prefill_attachments = attachments;
+            }
         }
         if let AgentEvent::RewindFailed { failure, .. }
         | AgentEvent::RewindUndoFailed { failure, .. } = &event
@@ -446,15 +459,17 @@ impl AppState {
             let _ = waiter.try_send(event.clone());
         }
         // A rewind the harness did not make leaves the queue as it was.
-        let released = matches!(event, AgentEvent::RewindFailed { .. })
-            && self
-                .resident_mut(session_id)
-                .is_some_and(|resident| std::mem::replace(&mut resident.queue_held, false));
+        if matches!(event, AgentEvent::RewindFailed { .. })
+            && let Some(resident) = self.resident_mut(session_id)
+        {
+            resident.queue_held = false;
+        }
         if !self.residents.live.contains_key(session_id) {
             self.on_background_turn_completed(session_id, cx);
             return;
         }
-        if released && self.dispatch_next_queued(session_id, cx).is_err() {
+        // Sends made while the rewind was made waited for it.
+        if self.dispatch_next_queued(session_id, cx).is_err() {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
         // A provider started only to rewind goes back to idle like one that

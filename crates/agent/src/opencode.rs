@@ -1382,11 +1382,18 @@ fn reverted_files(files: &Value) -> RewindFiles {
 /// The attachments of a restored prompt that are files on this machine. An
 /// inline attachment (Tcode sends its images as `data:` URLs) has no path to
 /// put back in a composer, so the prompt comes back without it.
+/// The prompt's images that are local files: the composer takes images
+/// alone, and an inline (`data:`) one has no path to hand it.
 fn local_attachments(files: &Value) -> Vec<String> {
     files
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|file| {
+            file.get("mime")
+                .and_then(Value::as_str)
+                .is_some_and(|mime| mime.starts_with("image/"))
+        })
         .filter_map(|file| {
             let path = file
                 .pointer("/source/uri")?
@@ -3586,7 +3593,7 @@ cat > /dev/null
     /// and a file attached by path.
     fn user_message(id: &str, text: &str) -> String {
         format!(
-            r#"{{"data":{{"type":"user","id":"{id}","text":"{text}","time":{{"created":1793562692083}},"files":[{{"data":"aGk=","mime":"image/png","source":{{"type":"uri","uri":"data:image/png;base64,aGk="}},"name":"shot.png"}},{{"data":"aGk=","mime":"text/plain","source":{{"type":"uri","uri":"file:///work/project/notes%20one.txt"}},"name":"notes one.txt"}}]}}}}"#
+            r#"{{"data":{{"type":"user","id":"{id}","text":"{text}","time":{{"created":1793562692083}},"files":[{{"data":"aGk=","mime":"image/png","source":{{"type":"uri","uri":"data:image/png;base64,aGk="}},"name":"shot.png"}},{{"data":"aGk=","mime":"image/png","source":{{"type":"uri","uri":"file:///work/project/shot%20one.png"}},"name":"shot one.png"}},{{"data":"aGk=","mime":"text/plain","source":{{"type":"uri","uri":"file:///work/project/notes%20one.txt"}},"name":"notes one.txt"}}]}}}}"#
         )
     }
 
@@ -3652,7 +3659,7 @@ cat > /dev/null
                     "checkpoint_id": PROMPT_ID,
                     "mode": "files_and_conversation",
                     "prefill": "Reply with exactly: PONG",
-                    "prefill_attachments": ["/work/project/notes one.txt"],
+                    "prefill_attachments": ["/work/project/shot one.png"],
                     "later_history": "hidden_until_next_send",
                     "files": {"files": [{"path": "notes.txt", "insertions": 1, "deletions": 2}]},
                     "undo_token": PROMPT_ID,

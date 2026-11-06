@@ -4094,6 +4094,7 @@ impl WorkspaceStore {
         session_id: String,
         turn: usize,
         steer: Option<String>,
+        checkpoint_id: String,
         mode: agent::RewindMode,
         cx: &mut App,
     ) -> Task<Result<agent::RewindPreviewResult, String>> {
@@ -4102,6 +4103,7 @@ impl WorkspaceStore {
                 turn: self.absolute_turn_for(Some(&session_id), turn),
                 session_id,
                 steer,
+                checkpoint_id: Some(checkpoint_id),
                 mode,
             },
             cx,
@@ -5886,6 +5888,7 @@ pub(crate) mod tests {
             store.rewind_turn_for(
                 store.sole_thread().unwrap_or_default(),
                 2,
+                None,
                 None,
                 agent::RewindMode::Conversation,
             );

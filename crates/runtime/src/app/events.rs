@@ -474,6 +474,8 @@ impl AppState {
             // an ordinary turn, FIFO, one at a time.
             let mut restart = false;
             let mut restart_deferred = false;
+            // A restart would drop the answer of a rewind that stopped this turn.
+            let rewinding = self.rewind_requests.contains_key(session_id);
             let is_active = if let Some(active) = self
                 .residents
                 .live
@@ -481,11 +483,15 @@ impl AppState {
                 .filter(|active| active.meta.id == session_id)
             {
                 active.turn_in_flight = false;
-                restart = !active.queue.is_empty() && active.launch_settings_changed_while_live();
-                restart_deferred = restart && active.background_task_count > 0;
+                restart = !active.queue.is_empty()
+                    && !active.queue_held
+                    && active.launch_settings_changed_while_live();
+                restart_deferred = restart && (active.background_task_count > 0 || rewinding);
                 // A thread that moved during this turn leaves the old directory now,
                 // whether or not anything waits to go.
-                let moved = active.cwd_changed_while_live() && active.background_task_count == 0;
+                let moved = active.cwd_changed_while_live()
+                    && active.background_task_count == 0
+                    && !rewinding;
                 if restart_deferred {
                     log::info!(
                         "deferring settings restart for {} background task(s)",
