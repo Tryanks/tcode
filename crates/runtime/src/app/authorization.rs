@@ -124,6 +124,7 @@ impl AppState {
                 | Topic::PreviewSession { .. }
                 | Topic::DevServers { .. }
                 | Topic::Hosting
+                | Topic::StorageMigration
                 | Topic::ExternalImport { .. } => Err(refusal("subscription")),
             },
             ClientPayload::Command(command) => match command {

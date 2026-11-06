@@ -494,6 +494,8 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         Topic::ExternalImport {
             project_id: host.a.id.clone(),
         },
+        // The machine's storage is a full device's to watch.
+        Topic::StorageMigration,
         Topic::SpaceIndex {
             space_id: "other".into(),
         },

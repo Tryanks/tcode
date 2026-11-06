@@ -461,6 +461,9 @@ pub struct AppState {
     /// `event_records`.
     log_hydrations: HashMap<String, Hydration>,
     storage_pass: Option<storage_pass::StoragePassRun>,
+    /// The move of an older build's threads, while one runs or waits for
+    /// disk space.
+    storage_migration: Option<tcode_protocol::StorageMigration>,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
@@ -650,6 +653,7 @@ impl AppState {
             event_records: HashMap::new(),
             log_hydrations: HashMap::new(),
             storage_pass: None,
+            storage_migration: None,
             review_comment_drafts: HashMap::new(),
             pending_relaunch,
             external_imports: HashMap::new(),

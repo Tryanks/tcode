@@ -494,6 +494,8 @@ pub struct SettingsPage {
     section: Section,
     /// Whether this page holds the store's archived threads.
     archived_held: bool,
+    /// Whether this page holds the host's storage migration.
+    storage_migration_held: bool,
     capabilities: SettingsCapabilities,
     /// Whether the machine group's **Advanced** subgroup is open, once the user
     /// has said. `None` keeps the capability-derived default.
@@ -748,6 +750,7 @@ impl SettingsPage {
             acp_cards: Vec::new(),
             section,
             archived_held: false,
+            storage_migration_held: false,
             capabilities,
             advanced_expanded: None,
             rail_opacity: 1.,
@@ -819,12 +822,16 @@ impl SettingsPage {
         page.sync_acp_cards(window, cx);
         page.hydrate_inputs(window, cx);
         page._subscriptions.push(cx.on_release(|this, cx| {
-            if this.archived_held {
-                this.store
-                    .update(cx, |store, _| store.release_archived_sessions());
-            }
+            this.store.update(cx, |store, _| {
+                if this.archived_held {
+                    store.release_archived_sessions();
+                }
+                if this.storage_migration_held {
+                    store.release_storage_migration();
+                }
+            });
         }));
-        page.sync_archived(cx);
+        page.sync_holds(cx);
         page
     }
 
@@ -971,34 +978,44 @@ impl SettingsPage {
         });
     }
 
-    /// The index leaves archived threads out; the Archived section holds
-    /// them only while it is open.
-    fn sync_archived(&mut self, cx: &mut Context<Self>) {
-        let open = self.section == Section::Archived;
-        if open == self.archived_held {
-            return;
+    /// What a section shows only while it is open: the archived threads,
+    /// which the index leaves out, and the host's storage migration.
+    fn sync_holds(&mut self, cx: &mut Context<Self>) {
+        let archived = self.section == Section::Archived;
+        if archived != self.archived_held {
+            self.archived_held = archived;
+            self.store.update(cx, |store, cx| {
+                if archived {
+                    store.hold_archived_sessions(cx);
+                } else {
+                    store.release_archived_sessions();
+                }
+            });
         }
-        self.archived_held = open;
-        self.store.update(cx, |store, cx| {
-            if open {
-                store.hold_archived_sessions(cx);
-            } else {
-                store.release_archived_sessions();
-            }
-        });
+        let maintenance = self.section == Section::Maintenance;
+        if maintenance != self.storage_migration_held {
+            self.storage_migration_held = maintenance;
+            self.store.update(cx, |store, _| {
+                if maintenance {
+                    store.hold_storage_migration();
+                } else {
+                    store.release_storage_migration();
+                }
+            });
+        }
     }
 
     fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
         self.host_permissions = None;
         if !self.section_applies(&section, cx) {
             self.section = Section::General;
-            self.sync_archived(cx);
+            self.sync_holds(cx);
             Self::return_to_settings_root(&self.window_state, cx);
             cx.notify();
             return;
         }
         self.section = section;
-        self.sync_archived(cx);
+        self.sync_holds(cx);
         // Arriving from a deep link or the palette must not leave the selected
         // section hidden inside a folded subgroup.
         if section.advanced() {
@@ -1477,7 +1494,7 @@ impl SettingsPage {
             #[cfg(feature = "remote-hosting")]
             Section::Traverse => v_flex().child(self.remote.traverse.clone()),
             Section::Archived => self.render_archived(window, cx),
-            Section::Maintenance => self.render_maintenance(cx),
+            Section::Maintenance => self.render_maintenance(window, cx),
         };
         // The rail swaps sections in place, so a newly chosen section fades in;
         // compact sections arrive through the shell's navigation stack. The
@@ -1573,7 +1590,7 @@ impl SettingsPage {
             ))
     }
 
-    fn render_maintenance(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_maintenance(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let throttle_disabled = self
             .store
             .read(cx)
@@ -1599,8 +1616,12 @@ impl SettingsPage {
             cx,
             |store, checked| store.set_inactive_frame_throttle_disabled(!checked),
         )];
+        let migration = self.store.read(cx).storage_migration().cloned();
+        let migration = crate::motion::shown("storage-migration", migration, SHOW, window, cx)
+            .map(|shown| shown.fold(self.storage_migration_group(&shown.value, cx)));
         v_flex()
             .gap(crate::material::section_gap(cx))
+            .children(migration)
             .child(crate::settings_rows::settings_group(
                 crate::tr!("settings.performance_section"),
                 performance,
@@ -1611,6 +1632,53 @@ impl SettingsPage {
                 vec![self.restore_all_row(cx)],
                 cx,
             ))
+    }
+
+    /// The host moving an older build's threads into its current storage.
+    fn storage_migration_group(
+        &self,
+        migration: &tcode_protocol::StorageMigration,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let compact = self.window_state.read(cx).compact;
+        let percent = 100. * migration.moved as f32 / migration.total.max(1) as f32;
+        let row = crate::material::group_row_stacked(cx)
+            .debug_selector(|| "storage-migration".into())
+            .child(
+                gpui_base::h_flex()
+                    .w_full()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_caption(cx)
+                            .child(crate::tr!("settings.storage_migration.title")),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_meta_mono(compact, cx)
+                            .child(format!("{}%", percent.floor() as u32)),
+                    ),
+            )
+            .child(
+                crate::widgets::progress::Progress::new("storage-migration-progress")
+                    .small()
+                    .value(percent),
+            )
+            .when(migration.waiting_for_space, |row| {
+                row.child(
+                    div()
+                        .text_secondary(compact, cx)
+                        .child(crate::tr!("settings.storage_migration.waiting_for_space")),
+                )
+            });
+        crate::settings_rows::settings_group(
+            crate::tr!("settings.storage_migration.section"),
+            vec![row.into_any_element()],
+            cx,
+        )
     }
 
     /// The whole-settings escape hatch: the per-item buttons cover single
@@ -3168,6 +3236,36 @@ mod tests {
         );
     }
 
+    /// A full-scope store whose host is scripted by the test: what the store
+    /// sends arrives on the first channel, and lines sent on the second
+    /// arrive from the host while the returned pump runs.
+    fn scripted_store(
+        attachment: WorkspaceAttachment,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceStore>,
+        async_channel::Receiver<String>,
+        async_channel::Sender<String>,
+        gpui::Task<()>,
+    ) {
+        cx.update(crate::theme::init);
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|delay| executor.timer(delay))
+                .await;
+        });
+        let store =
+            cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, false, cx));
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        (store, outgoing, incoming, pump)
+    }
+
     #[gpui::test]
     fn archived_delete_uses_response_worktree_sharing_and_preserves_the_cleanup_choice(
         cx: &mut TestAppContext,
@@ -3178,22 +3276,7 @@ mod tests {
         };
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
-        cx.update(crate::theme::init);
-        let (to_host, outgoing) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump_link = link.clone();
-        let executor = cx.background_executor.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump_link
-                .pump_with_timer(|delay| executor.timer(delay))
-                .await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
         store.update(cx, |store, cx| store.show_alone("live".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false));
         let mut page = None;
@@ -3308,6 +3391,93 @@ mod tests {
                 .unwrap();
             cx.run_until_parked();
         }
+    }
+
+    /// A client attached to another machine shows that machine's storage
+    /// migration in Maintenance only while the host says one runs: nothing
+    /// before, a card while it runs, nothing once it is done; and it stops
+    /// following once Maintenance closes.
+    #[gpui::test]
+    fn maintenance_shows_the_hosts_storage_migration_only_while_it_runs(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ClientPayload, EventEnvelope, HostMessage, ServerEvent, StorageMigration, Subscription,
+            Topic, decode_client_line, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let attachment = WorkspaceAttachment::Remote {
+            host_id: "studio".into(),
+            host_name: "Studio".into(),
+        };
+        let (store, outgoing, incoming, _pump) = scripted_store(attachment, cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        let follows = |outgoing: &async_channel::Receiver<String>, subscribe: bool| {
+            std::iter::from_fn(|| outgoing.try_recv().ok()).find_map(|line| {
+                let message = decode_client_line(&line).unwrap();
+                match message.payload {
+                    ClientPayload::Subscribe(Subscription {
+                        topic: Topic::StorageMigration,
+                        ..
+                    }) if subscribe => Some(message.id),
+                    ClientPayload::Unsubscribe(Subscription {
+                        topic: Topic::StorageMigration,
+                        ..
+                    }) if !subscribe => Some(message.id),
+                    _ => None,
+                }
+            })
+        };
+        let send = |request_id, migration| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id,
+                        topic: Topic::StorageMigration,
+                        event: ServerEvent::StorageMigrationReplaced(migration),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+        let shown = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw_settled(cx);
+            cx.debug_bounds("storage-migration").is_some()
+        };
+
+        page.update(cx, |page, cx| page.select_section(Section::Maintenance, cx));
+        cx.run_until_parked();
+        let request = follows(&outgoing, true).expect("Maintenance follows the migration");
+        send(Some(request), None);
+        assert!(!shown(cx), "no card while no migration runs");
+
+        send(
+            None,
+            Some(StorageMigration {
+                moved: 30,
+                total: 120,
+                waiting_for_space: false,
+            }),
+        );
+        assert!(shown(cx), "a card while the host moves threads");
+
+        send(None, None);
+        assert!(!shown(cx), "the card leaves once the move is done");
+
+        page.update(cx, |page, cx| page.select_section(Section::General, cx));
+        cx.run_until_parked();
+        assert!(
+            follows(&outgoing, false).is_some(),
+            "only Maintenance follows it"
+        );
     }
 
     struct CompactSettingsProbe {

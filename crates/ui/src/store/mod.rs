@@ -26,8 +26,8 @@ use tcode_protocol::{
     ArchivedSessions, Command, CommandResponse, EventEnvelope, ExternalImportStatus,
     ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus, IndexSummary, PathEntry,
     ProtocolError, ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, Scope,
-    ScopedProviderChoice, ServerEvent, SessionPlan, SessionSearchHit, SessionStatus, Subscription,
-    Topic,
+    ScopedProviderChoice, ServerEvent, SessionPlan, SessionSearchHit, SessionStatus,
+    StorageMigration, Subscription, Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -73,6 +73,7 @@ pub enum TopicKind {
     Preview,
     ExternalImport,
     Hosting,
+    StorageMigration,
 }
 
 impl From<&Topic> for TopicKind {
@@ -95,6 +96,7 @@ impl From<&Topic> for TopicKind {
             }
             Topic::ExternalImport { .. } => Self::ExternalImport,
             Topic::Hosting => Self::Hosting,
+            Topic::StorageMigration => Self::StorageMigration,
         }
     }
 }
@@ -195,6 +197,10 @@ pub struct WorkspaceStore {
     /// [`Topic::ExternalImport`]. The dialog renders this rather than owning a
     /// second events consumer.
     import_statuses: HashMap<String, Option<ExternalImportStatus>>,
+    /// The host's move of an older build's threads, replicated from
+    /// [`Topic::StorageMigration`] while a view holds it.
+    storage_migration: Option<StorageMigration>,
+    storage_migration_holds: usize,
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     /// Each thread's place in `index_replica.0`, rebuilt by
@@ -429,6 +435,8 @@ impl WorkspaceStore {
             archived_replica: None,
             archived_holds: 0,
             archived_task: None,
+            storage_migration: None,
+            storage_migration_holds: 0,
             removed_session: None,
             settings_replica: Settings::default(),
             settings_hydrated: false,
@@ -1243,6 +1251,7 @@ impl WorkspaceStore {
                     | Topic::DevServers { .. }
                     | Topic::ExternalImport { .. }
                     | Topic::Hosting
+                    | Topic::StorageMigration
             )
         {
             return Reach::Store;
@@ -1588,6 +1597,11 @@ impl WorkspaceStore {
                     self.baseline_topics.insert(Topic::Providers);
                 }
                 (Topic::Hosting, ServerEvent::HostingReplaced(state)) => cx.emit((**state).clone()),
+                (Topic::StorageMigration, ServerEvent::StorageMigrationReplaced(migration))
+                    if self.storage_migration_holds > 0 =>
+                {
+                    self.storage_migration.clone_from(migration);
+                }
                 (
                     Topic::Providers,
                     ServerEvent::ProviderUsageChanged {
@@ -3508,6 +3522,37 @@ impl WorkspaceStore {
         } else {
             self.host.unsubscribe(subscription)
         };
+    }
+
+    /// Follow the host's move of an older build's threads until a matching
+    /// release. Every view that shows it holds it, so one closing never
+    /// stops another's.
+    pub(crate) fn hold_storage_migration(&mut self) {
+        self.storage_migration_holds += 1;
+        if self.storage_migration_holds == 1 {
+            let _ = self.host.subscribe(Subscription {
+                known_index: None,
+                topic: Topic::StorageMigration,
+                after: None,
+            });
+        }
+    }
+
+    pub(crate) fn release_storage_migration(&mut self) {
+        self.storage_migration_holds = self.storage_migration_holds.saturating_sub(1);
+        if self.storage_migration_holds == 0 {
+            let _ = self.host.unsubscribe(Subscription {
+                known_index: None,
+                topic: Topic::StorageMigration,
+                after: None,
+            });
+            self.storage_migration = None;
+        }
+    }
+
+    /// The host's move of an older build's threads, while one runs.
+    pub(crate) fn storage_migration(&self) -> Option<&StorageMigration> {
+        self.storage_migration.as_ref()
     }
 
     /// The latest `tcode_control` writes across every thread, newest first.

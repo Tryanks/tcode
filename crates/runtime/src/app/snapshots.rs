@@ -1060,6 +1060,9 @@ impl AppState {
             }
             // The transport that owns hosting answers it.
             Topic::Hosting => return None,
+            Topic::StorageMigration => {
+                ServerEvent::StorageMigrationReplaced(self.storage_migration.clone())
+            }
             // Retained latest-run status, so a client that subscribes after a
             // fast completion still recovers the outcome. `None` means no run
             // has ever started for this project.

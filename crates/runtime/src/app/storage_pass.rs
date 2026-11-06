@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use tcode_protocol::StorageMigration;
 use tcode_services::store::{
     ChunkWait, Compaction, CompactionPlan, StepOutcome, StorageStep, StorageWork,
 };
@@ -11,6 +12,8 @@ use super::*;
 const BLOB_GRACE: Duration = Duration::from_secs(60 * 60);
 /// How long a pass that ran out of disk waits before trying again.
 const NO_SPACE_RETRY: Duration = Duration::from_secs(15 * 60);
+/// How often clients hear how far a running move has come.
+const REPORT_EVERY: Duration = Duration::from_secs(1);
 
 /// The background pass over the store: train the row dictionary, move an
 /// older build's threads in, retire its file, compact marked threads and
@@ -82,11 +85,18 @@ impl AppState {
             host_cx.enqueue(move |state, cx| {
                 state.storage_pass = None;
                 if let Finish::NoSpace = finish {
+                    let mut waiting = state.storage_migration.clone();
+                    if let Some(migration) = waiting.as_mut() {
+                        migration.waiting_for_space = true;
+                    }
+                    state.replace_storage_migration(waiting, cx);
                     let host_cx = cx.clone();
                     HostCx::spawn_detached(cx, async move {
                         smol::Timer::after(NO_SPACE_RETRY).await;
                         host_cx.enqueue(|state, cx| state.start_storage_pass(cx));
                     });
+                } else {
+                    state.replace_storage_migration(None, cx);
                 }
             });
         });
@@ -96,6 +106,47 @@ impl AppState {
         if let Some(run) = self.storage_pass.take() {
             run.stop.store(true, Ordering::Relaxed);
         }
+    }
+
+    fn replace_storage_migration(&mut self, migration: Option<StorageMigration>, cx: &mut HostCx) {
+        if self.storage_migration == migration {
+            return;
+        }
+        self.storage_migration.clone_from(&migration);
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            request_id: None,
+            topic: Topic::StorageMigration,
+            event: ServerEvent::StorageMigrationReplaced(migration),
+        }));
+    }
+}
+
+/// Tells the host's clients how far moving an older build's threads has
+/// come, at most once every [`REPORT_EVERY`].
+#[derive(Default)]
+struct MoveReport {
+    reported: Option<Instant>,
+}
+
+impl MoveReport {
+    async fn report(&mut self, store: &SessionStore, host_cx: &HostCx) {
+        if self.reported.is_some_and(|at| at.elapsed() < REPORT_EVERY) {
+            return;
+        }
+        self.reported = Some(Instant::now());
+        let reader = store.clone();
+        let migration = match host_cx.unblock(move || reader.move_progress()).await {
+            Ok(progress) => progress.map(|(moved, total)| StorageMigration {
+                moved,
+                total,
+                waiting_for_space: false,
+            }),
+            Err(error) => {
+                log::warn!("could not read how far the move has come: {error}");
+                return;
+            }
+        };
+        host_cx.enqueue(move |state, cx| state.replace_storage_migration(migration, cx));
     }
 }
 
@@ -182,6 +233,11 @@ async fn pass(
         source,
         compactions,
     } = work;
+    // Moving is what clients see; the steps after it are short or routine.
+    let mut report = (source && !moves.is_empty()).then(MoveReport::default);
+    if let Some(report) = report.as_mut() {
+        report.report(store, host_cx).await;
+    }
     if dictionary {
         let reader = store.clone();
         match host_cx.unblock(move || reader.prepare_dictionary()).await {
@@ -251,6 +307,9 @@ async fn pass(
                     totals.moved_rows += rows;
                     totals.bytes_before += before;
                     totals.bytes_after += after;
+                    if let Some(report) = report.as_mut() {
+                        report.report(store, host_cx).await;
+                    }
                     if done {
                         totals.moved_threads += 1;
                         break;
@@ -274,6 +333,9 @@ async fn pass(
                 totals.failed += 1;
             }
         }
+    }
+    if report.is_some() {
+        host_cx.enqueue(|state, cx| state.replace_storage_migration(None, cx));
     }
     for id in compactions {
         if stop.load(Ordering::Relaxed) {
