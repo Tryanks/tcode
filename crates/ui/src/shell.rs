@@ -7230,7 +7230,10 @@ pub(crate) mod tests {
                 Topic::Settings,
                 ServerEvent::SettingsSnapshot(Default::default()),
             ),
-            (Topic::Index, ServerEvent::IndexUpsertSession(meta)),
+            (
+                Topic::Index,
+                ServerEvent::IndexUpsertSession(Box::new(meta)),
+            ),
             (
                 Topic::SessionStatus {
                     session_id: session.into(),

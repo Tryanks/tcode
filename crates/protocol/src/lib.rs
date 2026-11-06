@@ -290,7 +290,14 @@ pub use wire::{
 // worktrees, other; ProviderDiskUsage provider, bytes, accounts;
 // AccountDiskUsage profile_id, dirs, bytes, parts; DiskUsagePart name,
 // bytes), and the MeasureDiskUsage command measures again. Settings drops
-// auto_open_task_panel with the AutoOpenTaskPanel patch.
+// auto_open_task_panel with the AutoOpenTaskPanel patch. The host no longer
+// stops a turn on a model change: ServerEvent drops ModelFallbackBlocked and
+// FallbackReviewReady; Settings drops abort_on_model_fallback,
+// fallback_review_advisor and fallback_review with the AbortOnModelFallback,
+// FallbackReviewAdvisor, FallbackReviewProvider, FallbackReviewModel and
+// FallbackReviewProfileId patches; and the model_fallback_detected and
+// turn_blocked agent events are no longer emitted, only read from stored
+// logs.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

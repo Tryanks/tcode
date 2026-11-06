@@ -36,12 +36,11 @@ use crate::claude_goal::GoalTranscript;
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, CatalogRefresh, ClassifierCategory, DeltaKind, FileChange,
-    FileChangeKind, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
-    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
-    ResumeCursor, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
-    TokenUsage, ToolOutput, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion,
-    selection_bool, selection_str,
+    ApprovalRequest, Attachment, CatalogRefresh, DeltaKind, FileChange, FileChangeKind, GoalStatus,
+    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
+    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolOutput, TurnStatus,
+    UserInputDelivery, UserInputOption, UserInputQuestion, selection_bool, selection_str,
 };
 
 /// First Claude Code build whose headless control protocol is verified to
@@ -461,7 +460,6 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         session_config,
         applied_permission_mode,
         native_rewind,
-        opts.model.clone(),
         stderr_tail,
         stderr_task,
     ))
@@ -761,11 +759,10 @@ async fn actor_loop(
     config: SessionConfig,
     applied_permission_mode: String,
     native_rewind: bool,
-    expected_model: Option<String>,
     stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
-    let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind, expected_model);
+    let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind);
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
     let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
@@ -1614,14 +1611,6 @@ struct PendingRewind {
     conversation: bool,
 }
 
-fn served_model_changed(expected: &str, served: &str) -> bool {
-    // CLI-generated errors/refusals do not identify a serving model.
-    !served.is_empty()
-        && served != "<synthetic>"
-        && !strip_context_window_suffix(expected)
-            .eq_ignore_ascii_case(strip_context_window_suffix(served))
-}
-
 #[derive(Default)]
 struct AssistantMessageState {
     blocks_seen: usize,
@@ -1696,14 +1685,8 @@ pub(crate) struct Mapper {
     native_rewind: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
-    /// Selected model: the comparison baseline and the source for synthetic refusals.
-    expected_model: Option<String>,
-    /// Whether a served-model mismatch was already reported for the active turn.
-    fallback_detected: bool,
     /// Latest structured stop reason for the active turn.
     stop_reason: Option<String>,
-    /// Classifier category captured from the active turn's structured refusal details.
-    pending_refusal_category: Option<ClassifierCategory>,
     /// Reset time reported for a rejected usage window in the active turn.
     limit_resets_at: Option<u64>,
     /// Warning-bearing stop reason already emitted for this occurrence.
@@ -1713,14 +1696,10 @@ pub(crate) struct Mapper {
 impl Mapper {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::new_configured("default".to_owned(), false, None)
+        Self::new_configured("default".to_owned(), false)
     }
 
-    fn new_configured(
-        applied_permission_mode: String,
-        native_rewind: bool,
-        expected_model: Option<String>,
-    ) -> Self {
+    fn new_configured(applied_permission_mode: String, native_rewind: bool) -> Self {
         Mapper {
             session_id: None,
             current_message_id: None,
@@ -1755,10 +1734,7 @@ impl Mapper {
             pending_rewinds: HashMap::new(),
             native_rewind,
             last_served_model: None,
-            expected_model,
-            fallback_detected: false,
             stop_reason: None,
-            pending_refusal_category: None,
             limit_resets_at: None,
             warned_stop_reason: None,
         }
@@ -1785,9 +1761,7 @@ impl Mapper {
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
-        self.fallback_detected = false;
         self.stop_reason = None;
-        self.pending_refusal_category = None;
         self.warned_stop_reason = None;
         id
     }
@@ -2179,35 +2153,11 @@ impl Mapper {
     }
 
     fn on_model_refusal_fallback(&mut self, msg: &Value) -> Vec<AgentEvent> {
-        let (Some(expected), Some(actual)) = (
-            msg.get("original_model").and_then(Value::as_str),
-            msg.get("fallback_model").and_then(Value::as_str),
-        ) else {
+        let Some(actual) = msg.get("fallback_model").and_then(Value::as_str) else {
             log::debug!("claude: ignoring malformed model_refusal_fallback");
             return Vec::new();
         };
-        if !served_model_changed(expected, actual) {
-            return Vec::new();
-        }
-        self.fallback_detected = true;
-        let mut events = vec![AgentEvent::ModelFallbackDetected {
-            expected: expected.to_owned(),
-            actual: actual.to_owned(),
-            category: msg
-                .get("api_refusal_category")
-                .and_then(Value::as_str)
-                .map(ClassifierCategory::parse),
-            checkpoint_id: msg
-                .get("refused_user_message_uuid")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            parent_tool_use_id: msg
-                .get("parent_tool_use_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        }];
-        events.extend(self.observe_served_model(&json!({ "model": actual })));
-        events
+        self.observe_served_model(&json!({ "model": actual }))
     }
 
     fn accept_pending_steers(&mut self) -> Vec<AgentEvent> {
@@ -2704,28 +2654,6 @@ impl Mapper {
         }
     }
 
-    fn observe_fallback_block(&mut self, block: &Value) -> Vec<AgentEvent> {
-        let (Some(expected), Some(actual)) = (
-            block.pointer("/from/model").and_then(Value::as_str),
-            block.pointer("/to/model").and_then(Value::as_str),
-        ) else {
-            return Vec::new();
-        };
-        let mut events = Vec::new();
-        if !self.fallback_detected && served_model_changed(expected, actual) {
-            self.fallback_detected = true;
-            events.push(AgentEvent::ModelFallbackDetected {
-                expected: expected.to_owned(),
-                actual: actual.to_owned(),
-                category: None,
-                checkpoint_id: None,
-                parent_tool_use_id: None,
-            });
-        }
-        events.extend(self.observe_served_model(&block["to"]));
-        events
-    }
-
     fn observe_served_model(&mut self, message: &Value) -> Vec<AgentEvent> {
         let Some(model) = message
             .get("model")
@@ -2734,29 +2662,14 @@ impl Mapper {
         else {
             return Vec::new();
         };
-        let mut events = Vec::new();
-        if !self.fallback_detected
-            && let Some(expected) = self.expected_model.as_deref()
-            && served_model_changed(expected, model)
-        {
-            self.fallback_detected = true;
-            events.push(AgentEvent::ModelFallbackDetected {
-                expected: expected.to_owned(),
-                actual: model.to_owned(),
-                category: None,
-                checkpoint_id: None,
-                // Child messages are routed to their own mapper by on_message.
-                parent_tool_use_id: None,
-            });
+        if self.last_served_model.as_deref() == Some(model) {
+            return Vec::new();
         }
-        if self.last_served_model.as_deref() != Some(model) {
-            self.last_served_model = Some(model.to_owned());
-            events.push(AgentEvent::ServedModel {
-                model: model.to_owned(),
-                reason: None,
-            });
-        }
-        events
+        self.last_served_model = Some(model.to_owned());
+        vec![AgentEvent::ServedModel {
+            model: model.to_owned(),
+            reason: None,
+        }]
     }
 
     fn on_assistant(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -2769,16 +2682,6 @@ impl Mapper {
             message.get("usage"),
             false,
         );
-        if message
-            .pointer("/stop_details/type")
-            .and_then(Value::as_str)
-            == Some("refusal")
-        {
-            self.pending_refusal_category = message
-                .pointer("/stop_details/category")
-                .and_then(Value::as_str)
-                .map(ClassifierCategory::parse);
-        }
         let msg_id = message
             .get("id")
             .and_then(Value::as_str)
@@ -2855,7 +2758,7 @@ impl Mapper {
                 Some("tool_use") => {
                     out.extend(self.on_tool_use(block));
                 }
-                Some("fallback") => out.extend(self.observe_fallback_block(block)),
+                Some("fallback") => out.extend(self.observe_served_model(&block["to"])),
                 _ => {}
             }
         }
@@ -3481,19 +3384,6 @@ impl Mapper {
             }
         }
         self.limit_resets_at = None;
-        if self.stop_reason.as_deref() == Some("refusal") {
-            let detail = msg
-                .get("result")
-                .and_then(Value::as_str)
-                .filter(|text| !text.trim().is_empty())
-                .unwrap_or("Claude blocked this turn after a safety classifier refusal.")
-                .to_owned();
-            events.push(AgentEvent::TurnBlocked {
-                category: self.pending_refusal_category.take(),
-                model: self.expected_model.clone(),
-                detail,
-            });
-        }
         // Publish the current background-task liveness with every result, not
         // only task-notification-origin ones. `background_tasks_changed []`
         // deliberately withholds the zero (see `on_background_tasks_changed`),
@@ -4169,7 +4059,7 @@ mod tests {
             "the provider's explicit auto unavailability must reach the picker: {events:?}"
         );
 
-        let mut auto = Mapper::new_configured("auto".into(), false, None);
+        let mut auto = Mapper::new_configured("auto".into(), false);
         let events = auto.on_message(json!({"type":"system", "subtype":"init", "session_id":"native", "permissionMode":"default"}));
         let descriptor = events
             .iter()
@@ -4189,7 +4079,7 @@ mod tests {
                 if options.iter().any(|option| option.value == "plan" && option.unavailable.as_deref() == Some("Entered by the agent"))))
         );
 
-        let mut supported = Mapper::new_configured("auto".into(), false, None);
+        let mut supported = Mapper::new_configured("auto".into(), false);
         supported.on_message(json!({"type":"system", "subtype":"init", "session_id":"supported", "permissionMode":"auto"}));
         let events = supported.on_message(json!({"type":"system", "subtype":"init", "session_id":"supported", "permissionMode":"plan"}));
         assert!(
@@ -4201,7 +4091,7 @@ mod tests {
         );
 
         for confirmation in ["control_response", "init"] {
-            let mut recovered = Mapper::new_configured("auto".into(), false, None);
+            let mut recovered = Mapper::new_configured("auto".into(), false);
             recovered.on_message(json!({"type":"system", "subtype":"init", "session_id":"recovered", "permissionMode":"default"}));
             let message = if confirmation == "init" {
                 json!({"type":"system", "subtype":"init", "session_id":"recovered", "permissionMode":"auto"})
@@ -4613,8 +4503,8 @@ mod tests {
         // Claude Code 2.1.299 against a local SSE endpoint using the documented
         // fallback boundary; only stream, assistant and result messages retained.
         let fixture = include_str!("../tests/fixtures/claude/mid-stream-fallback.jsonl");
-        for requested in [Some("claude-fable-5".into()), None] {
-            let mut mapper = Mapper::new_configured("default".into(), false, requested);
+        {
+            let mut mapper = Mapper::new();
             mapper.start_turn();
             let mut switched = false;
             let mut completed = false;
@@ -4629,13 +4519,7 @@ mod tests {
                     assert!(!completed);
                     let notices = events
                         .iter()
-                        .filter(|event| {
-                            matches!(
-                                event,
-                                AgentEvent::ModelFallbackDetected { .. }
-                                    | AgentEvent::ServedModel { .. }
-                            )
-                        })
+                        .filter(|event| matches!(event, AgentEvent::ServedModel { .. }))
                         .cloned()
                         .collect::<Vec<_>>();
                     assert!(
@@ -4645,28 +4529,17 @@ mod tests {
                     );
                     assert_eq!(
                         notices,
-                        [
-                            AgentEvent::ModelFallbackDetected {
-                                expected: "claude-fable-5".into(),
-                                actual: "claude-opus-4-8".into(),
-                                category: None,
-                                checkpoint_id: None,
-                                parent_tool_use_id: None,
-                            },
-                            AgentEvent::ServedModel {
-                                model: "claude-opus-4-8".into(),
-                                reason: None
-                            },
-                        ]
+                        [AgentEvent::ServedModel {
+                            model: "claude-opus-4-8".into(),
+                            reason: None
+                        }]
                     );
                     switched = true;
                 } else if switched {
                     assert!(
-                        !events.iter().any(|event| matches!(
-                            event,
-                            AgentEvent::ModelFallbackDetected { .. }
-                                | AgentEvent::ServedModel { .. }
-                        )),
+                        !events
+                            .iter()
+                            .any(|event| matches!(event, AgentEvent::ServedModel { .. })),
                         "later blocks must not repeat or undo the switch: {events:?}"
                     );
                 }
@@ -4693,145 +4566,21 @@ mod tests {
 
         assert_eq!(
             events,
-            [
-                AgentEvent::ModelFallbackDetected {
-                    expected: "claude-fable-5".into(),
-                    actual: "claude-opus-4-8".into(),
-                    category: Some(ClassifierCategory::Cyber),
-                    checkpoint_id: Some("cf7703ac-420b-4038-9f32-582077b27352".into()),
-                    parent_tool_use_id: None,
-                },
-                AgentEvent::ServedModel {
-                    model: "claude-opus-4-8".into(),
-                    reason: None,
-                }
-            ]
+            [AgentEvent::ServedModel {
+                model: "claude-opus-4-8".into(),
+                reason: None,
+            }]
         );
     }
 
     #[test]
-    fn assistant_model_changes_are_detected_without_family_rules() {
-        for (expected, served, changed) in [
-            ("claude-fable-5-1", "claude-fable-5", true),
-            ("claude-fable-5-1", "claude-opus-5", true),
-            ("claude-fable-5-1", "claude-opus-4-8", true),
-            ("claude-fable-5-1", "claude-sonnet-4-5", true),
-            ("claude-fable-5-1", "claude-haiku-4-5", true),
-            ("claude-opus-4-8", "claude-opus-5", true),
-            ("custom-model", "another-model", true),
-            ("claude-fable-5-1", "claude-fable-5-1", false),
-            ("claude-opus-5[1m]", "claude-opus-5", false),
-            ("claude-opus-5", "CLAUDE-OPUS-5[1M]", false),
-            ("claude-opus-5[2m]", "claude-opus-5", false),
-            ("custom-model[variant]", "custom-model", true),
-            ("claude-fable-5-1", "<synthetic>", false),
-        ] {
-            let mut mapper = Mapper::new_configured("default".into(), false, Some(expected.into()));
-            mapper.start_turn();
-            let events = mapper.on_message(json!({
-                "type": "assistant",
-                "message": { "id": "msg-change", "model": served, "content": [] },
-                "parent_tool_use_id": null,
-            }));
-            let changes: Vec<_> = events
-                .iter()
-                .filter(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                .collect();
-            assert_eq!(
-                changes.len(),
-                usize::from(changed),
-                "{expected} -> {served}"
-            );
-            if changed {
-                assert!(matches!(changes[0], AgentEvent::ModelFallbackDetected {
-                    expected: requested, actual, category: None,
-                    checkpoint_id: None, parent_tool_use_id: None,
-                } if requested == expected && actual == served));
-            }
-        }
-    }
-
-    #[test]
-    fn model_changes_are_detected_at_stream_start_once_per_turn() {
-        let mut mapper =
-            Mapper::new_configured("default".into(), false, Some("claude-fable-5-1".into()));
-        for served in ["claude-opus-5", "claude-opus-4-8", "claude-fable-5"] {
-            let stream = json!({
-                "type": "stream_event",
-                "event": { "type": "message_start", "message": {
-                    "id": "msg-change", "model": served,
-                } },
-                "parent_tool_use_id": null,
-            });
-            for _ in 0..2 {
-                mapper.start_turn();
-                // A child using another model must not consume the parent's guard.
-                let mut child = stream.clone();
-                child["parent_tool_use_id"] = json!("child-tool");
-                let child_events = mapper.on_message(child);
-                assert!(
-                    !child_events
-                        .iter()
-                        .any(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                );
-                let first = mapper.on_message(stream.clone());
-                assert_eq!(
-                    first
-                        .iter()
-                        .filter(|event| matches!(
-                            event, AgentEvent::ModelFallbackDetected { expected, actual, .. }
-                                if expected == "claude-fable-5-1" && actual == served
-                        ))
-                        .count(),
-                    1
-                );
-                let repeated = mapper.on_message(stream.clone());
-                let completed = mapper.on_message(json!({
-                    "type": "assistant", "message": {
-                        "id": "msg-change", "model": served, "content": [],
-                    }, "parent_tool_use_id": null,
-                }));
-                assert!(
-                    !repeated
-                        .iter()
-                        .chain(&completed)
-                        .any(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn explicit_model_changes_ignore_only_context_suffix_differences() {
-        for (actual, changed) in [("claude-opus-5", false), ("claude-opus-4-8", true)] {
-            let mut mapper = Mapper::new();
-            let events = mapper.on_message(json!({
-                "type": "system", "subtype": "model_refusal_fallback",
-                "original_model": "claude-opus-5[1m]", "fallback_model": actual,
-            }));
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                    .count(),
-                usize::from(changed)
-            );
-        }
-    }
-
-    #[test]
-    fn classifier_refusal_result_emits_turn_blocked() {
-        let mut mapper =
-            Mapper::new_configured("default".into(), false, Some("claude-fable-5".into()));
+    fn classifier_refusal_result_fails_the_turn_with_claudes_text() {
+        let mut mapper = Mapper::new();
         mapper.start_turn();
 
         let assistant_events = feed(
             &mut mapper,
             r#"{"type":"assistant","message":{"id":"msg-refusal","model":"<synthetic>","stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"This request triggered cyber content restrictions."},"content":[{"type":"text","text":"API Error: safeguards flagged this message. Details: `[cyber]`"}]},"parent_tool_use_id":null}"#,
-        );
-        assert_eq!(
-            mapper.pending_refusal_category,
-            Some(ClassifierCategory::Cyber)
         );
         assert!(
             assistant_events
@@ -4846,17 +4595,8 @@ mod tests {
 
         assert!(events.iter().any(|event| matches!(
             event,
-            AgentEvent::TurnBlocked {
-                category: Some(ClassifierCategory::Cyber),
-                model: Some(model),
-                detail,
-            } if model == "claude-fable-5" && detail.contains("[cyber]")
+            AgentEvent::Error { fatal: false, message } if message.contains("[cyber]")
         )));
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AgentEvent::Error { fatal: false, .. }))
-        );
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::TurnCompleted {

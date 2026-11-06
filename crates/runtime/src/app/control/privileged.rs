@@ -11,9 +11,9 @@ use tcode_protocol::{Command, Principal};
 
 /// The settings an agent may change, as display preferences only. Everything else touches
 /// authority (approvals, computer use, browser evaluation, plugins, child approval, grants,
-/// hosting, credentials), automation (settlement rules and tiers, resuming, fallbacks, title
-/// and review models) or UI state (sidebar, last project), and stays the user's. The match is
-/// exhaustive so a new setting is decided here, not allowed by default.
+/// hosting, credentials), automation (settlement rules and tiers, resuming, the title model)
+/// or UI state (sidebar, last project), and stays the user's. The match is exhaustive so a
+/// new setting is decided here, not allowed by default.
 pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
     match patch {
         SettingsPatch::Language(_)
@@ -22,13 +22,11 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::LiveCommandPanelDisabled(_)
         | SettingsPatch::SidebarProviderMarks(_)
         | SettingsPatch::InactiveFrameThrottleDisabled(_)
-        | SettingsPatch::ScrollToLatestOnSend(_)
-        | SettingsPatch::FallbackReviewAdvisor(_) => false,
+        | SettingsPatch::ScrollToLatestOnSend(_) => false,
         SettingsPatch::SourceControlHost { .. }
         | SettingsPatch::RemoveSourceControlHost { .. }
         | SettingsPatch::SkipDeleteConfirmation(_)
         | SettingsPatch::ProviderUpdateChecksDisabled(_)
-        | SettingsPatch::AbortOnModelFallback(_)
         | SettingsPatch::ResumeOnLimitReset(_)
         | SettingsPatch::AutoSettleAfterDays(_)
         | SettingsPatch::AutoSettleOnMerge(_)
@@ -56,9 +54,6 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::TitleGenerationProvider(_)
         | SettingsPatch::TitleGenerationModel(_)
         | SettingsPatch::TitleGenerationProfileId(_)
-        | SettingsPatch::FallbackReviewProvider(_)
-        | SettingsPatch::FallbackReviewModel(_)
-        | SettingsPatch::FallbackReviewProfileId(_)
         | SettingsPatch::SidebarLayout(_)
         | SettingsPatch::RemoteHostingEnabled(_)
         | SettingsPatch::Traverse(_)

@@ -1851,16 +1851,6 @@ pub enum ClassifierCategory {
     Other(String),
 }
 
-impl ClassifierCategory {
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "cyber" => Self::Cyber,
-            "bio" => Self::Bio,
-            other => Self::Other(other.to_string()),
-        }
-    }
-}
-
 /// A failed native turn can be continued without adding user input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRetry {
@@ -1918,19 +1908,18 @@ pub enum AgentEvent {
         model: String,
         reason: Option<String>,
     },
+    /// History-only: retained to decode stored rows; never emitted.
     ModelFallbackDetected {
         expected: String,
         actual: String,
         category: Option<ClassifierCategory>,
-        /// Claude's `refused_user_message_uuid` — the native rewind checkpoint for the refused turn.
         checkpoint_id: Option<String>,
         parent_tool_use_id: Option<String>,
     },
+    /// History-only: retained to decode stored rows; never emitted.
     TurnBlocked {
         category: Option<ClassifierCategory>,
-        /// The selected model that refused (NOT "<synthetic>").
         model: Option<String>,
-        /// Human-readable detail from Claude's error text.
         detail: String,
     },
     TurnStarted {

@@ -35,7 +35,7 @@ use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
 use tcode_core::project::SessionMeta;
-use tcode_core::settings::{FallbackReviewSettings, TitleGenerationSettings};
+use tcode_core::settings::TitleGenerationSettings;
 
 use crate::settings_rows::{SelectRowOption, ToggleRow};
 
@@ -486,8 +486,6 @@ pub struct SettingsPage {
     remote: RemotePanels,
     /// Shared provider/model picker configured for background thread titles.
     title_model_picker: Entity<ProviderModelPicker>,
-    /// Shared provider/model picker configured for fallback reviews.
-    fallback_review_model_picker: Entity<ProviderModelPicker>,
     /// Editable name this client presents to machines it connects to.
     device_name_input: SettingsInput,
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
@@ -608,18 +606,6 @@ impl SettingsPage {
                 cx,
             )
         });
-        let fallback_review = store.read(cx).settings().fallback_review;
-        let fallback_review_model_picker = cx.new(|cx| {
-            ProviderModelPicker::selection(
-                store.clone(),
-                "fallback-review-model-popover",
-                "fallback-review-model-dropdown",
-                fallback_review.provider,
-                fallback_review.model,
-                fallback_review.profile_id,
-                cx,
-            )
-        });
         let subscriptions = vec![
             cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
                 if change.topic != TopicKind::Settings {
@@ -628,15 +614,6 @@ impl SettingsPage {
                 let settings = this.store.read(cx).settings();
                 let selection = settings.title_generation;
                 this.title_model_picker.update(cx, |picker, cx| {
-                    picker.set_selected(
-                        selection.provider,
-                        selection.model,
-                        selection.profile_id,
-                        cx,
-                    );
-                });
-                let selection = settings.fallback_review;
-                this.fallback_review_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
                         selection.model,
@@ -663,17 +640,6 @@ impl SettingsPage {
                         store.set_title_generation_provider(selected.provider);
                         store.set_title_generation_model(selected.id);
                         store.set_title_generation_profile_id(selected.profile_id);
-                    },
-                    cx,
-                );
-            }),
-            cx.subscribe(&fallback_review_model_picker, |this, _, event, cx| {
-                let selected = event.0.clone();
-                this.dispatch_settings(
-                    move |store| {
-                        store.set_fallback_review_provider(selected.provider);
-                        store.set_fallback_review_model(selected.id);
-                        store.set_fallback_review_profile_id(selected.profile_id);
                     },
                     cx,
                 );
@@ -745,7 +711,6 @@ impl SettingsPage {
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             remote,
             title_model_picker,
-            fallback_review_model_picker,
             device_name_input: SettingsInput {
                 state: device_name_input.clone(),
                 pushed: device_name,
@@ -1746,39 +1711,6 @@ impl SettingsPage {
                 cx,
             ),
             self.title_model_picker.clone(),
-            cx,
-        );
-        row.render(layout)
-    }
-
-    fn fallback_review_model_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let overridden =
-            self.store.read(cx).settings().fallback_review != FallbackReviewSettings::default();
-        let reset = crate::settings_rows::reset_action(
-            "reset-fallback-review-model",
-            overridden,
-            cx.listener(|this, _, _, cx| {
-                let default = FallbackReviewSettings::default();
-                this.dispatch_settings(
-                    move |store| {
-                        store.set_fallback_review_provider(default.provider);
-                        store.set_fallback_review_model(default.model);
-                        store.set_fallback_review_profile_id(default.profile_id);
-                    },
-                    cx,
-                );
-            }),
-        );
-        let row = self.flip_row("fallback-review-model", cx);
-        let layout = row.row(
-            crate::settings_rows::row_labels(
-                crate::tr!("settings.fallback_review_model.title"),
-                Some(crate::tr!("settings.fallback_review_model.description").into()),
-                reset,
-                row.compact(),
-                cx,
-            ),
-            self.fallback_review_model_picker.clone(),
             cx,
         );
         row.render(layout)
