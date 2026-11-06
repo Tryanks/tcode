@@ -150,10 +150,10 @@ pub(crate) fn changed_files(
     let cwd = cwd.to_path_buf();
     let motion = motion.clone();
     let body = crate::motion::Sampled::new(move |window, cx| {
-        let glide = motion.glide_state(format!("changed-files-glide-{index}"));
+        let glide = motion.glide_state("changed-files-glide");
         let row = crate::motion::keyed::keyed_owned(
             &motion,
-            format!("changed-files-{index}"),
+            "changed-files",
             crate::motion::keyed::Fold::Across(px(0.)),
             chips,
             ROWS,
