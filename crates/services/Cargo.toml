@@ -31,6 +31,7 @@ turso = { version = "=0.8.3", default-features = false }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+zstd = { version = "0.13", default-features = false, features = ["zdict_builder"] }
 zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -41,6 +42,7 @@ windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
+    "Win32_Storage_FileSystem",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
 ] }

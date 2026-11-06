@@ -261,24 +261,23 @@ impl SessionSearch {
         let source = self.store.search_source(id)?;
         let log = self.store.read_log_until(id, source.end)?;
         let entries = extract_searchable_entries(&log);
-        let folded: Vec<String> = entries.iter().map(|entry| fold(&entry.text)).collect();
+        let texts: Vec<String> = entries.iter().map(|entry| collapse(&entry.text)).collect();
+        let folded: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
         let kinds: Vec<String> = entries.iter().map(|entry| entry.kind.name()).collect();
         self.store.replace_search_entries(
             id,
             EXTRACTION_VERSION,
             &source,
-            entries
-                .iter()
-                .zip(&folded)
-                .zip(&kinds)
-                .map(|((entry, folded), kind)| IndexedEntry {
+            entries.iter().zip(&texts).zip(&folded).zip(&kinds).map(
+                |(((entry, text), folded), kind)| IndexedEntry {
                     entry_id: &entry.entry_id,
                     position: entry.position,
                     turn: entry.turn,
                     kind,
-                    text: &entry.text,
+                    text,
                     folded,
-                }),
+                },
+            ),
         )?;
         verified(self);
         Ok(true)
@@ -299,13 +298,10 @@ fn protocol_hit(
     }
 }
 
-/// The text a query is matched against: whitespace collapsed as in a
-/// snippet, then lowercased as the query is.
-fn fold(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+/// Whitespace collapsed as in a snippet ([`match_snippet`]), which is all of
+/// an entry a hit shows.
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Fold persisted events and extract the final searchable representation.
@@ -514,6 +510,72 @@ mod tests {
             .unwrap();
         assert_eq!(search.search(sessions, "auth.rs", 10).len(), 2);
         assert_eq!(store.event_reads(), 1, "the changed log was folded again");
+        store.close().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A query matches an entry as the entry's text lowercased the Unicode
+    /// way with its whitespace collapsed, whatever is stored to answer it;
+    /// a Codex image generation recorded before it was read as a tool call
+    /// is searched as that call, never as its image.
+    #[test]
+    fn a_query_matches_what_the_entry_shows_lowercased() {
+        let root = std::env::temp_dir().join(format!("tcode-search-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
+        let picture = "iVBORw0KGgo".repeat(600);
+        let generation = format!(
+            "{{\"ts\":1,\"event\":{{\"type\":\"item_completed\",\"id\":\"gen\",\"content\":{{\"kind\":\"other\",\"provider_kind\":\"imageGeneration\",\"summary\":{}}}}}}}\n",
+            serde_json::to_string(&json!({"type":"imageGeneration","id":"gen","status":"completed","revisedPrompt":"a red fox","result":picture}).to_string()).unwrap()
+        );
+        store
+            .apply(&[Mutation::replace_event_log(
+                &meta.id,
+                generation.into_bytes(),
+            )])
+            .unwrap();
+        for (id, text) in [
+            ("ascii", "Fix   the\nLOGIN flow"),
+            ("umlaut", "ÄRGER über die Straße"),
+            ("dotted", "İstanbul ÄBC"),
+        ] {
+            store
+                .append_event(
+                    &meta.id,
+                    2,
+                    &completed(
+                        id,
+                        ItemContent::AssistantMessage {
+                            text: text.into(),
+                            summarized: false,
+                        },
+                    )
+                    .event,
+                )
+                .unwrap();
+        }
+        let search = SessionSearch::new(store.clone());
+        let sessions = std::slice::from_ref(&meta);
+        let hits = |query: &str| {
+            search
+                .search(sessions, query, 10)
+                .into_iter()
+                .map(|hit| (hit.entry_id, hit.snippet))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            hits("the login"),
+            [("ascii".into(), "Fix the LOGIN flow".into())]
+        );
+        assert_eq!(
+            hits("ärger ÜBER"),
+            [("umlaut".into(), "ÄRGER über die Straße".into())]
+        );
+        assert_eq!(hits("STRAßE").len(), 1);
+        assert_eq!(hits("İSTANBUL").len(), 1);
+        assert_eq!(hits("äbc").len(), 1);
+        assert_eq!(hits("image_generation").len(), 1);
+        assert!(hits(&picture[..40]).is_empty());
         store.close().unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

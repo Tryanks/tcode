@@ -10566,7 +10566,7 @@ fn an_appended_snapshot_drops_the_superseded_ones_diffs_in_the_same_commit() {
 /// The startup pass drops the superseded diffs of every thread stored before
 /// appends did, an open one included, through the store writer.
 #[test]
-fn the_startup_pass_drops_superseded_diffs_of_every_stored_thread() {
+fn the_storage_pass_drops_superseded_diffs_of_every_stored_thread() {
     struct CleanupLog(std::sync::Mutex<Vec<String>>);
     impl log::Log for CleanupLog {
         fn enabled(&self, _: &log::Metadata<'_>) -> bool {
@@ -10605,10 +10605,10 @@ fn the_startup_pass_drops_superseded_diffs_of_every_stored_thread() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     state.update(cx, |state, cx| {
         state.select_session("open", cx);
-        state.start_diff_pass(cx);
+        state.start_storage_pass(cx);
     });
     cx.run_until(|state| {
-        state.diff_pass.is_none() && state.store.threads_without_diff_pass().unwrap().is_empty()
+        state.storage_pass.is_none() && state.store.threads_to_compact().unwrap().is_empty()
     });
     for id in ["cold", "open"] {
         assert_eq!(
@@ -10621,15 +10621,152 @@ fn the_startup_pass_drops_superseded_diffs_of_every_stored_thread() {
     LOG.0.lock().unwrap().clear();
     let cx = &mut TestAppContext::default();
     let restarted = cx.new_entity(TestClientState::new((*store).clone()));
-    restarted.update(cx, |state, cx| state.start_diff_pass(cx));
+    restarted.update(cx, |state, cx| state.start_storage_pass(cx));
     cx.run_until(|_| {
         LOG.0
             .lock()
             .unwrap()
             .iter()
-            .any(|line| line == "superseded diff cleanup complete: no work")
+            .any(|line| line == "storage pass complete: no work")
     });
-    restarted.read(|state| assert!(state.diff_pass.is_none()));
+    restarted.read(|state| assert!(state.storage_pass.is_none()));
+}
+
+/// A completion appended to an open thread drops the deltas it repeats in
+/// the same commit: the one that created the entry stays with its text
+/// emptied, a stream the completion only abbreviates stays whole, and every
+/// later append still takes the row after the last. A thread nobody holds
+/// keeps its deltas until the background pass, which leaves the same rows.
+/// A client that holds the log up to a dropped delta and reads on from the
+/// store folds the same thread.
+#[test]
+fn a_completion_drops_the_deltas_it_repeats_in_the_same_commit() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("completion-supersedes");
+    let seeded = "{\"ts\":1,\"event\":{\"type\":\"turn_started\",\"turn_id\":\"t\"}}\n";
+    for id in ["held", "cold"] {
+        store
+            .apply(&[tcode_services::store::Mutation::replace_event_log(
+                id,
+                seeded.as_bytes().to_vec(),
+            )])
+            .unwrap();
+        open_stored_session(&store, id);
+    }
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    window_reply(
+        &through_pipe(&state, cx, 1, subscribe_events("held", None)),
+        1,
+    );
+    cx.run_until(|state| state.event_records.contains_key("held"));
+    let delta = |id: &str, kind, text: &str| AgentEvent::Delta {
+        item_id: id.into(),
+        kind,
+        text: text.into(),
+    };
+    let completed = |id: &str, content| {
+        AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
+        })
+    };
+    let command = |output: &str| ItemContent::CommandExecution {
+        command: "ls".into(),
+        output: output.into(),
+        exit_code: Some(0),
+        status: agent::ItemStatus::Completed,
+    };
+    let events = [
+        delta("a", agent::DeltaKind::AssistantText, "Hel"),
+        delta("a", agent::DeltaKind::AssistantText, "lo"),
+        completed(
+            "a",
+            ItemContent::AssistantMessage {
+                text: "Hello".into(),
+                summarized: false,
+            },
+        ),
+        delta(
+            "c",
+            agent::DeltaKind::CommandOutput,
+            "x".repeat(40).as_str(),
+        ),
+        completed("c", command("xxxx… 36 bytes omitted")),
+        AgentEvent::TurnCompleted {
+            turn_id: "t".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        },
+    ];
+    state.update(cx, |state, cx| {
+        for id in ["held", "cold"] {
+            for (ts, event) in events.iter().enumerate() {
+                state.record_event_for_replica_test(id, ts as u64 + 2, event, cx);
+            }
+        }
+    });
+    cx.run_until_parked();
+    let all: Vec<String> = std::iter::once(seeded.trim_end().to_owned())
+        .chain(events.iter().enumerate().map(|(ts, event)| {
+            let mut row = serde_json::json!({"ts": ts + 2, "event": event});
+            if matches!(event, AgentEvent::ItemCompleted(_)) {
+                row["item_version"] = 1.into();
+            }
+            serde_json::to_string(&row).unwrap()
+        }))
+        .collect();
+    let held = String::from_utf8(store.read_event_log("held").unwrap()).unwrap();
+    let expected: String = [
+        all[0].clone(),
+        all[1].replace("\"text\":\"Hel\"", "\"text\":\"\""),
+        all[3].clone(),
+        all[4].clone(),
+        all[5].clone(),
+        all[6].clone(),
+    ]
+    .iter()
+    .map(|line| format!("{line}\n"))
+    .collect();
+    assert_eq!(held, expected);
+    let log = store.read_log("held").unwrap();
+    assert_eq!(log.rows, [0, 1, 3, 4, 5, 6]);
+    let full = store.read_log("cold").unwrap();
+    assert_eq!(
+        full.rows,
+        [0, 1, 2, 3, 4, 5, 6],
+        "a thread nobody holds keeps its deltas"
+    );
+    assert_eq!(
+        Timeline::fold_stored(&log.records),
+        Timeline::fold_stored(&full.records)
+    );
+    // A client holding rows 0..=2 (the second delta among them) reads on.
+    let mut resumed = full.records[..3].to_vec();
+    resumed.extend(store.read_rows("held", 3..u64::MAX).unwrap().records);
+    assert_eq!(
+        Timeline::fold_stored(&resumed),
+        Timeline::fold_stored(&full.records)
+    );
+    state.update(cx, |state, cx| {
+        state.record_event_for_replica_test("held", 20, &events[5], cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(store.read_log("held").unwrap().rows.last(), Some(&7));
+
+    assert!(
+        store
+            .threads_to_compact()
+            .unwrap()
+            .contains(&"cold".to_owned())
+    );
+    state.update(cx, |state, cx| state.start_storage_pass(cx));
+    cx.run_until(|state| state.storage_pass.is_none());
+    assert_eq!(
+        String::from_utf8(store.read_event_log("cold").unwrap()).unwrap(),
+        expected
+    );
+    assert!(store.threads_to_compact().unwrap().is_empty());
 }
 
 /// A thread opens with about half a megabyte of history however long its
@@ -10906,6 +11043,7 @@ fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
             kind: agent::DeltaKind::AssistantText,
             text: text.into(),
         }),
+        streams: None,
     };
     let texts = || -> Vec<String> {
         store
@@ -10947,15 +11085,15 @@ fn session_log(records: impl IntoIterator<Item = SessionEventRecord>) -> Session
     })
 }
 
-/// Threads of [`diff_pass_survives_sigkill`]'s fixture, each a run of turns
+/// Threads of [`storage_pass_survives_sigkill`]'s fixture, each a run of turns
 /// whose every turn-changes snapshot carries the turn's whole, growing diff.
 const CRASH_PASS_THREADS: usize = 6;
 
-/// The process [`diff_pass_survives_sigkill`] kills: a host started with the
+/// The process [`storage_pass_survives_sigkill`] kills: a host started with the
 /// startup diff pass over the fixture in [`CRASH_CHILD_DIR`].
 #[test]
-#[ignore = "the child process of diff_pass_survives_sigkill, which runs it"]
-fn diff_pass_crash_child() {
+#[ignore = "the child process of storage_pass_survives_sigkill, which runs it"]
+fn storage_pass_crash_child() {
     let root = PathBuf::from(std::env::var_os(CRASH_CHILD_DIR).unwrap());
     let _host = crate::pipe::spawn_host(
         SessionStore::open_at(root).unwrap(),
@@ -10975,7 +11113,7 @@ fn diff_pass_crash_child() {
 /// number of kills.
 #[test]
 #[ignore = "spawns and SIGKILLs child processes and needs the sqlite3 CLI; run deliberately"]
-fn diff_pass_survives_sigkill() {
+fn storage_pass_survives_sigkill() {
     let runs: usize = std::env::var("TCODE_CRASH_RUNS")
         .ok()
         .and_then(|runs| runs.parse().ok())
@@ -11022,9 +11160,11 @@ fn diff_pass_survives_sigkill() {
         let before: Vec<_> = ids.iter().map(|id| rows_of(&store, id)).collect();
         let started = Instant::now();
         for id in &ids {
+            let mut plan = store.plan_compaction(id).unwrap();
+            while store.compact(&mut plan).unwrap().is_none() {}
             assert!(matches!(
-                store.drop_superseded_diffs(id).unwrap(),
-                tcode_services::store::DiffPass::Dropped { .. }
+                store.compact(&mut plan).unwrap(),
+                Some(tcode_services::store::Compaction::Compacted { .. })
             ));
         }
         let pass_time = started.elapsed();
@@ -11054,7 +11194,7 @@ fn diff_pass_survives_sigkill() {
         let mut child = tcode_services::process::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "app::tests::diff_pass_crash_child",
+                "app::tests::storage_pass_crash_child",
                 "--ignored",
                 "--nocapture",
             ])
@@ -11087,7 +11227,7 @@ fn diff_pass_survives_sigkill() {
             }
         }
         let store = SessionStore::open_at(root.clone()).unwrap();
-        let unpassed = store.threads_without_diff_pass().unwrap();
+        let unpassed = store.threads_to_compact().unwrap();
         let mut done = 0;
         for (index, id) in ids.iter().enumerate() {
             let rows = rows_of(&store, id);
@@ -13434,4 +13574,47 @@ fn settle_all_children_delivers_finished_results_and_skips_running_children() {
         }
         assert!(state.resident("running").unwrap().turn_in_flight);
     });
+}
+
+/// A host over a copy of a real data dir (`TCODE_STORAGE_DATA`), run until
+/// its startup storage pass reports how it ended, logging the pass to
+/// stderr. Killing it anywhere and starting it again must converge on the
+/// same store ([`tcode_services::store`]'s `a_real_data_dir_reads_back_as_its_original`
+/// checks the result).
+#[test]
+#[ignore = "drives the storage pass over a copy of a real data dir named by TCODE_STORAGE_DATA; run deliberately"]
+fn storage_pass_over_a_real_data_dir() {
+    struct PassLog(std::sync::atomic::AtomicBool);
+    impl log::Log for PassLog {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Info
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if !record.target().starts_with("tcode") {
+                return;
+            }
+            let line = record.args().to_string();
+            eprintln!("{} {}", record.level(), line);
+            if line.starts_with("storage pass ") {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        fn flush(&self) {}
+    }
+    static LOG: PassLog = PassLog(std::sync::atomic::AtomicBool::new(false));
+    log::set_logger(&LOG).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
+    let root = PathBuf::from(std::env::var_os("TCODE_STORAGE_DATA").unwrap());
+    let started = Instant::now();
+    let host = crate::pipe::spawn_host(
+        SessionStore::open_at(root).unwrap(),
+        crate::pipe::HostServices::default(),
+    )
+    .unwrap();
+    eprintln!("host up in {:.1?}", started.elapsed());
+    while !LOG.0.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!("pass ended after {:.1?}", started.elapsed());
+    drop(host);
 }

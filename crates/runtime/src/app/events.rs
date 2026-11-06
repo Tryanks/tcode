@@ -721,16 +721,19 @@ impl AppState {
         let topic = Topic::SessionEvents {
             session_id: session_id.to_string(),
         };
+        let mut streams = None;
         if self.event_records.contains_key(session_id) {
             self.emit_domain(
                 topic,
                 ServerEvent::SessionEvent(history::wire_record(&record).into_owned()),
                 cx,
             );
-            self.event_records
-                .get_mut(session_id)
-                .expect("checked above")
-                .push(record);
+            streams = Some(
+                self.event_records
+                    .get_mut(session_id)
+                    .expect("checked above")
+                    .push(record),
+            );
         } else {
             // A session nobody holds needs no row named: the append alone
             // keeps the record, and any later read of the log is queued
@@ -752,6 +755,7 @@ impl AppState {
                 author,
                 origin,
                 event: Box::new(event.clone()),
+                streams,
             },
             cx,
         );

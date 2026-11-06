@@ -6,52 +6,48 @@ use std::io;
 
 use turso::Connection;
 
-use super::SessionStore;
 use super::db::{Db, blob, integer, text};
+use super::rows::{self, Storage, Thread};
+use super::{READ_VERSION, SessionStore};
 
 pub(super) fn create_tables(db: &Db, connection: &Connection) -> io::Result<()> {
     db.execute(
         connection,
         "CREATE TABLE IF NOT EXISTS search_sources (\
-         session_id TEXT PRIMARY KEY, version INTEGER NOT NULL, \
+         thread INTEGER PRIMARY KEY, version INTEGER NOT NULL, \
          revision BLOB NOT NULL, end_row INTEGER NOT NULL)",
         (),
     )?;
-    // Entries are derived from the logs, so a table an older build created
-    // without the position and kind columns is dropped and extracted again.
-    let mut positioned = false;
-    db.query(connection, "PRAGMA table_info(search_entries)", (), |row| {
-        positioned |= text(row, 1)? == "position";
-        Ok(())
-    })?;
-    if !positioned {
-        db.execute(connection, "DROP TABLE IF EXISTS search_entries", ())?;
-        db.execute(connection, "DELETE FROM search_sources", ())?;
-    }
     db.execute(
         connection,
         "CREATE TABLE IF NOT EXISTS search_entries (\
-         session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, entry_id TEXT NOT NULL, \
+         thread INTEGER NOT NULL, ordinal INTEGER NOT NULL, entry_id TEXT NOT NULL, \
          position INTEGER NOT NULL, turn INTEGER NOT NULL, kind TEXT NOT NULL, \
-         text TEXT NOT NULL, folded TEXT NOT NULL, \
-         PRIMARY KEY (session_id, ordinal))",
+         text TEXT NOT NULL, folded TEXT, \
+         PRIMARY KEY (thread, ordinal))",
         (),
     )?;
     Ok(())
 }
 
-pub(super) fn forget(db: &Db, connection: &Connection, id: &str) -> io::Result<()> {
-    db.execute(
+pub(super) fn forget(st: &Storage, connection: &Connection, thread: &Thread) -> io::Result<()> {
+    st.execute(
         connection,
-        "DELETE FROM search_entries WHERE session_id = ?1",
-        [id],
+        "DELETE FROM search_entries WHERE thread = ?1",
+        [thread.key],
     )?;
-    db.execute(
+    st.execute(
         connection,
-        "DELETE FROM search_sources WHERE session_id = ?1",
-        [id],
+        "DELETE FROM search_sources WHERE thread = ?1",
+        [thread.key],
     )?;
     Ok(())
+}
+
+/// What entries extracted under `version` are kept under: the store's own
+/// read normalization is part of what they were extracted from.
+fn stored_version(version: u32) -> i64 {
+    (i64::from(version) << 16) | i64::from(READ_VERSION)
 }
 
 /// The identity of a thread's log: a replacement changes its revision, an
@@ -63,9 +59,10 @@ pub struct SearchSource {
     pub end: u64,
 }
 
-/// One searchable entry as it is kept: `folded` is the lowercased text a
-/// query is matched against, `text` what a hit's snippet is cut from, and
-/// `position` the log row that first recorded the entry.
+/// One searchable entry as it is kept: `text` is what a hit's snippet is cut
+/// from, with its whitespace collapsed as a snippet collapses it, and
+/// `folded` that text lowercased as a query is; `position` is the log row
+/// that first recorded the entry.
 pub struct IndexedEntry<'a> {
     pub entry_id: &'a str,
     pub position: u64,
@@ -84,32 +81,38 @@ pub struct SearchMatch<'a> {
     pub text: &'a str,
 }
 
-fn current_source(db: &Db, connection: &Connection, id: &str) -> io::Result<SearchSource> {
-    Ok(SearchSource {
-        revision: super::turn_index::revision(db, connection, id)?,
-        end: super::activity::log_end(db, connection, id)? as u64,
+fn current_source(st: &Storage, connection: &Connection, id: &str) -> io::Result<SearchSource> {
+    Ok(match rows::thread(st, connection, id)? {
+        Some(thread) => SearchSource {
+            revision: rows::revision(st, connection, id)?,
+            end: rows::end(st, connection, &thread)?,
+        },
+        None => SearchSource {
+            revision: Vec::new(),
+            end: 0,
+        },
     })
 }
 
 impl SessionStore {
     /// The identity of `id`'s log as it is now.
     pub fn search_source(&self, id: &str) -> io::Result<SearchSource> {
-        self.run("read a search source", |db| {
-            db.read(|db, connection| current_source(db, connection, id))
+        self.run("read a search source", |st| {
+            st.read(|st, connection| current_source(st, connection, id))
         })
     }
 
     /// Whether `id`'s searchable entries were extracted under `version` from
     /// its log as it is now.
     pub fn search_entries_current(&self, id: &str, version: u32) -> io::Result<bool> {
-        self.run("check search entries", |db| {
-            db.read(|db, connection| {
+        self.run("check search entries", |st| {
+            st.read(|st, connection| {
                 let mut indexed = None;
-                db.query(
+                st.query(
                     connection,
-                    "SELECT revision, end_row FROM search_sources \
-                     WHERE session_id = ?1 AND version = ?2",
-                    (id, i64::from(version)),
+                    "SELECT s.revision, s.end_row FROM search_sources s \
+                     JOIN threads t ON t.key = s.thread WHERE t.id = ?1 AND s.version = ?2",
+                    (id, stored_version(version)),
                     |row| {
                         indexed = Some(SearchSource {
                             revision: blob(row, 0)?,
@@ -119,7 +122,7 @@ impl SessionStore {
                     },
                 )?;
                 Ok(indexed.is_some_and(|indexed| {
-                    current_source(db, connection, id).is_ok_and(|current| current == indexed)
+                    current_source(st, connection, id).is_ok_and(|current| current == indexed)
                 }))
             })
         })
@@ -134,34 +137,39 @@ impl SessionStore {
         source: &SearchSource,
         entries: impl IntoIterator<Item = IndexedEntry<'a>>,
     ) -> io::Result<()> {
-        self.run("write search entries", |db| {
-            db.write(|db, connection| {
-                forget(db, connection, id)?;
+        self.run("write search entries", |st| {
+            st.write(|st, connection| {
+                let thread = rows::ensure_thread(st, connection, id)?;
+                forget(st, connection, &thread)?;
                 for (ordinal, entry) in entries.into_iter().enumerate() {
-                    db.execute(
+                    // `lower()` folds ASCII alone, so only text it would fold
+                    // differently from a query keeps its folded form.
+                    let folded =
+                        (entry.folded != entry.text.to_ascii_lowercase()).then_some(entry.folded);
+                    st.execute(
                         connection,
                         "INSERT INTO search_entries \
-                         (session_id, ordinal, entry_id, position, turn, kind, text, folded) \
+                         (thread, ordinal, entry_id, position, turn, kind, text, folded) \
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         (
-                            id,
+                            thread.key,
                             ordinal as i64,
                             entry.entry_id,
                             entry.position as i64,
                             entry.turn as i64,
                             entry.kind,
                             entry.text,
-                            entry.folded,
+                            folded,
                         ),
                     )?;
                 }
-                db.execute(
+                st.execute(
                     connection,
-                    "INSERT INTO search_sources (session_id, version, revision, end_row) \
+                    "INSERT INTO search_sources (thread, version, revision, end_row) \
                      VALUES (?1, ?2, ?3, ?4)",
                     (
-                        id,
-                        i64::from(version),
+                        thread.key,
+                        stored_version(version),
                         source.revision.clone(),
                         source.end as i64,
                     ),
@@ -179,12 +187,13 @@ impl SessionStore {
         folded: &str,
         mut each: impl FnMut(SearchMatch<'_>) -> bool,
     ) -> io::Result<()> {
-        self.run("search entries", |db| {
-            db.read(|db, connection| {
-                db.query_while(
+        self.run("search entries", |st| {
+            st.read(|st, connection| {
+                st.query_while(
                     connection,
-                    "SELECT entry_id, position, turn, kind, text FROM search_entries \
-                     WHERE session_id = ?1 AND instr(folded, ?2) > 0 ORDER BY ordinal",
+                    "SELECT e.entry_id, e.position, e.turn, e.kind, e.text FROM search_entries e \
+                     JOIN threads t ON t.key = e.thread WHERE t.id = ?1 \
+                     AND instr(COALESCE(e.folded, lower(e.text)), ?2) > 0 ORDER BY e.ordinal",
                     (id, folded),
                     |row| {
                         Ok(each(SearchMatch {
