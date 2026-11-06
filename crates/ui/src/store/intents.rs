@@ -1157,6 +1157,16 @@ impl WorkspaceStore {
     pub fn set_host_token(&mut self, host: String, token: Option<String>, email: Option<String>) {
         self.dispatch(Command::SetHostToken { host, token, email });
     }
+    /// Asks the host whose `token` is; the host saves it only when the platform takes it.
+    pub fn verify_host_token(
+        &self,
+        host: String,
+        token: String,
+        email: Option<String>,
+        cx: &mut App,
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(Command::VerifyHostToken { host, token, email }, cx)
+    }
     pub fn patch_source_control_host(
         &mut self,
         host: String,

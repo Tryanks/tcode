@@ -86,7 +86,7 @@ impl AppState {
                 .map_err(|message| error("invalid_settings", message))?;
         }
         let host_kind = match command {
-            Command::SetHostToken { host, .. } => {
+            Command::SetHostToken { host, .. } | Command::VerifyHostToken { host, .. } => {
                 Some((host, self.settings.source_control.kind(host)))
             }
             Command::PatchSettings {

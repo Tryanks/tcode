@@ -1,80 +1,49 @@
-//! Settings → Git Platforms: every host Tcode reads pull requests from, whatever its kind. The
-//! host decides which hosts exist, where each credential comes from and what is wrong; this
-//! panel shows it and sends the user's choices.
+//! Settings → Git Platforms: every platform Tcode reads pull requests from, whatever its kind.
+//! The host decides which platforms exist, where each token comes from, whose it is and what is
+//! wrong; this panel lists them, one row each, and connects or manages one in a dialog (a
+//! pushed page on a phone).
 
-use crate::widgets::TooltipTrigger as _;
+mod add;
+mod host;
+
+pub(crate) use host::HostEditor;
+
 use crate::{
-    icon::Icon,
-    overlay::{DialogActions, OverlayExt as _},
-    sizing::Sizable as _,
+    icon::{Icon, IconName},
+    overlay::OverlayExt as _,
     store::{StoreChange, TopicKind, WorkspaceStore},
     theme::ActiveTheme as _,
     typography::TextRole as _,
-    widgets::{
-        Tooltip,
-        button::{Button, ButtonVariant, ButtonVariants as _},
-        choice::{Choice, ChoiceGroup},
-        input::{Input, InputEvent, InputState},
-        menu::DropdownMenu as _,
-        switch::Switch,
-    },
+    widgets::button::{Button, ButtonVariants as _},
 };
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _,
+    AnyElement, App, Context, Entity, EventEmitter, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use tcode_core::{
-    pull_request::{HostKind, HostRefusal},
+    pull_request::HostKind,
     settings::{CredentialSource, HostProblem, HostSettings, HostStatus, SourceControlSettings},
 };
-
-/// How long a value drawn here takes to glide to a new one.
-const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// How long what is drawn here only some of the time takes to come in or go.
-const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// How long a part drawn here takes to cross-fade to another of its states.
-const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
-
-#[derive(Action, Clone, PartialEq, serde::Deserialize)]
-#[action(namespace = source_control_settings, no_json)]
-struct ChooseAccount {
-    host: String,
-    kind: HostKind,
-    account: Option<String>,
-}
-
-#[derive(Action, Clone, PartialEq, serde::Deserialize)]
-#[action(namespace = source_control_settings, no_json)]
-struct ChooseKind {
-    kind: HostKind,
-}
 
 /// A host kind's name in keys: `github`, `forgejo`, `gitea`, `azure_devops`.
 fn slug(kind: HostKind) -> String {
     crate::pull_requests::host_key(kind.terms())
 }
 
-/// What Add host's input holds for a kind before anything is typed: its public host, or
-/// nothing where a host is an organization the user names.
-fn prefill(kind: HostKind) -> &'static str {
-    if kind.organizations() {
-        ""
-    } else {
-        kind.public_host()
-    }
+/// What a pull request is called on a kind's platforms, in running text.
+fn noun(kind: HostKind) -> String {
+    crate::pull_requests::Noun::of(kind.terms()).pr
 }
 
 fn mark(kind: HostKind) -> Icon {
     Icon::empty().path(kind.terms().mark)
 }
 
-/// The hosts to list, each with its kind: configured, reported by the host, and github.com;
-/// by kind, then the kind's public host, then by name.
+/// The platforms to list, each with its kind: configured, reported by the host, and github.com;
+/// by kind, then the kind's public platform, then by name.
 fn listed(settings: &SourceControlSettings) -> Vec<(String, HostKind)> {
     let names: BTreeSet<_> = settings
         .hosts
@@ -100,51 +69,276 @@ fn listed(settings: &SourceControlSettings) -> Vec<(String, HostKind)> {
     listed
 }
 
-fn source_slot(source: &CredentialSource) -> String {
+/// One platform as the host reports it, with the user's choices for it.
+#[derive(Clone)]
+pub(crate) struct Platform {
+    pub host: String,
+    pub kind: HostKind,
+    pub choice: HostSettings,
+    pub status: Option<HostStatus>,
+    /// Only the user's settings name it, so only they may remove it.
+    pub added: bool,
+}
+
+impl Platform {
+    pub(crate) fn read(store: &WorkspaceStore, host: &str) -> Self {
+        let settings = &store.settings().source_control;
+        let kind = settings.kind(host);
+        let choice = settings
+            .hosts
+            .get(host)
+            .cloned()
+            .unwrap_or_else(|| HostSettings::new(kind));
+        let status = settings.status.get(host).cloned();
+        let added = status
+            .as_ref()
+            .map_or(settings.hosts.contains_key(host), |status| status.added)
+            && host != kind.public_host();
+        Self {
+            host: host.to_owned(),
+            kind,
+            choice,
+            status,
+            added,
+        }
+    }
+
+    pub(crate) fn source(&self) -> Option<&CredentialSource> {
+        self.status.as_ref()?.source.as_ref()
+    }
+
+    pub(crate) fn standing(&self) -> Standing {
+        if !self.choice.enabled {
+            return Standing::Paused;
+        }
+        let status = self.status.as_ref();
+        match status.and_then(|status| status.problem.as_ref()) {
+            Some(HostProblem::Rejected { status, at }) => Standing::Rejected {
+                status: *status,
+                at: *at,
+            },
+            Some(HostProblem::NotSignedIn { tool, .. }) => {
+                Standing::NotSignedIn { tool: tool.clone() }
+            }
+            Some(HostProblem::Unverified) => Standing::Unverified,
+            _ if self.source().is_some() => Standing::Connected {
+                login: status.and_then(|status| status.login.clone()),
+            },
+            _ => Standing::NotConnected,
+        }
+    }
+
+    /// The kind's name, and that the user added it.
+    pub(crate) fn kind_line(&self) -> String {
+        let mut line = self.kind.terms().name.to_owned();
+        if self.added {
+            line.push_str(" · ");
+            line.push_str(&crate::tr!("source_control.origin_added"));
+        }
+        line
+    }
+
+    /// The command that signs the platform's CLI in, when the host names one.
+    pub(crate) fn sign_in(&self) -> Option<(String, String)> {
+        match self.status.as_ref()?.problem.as_ref()? {
+            HostProblem::NotSignedIn {
+                tool,
+                command: Some(command),
+            } => Some((tool.clone(), command.clone())),
+            _ => None,
+        }
+    }
+}
+
+/// Where a platform stands, as its row and its dialogs say it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Standing {
+    /// The user turned it off.
+    Paused,
+    Connected {
+        login: Option<String>,
+    },
+    /// The platform refused the token in use.
+    Rejected {
+        status: u16,
+        at: u64,
+    },
+    /// A saved token the platform has not answered yet.
+    Unverified,
+    /// The platform's CLI is there, without a login for it.
+    NotSignedIn {
+        tool: String,
+    },
+    NotConnected,
+}
+
+impl Standing {
+    /// Whether the row offers to connect rather than to manage.
+    pub(crate) fn connects(&self) -> bool {
+        matches!(self, Self::NotConnected | Self::NotSignedIn { .. })
+    }
+
+    /// A name for tests and debug selectors.
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Paused => "paused",
+            Self::Connected { .. } => "connected",
+            Self::Rejected { .. } => "rejected",
+            Self::Unverified => "unverified",
+            Self::NotSignedIn { .. } => "not-signed-in",
+            Self::NotConnected => "not-connected",
+        }
+    }
+
+    /// The status dot's color; none for a paused platform, a ring for one not connected.
+    fn dot(&self, cx: &App) -> Option<(Hsla, bool)> {
+        let theme = cx.theme();
+        match self {
+            Self::Paused => None,
+            Self::Connected { .. } => Some((theme.success, true)),
+            Self::Rejected { .. } => Some((theme.danger, true)),
+            Self::Unverified | Self::NotSignedIn { .. } => Some((theme.warning, true)),
+            Self::NotConnected => Some((theme.muted_foreground, false)),
+        }
+    }
+
+    fn color(&self, cx: &App) -> Hsla {
+        let theme = cx.theme();
+        match self {
+            Self::Rejected { .. } => theme.danger,
+            Self::Unverified | Self::NotSignedIn { .. } => theme.warning,
+            _ => theme.muted_foreground,
+        }
+    }
+}
+
+/// The status in words: who it is connected as, or what is wrong.
+pub(crate) fn status_text(standing: &Standing, cx: &App) -> AnyElement {
+    let text = |text: String| div().child(text).into_any_element();
+    match standing {
+        Standing::Connected { login: Some(login) } => connected_as(login, None, cx),
+        Standing::Connected { login: None } => text(crate::tr!("source_control.connected").into()),
+        Standing::Rejected { .. } => text(crate::tr!("source_control.rejected").into()),
+        Standing::Unverified => text(crate::tr!("source_control.unverified").into()),
+        Standing::NotSignedIn { tool } => {
+            text(crate::tr!("source_control.not_signed_in", tool = tool).into())
+        }
+        Standing::NotConnected => text(crate::tr!("source_control.not_connected").into()),
+        Standing::Paused => text(crate::tr!("source_control.paused").into()),
+    }
+}
+
+/// "Connected as @login", with the login set apart, and the account's name after it when
+/// known.
+pub(crate) fn connected_as(login: &str, name: Option<&str>, cx: &App) -> AnyElement {
+    const AT: &str = "\u{1}";
+    let sentence = match name {
+        Some(name) => crate::tr!("source_control.connected_as_named", login = AT, name = name),
+        None => crate::tr!("source_control.connected_as", login = AT),
+    };
+    let (before, after) = sentence.split_once(AT).unwrap_or((&sentence, ""));
+    h_flex()
+        .flex_wrap()
+        .child(before.to_owned())
+        .child(
+            div()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().foreground)
+                .child(format!("@{login}")),
+        )
+        .child(after.to_owned())
+        .into_any_element()
+}
+
+/// Where the token in use comes from, as a row names it.
+pub(crate) fn source_label(source: &CredentialSource) -> String {
     match source {
-        CredentialSource::Saved
-        | CredentialSource::SavedBasic { .. }
-        | CredentialSource::SavedBearer => crate::tr!("source_control.order_saved").into_owned(),
-        CredentialSource::Env { name } => name.clone(),
+        CredentialSource::Saved | CredentialSource::SavedBearer => {
+            crate::tr!("source_control.order_saved").into_owned()
+        }
+        CredentialSource::SavedBasic { email } => {
+            crate::tr!("source_control.source_api_token", email = email).into_owned()
+        }
+        CredentialSource::Env { name } => {
+            crate::tr!("source_control.source_env", name = name).into_owned()
+        }
         CredentialSource::Cli { tool } => {
             crate::tr!("source_control.order_cli", tool = tool).into_owned()
         }
     }
 }
 
-fn status_line(status: Option<&HostStatus>) -> String {
-    match status.and_then(|status| status.source.as_ref()) {
-        Some(CredentialSource::Saved) => crate::tr!("source_control.using_saved").into_owned(),
-        Some(CredentialSource::SavedBasic { email }) => {
-            crate::tr!("source_control.using_saved_basic", email = email).into_owned()
-        }
-        Some(CredentialSource::SavedBearer) => {
-            crate::tr!("source_control.using_saved_bearer").into_owned()
-        }
-        Some(CredentialSource::Env { name }) => {
-            crate::tr!("source_control.using_env", name = name).into_owned()
-        }
-        Some(CredentialSource::Cli { tool }) => {
-            crate::tr!("source_control.using_cli", tool = tool).into_owned()
-        }
-        None => crate::tr!("source_control.not_connected").into_owned(),
-    }
+/// The platform's resolution order, the first that works being used.
+pub(crate) fn order(status: Option<&HostStatus>) -> String {
+    status
+        .map(|status| {
+            status
+                .order
+                .iter()
+                .map(|source| match source {
+                    CredentialSource::Env { name } => name.clone(),
+                    source => source_label(source),
+                })
+                .collect::<Vec<_>>()
+                .join(" → ")
+        })
+        .unwrap_or_default()
 }
+
+/// The status dot before a status, in its color; a ring for a platform not connected.
+pub(crate) fn dot(standing: &Standing, cx: &App) -> Option<AnyElement> {
+    let (color, filled) = standing.dot(cx)?;
+    Some(if filled {
+        crate::material::status_dot(color).into_any_element()
+    } else {
+        crate::material::status_dot(gpui::transparent_black())
+            .border_1()
+            .border_color(color)
+            .into_any_element()
+    })
+}
+
+/// The second line of a platform's row: its status, then where its token comes from, or its
+/// kind when nothing is in use.
+pub(crate) fn status_line(platform: &Platform, compact: bool, cx: &App) -> gpui::Div {
+    let standing = platform.standing();
+    let detail = match (&standing, platform.source()) {
+        (Standing::Connected { .. } | Standing::Unverified, Some(source)) => source_label(source),
+        _ => platform.kind_line(),
+    };
+    let selector = format!(
+        "source-control-standing-{}-{}",
+        platform.host,
+        standing.key()
+    );
+    h_flex()
+        .min_w_0()
+        .gap_1p5()
+        .items_center()
+        .text_secondary(compact, cx)
+        .debug_selector(move || selector)
+        .children(dot(&standing, cx))
+        .child(
+            div()
+                .flex_none()
+                .text_color(standing.color(cx))
+                .child(status_text(&standing, cx)),
+        )
+        .child(div().flex_none().child("·"))
+        .child(div().min_w_0().truncate().child(detail))
+}
+
+/// Emitted to manage a platform on a phone, which pushes a page for it.
+pub(crate) struct ManageHost(pub String);
 
 pub struct SourceControlPanel {
     store: Entity<WorkspaceStore>,
     window_state: Entity<crate::window_state::WindowState>,
-    tokens: BTreeMap<String, Entity<InputState>>,
-    /// The account email beside the token, for hosts whose tokens may take one.
-    emails: BTreeMap<String, Entity<InputState>>,
-    /// Whether the token being typed is one sent with the email, for those hosts.
-    with_email: BTreeMap<String, bool>,
     visible: bool,
-    /// The panel's size-class motion: the window draws it under another
-    /// parent when it turns compact or wide.
-    motion: crate::motion::owned::Owned,
     _subscription: Subscription,
 }
+
+impl EventEmitter<ManageHost> for SourceControlPanel {}
 
 impl SourceControlPanel {
     pub fn new(
@@ -160,14 +354,13 @@ impl SourceControlPanel {
         Self {
             store,
             window_state,
-            tokens: BTreeMap::new(),
-            emails: BTreeMap::new(),
-            with_email: BTreeMap::new(),
             visible: false,
-            motion: Default::default(),
             _subscription: subscription,
         }
     }
+
+    /// Opening the page asks the host to report each platform afresh, and to learn whose the
+    /// tokens in use are.
     pub fn show(&mut self, cx: &mut Context<Self>) {
         if !self.visible {
             self.visible = true;
@@ -175,819 +368,158 @@ impl SourceControlPanel {
                 .update(cx, |store, _| store.refresh_host_credentials());
         }
     }
+
     pub fn hide(&mut self) {
         self.visible = false;
-        self.tokens.clear();
-        self.emails.clear();
-        self.with_email.clear();
     }
 
-    fn notice(&self, host: &str, problem: &HostProblem, cx: &App) -> Option<AnyElement> {
-        let theme = cx.theme();
-        let text = match problem {
-            HostProblem::NotSignedIn { tool, .. } => {
-                crate::tr!(
-                    "source_control.notice_not_signed_in",
-                    tool = tool,
-                    host = host
-                )
-            }
-            HostProblem::NoCredential { .. } | HostProblem::Unverified => return None,
-        };
-        let command = match problem {
-            HostProblem::NotSignedIn {
-                command: Some(command),
-                ..
-            } => Some(command.clone()),
-            _ => None,
-        };
+    /// Connects a platform in a dialog, or manages it: in a dialog, or on a phone a page.
+    fn open(&self, host: &str, connect: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !connect && self.window_state.read(cx).compact {
+            cx.emit(ManageHost(host.to_owned()));
+            return;
+        }
+        host::open(self.store.clone(), host.to_owned(), connect, window, cx);
+    }
+
+    fn row(&self, platform: &Platform, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
-        let selector = format!("source-control-notice-{host}");
-        Some(
-            crate::material::card(cx)
-                .w_full()
-                .debug_selector(move || selector)
-                .text_token(&theme.tokens.typography.xs)
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            Icon::new(crate::icon::IconName::TriangleAlert)
-                                .text_color(theme.warning),
-                        )
-                        .child(div().flex_1().min_w_0().child(text.into_owned())),
-                )
-                .when_some(command, |notice, command| {
-                    let copied = command.clone();
-                    notice.child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            // Wraps between words only, so a URL in the command stays whole.
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex_wrap()
-                                    .px_1()
-                                    .rounded(crate::material::radius_chip(cx))
-                                    .bg(theme.secondary)
-                                    .font_family(theme.mono_font_family.clone())
-                                    // Each word keeps the space after it, so the gaps are the
-                                    // font's own and a line breaks only after one.
-                                    .children(command.split_inclusive(' ').map(|word| {
-                                        div().whitespace_nowrap().child(word.to_owned())
-                                    })),
-                            )
-                            .child(crate::widgets::copy::copy_button(
-                                &format!("source-control-command-{host}"),
-                                false,
-                                compact,
-                                move |_, _, cx| {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        copied.clone(),
-                                    ))
-                                },
-                                cx,
-                            )),
-                    )
-                })
-                .into_any_element(),
-        )
-    }
-
-    fn row(
-        &mut self,
-        host: &str,
-        kind: HostKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let settings = self.store.read(cx).settings().source_control.clone();
-        let choice = settings
-            .hosts
-            .get(host)
-            .cloned()
-            .unwrap_or_else(|| HostSettings::new(kind));
-        let status = settings.status.get(host).cloned();
-        let theme = cx.theme().clone();
-        let compact = self.window_state.read(cx).compact;
-        let store = self.store.clone();
-        let toggle_host = host.to_owned();
-        let switch = Switch::new(SharedString::from(format!("source-control-enabled-{host}")))
-            .checked(choice.enabled)
-            .aria_label(crate::tr!("source_control.use_host", host = host).into_owned())
-            .tooltip(crate::tr!("source_control.use_host", host = host).into_owned())
-            .on_click(move |enabled, _, cx| {
-                store.update(cx, |store, cx| {
-                    store.patch_source_control_host(
-                        toggle_host.clone(),
-                        kind,
-                        Some(*enabled),
-                        None,
-                    );
-                    cx.notify();
-                });
-            });
-        let added = status
-            .as_ref()
-            .map_or(settings.hosts.contains_key(host), |status| status.added)
-            && host != kind.public_host();
-        let mut kind_line = kind.terms().name.to_owned();
-        if added {
-            kind_line.push_str(" · ");
-            kind_line.push_str(&crate::tr!("source_control.origin_added"));
-        }
-        let header_color = gpui_base::motion::transition(
-            SharedString::from(format!("source-control-header-{host}")),
-            if choice.enabled {
-                theme.foreground
-            } else {
-                theme.muted_foreground
-            },
-            gpui_base::motion::Transition::new(GLIDE),
-            window,
-            cx,
-        );
-        let header = h_flex()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .text_body(compact, cx)
-            .child(mark(kind).text_color(header_color))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .text_color(header_color)
-                            .overflow_hidden()
-                            .child(crate::widgets::fade_text(host.to_owned())),
-                    )
-                    .child(div().text_secondary(compact, cx).child(kind_line)),
-            )
-            .child(switch);
-        let spacing = cx.theme().tokens.spacing.sm;
-        // A host switched off folds its editor away to one line saying so.
-        let details = crate::motion::shown(
-            SharedString::from(format!("source-control-details-{host}")),
-            choice.enabled.then_some(()),
-            SHOW,
-            window,
-            cx,
-        )
-        .map(|_| self.host_details(host, kind, &choice, status, added, compact, window, cx));
-        crate::material::group_row_stacked(cx)
-            .child(header)
-            .child(
-                v_flex()
-                    .w_full()
-                    .child(
-                        crate::widgets::Collapsible::new(
-                            SharedString::from(format!("source-control-details-fold-{host}")),
-                            choice.enabled,
-                        )
-                        .motion(&self.motion)
-                        .w_full()
-                        .when_some(details, |fold, details| fold.content(details.pt(spacing))),
-                    )
-                    .child(
-                        crate::widgets::Collapsible::new(
-                            SharedString::from(format!("source-control-off-fold-{host}")),
-                            !choice.enabled,
-                        )
-                        .motion(&self.motion)
-                        .w_full()
-                        .content(
-                            div()
-                                .pt(spacing)
-                                .text_secondary(compact, cx)
-                                .child(crate::tr!("source_control.off", host = host).into_owned()),
-                        ),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// An enabled host's status, notices and credential editor.
-    #[allow(clippy::too_many_arguments)]
-    fn host_details(
-        &mut self,
-        host: &str,
-        kind: HostKind,
-        choice: &HostSettings,
-        status: Option<HostStatus>,
-        added: bool,
-        compact: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let mut row = v_flex().w_full().gap(cx.theme().tokens.spacing.sm);
-        let order = status
-            .as_ref()
-            .map(|status| {
-                status
-                    .order
-                    .iter()
-                    .map(source_slot)
-                    .collect::<Vec<_>>()
-                    .join(" → ")
-            })
-            .unwrap_or_default();
-        let tooltip = crate::tr!("source_control.order", order = order).into_owned();
-        let unverified = crate::motion::shown(
-            SharedString::from(format!("source-control-unverified-{host}")),
-            status
-                .as_ref()
-                .is_some_and(|status| status.problem == Some(HostProblem::Unverified))
-                .then_some(()),
-            SHOW,
-            window,
-            cx,
-        );
-        let source_line = div()
-            .id(SharedString::from(format!("source-control-source-{host}")))
-            .flex()
-            .flex_wrap()
-            .gap_1()
-            .text_secondary(compact, cx)
-            // Where the credential comes from cross-fades when it changes.
-            .child(crate::motion::cross_fade(
-                SharedString::from(format!("source-control-status-{host}")),
-                status_line(status.as_ref()),
-                CHANGE,
-                window,
-                cx,
-                |line, _, _| line.clone().into_any_element(),
-            ))
-            .when_some(unverified, |line, unverified| {
-                let selector = format!("source-control-unverified-{host}");
-                line.child(
-                    unverified.fade(
-                        h_flex().gap_1().child(" · ").child(
-                            div()
-                                .debug_selector(move || selector)
-                                .child(crate::tr!("source_control.unverified").into_owned()),
-                        ),
-                    ),
-                )
-            })
-            .when(!order.is_empty(), |line| {
-                line.with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
-            });
-        // A notice folds in under the status when the host reports a problem
-        // one can act on, and away once it is solved.
-        let notice = crate::motion::shown(
-            SharedString::from(format!("source-control-notice-{host}")),
-            status
-                .as_ref()
-                .and_then(|status| status.problem.clone())
-                .filter(|problem| matches!(problem, HostProblem::NotSignedIn { .. })),
-            SHOW,
-            window,
-            cx,
-        );
-        let spacing = cx.theme().tokens.spacing.sm;
-        row = row.child(
-            v_flex()
-                .w_full()
-                .child(source_line)
-                .children(notice.and_then(|notice| {
-                    self.notice(host, &notice.value, cx)
-                        .map(|card| notice.fold(div().w_full().pt(spacing).child(card)))
-                })),
-        );
-        let accounts = status
-            .as_ref()
-            .map(|status| status.accounts.clone())
-            .unwrap_or_default();
-        let accounts = crate::motion::shown(
-            SharedString::from(format!("source-control-account-{host}")),
-            (accounts.len() > 1).then_some(accounts),
-            SHOW,
-            window,
-            cx,
-        );
-        if let Some(shown) = accounts {
-            let accounts = shown.value.clone();
-            let selected = choice
-                .account
-                .clone()
-                .unwrap_or_else(|| crate::tr!("source_control.active_account").into_owned());
-            let selected_account = choice.account.clone();
-            let menu_host = host.to_owned();
-            row = row.child(
-                shown.fade(
-                    Button::new(SharedString::from(format!("source-control-account-{host}")))
-                        .ghost()
-                        .outline()
-                        .compact()
-                        .label(selected)
-                        .dropdown_menu(move |mut menu, _, _| {
-                            menu = menu.menu_with_check(
-                                crate::tr!("source_control.active_account").into_owned(),
-                                selected_account.is_none(),
-                                Box::new(ChooseAccount {
-                                    host: menu_host.clone(),
-                                    kind,
-                                    account: None,
-                                }),
-                            );
-                            for account in &accounts {
-                                menu = menu.menu_with_check(
-                                    account.clone(),
-                                    selected_account.as_ref() == Some(account),
-                                    Box::new(ChooseAccount {
-                                        host: menu_host.clone(),
-                                        kind,
-                                        account: Some(account.clone()),
-                                    }),
-                                );
-                            }
-                            menu
-                        }),
-                ),
-            );
-        }
-        if let Some(note) = crate::motion::shown(
-            SharedString::from(format!("source-control-env-override-{host}")),
-            status
-                .as_ref()
-                .is_some_and(|status| status.env_overrides_account)
-                .then_some(()),
-            SHOW,
-            window,
-            cx,
-        ) {
-            row = row.child(
-                note.fade(
-                    div()
-                        .text_secondary(compact, cx)
-                        .child(crate::tr!("source_control.env_override").into_owned()),
-                ),
-            );
-        }
-        if kind.takes_email() {
-            return row.child(self.email_editor(host, status.as_ref(), window, cx));
-        }
-        let token_set = status.as_ref().is_some_and(|status| status.token_set);
-        let placeholder = if token_set {
-            crate::tr!("source_control.token_placeholder_saved")
-        } else {
-            crate::tr!("source_control.token_placeholder")
-        };
-        let token = self
-            .tokens
-            .entry(host.to_owned())
-            .or_insert_with(|| cx.new(|cx| InputState::new(window, cx).masked(true)))
-            .clone();
-        let set_host = host.to_owned();
-        let clear_host = host.to_owned();
-        let input = token.clone();
-        let store = self.store.clone();
-        let clear_store = self.store.clone();
-        // A phone gives the field the row and puts the buttons under it, at
-        // the end; turning, the field's width glides and both glide to
-        // their places.
-        let flip = crate::settings_rows::flip_row(
-            &self.motion,
-            format!("source-control-token-{host}"),
-            compact,
-        )
-        .bare();
-        let buttons_width = self
-            .motion
-            .keep::<std::rc::Rc<std::cell::Cell<gpui::Pixels>>>(format!(
-                "source-control-token-buttons-{host}"
-            ));
-        let gap = cx.theme().tokens.spacing.sm;
-        let field = flip
-            .field_beside(
-                Input::new(&token)
-                    .placeholder(placeholder)
-                    .aria_label(crate::tr!("source_control.token_label", host = host).into_owned()),
-                buttons_width.get() + gap,
-                cx,
-            )
-            // The token field's floor before the buttons wrap; gpui-base has no field-width token.
-            .min_w(gpui::px(120.));
-        let mut buttons = h_flex()
-            .gap_2()
-            .child(
-                Button::new(SharedString::from(format!(
-                    "source-control-token-set-{host}"
-                )))
-                .ghost()
-                .outline()
-                .compact()
-                .touch(compact)
-                .label(crate::tr!("source_control.set").into_owned())
-                .aria_label(crate::tr!("source_control.set_label", host = host).into_owned())
-                .on_click(move |_, window, cx| {
-                    let value = input.read(cx).value().to_string();
-                    if !value.trim().is_empty() {
-                        store.update(cx, |store, _| {
-                            store.set_host_token(set_host.clone(), Some(value), None)
-                        });
-                        input.update(cx, |input, cx| input.set_value("", window, cx));
-                    }
-                }),
-            )
-            .child(
-                Button::new(SharedString::from(format!(
-                    "source-control-token-clear-{host}"
-                )))
-                .ghost()
-                .compact()
-                .touch(compact)
-                .disabled(!token_set)
-                .label(crate::tr!("source_control.clear").into_owned())
-                .aria_label(crate::tr!("source_control.clear_label", host = host).into_owned())
-                .on_click(move |_, _, cx| {
-                    clear_store.update(cx, |store, _| {
-                        store.set_host_token(clear_host.clone(), None, None)
-                    })
-                }),
-            );
-        if added {
-            let remove_host = host.to_owned();
-            let store = self.store.clone();
-            buttons = buttons.child(
-                Button::new(SharedString::from(format!("source-control-remove-{host}")))
-                    .ghost()
-                    .compact()
-                    .touch(compact)
-                    .label(crate::tr!("source_control.remove_host").into_owned())
-                    .on_click(move |_, window, cx| {
-                        confirm_remove(store.clone(), remove_host.clone(), window, cx)
-                    }),
-            );
-        }
-        let buttons = gpui_base::ElementExt::on_prepaint(buttons, move |bounds, _, _| {
-            buttons_width.set(bounds.size.width)
-        });
-        let field = flip.part("field", field);
-        let buttons = flip.part("buttons", buttons);
-        let editor = if compact {
-            v_flex()
-                .w_full()
-                .gap(gap)
-                .child(field)
-                .child(h_flex().w_full().justify_end().child(buttons))
-        } else {
-            h_flex().w_full().gap(gap).child(field).child(buttons)
-        };
-        let editor = flip.render(editor);
-        let scopes = status
-            .as_ref()
-            .filter(|status| !status.token_scopes.is_empty())
-            .map(|status| {
-                crate::tr!(
-                    "source_control.token_scopes",
-                    scopes = status.token_scopes.join(", ")
-                )
-                .into_owned()
-            });
-        let token_url = status.and_then(|status| status.token_url);
-        let help = crate::motion::shown(
-            SharedString::from(format!("source-control-help-{host}")),
-            (scopes.is_some() || token_url.is_some()).then_some((scopes, token_url)),
-            SHOW,
-            window,
-            cx,
-        )
-        .map(|help| {
-            let (scopes, token_url) = help.value.clone();
-            help.fade(
-                h_flex()
-                    .w_full()
-                    .flex_wrap()
-                    .gap_1()
-                    .items_center()
-                    .text_secondary(compact, cx)
-                    .children(scopes)
-                    .when_some(token_url, |help, url| {
-                        help.child(crate::settings_rows::external_link(
-                            format!("source-control-token-link-{host}"),
-                            crate::tr!("source_control.create_token")
-                                .into_owned()
-                                .into(),
-                            url,
-                        ))
-                    }),
-            )
-        });
-        row.child(editor).children(help)
-    }
-}
-
-impl SourceControlPanel {
-    /// The editor of a host whose token is either an API token sent with the account's email
-    /// or an access token sent alone: one is chosen, and saving it replaces the other.
-    fn email_editor(
-        &mut self,
-        host: &str,
-        status: Option<&HostStatus>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let compact = self.window_state.read(cx).compact;
-        let saved = status.and_then(|status| status.source.clone());
-        let saved_email = match &saved {
-            Some(CredentialSource::SavedBasic { email }) => Some(email.clone()),
-            _ => None,
-        };
-        let bearer_saved = saved == Some(CredentialSource::SavedBearer);
-        let with_email = *self
-            .with_email
-            .entry(host.to_owned())
-            .or_insert(!bearer_saved);
-        let token_saved = if with_email {
-            saved_email.is_some()
-        } else {
-            bearer_saved
-        };
-        let token = self
-            .tokens
-            .entry(host.to_owned())
-            .or_insert_with(|| cx.new(|cx| InputState::new(window, cx).masked(true)))
-            .clone();
-        token.update(cx, |input, cx| {
-            input.set_placeholder(
-                if token_saved {
-                    crate::tr!("source_control.token_placeholder_saved")
-                } else {
-                    crate::tr!("source_control.token_placeholder")
-                }
-                .into_owned(),
-                window,
-                cx,
-            )
-        });
-        let email = match self.emails.get(host) {
-            Some(email) => email.clone(),
-            None => {
-                let email = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .placeholder(crate::tr!("source_control.bitbucket_email"))
-                });
-                if let Some(saved_email) = &saved_email {
-                    email.update(cx, |input, cx| input.set_value(saved_email, window, cx));
-                }
-                self.emails.insert(host.to_owned(), email.clone());
-                email
-            }
-        };
+        let host = platform.host.clone();
+        let standing = platform.standing();
+        let connect = standing.connects();
+        let paused = standing == Standing::Paused;
         let panel = cx.entity().downgrade();
-        let method = |id: &str, label: SharedString, chosen: bool| {
-            let panel = panel.clone();
-            let host = host.to_owned();
-            Choice::new(
-                SharedString::from(format!("source-control-method-{id}-{host}")),
-                label,
-            )
-            .selected(with_email == chosen)
-            .on_select(move |_, cx| {
-                let _ = panel.update(cx, |panel, cx| {
-                    panel.with_email.insert(host.clone(), chosen);
-                    cx.notify();
-                });
-            })
+        let open = move |host: &str, window: &mut Window, cx: &mut App| {
+            let _ = panel.update(cx, |panel, cx| panel.open(host, connect, window, cx));
         };
-        let track = ChoiceGroup::new(SharedString::from(format!("source-control-method-{host}")))
-            .compact(compact)
-            .choices([
-                method(
-                    "api",
-                    crate::tr!("source_control.bitbucket_api_token")
-                        .into_owned()
-                        .into(),
-                    true,
-                ),
-                method(
-                    "access",
-                    crate::tr!("source_control.bitbucket_access_token")
-                        .into_owned()
-                        .into(),
-                    false,
-                ),
-            ]);
-        // The chosen method's description cross-fades with the choice.
-        let description = crate::motion::cross_fade(
-            SharedString::from(format!("source-control-method-desc-{host}")),
-            with_email,
-            CHANGE,
-            window,
-            cx,
-            |&with_email, _, cx| {
-                let (description, link_label, link) = if with_email {
-                    (
-                        crate::tr!("source_control.bitbucket_api_desc"),
-                        crate::tr!("source_control.bitbucket_api_link"),
-                        status.and_then(|status| status.token_url.clone()),
-                    )
-                } else {
-                    (
-                        crate::tr!("source_control.bitbucket_access_desc"),
-                        crate::tr!("source_control.bitbucket_access_link"),
-                        status.and_then(|status| status.access_token_url.clone()),
-                    )
-                };
-                v_flex()
-                    .w_full()
-                    .items_start()
-                    .gap_1()
-                    .text_secondary(compact, cx)
-                    .child(div().w_full().child(description.into_owned()))
-                    .when_some(link, |description, url| {
-                        description.child(crate::settings_rows::external_link(
-                            format!("source-control-method-link-{host}"),
-                            link_label.into_owned().into(),
-                            url,
-                        ))
-                    })
-                    .into_any_element()
-            },
-        );
-        let replaces = match (with_email, &saved) {
-            (true, Some(CredentialSource::SavedBearer)) => {
-                Some(crate::tr!("source_control.bitbucket_replaces_access"))
-            }
-            (false, Some(CredentialSource::SavedBasic { .. })) => {
-                Some(crate::tr!("source_control.bitbucket_replaces_api"))
-            }
-            _ => None,
-        };
-        let replaces = crate::motion::shown(
-            SharedString::from(format!("source-control-replaces-{host}")),
-            replaces.map(|replaces| replaces.into_owned()),
-            SHOW,
-            window,
-            cx,
-        );
-        let store = self.store.clone();
-        let set_host = host.to_owned();
-        let (set_token, set_email) = (token.clone(), email.clone());
-        let set = Button::new(SharedString::from(format!(
-            "source-control-token-set-{host}"
-        )))
-        .ghost()
-        .outline()
-        .compact()
-        .touch(compact)
-        .label(crate::tr!("source_control.set").into_owned())
-        .aria_label(crate::tr!("source_control.set_label", host = host).into_owned())
-        .on_click(move |_, window, cx| {
-            let token = set_token.read(cx).value().trim().to_owned();
-            let token = (!token.is_empty()).then_some(token);
-            let email = with_email
-                .then(|| set_email.read(cx).value().trim().to_owned())
-                .filter(|email| !email.is_empty());
-            // An API token needs its email, and either a new token or the one saved with
-            // an email; an access token needs a new token.
-            let ready = match (with_email, &email, &token) {
-                (true, None, _) => false,
-                (true, Some(_), token) => token.is_some() || token_saved,
-                (false, _, token) => token.is_some(),
+        let trailing = if compact && !connect {
+            Icon::new(IconName::ChevronRight)
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element()
+        } else {
+            let button_host = host.clone();
+            let open = open.clone();
+            let label = if connect {
+                crate::tr!("source_control.connect")
+            } else {
+                crate::tr!("source_control.manage")
             };
-            if ready {
-                store.update(cx, |store, _| {
-                    store.set_host_token(set_host.clone(), token, email)
+            let id = format!(
+                "source-control-{}-{host}",
+                if connect { "connect" } else { "manage" }
+            );
+            let button = Button::new(SharedString::from(id.clone()))
+                .debug_selector(move || id)
+                .compact()
+                .touch(compact)
+                .label(label.into_owned())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    open(&button_host, window, cx)
                 });
-                set_token.update(cx, |input, cx| input.set_value("", window, cx));
+            if connect {
+                button.primary().into_any_element()
+            } else {
+                button.outline().into_any_element()
             }
-        });
-        let clear_store = self.store.clone();
-        let clear_host = host.to_owned();
-        let clear = Button::new(SharedString::from(format!(
-            "source-control-token-clear-{host}"
-        )))
-        .ghost()
-        .compact()
-        .touch(compact)
-        .disabled(!status.is_some_and(|status| status.token_set))
-        .label(crate::tr!("source_control.clear").into_owned())
-        .aria_label(crate::tr!("source_control.clear_label", host = host).into_owned())
-        .on_click(move |_, _, cx| {
-            clear_store.update(cx, |store, _| {
-                store.set_host_token(clear_host.clone(), None, None)
-            })
-        });
-        let email_label = crate::tr!("source_control.bitbucket_email_label", host = host);
-        v_flex()
-            .w_full()
-            .gap_2()
-            .child(track)
-            .child(
-                // The email field folds in under the description for an API token.
-                v_flex().w_full().child(description).child(
-                    crate::widgets::Collapsible::new(
-                        SharedString::from(format!("source-control-email-fold-{host}")),
-                        with_email,
-                    )
-                    .motion(&self.motion)
-                    .w_full()
-                    .content(
-                        div()
-                            .w_full()
-                            .pt_2()
-                            .child(Input::new(&email).aria_label(email_label.into_owned())),
-                    ),
+        };
+        let row_host = host.clone();
+        crate::material::accessible_clickable(
+            crate::material::group_row(cx),
+            SharedString::from(format!("source-control-row-{host}")),
+            Role::Button,
+            host.clone(),
+            cx,
+        )
+        .debug_selector({
+            let selector = format!("source-control-row-{host}");
+            move || selector
+        })
+        .relative()
+        .cursor_pointer()
+        .child(crate::material::row_hover(px(0.), cx))
+        .on_click(move |_, window, cx| open(&row_host, window, cx))
+        .child(
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_3()
+                .items_center()
+                .when(paused, |row| row.opacity(0.6))
+                .child(
+                    mark(platform.kind)
+                        .flex_none()
+                        .text_color(cx.theme().foreground),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_body(compact, cx)
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(host.clone())),
+                        )
+                        .child(status_line(platform, compact, cx)),
                 ),
-            )
-            .child(
-                div().w_full().child(Input::new(&token).aria_label(
-                    crate::tr!("source_control.token_label", host = host).into_owned(),
-                )),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_secondary(compact, cx)
-                            .children(replaces.map(|replaces| {
-                                replaces.fade(div().child(replaces.value.clone()))
-                            })),
-                    )
-                    .child(h_flex().gap_2().child(set).child(clear)),
-            )
-            .into_any_element()
+        )
+        .child(div().flex_none().child(trailing))
+        .into_any_element()
     }
-}
 
-fn confirm_remove(store: Entity<WorkspaceStore>, host: String, window: &mut Window, cx: &mut App) {
-    window.open_alert_dialog(cx, move |alert, _, _| {
-        let store = store.clone();
-        let host = host.clone();
-        alert
-            .title(crate::tr!("source_control.remove_title", host = &host).into_owned())
-            .description(crate::tr!("source_control.remove_desc").into_owned())
-            .button_props(
-                crate::overlay::DialogButtons::default()
-                    .ok_variant(ButtonVariant::Danger)
-                    .ok_text(crate::tr!("source_control.remove_host"))
-                    .cancel_text(crate::tr!("settings.cancel"))
-                    .show_cancel(true),
-            )
-            .on_ok(move |_, _, cx| {
-                store.update(cx, |store, _| {
-                    store.remove_source_control_host(host.clone())
-                });
-                true
-            })
-    });
+    fn add_row(&self, listed: Vec<String>, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
+        let store = self.store.clone();
+        let label = crate::tr!("source_control.add_host_menu").into_owned();
+        crate::material::accessible_clickable(
+            crate::material::group_row(cx),
+            "source-control-add-host",
+            Role::Button,
+            label.clone(),
+            cx,
+        )
+        .debug_selector(|| "source-control-add-host".into())
+        .relative()
+        .cursor_pointer()
+        .child(crate::material::row_hover(px(0.), cx))
+        .on_click(move |_, window, cx| add::open(store.clone(), listed.clone(), window, cx))
+        .text_body(compact, cx)
+        .text_color(cx.theme().link)
+        .child(Icon::new(IconName::Plus).flex_none())
+        .child(label)
+        .into_any_element()
+    }
 }
 
 impl Render for SourceControlPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let settings = self.store.read(cx).settings().source_control.clone();
-        let hosts = listed(&settings);
-        let rows = hosts
+        let store = self.store.read(cx);
+        let settings = store.settings().source_control.clone();
+        let platforms: Vec<Platform> = listed(&settings)
+            .into_iter()
+            .map(|(host, _)| Platform::read(store, &host))
+            .collect();
+        let compact = self.window_state.read(cx).compact;
+        let names: Vec<String> = platforms
             .iter()
-            .map(|(host, kind)| (SharedString::from(host.clone()), (host.clone(), *kind)));
+            .map(|platform| platform.host.clone())
+            .collect();
+        let rows = platforms
+            .iter()
+            .map(|platform| (SharedString::from(platform.host.clone()), platform.clone()))
+            .collect::<Vec<_>>();
         let rows = crate::settings_rows::grouped_keyed(
             "source-control-hosts",
             rows,
             window,
             cx,
-            |_, (host, kind), window, cx| self.row(host, *kind, window, cx),
+            |_, platform, _, cx| self.row(platform, cx),
         );
-        let compact = self.window_state.read(cx).compact;
-        let store = self.store.clone();
-        let listed_hosts: Vec<String> = hosts.into_iter().map(|(host, _)| host).collect();
-        let add = Button::new("source-control-add-host")
-            .outline()
-            .small()
-            .icon(crate::icon::IconName::Plus)
-            .w_full()
-            .label(crate::tr!("source_control.add_host_menu").into_owned())
-            .on_click(move |_, window, cx| {
-                AddHostDialog::open(store.clone(), listed_hosts.clone(), window, cx)
-            });
-        let note = div()
-            .text_secondary(compact, cx)
-            .child(crate::tr!("source_control.detection_note").into_owned());
+        let add = self.add_row(names, cx);
         v_flex()
             .gap(crate::material::section_gap(cx))
-            .on_action(cx.listener(|this, action: &ChooseAccount, _, cx| {
-                this.store.update(cx, |store, _| {
-                    store.patch_source_control_host(
-                        action.host.clone(),
-                        action.kind,
-                        None,
-                        Some(action.account.clone()),
-                    )
-                });
-            }))
             .child(
                 div()
                     .text_secondary(compact, cx)
@@ -999,400 +531,57 @@ impl Render for SourceControlPanel {
                         crate::tr!("settings.hosts_section"),
                         cx,
                     ))
-                    .child(crate::material::group(cx).child(rows)),
-            )
-            .child({
-                // A phone puts the button, full width, over the note; each
-                // glides to its place when the window turns, and the
-                // button's width glides.
-                let flip = crate::settings_rows::flip_row(
-                    &self.motion,
-                    "source-control-add-host",
-                    compact,
-                )
-                .bare();
-                let layout = if compact {
-                    v_flex()
-                        .gap_2()
-                        .child(flip.part("add", flip.stretch(add, cx)))
-                        .child(flip.part("note", note))
-                } else {
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .items_center()
-                        .gap_3()
-                        .child(flip.part("note", note.flex_1()))
-                        .child(flip.part("add", flip.stretch(add, cx)))
-                };
-                flip.render(layout)
-            })
-    }
-}
-
-/// The Add host dialog: a kind and an authority, checked by the kind's own rule before the host
-/// is asked to add it.
-struct AddHostDialog {
-    store: Entity<WorkspaceStore>,
-    listed: Vec<String>,
-    kind: HostKind,
-    input: Entity<InputState>,
-    error: Option<String>,
-    _subscription: Subscription,
-}
-
-impl AddHostDialog {
-    fn open(store: Entity<WorkspaceStore>, listed: Vec<String>, window: &mut Window, cx: &mut App) {
-        let dialog = cx.new(|cx| {
-            let kind = HostKind::Github;
-            let input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(crate::tr!(&format!(
-                    "source_control.host_placeholder_{}",
-                    slug(kind)
-                )))
-            });
-            input.update(cx, |input, cx| {
-                input.set_value(prefill(kind), window, cx);
-                input.focus(window, cx);
-            });
-            let subscription = cx.subscribe_in(
-                &input,
-                window,
-                |dialog: &mut Self, _, event: &InputEvent, window, cx| match event {
-                    InputEvent::Change => {
-                        dialog.error = None;
-                        cx.notify();
-                    }
-                    InputEvent::PressEnter { .. } => dialog.add(window, cx),
-                    _ => {}
-                },
-            );
-            Self {
-                store,
-                listed,
-                kind,
-                input,
-                error: None,
-                _subscription: subscription,
-            }
-        });
-        let content = dialog.clone();
-        let footer = dialog.clone();
-        window.open_dialog(cx, move |builder, _, _| {
-            let content = content.clone();
-            let cancel = footer.clone();
-            let add = footer.clone();
-            builder
-                .title(crate::tr!("source_control.add_host").into_owned())
-                .content(move |el, _, _| el.child(content.clone()))
-                .footer(
-                    DialogActions::new()
-                        .child(
-                            Button::new("source-control-add-cancel")
-                                .outline()
-                                .small()
-                                .label(crate::tr!("settings.cancel"))
-                                .on_click(move |_, window, cx| {
-                                    let _ = &cancel;
-                                    window.close_dialog(cx)
-                                }),
-                        )
-                        .child(
-                            Button::new("source-control-add-confirm")
-                                .primary()
-                                .small()
-                                .label(crate::tr!("source_control.add"))
-                                .on_click(move |_, window, cx| {
-                                    add.update(cx, |dialog, cx| dialog.add(window, cx))
-                                }),
-                        )
-                        .into_any_element(),
-                )
-        });
-    }
-
-    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.input.read(cx).value().to_string();
-        let name = self.kind.terms().name;
-        let host = match self.kind.authority(&typed) {
-            Ok(host) => host,
-            Err(HostRefusal::Blank) if self.kind.organizations() => {
-                self.error =
-                    Some(crate::tr!("source_control.error_blank_organization").into_owned());
-                return cx.notify();
-            }
-            Err(HostRefusal::Invalid) if self.kind.organizations() => {
-                self.error =
-                    Some(crate::tr!("source_control.error_invalid_organization").into_owned());
-                return cx.notify();
-            }
-            Err(HostRefusal::Blank) => {
-                self.error = Some(crate::tr!("source_control.error_blank").into_owned());
-                return cx.notify();
-            }
-            Err(HostRefusal::Invalid) => {
-                self.error = Some(crate::tr!("source_control.error_invalid").into_owned());
-                return cx.notify();
-            }
-            Err(HostRefusal::PortOrPath) => {
-                self.error =
-                    Some(crate::tr!("source_control.error_port_path", kind = name).into_owned());
-                return cx.notify();
-            }
-            Err(HostRefusal::Path) => {
-                self.error =
-                    Some(crate::tr!("source_control.error_path", kind = name).into_owned());
-                return cx.notify();
-            }
-            Err(HostRefusal::Fixed) => {
-                self.error = Some(
-                    crate::tr!(
-                        "source_control.error_fixed",
-                        kind = name,
-                        host = self.kind.public_host()
-                    )
-                    .into_owned(),
-                );
-                return cx.notify();
-            }
-        };
-        if self.listed.contains(&host) {
-            self.error = Some(crate::tr!("source_control.error_exists", host = &host).into_owned());
-            return cx.notify();
-        }
-        let kind = self.kind;
-        self.store.update(cx, |store, _| {
-            store.patch_source_control_host(host, kind, Some(true), None)
-        });
-        window.close_dialog(cx);
-    }
-
-    fn choose(&mut self, kind: HostKind, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.input.read(cx).value().trim().to_ascii_lowercase();
-        let previous = self.kind;
-        self.kind = kind;
-        self.error = None;
-        self.input.update(cx, |input, cx| {
-            input.set_placeholder(
-                crate::tr!(&format!("source_control.host_placeholder_{}", slug(kind))).into_owned(),
-                window,
-                cx,
-            );
-            if typed.is_empty() || typed == previous.public_host() || kind.fixed_host().is_some() {
-                input.set_value(prefill(kind), window, cx);
-            }
-        });
-        cx.notify();
-    }
-}
-
-impl Render for AddHostDialog {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = crate::window_seam::window_is_compact(window, cx);
-        let error = crate::motion::shown(
-            "source-control-add-error",
-            self.error.clone(),
-            SHOW,
-            window,
-            cx,
-        );
-        let theme = cx.theme();
-        let kind = self.kind;
-        let label = |text: SharedString| div().text_caption(cx).child(text);
-        v_flex()
-            .gap_2()
-            .on_action(cx.listener(|this, action: &ChooseKind, window, cx| {
-                this.choose(action.kind, window, cx)
-            }))
-            .child(label(
-                crate::tr!("source_control.kind_label").into_owned().into(),
-            ))
-            .child(
-                Button::new("source-control-add-kind")
-                    .outline()
-                    .small()
-                    .w_full()
                     .child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .child(mark(kind))
-                            .child(kind.terms().name)
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .child(Icon::new(crate::icon::IconName::ChevronDown)),
-                            ),
+                        crate::material::group(cx)
+                            .child(rows)
+                            .child(crate::material::row_hairline(
+                                px(crate::material::CARD_INSET),
+                                cx,
+                            ))
+                            .child(add),
                     )
-                    // gpui-base has no Select; a button with a menu stands in for one.
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for choice in HostKind::ALL {
-                            menu = menu.menu_with_check(
-                                choice.terms().name,
-                                choice == kind,
-                                Box::new(ChooseKind { kind: choice }),
-                            );
-                        }
-                        menu
-                    }),
-            )
-            .child(label(
-                if kind.organizations() {
-                    crate::tr!("source_control.organization_label")
-                } else {
-                    crate::tr!("source_control.host_label")
-                }
-                .into_owned()
-                .into(),
-            ))
-            // A kind served from one host alone takes no other.
-            .child(Input::new(&self.input).disabled(kind.fixed_host().is_some()))
-            .child(
-                div()
-                    .text_secondary(compact, cx)
-                    .flex()
-                    .flex_wrap()
-                    .children(
-                        crate::tr!(&format!("source_control.note_{}", slug(kind)))
-                            .split_inclusive([' ', '。'])
-                            .map(|word| {
-                                div()
-                                    .min_w_0()
-                                    .when(word.is_ascii() || word.contains('.'), |fragment| {
-                                        fragment.whitespace_nowrap()
-                                    })
-                                    .child(word.to_owned())
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    // Holds one line while empty, so an error does not move the dialog.
-                    .min_h(theme.tokens.typography.xs.line_height)
-                    .text_token(&theme.tokens.typography.xs)
-                    .text_color(theme.danger)
-                    .children(error.map(|error| error.fade(div().child(error.value.clone())))),
+                    .child(crate::settings_rows::footnote(
+                        crate::tr!("source_control.detection_note").into_owned(),
+                        compact,
+                        cx,
+                    )),
             )
     }
+}
+
+/// Asks before removing a platform the user added, with its saved token.
+pub(crate) fn confirm_remove(
+    store: Entity<WorkspaceStore>,
+    host: String,
+    kind: HostKind,
+    then: impl Fn(&mut Window, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let then = std::rc::Rc::new(then);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let store = store.clone();
+        let host = host.clone();
+        let then = then.clone();
+        alert
+            .title(crate::tr!("source_control.remove_title", host = &host).into_owned())
+            .description(crate::tr!("source_control.remove_desc", pr = noun(kind)).into_owned())
+            .button_props(
+                crate::overlay::DialogButtons::default()
+                    .ok_variant(crate::widgets::button::ButtonVariant::Danger)
+                    .ok_text(crate::tr!("source_control.remove"))
+                    .cancel_text(crate::tr!("settings.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, window, cx| {
+                store.update(cx, |store, _| {
+                    store.remove_source_control_host(host.clone())
+                });
+                then(window, cx);
+                true
+            })
+    });
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::TestAppContext;
-    use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
-
-    #[gpui::test]
-    fn credential_rows_show_only_actionable_notices(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        cx.update(crate::theme::init);
-        let status = |kind, source, problem| HostStatus {
-            kind,
-            added: true,
-            token_set: true,
-            source: Some(source),
-            accounts: Vec::new(),
-            env_overrides_account: false,
-            order: vec![CredentialSource::Saved],
-            problem,
-            token_url: None,
-            access_token_url: None,
-            token_scopes: Vec::new(),
-        };
-        let mut settings = tcode_core::settings::Settings {
-            language: Some(crate::LANGUAGE_ENGLISH.into()),
-            ..Default::default()
-        };
-        settings.source_control.status = BTreeMap::from([
-            (
-                "bitbucket.org".to_owned(),
-                status(
-                    HostKind::Bitbucket,
-                    CredentialSource::SavedBearer,
-                    Some(HostProblem::Unverified),
-                ),
-            ),
-            (
-                "gitlab.com".to_owned(),
-                status(HostKind::Gitlab, CredentialSource::Saved, None),
-            ),
-        ]);
-        let mut empty = status(
-            HostKind::Gitea,
-            CredentialSource::Saved,
-            Some(HostProblem::NoCredential {
-                tools_missing: vec!["tea".into()],
-            }),
-        );
-        empty.source = None;
-        empty.token_set = false;
-        settings
-            .source_control
-            .status
-            .insert("gitea.com".into(), empty.clone());
-        empty.kind = HostKind::Gitlab;
-        empty.problem = Some(HostProblem::NotSignedIn {
-            tool: "glab".into(),
-            command: Some("glab auth login --hostname gitlab.example.com".into()),
-        });
-        settings
-            .source_control
-            .status
-            .insert("gitlab.example.com".into(), empty);
-        let (to_host, _requests) = async_channel::unbounded();
-        let (incoming, from_host) = async_channel::unbounded();
-        incoming
-            .try_send(
-                encode_line(&HostMessage::Event(EventEnvelope {
-                    request_id: None,
-                    topic: Topic::Settings,
-                    event: ServerEvent::SettingsSnapshot(settings),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
-        let link = tcode_client::HostLink::new(to_host, from_host);
-        let pump = link.clone();
-        let executor = cx.background_executor.clone();
-        let _pump = cx.background_executor.spawn(async move {
-            pump.pump_with_timer(|delay| executor.timer(delay)).await;
-        });
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
-        let (_, cx) =
-            cx.add_window_view(|_, cx| SourceControlPanel::new(store.clone(), window_state, cx));
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        cx.run_until_parked();
-        cx.update(|window, cx| _ = window.draw(cx));
-        assert!(
-            cx.debug_bounds("source-control-unverified-bitbucket.org")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("source-control-notice-bitbucket.org")
-                .is_none()
-        );
-        assert!(cx.debug_bounds("source-control-notice-gitea.com").is_none());
-        assert!(
-            cx.debug_bounds("source-control-notice-gitlab.example.com")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("source-control-notice-gitlab.com")
-                .is_none()
-        );
-    }
-}
+mod tests;

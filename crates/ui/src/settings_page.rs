@@ -97,6 +97,8 @@ enum Section {
     ProjectThreadRules,
     Providers,
     SourceControl,
+    /// One platform of Git Platforms, managed on a phone's pushed page.
+    SourceControlHost,
     Usage,
     Browser,
     ComputerUse,
@@ -282,6 +284,7 @@ impl Section {
             Self::Threads
             | Self::ProjectThreadRules
             | Self::SourceControl
+            | Self::SourceControlHost
             | Self::Providers
             | Self::Usage
             | Self::Browser
@@ -314,6 +317,7 @@ impl Section {
             | Self::ProjectThreadRules
             | Self::General
             | Self::SourceControl
+            | Self::SourceControlHost
             | Self::Providers
             | Self::Usage
             | Self::ComputerUse
@@ -337,6 +341,7 @@ impl Section {
             Self::Threads => "settings-nav-threads",
             Self::ProjectThreadRules => "settings-nav-project-rules",
             Self::SourceControl => "settings-nav-source-control",
+            Self::SourceControlHost => "settings-nav-source-control-host",
             Self::Providers => "settings-nav-providers",
             Self::Usage => "settings-nav-usage",
             Self::Browser => "settings-nav-browser",
@@ -360,7 +365,7 @@ impl Section {
         match self {
             Self::General => IconName::Settings,
             Self::Threads | Self::ProjectThreadRules => IconName::MessageSquare,
-            Self::SourceControl => IconName::Github,
+            Self::SourceControl | Self::SourceControlHost => IconName::Github,
             Self::Providers => IconName::Bot,
             Self::Usage => IconName::ChartPie,
             Self::Browser => IconName::Globe,
@@ -384,7 +389,9 @@ impl Section {
         match self {
             Self::General => crate::tr!("settings.general"),
             Self::Threads | Self::ProjectThreadRules => crate::tr!("settings.threads"),
-            Self::SourceControl => crate::tr!("settings.source_control"),
+            Self::SourceControl | Self::SourceControlHost => {
+                crate::tr!("settings.source_control")
+            }
             Self::Providers => crate::tr!("settings.providers"),
             Self::Usage => crate::tr!("settings.usage"),
             Self::Browser => crate::tr!("settings.browser"),
@@ -525,6 +532,11 @@ pub struct SettingsPage {
     section_scroll: ScrollHandle,
     content_scroll: ScrollHandle,
     project_rules_scroll: ScrollHandle,
+    /// The platform a phone manages on its own page.
+    source_control_host: Option<Entity<crate::source_control_settings::HostEditor>>,
+    source_control_host_subscription: Option<Subscription>,
+    source_control_host_scroll: ScrollHandle,
+    _source_control_subscription: Subscription,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -687,6 +699,13 @@ impl SettingsPage {
                 cx,
             )
         });
+        let source_control_subscription = cx.subscribe_in(
+            &source_control_panel,
+            window,
+            |page: &mut Self, _, crate::source_control_settings::ManageHost(host), window, cx| {
+                page.manage_source_control_host(host.clone(), window, cx)
+            },
+        );
         let mut page = Self {
             store,
             window_state,
@@ -731,6 +750,10 @@ impl SettingsPage {
             section_scroll: ScrollHandle::new(),
             content_scroll,
             project_rules_scroll: ScrollHandle::new(),
+            source_control_host: None,
+            source_control_host_subscription: None,
+            source_control_host_scroll: ScrollHandle::new(),
+            _source_control_subscription: source_control_subscription,
             _subscriptions: subscriptions,
         };
         page._subscriptions
@@ -1000,6 +1023,17 @@ impl SettingsPage {
                 != crate::window_state::Destination::SettingsThreadRules
         {
             return Section::Threads.label();
+        }
+        if self.section == Section::SourceControlHost {
+            return match &self.source_control_host {
+                Some(editor)
+                    if self.window_state.read(cx).destination()
+                        == crate::window_state::Destination::SettingsSourceControlHost =>
+                {
+                    editor.read(cx).host.clone().into()
+                }
+                _ => Section::SourceControl.label(),
+            };
         }
         // The phone page names just the project: the nav bar has no room for
         // the dialog's sentence-long title.
@@ -1424,7 +1458,10 @@ impl SettingsPage {
         if self.section != Section::Plugins {
             self.plugins_panel.update(cx, |panel, _| panel.hide());
         }
-        if self.section == Section::SourceControl {
+        if matches!(
+            self.section,
+            Section::SourceControl | Section::SourceControlHost
+        ) {
             self.source_control_panel
                 .update(cx, |panel, cx| panel.show(cx));
         } else {
@@ -1436,6 +1473,7 @@ impl SettingsPage {
             Section::Threads => self.render_threads(window, cx),
             Section::ProjectThreadRules => v_flex().children(self.project_rules_editor.clone()),
             Section::SourceControl => self.render_source_control(cx),
+            Section::SourceControlHost => v_flex().children(self.source_control_host.clone()),
             Section::Providers => self.render_providers(window, cx),
             Section::Usage => self.render_usage(window, cx),
             Section::Browser => self.render_browser(cx),
@@ -1467,6 +1505,8 @@ impl SettingsPage {
         };
         let scroll = if self.section == Section::ProjectThreadRules {
             &self.project_rules_scroll
+        } else if self.section == Section::SourceControlHost {
+            &self.source_control_host_scroll
         } else {
             &self.content_scroll
         };
@@ -2890,6 +2930,37 @@ impl SettingsPage {
         None
     }
 
+    /// A phone manages one platform on a page pushed over Git Platforms.
+    fn manage_source_control_host(
+        &mut self,
+        host: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let editor = cx.new(|cx| {
+            crate::source_control_settings::HostEditor::new(store, host, false, true, window, cx)
+        });
+        self.source_control_host_subscription = Some(cx.subscribe(
+            &editor,
+            |this, _, _: &gpui::DismissEvent, cx| {
+                this.window_state.update(cx, |state, cx| state.back(cx));
+                this.section = Section::SourceControl;
+                this.source_control_host = None;
+                cx.notify();
+            },
+        ));
+        self.source_control_host = Some(editor);
+        self.section = Section::SourceControlHost;
+        self.window_state.update(cx, |state, cx| {
+            state.go(
+                crate::window_state::Destination::SettingsSourceControlHost,
+                cx,
+            )
+        });
+        cx.notify();
+    }
+
     fn render_source_control(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let remove_credits = self.store.read(cx).settings().remove_agent_credits_on_merge;
         let reset = crate::settings_rows::reset_action(
@@ -2911,7 +2982,14 @@ impl SettingsPage {
         v_flex()
             .gap(crate::material::section_gap(cx))
             .child(self.source_control_panel.clone())
-            .child(crate::material::group(cx).child(row))
+            .child(
+                v_flex()
+                    .child(crate::material::group_caption(
+                        crate::tr!("source_control.merge_section"),
+                        cx,
+                    ))
+                    .child(crate::material::group(cx).child(row)),
+            )
     }
 
     /// A [`ToggleRow`] for one local setting, written through `intent`.
@@ -3082,6 +3160,21 @@ impl SettingsPage {
         {
             let column = self.render_threads(window, cx);
             return self.render_content_column(column, &self.content_scroll, window, cx);
+        }
+        if destination == crate::window_state::Destination::SettingsSection
+            && self.window_state.read(cx).destination()
+                == crate::window_state::Destination::SettingsSourceControlHost
+        {
+            let column = self.render_source_control(cx);
+            return self.render_content_column(column, &self.content_scroll, window, cx);
+        }
+        if self.section == Section::SourceControlHost
+            && self.window_state.read(cx).destination()
+                != crate::window_state::Destination::SettingsSourceControlHost
+        {
+            self.section = Section::SourceControl;
+            self.source_control_host = None;
+            self.source_control_host_subscription = None;
         }
         if self.section == Section::ProjectThreadRules
             && self.window_state.read(cx).destination()

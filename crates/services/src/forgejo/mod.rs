@@ -29,7 +29,7 @@ use tcode_core::{
     },
     pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{CredentialSource, HostProblem, HostSettings, HostStatus},
+    settings::{CredentialSource, HostProblem, HostSettings, HostStatus, TokenCheck},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState,
@@ -714,24 +714,23 @@ impl Forge for Forgejo {
             .into_iter()
             .map(|(host, (kind, added))| {
                 let enabled = configured.get(&host).is_none_or(|choice| choice.enabled);
-                let source = self
-                    .api
-                    .credential(&host)
-                    .ok()
-                    .flatten()
-                    .map(|credential| credential.source);
-                let problem = (source.is_none() && enabled).then(|| {
-                    if tea {
-                        HostProblem::NotSignedIn {
-                            tool: "tea".into(),
-                            command: Some(format!("tea login add --url https://{host}")),
-                        }
-                    } else {
-                        HostProblem::NoCredential {
-                            tools_missing: vec!["tea".into()],
-                        }
-                    }
-                });
+                let credential = self.api.credential(&host).ok().flatten();
+                let (assessed, login) = credential
+                    .as_ref()
+                    .map(|credential| self.api.assessed(&host, credential))
+                    .unwrap_or_default();
+                let source = credential.map(|credential| credential.source);
+                let problem = match &source {
+                    _ if !enabled => None,
+                    None if tea => Some(HostProblem::NotSignedIn {
+                        tool: "tea".into(),
+                        command: Some(format!("tea login add --url https://{host}")),
+                    }),
+                    None => Some(HostProblem::NoCredential {
+                        tools_missing: vec!["tea".into()],
+                    }),
+                    Some(_) => assessed,
+                };
                 (
                     host.clone(),
                     HostStatus {
@@ -756,6 +755,7 @@ impl Forge for Forgejo {
                             "write:issue".into(),
                             "read:user".into(),
                         ],
+                        login,
                     },
                 )
             })
@@ -764,6 +764,14 @@ impl Forge for Forgejo {
 
     fn forget_credential(&self, host: &str) {
         self.api.forget(host);
+    }
+
+    fn check_token(&self, host: &str, token: &str, _: Option<&str>) -> TokenCheck {
+        crate::forge::account::check(self.api.whose(host, token.trim()))
+    }
+
+    fn identify(&self, host: &str) {
+        self.api.identify(host);
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
@@ -1014,5 +1022,69 @@ impl Forge for Forgejo {
             );
         }
         Ok(reviews_complete.then_some(remarks))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_checked_before_saving_and_accounts_learned() {
+        crate::forge::verification_tests::token_checks(
+            HostKind::Forgejo,
+            "git.example.dev",
+            crate::forge::verification_tests::CurrentUser {
+                path: "/api/v1/user",
+                body: br#"{"login":"lin","full_name":"Lin Chen"}"#,
+                account: tcode_core::settings::HostAccount {
+                    login: "lin".into(),
+                    name: Some("Lin Chen".into()),
+                },
+                then: &[],
+                environment: &[
+                    ("GITEA_TOKEN", "environment-token"),
+                    ("GITEA_INSTANCE_URL", "https://git.example.dev"),
+                ],
+                email: None,
+            },
+            |store, builder, environment| {
+                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+                let mut host = Forgejo::new(store, environment, viewed);
+                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
+                    .unwrap()
+                    .agent = builder.build();
+                host
+            },
+        );
+    }
+
+    /// Gitea names the scopes a token lacks when it refuses to say whose the token is.
+    #[test]
+    fn a_token_without_the_account_scope_is_named_missing_it() {
+        use crate::forge::verification_tests::http;
+        let root =
+            std::env::temp_dir().join(format!("tcode-forgejo-scopes-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = http::Fixture::new();
+        let store = SettingsStore::new(root.clone());
+        let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+        let mut host = Forgejo::new(store, Vec::new(), viewed);
+        Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
+            .unwrap()
+            .agent = fixture.builder().build();
+        let (check, _, _) = fixture.call(
+            || host.check_token("gitea.com", "token", None),
+            403,
+            "",
+            br#"{"message":"token does not have at least one of required scope(s): [read:user]"}"#,
+        );
+        assert_eq!(
+            check,
+            TokenCheck::MissingScopes {
+                scopes: vec!["read:user".into()]
+            }
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

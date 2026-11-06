@@ -1956,6 +1956,17 @@ fn a_partly_posted_review_keeps_only_unposted_drafts_for_the_next_submission() {
         fn forget_credential(&self, _: &str) {
             unreachable!()
         }
+        fn check_token(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> tcode_core::settings::TokenCheck {
+            unreachable!()
+        }
+        fn identify(&self, _: &str) {
+            unreachable!()
+        }
         fn pull_request_url(&self, _: &str) -> Option<(PullRequestKey, String)> {
             unreachable!()
         }

@@ -29,6 +29,8 @@ pub enum Destination {
     /// *that a detail is open* is navigation and belongs here.
     SettingsSection,
     SettingsThreadRules,
+    /// One Git platform, managed on a phone's page pushed over Git Platforms.
+    SettingsSourceControlHost,
     /// The phone's page for pinning, settling and reordering threads by handle.
     ArrangeThreads,
 }
@@ -82,6 +84,7 @@ impl NavigationSnapshot {
                 Destination::Settings
                     | Destination::SettingsSection
                     | Destination::SettingsThreadRules
+                    | Destination::SettingsSourceControlHost
                     | Destination::ArrangeThreads
                     | Destination::Pair
                     // A cold start reads the pull request afresh from its thread.
@@ -125,7 +128,10 @@ impl Destination {
     pub fn route(self) -> Route {
         match self {
             Self::Hosts | Self::Pair => Route::Hosts,
-            Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => Route::Settings,
+            Self::Settings
+            | Self::SettingsSection
+            | Self::SettingsThreadRules
+            | Self::SettingsSourceControlHost => Route::Settings,
             Self::Threads
             | Self::Thread
             | Self::Panel
@@ -146,7 +152,10 @@ impl Destination {
             Self::Thread => "mobile.thread",
             Self::Panel => "chat.panels",
             Self::PullRequest => "pull_requests.title",
-            Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => "settings.title",
+            Self::Settings
+            | Self::SettingsSection
+            | Self::SettingsThreadRules
+            | Self::SettingsSourceControlHost => "settings.title",
         })
         .into_owned()
         .into()

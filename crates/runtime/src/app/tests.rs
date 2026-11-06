@@ -12915,6 +12915,77 @@ fn pinning_promotes_and_exempts_until_a_settle_unpins() {
     });
 }
 
+/// Verifying a token saves it only when the server takes it: one the host cannot ask the
+/// server about stays unsaved, and saving it anyway leaves it saved and unverified.
+#[test]
+fn a_token_the_server_cannot_be_asked_about_is_saved_only_when_saved_anyway() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-verify-host-token");
+    let secrets = || -> serde_json::Value {
+        std::fs::read(store.root().join("secrets.json"))
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+            .unwrap_or_default()
+    };
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        state.forge = tcode_services::forge::connect(SettingsStore::new(store.root().clone()), []);
+    });
+    // Nothing listens on port 1, so the server answers nothing.
+    let host = "127.0.0.1:1";
+    state.dispatch_command(
+        cx,
+        701,
+        Command::PatchSettings {
+            patch: SettingsPatch::SourceControlHost {
+                host: host.into(),
+                kind: tcode_core::pull_request::HostKind::Gitlab,
+                enabled: Some(true),
+                account: None,
+            },
+        },
+    );
+    state.dispatch_command(
+        cx,
+        702,
+        Command::VerifyHostToken {
+            host: host.into(),
+            token: "unasked-token".into(),
+            email: None,
+        },
+    );
+    let (result, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Ack { id: 702, result } => Some(result.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        result,
+        Ok(CommandResponse::TokenCheck(
+            tcode_core::settings::TokenCheck::Unreachable { status: None }
+        ))
+    );
+    assert!(secrets().get("@gitlab").is_none());
+    state.dispatch_command(
+        cx,
+        703,
+        Command::SetHostToken {
+            host: host.into(),
+            token: Some("unasked-token".into()),
+            email: None,
+        },
+    );
+    cx.run_until(|state| {
+        state
+            .settings_snapshot()
+            .source_control
+            .status
+            .get(host)
+            .is_some_and(|status| {
+                status.problem == Some(tcode_core::settings::HostProblem::Unverified)
+            })
+    });
+    assert_eq!(secrets()["@gitlab"][host], "unasked-token");
+}
+
 #[test]
 fn github_secret_command_persists_separately_and_settings_never_replicate_it() {
     let cx = &mut TestAppContext::default();

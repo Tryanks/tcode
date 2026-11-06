@@ -335,23 +335,6 @@ impl FlipRow {
         )
     }
 
-    /// A text field that takes what `beside` (the width of what follows it
-    /// in the row, gap included) leaves of the row, or the whole row under
-    /// it, its width gliding from one to the other.
-    pub(crate) fn field_beside(
-        &self,
-        field: impl IntoElement,
-        beside: Pixels,
-        cx: &App,
-    ) -> gpui::Div {
-        self.glide_field(
-            field,
-            (self.fill.get(), |frame| frame.w_full()),
-            (self.fill.get() - beside, |frame| frame.flex_1()),
-            cx,
-        )
-    }
-
     /// A text field in a row of controls that fills the row under the
     /// labels: [`FIELD_WIDTH`] beside them, and what `beside` (the other
     /// controls, gaps included) leaves of the row under them.
@@ -424,13 +407,6 @@ impl FlipRow {
             state.painted_at(bounds.size, window)
         });
         at_rest(div()).max_w_full().child(drawn)
-    }
-
-    /// The row's frame has no inset of its own: the width a field fills is
-    /// the whole row's.
-    pub(crate) fn bare(mut self) -> Self {
-        self.inset = Pixels::ZERO;
-        self
     }
 
     /// The row, laid out as `row`.

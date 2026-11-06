@@ -69,6 +69,8 @@ pub(super) enum StoreWrite {
         host: String,
         token: Option<String>,
         email: Option<String>,
+        /// The host took the token, signed in as this login when it said.
+        accepted: Option<Option<String>>,
         completion: smol::channel::Sender<Result<(), String>>,
     },
     ClearProfileSecrets(String),
@@ -449,12 +451,25 @@ impl StoreWriter {
                 host,
                 token,
                 email,
+                accepted,
                 completion,
             } => {
-                let result = self
-                    .settings_store
-                    .set_credential(kind, &host, token.as_deref(), email.as_deref())
-                    .map_err(|error| error.to_string());
+                let result = match accepted {
+                    Some(login) => self.settings_store.set_accepted_credential(
+                        kind,
+                        &host,
+                        token.as_deref().unwrap_or_default(),
+                        email.as_deref(),
+                        login.as_deref(),
+                    ),
+                    None => self.settings_store.set_credential(
+                        kind,
+                        &host,
+                        token.as_deref(),
+                        email.as_deref(),
+                    ),
+                }
+                .map_err(|error| error.to_string());
                 let _ = completion.try_send(result);
                 None
             }

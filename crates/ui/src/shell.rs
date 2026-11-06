@@ -171,7 +171,9 @@ impl Render for DestinationView {
                     Destination::Settings => {
                         shell.render_settings_page(Destination::Settings, window, cx)
                     }
-                    Destination::SettingsSection | Destination::SettingsThreadRules => {
+                    Destination::SettingsSection
+                    | Destination::SettingsThreadRules
+                    | Destination::SettingsSourceControlHost => {
                         shell.render_settings_page(destination, window, cx)
                     }
                     Destination::ArrangeThreads => shell.render_arrange_page(window, cx),
@@ -4178,6 +4180,10 @@ impl AppShell {
             && self.destination(cx) == Destination::SettingsThreadRules
         {
             crate::tr!("settings.threads").into_owned().into()
+        } else if destination == Destination::SettingsSection
+            && self.destination(cx) == Destination::SettingsSourceControlHost
+        {
+            crate::tr!("settings.source_control").into_owned().into()
         } else if detail {
             settings.read(cx).section_title(cx)
         } else {

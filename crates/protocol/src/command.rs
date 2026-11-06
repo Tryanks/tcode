@@ -112,6 +112,14 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         email: Option<String>,
     },
+    /// Asks the host whose `token` is and saves it only when the host takes it, answering
+    /// with [`CommandResponse::TokenCheck`].
+    VerifyHostToken {
+        host: String,
+        token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
+    },
     RefreshHostCredentials,
     LinkPullRequest {
         session_id: String,
@@ -644,6 +652,8 @@ pub enum CommandResponse {
     ThreadReferenceAdded {
         boundary_notice: bool,
     },
+    /// `VerifyHostToken`: what the host answered; the token was saved only when accepted.
+    TokenCheck(tcode_core::settings::TokenCheck),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -740,6 +750,7 @@ impl Command {
         matches!(
             self,
             Self::SetHostToken { .. }
+                | Self::VerifyHostToken { .. }
                 | Self::SetProfileSecret { .. }
                 | Self::CreateThirdPartyProfile { .. }
                 | Self::SubmitProviderLoginCode { .. }
