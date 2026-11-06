@@ -183,6 +183,17 @@ pub struct ActionResult {
     pub outcome: ActionOutcome,
     pub message: String,
     pub delivery: Delivery,
+    /// Set when keys could not be delivered in the background and could
+    /// reach the app only with it in front, which the caller decides.
+    #[serde(skip)]
+    pub foreground: Option<ForegroundNeed>,
+}
+
+/// Why a keyboard step needs the app in front: the background delivery
+/// that could not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundNeed {
+    pub background_error: String,
 }
 
 impl ActionResult {
@@ -191,6 +202,7 @@ impl ActionResult {
             outcome: ActionOutcome::Worked,
             message: message.into(),
             delivery,
+            foreground: None,
         }
     }
 
@@ -199,6 +211,19 @@ impl ActionResult {
             outcome: ActionOutcome::Didnt,
             message: message.into(),
             delivery,
+            foreground: None,
+        }
+    }
+
+    /// Keys that could not be delivered in the background; the step did not
+    /// happen unless the caller brings the app to the front.
+    pub fn needs_foreground(background_error: impl Into<String>) -> Self {
+        let background_error = background_error.into();
+        Self {
+            outcome: ActionOutcome::Didnt,
+            message: format!("background key delivery could not start: {background_error}"),
+            delivery: Delivery::None,
+            foreground: Some(ForegroundNeed { background_error }),
         }
     }
 
@@ -207,6 +232,7 @@ impl ActionResult {
             outcome: ActionOutcome::Unknown,
             message: message.into(),
             delivery,
+            foreground: None,
         }
     }
 }
@@ -291,6 +317,24 @@ pub(crate) fn perform_action_with_feedback(
     {
         let _ = (feedback, paced);
         perform_action(root, request)
+    }
+}
+
+/// Bring the target app to the front and deliver the keyboard step there,
+/// restoring the app the user was in. Only a step that reported a
+/// [`ForegroundNeed`] is retried this way; it never posts a pointer event.
+pub(crate) fn type_in_foreground(
+    root: &RootInfo,
+    request: &ActionRequest,
+) -> Result<(), BackendError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::type_in_foreground(root, request)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (root, request);
+        Err(BackendError::unsupported())
     }
 }
 

@@ -564,24 +564,93 @@ pub enum ImageMode {
 
 /// Global configuration for desktop computer-use tools.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ComputerUseSettingsFile")]
 pub struct ComputerUseSettings {
     /// Whether newly spawned provider sessions receive the computer-use MCP server.
-    #[serde(default)]
     pub enabled: bool,
-    /// When observations include a screenshot. Absent in legacy files → `auto`.
-    #[serde(default)]
+    /// When observations include a screenshot.
     pub image_mode: ImageMode,
     /// When false the tools are observe-only (`act_ui` rejects every action).
-    /// Defaults to TRUE and tolerates an absent field in legacy files.
-    #[serde(default = "default_true")]
     pub allow_input: bool,
-    /// Permit an opt-in foreground HID retry for keyboard actions when
-    /// background PID delivery cannot be initialized.
-    #[serde(default)]
-    pub allow_foreground_fallback: bool,
     /// Show the agent cursor overlay.
-    #[serde(default = "default_true")]
     pub show_agent_cursor: bool,
+    /// What happens on macOS when keys cannot be delivered to an app in the
+    /// background, for an app with no remembered choice.
+    pub foreground_default: ForegroundChoice,
+    /// The choices remembered per app, by macOS bundle id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub foreground_apps: BTreeMap<String, ForegroundApp>,
+}
+
+/// Whether an app may come to the front for typing when its keys cannot be
+/// delivered in the background.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForegroundChoice {
+    /// Ask the user in the thread each time.
+    #[default]
+    Ask,
+    Allow,
+    Deny,
+}
+
+/// A choice remembered for one app, with the name it was asked under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForegroundApp {
+    pub name: String,
+    pub allow: bool,
+}
+
+impl ComputerUseSettings {
+    /// What happens for the app `bundle_id`, and whether that is a choice
+    /// remembered for it rather than the one for other apps.
+    pub fn foreground_choice(&self, bundle_id: &str) -> (ForegroundChoice, bool) {
+        match self.foreground_apps.get(bundle_id) {
+            Some(app) if app.allow => (ForegroundChoice::Allow, true),
+            Some(_) => (ForegroundChoice::Deny, true),
+            None => (self.foreground_default, false),
+        }
+    }
+}
+
+/// The settings file's shape, which also reads the switch the per-app
+/// choices replaced: a switch turned on keeps allowing every app, and one
+/// off or absent becomes asking.
+#[derive(Deserialize)]
+struct ComputerUseSettingsFile {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    image_mode: ImageMode,
+    #[serde(default = "default_true")]
+    allow_input: bool,
+    #[serde(default = "default_true")]
+    show_agent_cursor: bool,
+    #[serde(default)]
+    foreground_default: Option<ForegroundChoice>,
+    #[serde(default)]
+    foreground_apps: BTreeMap<String, ForegroundApp>,
+    #[serde(default)]
+    allow_foreground_fallback: Option<bool>,
+}
+
+impl From<ComputerUseSettingsFile> for ComputerUseSettings {
+    fn from(file: ComputerUseSettingsFile) -> Self {
+        Self {
+            enabled: file.enabled,
+            image_mode: file.image_mode,
+            allow_input: file.allow_input,
+            show_agent_cursor: file.show_agent_cursor,
+            foreground_default: file.foreground_default.unwrap_or(
+                if file.allow_foreground_fallback == Some(true) {
+                    ForegroundChoice::Allow
+                } else {
+                    ForegroundChoice::Ask
+                },
+            ),
+            foreground_apps: file.foreground_apps,
+        }
+    }
 }
 
 impl Default for ComputerUseSettings {
@@ -590,8 +659,9 @@ impl Default for ComputerUseSettings {
             enabled: false,
             image_mode: ImageMode::default(),
             allow_input: true,
-            allow_foreground_fallback: false,
             show_agent_cursor: true,
+            foreground_default: ForegroundChoice::Ask,
+            foreground_apps: BTreeMap::new(),
         }
     }
 }
@@ -703,8 +773,13 @@ pub enum SettingsPatch {
     ComputerUseEnabled(bool),
     ComputerUseImageMode(ImageMode),
     ComputerUseAllowInput(bool),
-    ComputerUseAllowForegroundFallback(bool),
     ComputerUseShowAgentCursor(bool),
+    ComputerUseForegroundDefault(ForegroundChoice),
+    /// Remember a choice for one app, by bundle id, or forget it.
+    ComputerUseForegroundApp {
+        bundle_id: String,
+        app: Option<ForegroundApp>,
+    },
     BrowserEnabled(bool),
     BrowserHomeUrl(Option<String>),
     BrowserAllowEvaluate(bool),
@@ -1191,9 +1266,17 @@ impl Settings {
             SettingsPatch::ComputerUseEnabled(value) => self.computer_use.enabled = value,
             SettingsPatch::ComputerUseImageMode(value) => self.computer_use.image_mode = value,
             SettingsPatch::ComputerUseAllowInput(value) => self.computer_use.allow_input = value,
-            SettingsPatch::ComputerUseAllowForegroundFallback(value) => {
-                self.computer_use.allow_foreground_fallback = value
+            SettingsPatch::ComputerUseForegroundDefault(value) => {
+                self.computer_use.foreground_default = value
             }
+            SettingsPatch::ComputerUseForegroundApp { bundle_id, app } => match app {
+                Some(app) => {
+                    self.computer_use.foreground_apps.insert(bundle_id, app);
+                }
+                None => {
+                    self.computer_use.foreground_apps.remove(&bundle_id);
+                }
+            },
             SettingsPatch::ComputerUseShowAgentCursor(value) => {
                 self.computer_use.show_agent_cursor = value
             }
@@ -1463,6 +1546,41 @@ impl Settings {
 mod tests {
     use super::*;
 
+    /// The switch the per-app choices replaced is read from older settings
+    /// files: on keeps every app allowed, off or absent asks; a file written
+    /// since keeps what it says, and writes no switch back.
+    #[test]
+    fn the_old_foreground_switch_becomes_the_choice_for_other_apps() {
+        let read = |json: &str| -> ComputerUseSettings { serde_json::from_str(json).unwrap() };
+        assert_eq!(
+            read(r#"{"enabled":true,"allow_foreground_fallback":true}"#).foreground_default,
+            ForegroundChoice::Allow
+        );
+        assert_eq!(
+            read(r#"{"enabled":true,"allow_foreground_fallback":false}"#).foreground_default,
+            ForegroundChoice::Ask
+        );
+        assert_eq!(
+            read(r#"{"enabled":true}"#).foreground_default,
+            ForegroundChoice::Ask
+        );
+        let current = read(
+            r#"{"allow_foreground_fallback":true,"foreground_default":"deny","foreground_apps":{"com.apple.Notes":{"name":"Notes","allow":true}}}"#,
+        );
+        assert_eq!(current.foreground_default, ForegroundChoice::Deny);
+        assert_eq!(
+            current.foreground_choice("com.apple.Notes"),
+            (ForegroundChoice::Allow, true)
+        );
+        assert_eq!(
+            current.foreground_choice("com.apple.Terminal"),
+            (ForegroundChoice::Deny, false)
+        );
+        let written = serde_json::to_value(&current).unwrap();
+        assert!(written.get("allow_foreground_fallback").is_none());
+        assert_eq!(written["foreground_default"], "deny");
+    }
+
     #[test]
     fn child_approval_settings_preserve_old_orchestrator_and_default_to_auto() {
         for (json, expected) in [
@@ -1538,7 +1656,10 @@ mod tests {
         assert!(partial.computer_use.enabled);
         assert_eq!(partial.computer_use.image_mode, ImageMode::Auto);
         assert!(partial.computer_use.allow_input);
-        assert!(!partial.computer_use.allow_foreground_fallback);
+        assert_eq!(
+            partial.computer_use.foreground_default,
+            ForegroundChoice::Ask
+        );
         assert!(partial.computer_use.show_agent_cursor);
         assert!(!partial.browser.enabled);
         assert!(partial.browser.allow_evaluate);

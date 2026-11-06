@@ -850,6 +850,7 @@ impl AppState {
             active.interrupt_requested = true;
         }
         self.cancel_computer_use_feedback(target_id);
+        self.withdraw_foreground_prompts(target_id);
         Ok(())
     }
 

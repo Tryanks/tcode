@@ -346,6 +346,7 @@ impl AppState {
                 | Command::PatchSettings { .. }
                 | Command::SetControlGrant { .. }
                 | Command::RespondControlGrant { .. }
+                | Command::RespondForegroundPrompt { .. }
                 | Command::ResetSettings
                 | Command::SetSidebarCollapsed { .. }
                 | Command::CycleProjectSort

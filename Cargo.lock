@@ -11415,6 +11415,7 @@ dependencies = [
  "tcode-services",
  "tcode-traverse",
  "term",
+ "tokio",
  "ureq",
  "uuid",
 ]

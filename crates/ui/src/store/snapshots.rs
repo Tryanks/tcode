@@ -274,6 +274,7 @@ mod tests {
             context_window: None,
             running_turn: None,
             pending_approvals: Vec::new(),
+            foreground_prompt: None,
             pending_user_input: None,
             steering_supported: true,
             provider_option_descriptors: Vec::new(),

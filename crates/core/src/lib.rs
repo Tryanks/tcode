@@ -2,6 +2,7 @@
 
 pub mod acp;
 pub mod attachments;
+pub mod computer_use;
 pub mod control;
 pub mod git;
 pub mod notice;
