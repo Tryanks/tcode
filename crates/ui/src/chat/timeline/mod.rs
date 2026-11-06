@@ -909,6 +909,16 @@ impl TimelineView {
         self.timeline_folds = folds;
         // A collapsed Work Log's rows fold away from what they showed.
         let old_rows = (seen && regrouped).then(|| self.rows.clone());
+        // A reader away from the tail is held by the row at the top of the
+        // view, and the rows below it stand in for it if it goes.
+        let reading = (!session_changed && !self.list_state.is_following_tail()).then(|| {
+            let anchor = self.list_state.logical_scroll_top();
+            let rows = self.rows.get(anchor.item_ix..).unwrap_or_default();
+            (
+                anchor,
+                rows.iter().map(|row| row.identity).collect::<Vec<_>>(),
+            )
+        });
         let (list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
@@ -986,27 +996,7 @@ impl TimelineView {
                 // its content.
                 self.list_state.remeasure_items(count..count + 1);
                 if anchor.item_ix == 0 && !following {
-                    let into_reservation = self.leading_space() - anchor.offset_in_item;
-                    let anchor = ListOffset {
-                        item_ix: count,
-                        offset_in_item: (-into_reservation).max(px(0.)),
-                    };
-                    self.list_state.scroll_to(anchor);
-                    // A reader inside the padding or the reservation keeps that
-                    // pixel position, which now belongs to the page above. A
-                    // list anchor cannot precede its row (rows above it stay
-                    // unpainted), so the render after the next frame walks
-                    // back over the page once layout has measured it.
-                    if into_reservation > px(0.) {
-                        let distance = self
-                            .reservation_scroll_back
-                            .take()
-                            .map_or(px(0.), |back| back.distance);
-                        self.reservation_scroll_back = Some(ReservationScrollBack {
-                            distance: distance + into_reservation,
-                            measured: false,
-                        });
-                    }
+                    self.keep_reading(anchor, count);
                 }
                 for index in remeasure {
                     self.list_state.remeasure_items(index..index + 1);
@@ -1019,6 +1009,33 @@ impl TimelineView {
                     // Reset also clears stale item focus handles. A newly opened
                     // session always starts actively following its tail.
                     self.list_state.set_follow_mode(FollowMode::Tail);
+                } else if let Some((anchor, below)) = reading {
+                    // `ListState::reset` drops the anchor, and this list is
+                    // bottom-aligned: without one it lays out at its end and
+                    // follows the tail again. Rows re-indexed under a reader
+                    // (a page bringing the start of an item a later turn
+                    // updated moves it there) keep the row read.
+                    let rows: HashMap<u64, usize> = self
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .map(|(index, row)| (row.identity, index))
+                        .collect();
+                    if let Some((skipped, &row)) = below
+                        .iter()
+                        .enumerate()
+                        .find_map(|(skipped, identity)| Some((skipped, rows.get(identity)?)))
+                    {
+                        let anchor = if skipped == 0 {
+                            anchor
+                        } else {
+                            ListOffset {
+                                item_ix: anchor.item_ix + skipped,
+                                offset_in_item: px(0.),
+                            }
+                        };
+                        self.keep_reading(anchor, row);
+                    }
                 }
             }
             ListSync::Incremental {
@@ -1256,6 +1273,38 @@ impl TimelineView {
     /// reservation. Both move to the new first row when a page lands.
     pub(super) fn leading_space(&self) -> gpui::Pixels {
         px(TIMELINE_EDGE_PADDING) + self.history_placeholder_height
+    }
+
+    /// Hold a reader who rested at `anchor` on the row now at `row`. The
+    /// first row carries the leading space, so a reader there who stays at
+    /// the first row keeps the offset; one whose row has moved down keeps the
+    /// pixel inside the padding or the reservation, which now belongs to the
+    /// rows above. A list anchor cannot precede its row (rows above it stay
+    /// unpainted), so the render after the next frame walks back over them
+    /// once layout has measured them.
+    fn keep_reading(&mut self, anchor: ListOffset, row: usize) {
+        if anchor.item_ix != 0 || row == 0 {
+            self.list_state.scroll_to(ListOffset {
+                item_ix: row,
+                offset_in_item: anchor.offset_in_item,
+            });
+            return;
+        }
+        let into_reservation = self.leading_space() - anchor.offset_in_item;
+        self.list_state.scroll_to(ListOffset {
+            item_ix: row,
+            offset_in_item: (-into_reservation).max(px(0.)),
+        });
+        if into_reservation > px(0.) {
+            let distance = self
+                .reservation_scroll_back
+                .take()
+                .map_or(px(0.), |back| back.distance);
+            self.reservation_scroll_back = Some(ReservationScrollBack {
+                distance: distance + into_reservation,
+                measured: false,
+            });
+        }
     }
 
     /// Walk back over a landed page inside the render that follows the frame
@@ -3487,5 +3536,150 @@ mod tests {
             first > px(0.),
             "one short turn scrolls into the reservation above it"
         );
+    }
+
+    /// A reader flicking up a long thread is not sent back to its end when a
+    /// page of history lands mid-fling, even one that re-indexes the rows: a
+    /// background agent that a later turn reported on moves back to the turn
+    /// that started it once the page holds that turn.
+    #[gpui::test]
+    fn a_page_that_moves_a_background_agent_back_keeps_the_reader_in_place(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{VisualTestContext, point, px};
+
+        let agent = |status| agent::ThreadItem {
+            id: "agent-0".into(),
+            parent_item_id: None,
+            content: agent::ItemContent::Subagent {
+                agent_type: "general-purpose".into(),
+                description: "Survey the code".into(),
+                status,
+                summary: None,
+                model: None,
+                effort: None,
+            },
+        };
+        let events: Vec<_> = (0..60)
+            .flat_map(|turn| {
+                let mut events = vec![
+                    agent::AgentEvent::TurnStarted {
+                        turn_id: turn.to_string(),
+                    },
+                    user_event(&format!("user-{turn}"), &format!("Question {turn}")),
+                ];
+                match turn {
+                    10 => events.push(agent::AgentEvent::ItemStarted(agent(
+                        agent::ItemStatus::InProgress,
+                    ))),
+                    50 => events.push(agent::AgentEvent::ItemCompleted(agent(
+                        agent::ItemStatus::Completed,
+                    ))),
+                    _ => {}
+                }
+                events.extend([
+                    answer_event(
+                        &format!("answer-{turn}"),
+                        &format!("Answer {turn}, one paragraph of several.\n\n").repeat(8),
+                    ),
+                    agent::AgentEvent::TurnCompleted {
+                        turn_id: turn.to_string(),
+                        status: agent::TurnStatus::Completed,
+                        usage: None,
+                    },
+                ]);
+                events
+            })
+            .collect();
+        // The window opens at turn 40, after the agent started.
+        let held_from = events
+            .iter()
+            .position(|event| {
+                matches!(event, agent::AgentEvent::TurnStarted { turn_id } if turn_id == "40")
+            })
+            .unwrap();
+        let mut thread = ScriptedThread::new(cx, events, held_from, false);
+        let store = thread.store.clone();
+        let (view, cx) = thread.open(cx);
+        let frame = |cx: &mut VisualTestContext| {
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+            draw(cx);
+        };
+        draw_settled(cx);
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        assert!(list.is_following_tail());
+        let loading = |cx: &mut VisualTestContext| {
+            store.read_with(cx, |store, _| store.history_loading_for(Some(THREAD)))
+        };
+        let send = |delta: f32, touch_phase, cx: &mut VisualTestContext| {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: list.viewport_bounds().center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
+                touch_phase,
+                ..Default::default()
+            });
+        };
+        // Trackpad flicks up, a frame between packets, until the reader nears
+        // the start of the window and the page is asked for.
+        let mut gestures = 0;
+        'flicking: while !loading(cx) {
+            gestures += 1;
+            assert!(gestures < 20, "the page was never asked for");
+            send(0., gpui::TouchPhase::Started, cx);
+            for _ in 0..3 {
+                send(120., gpui::TouchPhase::Moved, cx);
+                frame(cx);
+            }
+            send(0., gpui::TouchPhase::Ended, cx);
+            let mut speed = 300.;
+            for _ in 0..12 {
+                if loading(cx) {
+                    break 'flicking;
+                }
+                send(speed, gpui::TouchPhase::Moved, cx);
+                speed *= 0.85;
+                frame(cx);
+            }
+        }
+        assert!(!list.is_following_tail());
+        let on_screen = |cx: &mut VisualTestContext| {
+            (40..60)
+                .filter_map(|turn| {
+                    let bounds = cx.debug_bounds(format!("user-bubble-user-{turn}").leak())?;
+                    bounds
+                        .intersects(&list.viewport_bounds())
+                        .then_some((turn, bounds.top()))
+                })
+                .collect::<Vec<_>>()
+        };
+        let reading = on_screen(cx);
+        assert!(!reading.is_empty(), "a question is on screen");
+        let rows = list.item_count();
+
+        // The page holds every earlier turn, the agent's start among them.
+        assert!(thread.answer_page(held_from).is_some());
+        cx.run_until_parked();
+        frame(cx);
+        frame(cx);
+        assert!(list.item_count() > rows, "the page landed");
+        assert!(
+            !list.is_following_tail(),
+            "the page sent the reader back to the end"
+        );
+        let now = on_screen(cx);
+        for (turn, top) in &reading {
+            let moved = now
+                .iter()
+                .find(|(seen, _)| seen == turn)
+                .map(|(_, now)| *now);
+            assert!(
+                moved.is_some_and(|now| (now - *top).abs() < px(1.)),
+                "question {turn} moved from {top:?} to {moved:?}"
+            );
+        }
     }
 }
