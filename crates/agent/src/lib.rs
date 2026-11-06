@@ -457,7 +457,22 @@ impl ProviderKind {
             ProviderKind::Grok => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                rewind: None,
+                // `_x.ai/rewind/execute`: a prompt's number, in every mode its
+                // /rewind offers. The files are the snapshots its own tools
+                // took; a dry run lists them and those changed since.
+                rewind: Some(RewindControl {
+                    modes: &[
+                        RewindMode::FilesAndConversation,
+                        RewindMode::Conversation,
+                        RewindMode::Files,
+                    ],
+                    first_turn_conversation: true,
+                    steer_targets: false,
+                    later_history: LaterHistory::Truncated,
+                    preview: RewindPreviewKind::Conflicts,
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    restores_command_edits: false,
+                }),
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
