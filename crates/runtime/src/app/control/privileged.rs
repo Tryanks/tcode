@@ -33,8 +33,6 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::ProjectSettlement { .. }
         | SettingsPatch::ProjectMergeMethod { .. }
         | SettingsPatch::RemoveAgentCreditsOnMerge(_)
-        | SettingsPatch::OrchestrateDecisionModels(_)
-        | SettingsPatch::OrchestrateChildModels(_)
         | SettingsPatch::OrchestrateChildApproval(_)
         | SettingsPatch::OrchestrateChildWorktrees(_)
         | SettingsPatch::ComputerUseEnabled(_)
@@ -153,7 +151,7 @@ impl AppState {
         Ok(serde_json::json!({ "thread_id": target, "request_id": request_id, "answered": true }))
     }
 
-    /// The lead answers its own subagent's approval, where Settings → Orchestrate child
+    /// The lead answers its own subagent's approval, where Settings → Control child
     /// approval makes it the approver; every other approval is the user's.
     pub(super) fn op_respond_approval(
         &mut self,
@@ -170,9 +168,9 @@ impl AppState {
                 "refused: thread {target} is not your subagent; its approvals are the user's"
             ));
         }
-        if self.settings.orchestrate.child_approval == ChildApprovalMode::Manual {
+        if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
             return Err(
-                "refused: Settings → Orchestrate child approval is manual, so the user answers \
+                "refused: Settings → Control child approval is manual, so the user answers \
                  your subagents' approvals"
                     .into(),
             );

@@ -27,10 +27,6 @@ pub struct QueuedMessage {
     /// Per-turn settings captured with the user's send gesture. A later mode
     /// toggle must affect later messages, not rewrite work already in the FIFO.
     pub(super) options: TurnOptions,
-    /// Byte length of visible context folded into `text`, including orchestration
-    /// context and per-turn pull-request instructions. The recorded event uses
-    /// it to split the injected prefix from the user's own words.
-    pub(super) context_len: Option<usize>,
     /// Context-window selection changed while the provider was live.
     pub(super) context_window_changed: Option<u64>,
     /// Orchestration callbacks arriving during the same provider-start window
@@ -168,12 +164,6 @@ pub struct ActiveSession {
     pub(super) live_profile_id: Option<String>,
     pub(super) live_option_selections: Vec<OptionSelection>,
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
-    /// A transient "the next queued send carries an injected context prefix of
-    /// this many bytes" flag, set by [`AppState::orchestrate_turn`] right before
-    /// it hands the composed text to `steer`. It is a
-    /// per-send annotation, consumed by the next `push_queued`, and never
-    /// persisted on the session.
-    pub(super) pending_context_len: Option<usize>,
     /// Draft-only: run in the current checkout or a new dedicated
     /// worktree. Chosen in the checkout row before the first send; locked after.
     pub draft_workspace: WorkspaceMode,
@@ -270,7 +260,6 @@ impl ActiveSession {
             live_profile_id,
             live_option_selections: Vec::new(),
             confirmed_option_selections: Vec::new(),
-            pending_context_len: None,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -592,13 +581,12 @@ impl ActiveSession {
             .map_err(|_| ())
     }
 
-    /// Append a message to the queue, consuming the staged context prefix.
+    /// Append a message to the queue.
     pub(super) fn push_queued(&mut self, text: String, attachments: Vec<Attachment>) -> u64 {
         self.idle_since = None;
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         let options = self.turn_options();
-        let context_len = std::mem::take(&mut self.pending_context_len);
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
@@ -609,7 +597,6 @@ impl ActiveSession {
             attachments,
             not_before: None,
             options,
-            context_len,
             context_window_changed: None,
             kind: QueuedMessageKind::User,
         });
@@ -660,7 +647,6 @@ impl ActiveSession {
             attachments: Vec::new(),
             not_before: None,
             options,
-            context_len: None,
             context_window_changed: None,
             kind: QueuedMessageKind::OrchestrateCallback,
         });
@@ -683,7 +669,6 @@ impl ActiveSession {
             attachments: Vec::new(),
             not_before: None,
             options,
-            context_len: None,
             context_window_changed: None,
             kind,
         });

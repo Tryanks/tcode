@@ -56,8 +56,8 @@ pub(crate) fn assert_follows_language_switch(
 }
 
 pub use tcode_core::settings::{
-    BrowserSettings, ChildApprovalMode, EnvVar, ImageMode, OrchestrateChildModel,
-    OrchestrateSettings, ProjectSort, ProviderSettings, Settings, ThemeMode, provider_label,
+    BrowserSettings, ChildApprovalMode, EnvVar, ImageMode, ProjectSort, ProviderSettings, Settings,
+    ThemeMode, provider_label,
 };
 /// The six accent presets offered by the provider card.
 pub const ACCENT_PRESETS: [&str; 6] = [

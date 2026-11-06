@@ -364,7 +364,6 @@ impl HostLink {
                                         | Command::ScheduleTurn { .. }
                                         | Command::Steer { .. }
                                         | Command::ConfirmRelayAndSend { .. }
-                                        | Command::OrchestrateTurn { .. }
                                 )
                             {
                                 delivery.acknowledged.push_back(write.entry);

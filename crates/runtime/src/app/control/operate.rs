@@ -307,7 +307,7 @@ impl AppState {
                 );
             }
             Some(workspace) => workspace == Workspace::Worktree,
-            None => subagent && self.settings.orchestrate.child_worktrees,
+            None => subagent && self.settings.subagents.child_worktrees,
         };
         let provider = native_provider_named(&params.provider).ok_or_else(|| {
             format!(
@@ -373,7 +373,7 @@ impl AppState {
             meta.parent_session_id = Some(caller.thread_id.clone());
             meta.option_selections.extend(resolve_child_permission(
                 permission_control(provider),
-                self.settings.orchestrate.child_approval,
+                self.settings.subagents.child_approval,
             ));
         } else {
             meta.option_selections

@@ -1,6 +1,7 @@
 use super::*;
 use tcode_core::control::{ControlGrant, SettlementAutomation};
 use tcode_core::project::Project;
+use tcode_core::settings::ChildApprovalMode;
 use tcode_protocol::ControlActivityEntry;
 
 /// How long what is drawn here only some of the time takes to come in or go.
@@ -205,6 +206,7 @@ impl SettingsPage {
             cx,
         );
 
+        let subagent_rows = self.subagent_rows(cx);
         let project_rows = self.control_project_rows(&control, projects, compact, window, cx);
         let thread_rows = self.control_thread_rows(compact, window, cx);
         let activity_rows = self.control_activity_rows(compact, window, cx);
@@ -225,6 +227,11 @@ impl SettingsPage {
             .child(crate::settings_rows::settings_group(
                 crate::tr!("control.title"),
                 general,
+                cx,
+            ))
+            .child(crate::settings_rows::settings_group(
+                crate::tr!("control.subagents.section"),
+                subagent_rows,
                 cx,
             ))
             .child(
@@ -251,6 +258,109 @@ impl SettingsPage {
                 activity_rows,
                 cx,
             ))
+    }
+
+    /// How `start_thread` with `subagent: true` starts a subagent.
+    fn subagent_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let subagents = self.store.read(cx).settings().subagents;
+        let approval_reset = crate::settings_rows::reset_action(
+            "reset-child-approval",
+            subagents.child_approval != ChildApprovalMode::default(),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(
+                    |store| store.set_child_approval(ChildApprovalMode::default()),
+                    cx,
+                )
+            }),
+        );
+        let approval_label = |mode: ChildApprovalMode| -> SharedString {
+            match mode {
+                ChildApprovalMode::Orchestrator => {
+                    crate::tr!("control.subagents.child_approval.orchestrator")
+                }
+                ChildApprovalMode::Auto => crate::tr!("control.subagents.child_approval.auto"),
+                ChildApprovalMode::AlwaysAllow => {
+                    crate::tr!("control.subagents.child_approval.always_allow")
+                }
+                ChildApprovalMode::Manual => crate::tr!("control.subagents.child_approval.manual"),
+            }
+            .into_owned()
+            .into()
+        };
+        let approval_options = [
+            (
+                ChildApprovalMode::Orchestrator,
+                "child-approval-orchestrator",
+                "control.subagents.child_approval.orchestrator_description",
+            ),
+            (
+                ChildApprovalMode::Auto,
+                "child-approval-auto",
+                "control.subagents.child_approval.auto_description",
+            ),
+            (
+                ChildApprovalMode::AlwaysAllow,
+                "child-approval-always-allow",
+                "control.subagents.child_approval.always_allow_description",
+            ),
+            (
+                ChildApprovalMode::Manual,
+                "child-approval-manual",
+                "control.subagents.child_approval.manual_description",
+            ),
+        ]
+        .into_iter()
+        .map(|(mode, id, description)| SelectRowOption {
+            value: mode,
+            id: id.into(),
+            label: approval_label(mode),
+            description: Some(crate::tr!(description).into_owned().into()),
+            selected: mode == subagents.child_approval,
+        })
+        .collect();
+        let worktrees_reset = crate::settings_rows::reset_action(
+            "reset-child-worktrees",
+            subagents.child_worktrees,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_child_worktrees(false), cx)
+            }),
+        );
+        vec![
+            crate::settings_rows::select_row(
+                "child-approval-dropdown",
+                "child-approval-popover",
+                "child-approval-menu",
+                340.,
+                crate::tr!("control.subagents.child_approval.title")
+                    .into_owned()
+                    .into(),
+                crate::tr!("control.subagents.child_approval.description")
+                    .into_owned()
+                    .into(),
+                approval_label(subagents.child_approval),
+                approval_options,
+                approval_reset,
+                self.flip_row("child-approval-dropdown", cx),
+                {
+                    let page = cx.entity();
+                    move |mode, _, cx| {
+                        page.update(cx, |page, cx| {
+                            page.dispatch_settings(move |store| store.set_child_approval(mode), cx)
+                        })
+                    }
+                },
+                cx,
+            ),
+            self.toggle_row(
+                "child-worktrees",
+                crate::tr!("control.subagents.child_worktrees.title"),
+                crate::tr!("control.subagents.child_worktrees.description"),
+                subagents.child_worktrees,
+                worktrees_reset,
+                cx,
+                WorkspaceStore::set_child_worktrees,
+            ),
+        ]
     }
 
     fn control_project_rows(

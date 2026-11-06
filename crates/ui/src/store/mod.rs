@@ -851,8 +851,7 @@ impl WorkspaceStore {
                 Command::SendTurn { text, .. }
                 | Command::ScheduleTurn { text, .. }
                 | Command::Steer { text, .. }
-                | Command::ConfirmRelayAndSend { text, .. }
-                | Command::OrchestrateTurn { text, .. } => text,
+                | Command::ConfirmRelayAndSend { text, .. } => text,
                 _ => String::new(),
             };
             if !sessions.iter().any(|(existing, _)| existing == &id) {
@@ -881,9 +880,6 @@ impl WorkspaceStore {
                 session_id, text, ..
             }
             | Command::ConfirmRelayAndSend {
-                session_id, text, ..
-            }
-            | Command::OrchestrateTurn {
                 session_id, text, ..
             } if session_id == active => Some(text.clone()),
             _ => None,

@@ -286,8 +286,8 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
     {
         let started = state
             .update(cx, |state, cx| {
-                state.settings.orchestrate.child_approval = mode;
-                state.settings.orchestrate.child_worktrees = false;
+                state.settings.subagents.child_approval = mode;
+                state.settings.subagents.child_worktrees = false;
                 call(state, cx, "caller", with(&format!("child-{n}"), &|_| {}))
             })
             .unwrap();
@@ -315,7 +315,7 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
     // The setting isolates a subagent by default; the project root is not a Git repository.
     let (reply, response) = smol::channel::bounded(1);
     state.update(cx, |state, cx| {
-        state.settings.orchestrate.child_worktrees = true;
+        state.settings.subagents.child_worktrees = true;
         let ControlOp::StartThread(params) = with("isolated", &|p| p.cwd = Some(".".into())) else {
             unreachable!()
         };
@@ -336,83 +336,6 @@ fn a_subagent_is_a_child_that_owes_its_caller_a_report() {
 
 /// An untitled `start_thread` thread is titled from its first message once the provider
 /// accepts it, as a thread the user started is, though it runs in the background.
-/// Each row's arguments, read from what the lead is told, start a child on
-/// that row's own account.
-#[test]
-fn the_orchestrate_configuration_starts_each_account_of_a_model() {
-    use tcode_core::settings::{OrchestrateSettings, ProviderProfile};
-
-    let store = TestStore::new("tcode-control-start-accounts");
-    let root = store.root().join("project");
-    std::fs::create_dir_all(&root).unwrap();
-    let cx = &mut TestAppContext::default();
-    let state = host(&store, cx);
-    let (project_id, configuration) = state.update(cx, |state, cx| {
-        let project_id = state.create_project(root.clone(), cx).unwrap();
-        let mut caller = thread("caller", &project_id, ProviderKind::ClaudeCode);
-        caller.cwd = root.clone();
-        state.persist_meta(&caller, cx);
-        state.settings.profiles.insert(
-            "second-account".into(),
-            ProviderProfile {
-                kind: ProviderKind::Codex,
-                settings: Default::default(),
-            },
-        );
-        state.settings.orchestrate =
-            serde_json::from_value::<OrchestrateSettings>(serde_json::json!({
-                "decision_models": [],
-                "child_models": [
-                    {"provider": "codex", "model": "shared-model"},
-                    {"provider": "codex", "model": "shared-model", "profile_id": "second-account"},
-                ]
-            }))
-            .unwrap();
-        let configuration = crate::app::orchestrate::render_orchestrate_configuration(
-            &state.settings,
-            None,
-            &HashMap::new(),
-        );
-        (project_id, configuration)
-    });
-    let rows: Vec<serde_json::Value> = configuration
-        .split("start_thread: `")
-        .skip(1)
-        .map(|row| serde_json::from_str(row.split_once('`').unwrap().0).unwrap())
-        .collect();
-    assert_eq!(rows.len(), 2, "{configuration}");
-
-    let mut accounts = Vec::new();
-    for (n, row) in rows.iter().enumerate() {
-        let ControlOp::StartThread(mut params) = start(&project_id) else {
-            unreachable!()
-        };
-        params.request_id = format!("account-{n}");
-        params.subagent = Some(true);
-        params.provider = row["provider"].as_str().unwrap().into();
-        params.model = row["model"].as_str().map(str::to_owned);
-        params.profile = row["profile"].as_str().map(str::to_owned);
-        let started = state
-            .update(cx, |state, cx| {
-                call(state, cx, "caller", ControlOp::StartThread(params))
-            })
-            .unwrap();
-        let id = started["thread_id"].as_str().unwrap().to_owned();
-        accounts.push(state.read(|state| {
-            let meta = state.find_meta(&id).unwrap();
-            (meta.model.clone(), meta.profile_id.clone())
-        }));
-    }
-    let model = Some("shared-model".to_owned());
-    assert_eq!(
-        accounts,
-        [
-            (model.clone(), None),
-            (model, Some("second-account".to_owned()))
-        ]
-    );
-}
-
 #[test]
 fn an_untitled_started_thread_is_titled_from_its_first_message() {
     let store = TestStore::new("tcode-control-start-title");

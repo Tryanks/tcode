@@ -536,11 +536,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.shutdown_all(cx);
             return CommandOutcome::StoreBarrier(app.store_write_barrier(cx));
         }
-        Command::OrchestrateTurn {
-            session_id,
-            text,
-            attachment_paths,
-        } => app.orchestrate_turn(&session_id, text, attachment_paths, cx),
         Command::ReloadProvider => app.reload_provider(cx),
         Command::LinkPullRequest {
             session_id,
@@ -1509,11 +1504,6 @@ mod tests {
                 attachment_paths: Vec::new(),
             },
             Command::ConfirmRelayAndSend {
-                session_id: "gone".into(),
-                text: "hi".into(),
-                attachment_paths: Vec::new(),
-            },
-            Command::OrchestrateTurn {
                 session_id: "gone".into(),
                 text: "hi".into(),
                 attachment_paths: Vec::new(),

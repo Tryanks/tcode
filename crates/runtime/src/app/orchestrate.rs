@@ -5,7 +5,6 @@ use tcode_core::notice::{
     callback_header,
 };
 use tcode_core::project::ChildExpectation;
-use tcode_core::settings::orchestrate_efforts;
 use tcode_core::settlement::{AgentDelivery, AgentReport};
 
 /// Appended to every subagent's first message so the report contract reaches it
@@ -211,73 +210,6 @@ impl AppState {
         {
             tokens.revoke(session_id, &registration.bearer_token);
         }
-    }
-
-    /// Submit the Orchestrate guidance and configuration ahead of the user's text.
-    pub fn orchestrate_turn(
-        &mut self,
-        target_id: &str,
-        text: String,
-        attachment_paths: Vec<PathBuf>,
-        cx: &mut HostCx,
-    ) {
-        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
-        self.orchestrate_turn_assembled(target_id, text, attachments, cx);
-        self.clear_consumed_draft_context(target_id, cx);
-    }
-
-    pub(super) fn orchestrate_turn_assembled(
-        &mut self,
-        target_id: &str,
-        text: String,
-        attachments: Vec<Attachment>,
-        cx: &mut HostCx,
-    ) {
-        let Some(active) = self.resident(target_id) else {
-            return;
-        };
-        // The composed text is [workflow] + [configuration] + [user text] joined
-        // by "\n\n", with the user's words last. `context_len` is the byte length
-        // of everything before them (prefix + its trailing "\n\n") — the split the
-        // timeline records so it can show the prefix as a disclosure and the
-        // bubble only the user's words. The provider still receives all of `text`.
-        let user_len = text.len();
-        let caller = OrchestrateCaller {
-            provider: active.meta.provider,
-            profile_id: active
-                .meta
-                .profile_id
-                .as_deref()
-                .filter(|id| !Settings::is_builtin_profile_id(id)),
-            model: active
-                .meta
-                .model
-                .as_deref()
-                .or(active.live_model.as_deref())
-                .or_else(|| {
-                    self.models_for(active.meta.provider)
-                        .iter()
-                        .find(|model| model.is_default)
-                        .map(|model| model.id.as_str())
-                }),
-        };
-        let text = compose_orchestrate_text(
-            &self.settings,
-            &text,
-            Some(caller),
-            &self.providers.model_catalogs,
-        );
-        let context_len = text.len().saturating_sub(user_len);
-
-        // Stage the split so the next `push_queued` records it on the user
-        // message. (A mid-turn steer clears it instead — see `steer` — so the
-        // annotation never leaks onto an unrelated later message.)
-        if let Some(active) = self.resident_mut(target_id) {
-            active.pending_context_len = Some(context_len);
-        }
-
-        // `steer` sends ordinarily when idle and injects into a live turn.
-        self.steer_assembled(target_id, text, attachments, cx);
     }
 
     pub(super) fn preview_registration_for(
@@ -720,7 +652,7 @@ impl AppState {
         else {
             return;
         };
-        if self.settings.orchestrate.child_approval == ChildApprovalMode::AlwaysAllow
+        if self.settings.subagents.child_approval == ChildApprovalMode::AlwaysAllow
             && let Some(option) = native_allow_option(&request)
         {
             match self.respond_session_approval(
@@ -742,7 +674,7 @@ impl AppState {
         let options = request.options.iter().map(|option| {
             serde_json::json!({ "id": option.id, "label": option.label, "kind": option.kind })
         }).collect::<Vec<_>>();
-        let instruction = if self.settings.orchestrate.child_approval == ChildApprovalMode::Manual {
+        let instruction = if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
             "The user answers in the child thread."
         } else {
             "You are the approver: answer with tcode_control respond_approval, passing this thread_id and approval_id with option: <exact id> or cancel: true; reject anything outside the brief's scope. To allow, prefer an allow_always option over allow_once when one is offered."
@@ -795,7 +727,7 @@ impl AppState {
         } else {
             "the child keeps working and reads the answer when it arrives; the question lapses when its turn ends"
         };
-        let instruction = if self.settings.orchestrate.child_approval == ChildApprovalMode::Manual {
+        let instruction = if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
             "The user answers in the child thread."
         } else {
             "You are the decider: answer with tcode_control respond_input, passing this thread_id and question_id with answers keyed by question id, a string (an option label or free text) for a single-choice question and an array of strings for a multi_select one, deciding from the brief and the user's instructions."
@@ -859,172 +791,6 @@ impl AppState {
     }
 }
 
-pub(super) const ORCHESTRATE_GUIDANCE: &str =
-    include_str!("../../../../assets/orchestrate/workflow.md");
-
-/// The thread an Orchestrate turn runs in: one row of a role's list, which it
-/// does not see as a peer of itself. `profile_id` is `None` on the built-in
-/// profile, and `model` before discovery names it.
-#[derive(Clone, Copy)]
-pub(super) struct OrchestrateCaller<'a> {
-    pub provider: ProviderKind,
-    pub profile_id: Option<&'a str>,
-    pub model: Option<&'a str>,
-}
-
-pub(super) fn compose_orchestrate_text(
-    settings: &Settings,
-    user_text: &str,
-    caller: Option<OrchestrateCaller>,
-    catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
-) -> String {
-    let configuration = render_orchestrate_configuration(settings, caller, catalogs);
-    let mut sections = Vec::with_capacity(3);
-    sections.push(ORCHESTRATE_GUIDANCE.trim());
-    sections.push(configuration.trim());
-    if !user_text.is_empty() {
-        sections.push(user_text);
-    }
-    sections.join("\n\n")
-}
-
-pub(super) fn render_orchestrate_configuration(
-    settings: &Settings,
-    caller: Option<OrchestrateCaller>,
-    catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
-) -> String {
-    let approvals = match settings.orchestrate.child_approval {
-        ChildApprovalMode::Manual => "the user answers its approval requests in the child thread",
-        ChildApprovalMode::Orchestrator
-        | ChildApprovalMode::Auto
-        | ChildApprovalMode::AlwaysAllow => {
-            "you answer the approval requests and questions it forwards, with respond_approval and respond_input"
-        }
-    };
-    let mut text = format!(
-        "## Current orchestrator configuration\n\nStart every child with tcode_control start_thread and subagent: true. Compare enabled profiles across all providers by their task fit, strengths, limitations, and cost; provider family is not a routing preference. Each entry gives the start_thread arguments that select it: pass provider and model as shown, profile only where the entry names one (it selects an account or endpoint configuration, not a model), and the options shown, which turn on fast mode where the configuration asks for it; change fast mode only when the user explicitly asks. Choose reasoningEffort per call from the values the entry lists, by its description and the task's difficulty, and pass it in options; omitted, the provider's default applies. A subagent runs with the permission Settings → Orchestrate child approval chooses, which options cannot change, and {approvals}.\n"
-    );
-    for (heading, profiles, collaboration) in [
-        (
-            "Collaboration models",
-            &settings.orchestrate.decision_models,
-            true,
-        ),
-        (
-            "Execution models",
-            &settings.orchestrate.child_models,
-            false,
-        ),
-    ] {
-        text.push_str(&format!("\n### {heading}\n\n"));
-        text.push_str(if collaboration {
-            "Peers for a decision discussion. The description under each peer is that peer's own guidance, not yours: open the discussion's first message with it. The main thread's own peer entry is omitted.\n"
-        } else {
-            "Executors for concrete work. The description under each executor guides your choice and effort.\n"
-        });
-        let available: Vec<_> = profiles
-            .iter()
-            .filter(|entry| {
-                entry.enabled
-                    && !(collaboration
-                        && caller.is_some_and(|caller| {
-                            // Before discovery identifies the lead, withhold that
-                            // account's peer identities rather than guessing its model.
-                            caller.provider == entry.provider
-                                && caller.profile_id == entry.profile_id.as_deref()
-                                && caller.model.is_none_or(|model| model == entry.model)
-                        }))
-            })
-            .collect();
-        if available.is_empty() {
-            text.push_str("No enabled models in this list.\n");
-        }
-        for entry in available {
-            let catalog = catalogs
-                .get(&entry.provider)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let mut arguments = serde_json::json!({
-                "provider": provider_name(entry.provider),
-                "model": entry.model,
-            });
-            // The built-in profile goes unnamed unless the list holds this model
-            // under another account too: then each row says which it is.
-            let shared = profiles.iter().any(|other| {
-                other.provider == entry.provider
-                    && other.model == entry.model
-                    && other.profile_id != entry.profile_id
-            });
-            if let Some(id) = &entry.profile_id {
-                arguments["profile"] = serde_json::json!(id);
-            } else if shared {
-                arguments["profile"] =
-                    serde_json::json!(Settings::builtin_profile_id(entry.provider));
-            }
-            if entry.fast
-                && let Some((id, value)) = fast_option(entry.provider)
-            {
-                arguments["options"] = serde_json::json!({ id: value });
-            }
-            let arguments = escape_markdown_inline(&arguments.to_string());
-            let mut title = format!(
-                "`{}` / `{}`",
-                provider_name(entry.provider),
-                escape_markdown_inline(&entry.model)
-            );
-            if let Some(id) = &entry.profile_id {
-                title.push_str(&format!(" / `{}`", escape_markdown_inline(id)));
-                if settings.resolved_profile(id).is_none() {
-                    text.push_str(&format!(
-                        "\n#### {title} — unavailable\n\nUnavailable: profile `{}` no longer exists.\n\n{}\n",
-                        escape_markdown_inline(id),
-                        entry.guidance(collaboration).trim()
-                    ));
-                    continue;
-                }
-            }
-            if settings.orchestrate_model_missing(entry, catalog) {
-                text.push_str(&format!(
-                    "\n#### {title} — unavailable\n\nUnavailable: model `{}` is not present in the loaded `{}` catalog.\n\n{}\n",
-                    escape_markdown_inline(&entry.model),
-                    provider_name(entry.provider),
-                    entry.guidance(collaboration).trim()
-                ));
-                continue;
-            }
-            let choices = orchestrate_efforts(entry.provider, &entry.model, catalog);
-            let efforts = if choices.is_empty() {
-                "none known; omit it".to_string()
-            } else {
-                choices
-                    .iter()
-                    .map(|effort| format!("`{}`", escape_markdown_inline(effort)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            text.push_str(&format!(
-                "\n#### {title}\n\nstart_thread: `{arguments}`; reasoningEffort: {efforts}.\n\n{}\n",
-                entry.guidance(collaboration).trim()
-            ));
-        }
-    }
-    text
-}
-
-/// The provider option that turns on its fast mode: Claude's `fastMode` launch setting,
-/// Codex's `fast` service tier. `None` for providers without one.
-fn fast_option(provider: ProviderKind) -> Option<(&'static str, serde_json::Value)> {
-    match provider {
-        ProviderKind::ClaudeCode => Some(("fastMode", serde_json::Value::Bool(true))),
-        ProviderKind::Codex => Some(("serviceTier", serde_json::Value::String("fast".into()))),
-        _ => None,
-    }
-}
-
-pub(super) fn escape_markdown_inline(value: &str) -> String {
-    value.replace('`', "\\`").replace(['\r', '\n'], " ")
-}
-
 /// A native provider as a model names it: `claude`, `codex`, `opencode`, …
 pub(super) fn native_provider_named(name: &str) -> Option<ProviderKind> {
     match name.trim().to_ascii_lowercase().as_str() {
@@ -1038,7 +804,7 @@ pub(super) fn native_provider_named(name: &str) -> Option<ProviderKind> {
     }
 }
 
-/// The permission value a subagent starts with: what Settings → Orchestrate child approval
+/// The permission value a subagent starts with: what Settings → Control child approval
 /// chooses from the provider's native control, `None` for a provider without one.
 pub(super) fn resolve_child_permission(
     descriptor: Option<OptionDescriptor>,
@@ -1099,18 +865,6 @@ pub(super) fn resolve_approval_decision(
         )),
         (None, true) => Ok(ApprovalDecision::Cancel),
         _ => Err("supply option or cancel: true, never both".into()),
-    }
-}
-
-pub(super) fn provider_name(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::Codex => "codex",
-        ProviderKind::ClaudeCode => "claude",
-        ProviderKind::Pi => "pi",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Cursor => "cursor",
-        ProviderKind::Grok => "grok",
-        ProviderKind::Acp => "acp",
     }
 }
 
