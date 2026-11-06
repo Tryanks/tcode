@@ -174,11 +174,15 @@ pub enum ServerEvent {
     LastVisitedChanged(HashMap<String, u64>),
     Runtime(RuntimeNotification),
 
-    /// A provider-native rewind prompt is delivered once over the serialized
-    /// event stream. The client store owns consumption after receipt.
-    NativeRewindPrefill {
+    /// The prompt a rewind restored, for the composer of the client that
+    /// asked for the rewind; every other client ignores it.
+    RewindPrefill {
         session_id: String,
+        client_id: String,
         text: String,
+        /// Local paths of the images the prompt carried.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// Records standing for the log cursors `from..end`. A cursor is the
     /// position of a stored row of the log, and a row without a readable
@@ -748,7 +752,14 @@ pub struct SessionStatus {
     /// The harness's standing goal (Codex `thread/goal`, Claude Code `/goal`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<agent::Goal>,
-    pub native_rewind_blocked: bool,
+    /// What a rewind does in this thread and whether one can start now; none
+    /// when its harness, or this thread's session, has no rewind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewind: Option<RewindStatus>,
+    /// Queued messages wait, after a rewind, until the user sends the next
+    /// message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue_held: bool,
     pub checkout_blocked: bool,
     pub conversation_read_only: bool,
     pub terminal_limit_reached: bool,
@@ -778,8 +789,6 @@ pub struct SessionStatus {
     pub worktree: Option<WorktreeInfo>,
     pub preparing_worktree: bool,
     pub relay_confirmation: Option<(String, String)>,
-    pub native_rewind_pending: bool,
-    pub native_rewind_prefill_available: bool,
     pub model_pending_restart: bool,
     pub options_pending_restart: bool,
     /// The MCP tools offered to this thread's provider, with every text Tcode gives its
@@ -790,6 +799,54 @@ pub struct SessionStatus {
     /// takes no MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ControlStatus>,
+}
+
+/// A thread's rewind, as its harness declares it and the thread refines it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindStatus {
+    /// What a rewind restores, in the order the panel offers them.
+    pub modes: Vec<RewindMode>,
+    pub first_turn_conversation: bool,
+    pub steer_targets: bool,
+    pub later_history: agent::LaterHistory,
+    pub preview: agent::RewindPreviewKind,
+    pub running_turn: agent::RunningTurnPolicy,
+    pub restores_command_edits: bool,
+    /// Why no rewind can start now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<RewindBlocked>,
+    /// The rewind, or undo, the harness is making now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<PendingRewind>,
+}
+
+impl RewindStatus {
+    /// Whether `mode` can restore turn `turn`, or a steer inside it.
+    pub fn offers(&self, mode: RewindMode, turn: usize, steer: bool) -> bool {
+        self.modes.contains(&mode)
+            && (!steer || (self.steer_targets && mode == RewindMode::Conversation))
+            && (turn > 0 || steer || self.first_turn_conversation || !mode.includes_conversation())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindBlocked {
+    /// A rewind or its undo is being made.
+    InProgress,
+    /// A message is on its way to the harness.
+    Delivering,
+    /// A turn runs and the harness does not stop it for a rewind.
+    TurnRunning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRewind {
+    pub checkpoint_id: String,
+    pub mode: RewindMode,
+    /// An undo of the rewind to `checkpoint_id`, not a rewind.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub undo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1084,7 +1141,6 @@ pub enum RuntimeError {
     DeleteProject {
         error: String,
     },
-    NativeRewindBlocked,
     PersistEvent {
         error: String,
     },
@@ -1139,9 +1195,6 @@ pub enum RuntimeNotice {
     TcodeUpdateAvailable {
         version: String,
     },
-    NativeRewindCompleted {
-        mode: RewindMode,
-    },
     SwitchedBranch {
         branch: String,
     },
@@ -1184,7 +1237,6 @@ impl RuntimeNotice {
             | Self::WorktreeMergeFailed { .. }
             | Self::ReferenceBoundaryCrossed { .. } => NoticeSeverity::Warning,
             Self::TcodeUpdateAvailable { .. }
-            | Self::NativeRewindCompleted { .. }
             | Self::SwitchedBranch { .. }
             | Self::WorktreeSeeded { .. }
             | Self::WorktreeMergedFastForward

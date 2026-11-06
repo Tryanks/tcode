@@ -88,8 +88,13 @@ impl IndexedLog {
                     .collect();
                 timeline.apply_stored(record);
                 positions = reconcile(before, &timeline.entries, row);
-                if matches!(record.event, AgentEvent::RewindCompleted { .. }) {
-                    rewinds.push((row, timeline.turns.len()));
+                // The divider ends the log so far and sits in the turn after
+                // the ones the cut kept.
+                if let (AgentEvent::RewindCompleted { .. }, Some(divider)) =
+                    (&record.event, timeline.entries.last())
+                    && matches!(divider.content, EntryContent::Rewound(_))
+                {
+                    rewinds.push((row, divider.turn));
                 }
             } else {
                 timeline.apply_stored(record);
@@ -138,7 +143,9 @@ impl IndexedLog {
 fn reorders_entries(event: &AgentEvent) -> bool {
     match event {
         AgentEvent::RewindCompleted { mode, .. } => mode.includes_conversation(),
-        AgentEvent::SteerAccepted { .. } | AgentEvent::SteerRejected { .. } => true,
+        AgentEvent::RewindUndone { .. }
+        | AgentEvent::SteerAccepted { .. }
+        | AgentEvent::SteerRejected { .. } => true,
         _ => false,
     }
 }
@@ -457,6 +464,8 @@ impl Activity {
             | EntryContent::ModelChanged { .. }
             | EntryContent::ContextCompacted(_)
             | EntryContent::ControlAction(_)
+            | EntryContent::Rewound(_)
+            | EntryContent::RewindFailed { .. }
             | EntryContent::ContextWindowChanged { .. } => {}
         }
     }
@@ -1310,6 +1319,35 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
                 Some(detail) => format!("{}: {} ({detail})", action.actor_title, action.action),
                 None => format!("{}: {}", action.actor_title, action.action),
             },
+        ),
+        EntryContent::Rewound(rewound) => (
+            "rewind",
+            format!(
+                "rewound {:?}: {} turn(s) removed{}",
+                rewound.mode,
+                rewound.removed_turns,
+                rewound
+                    .incomplete
+                    .as_ref()
+                    .map(|incomplete| format!(
+                        "; {:?} failed: {:?}",
+                        incomplete.requested, incomplete.failure.reason
+                    ))
+                    .unwrap_or_default()
+            ),
+        ),
+        EntryContent::RewindFailed { mode, failure } => (
+            "rewind_failed",
+            format!(
+                "{} failed: {:?}{}",
+                if mode.is_some() { "rewind" } else { "undo" },
+                failure.reason,
+                failure
+                    .detail
+                    .as_deref()
+                    .map(|detail| format!(" ({detail})"))
+                    .unwrap_or_default()
+            ),
         ),
     }
 }

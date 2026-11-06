@@ -1,48 +1,6 @@
 use super::*;
 
 impl AppState {
-    /// Request a provider-owned restore point. No local Git or transcript
-    /// operation is performed: the canonical timeline changes only after the
-    /// provider confirms the native request.
-    pub fn rewind_turn(&mut self, target_id: &str, turn: usize, mode: RewindMode, cx: &mut HostCx) {
-        let Some(active) = self.resident(target_id) else {
-            return;
-        };
-        if self.native_rewind_blocked(active) || !Self::native_rewind_offered(active, turn, mode) {
-            self.report_error(RuntimeError::NativeRewindBlocked, cx);
-            return;
-        }
-        let Some(checkpoint_id) = active
-            .timeline
-            .turns
-            .get(turn)
-            .and_then(|turn| turn.provider_checkpoint_id.clone())
-        else {
-            return;
-        };
-        let session_id = active.meta.id.clone();
-        let live_commands = match &active.runtime {
-            Runtime::Live(commands) => Some(commands.clone()),
-            Runtime::Idle | Runtime::Starting { .. } => None,
-        };
-        self.pending_native_rewinds
-            .insert(session_id.clone(), (checkpoint_id.clone(), mode));
-        if let Some(commands) = live_commands {
-            if commands
-                .try_send(SessionCommand::Rewind {
-                    checkpoint_id,
-                    mode,
-                })
-                .is_err()
-            {
-                self.pending_native_rewinds.remove(&session_id);
-                self.report_error(RuntimeError::ProcessGone, cx);
-            }
-        } else {
-            self.ensure_started(target_id, cx);
-        }
-    }
-
     /// The command asked for while the provider was starting; clears it.
     fn take_requested_command(&mut self, session_id: &str) -> Option<SessionCommand> {
         self.resident_mut(session_id)?.requested_command.take()
@@ -258,50 +216,19 @@ impl AppState {
                                 }
                             }
                         }
-                        if matches_active {
-                            if let Some((checkpoint_id, mode)) =
-                                state.pending_native_rewinds.get(&session_id).cloned()
-                            {
-                                if commands
-                                    .try_send(SessionCommand::Rewind {
-                                        checkpoint_id,
-                                        mode,
-                                    })
-                                    .is_err()
-                                {
-                                    state.pending_native_rewinds.remove(&session_id);
-                                    state.report_error(RuntimeError::ProcessGone, cx);
-                                }
-                            } else if let Some(command) = state.take_requested_command(&session_id) {
-                                if commands.try_send(command).is_err() {
-                                    state.report_error(RuntimeError::ProcessGone, cx);
-                                }
-                            } else if state.dispatch_next_queued(&session_id, cx).is_err() {
+                        // A rewind waiting for the start takes the place of
+                        // the queue's next message.
+                        if state.send_waiting_rewinds(&session_id, &commands, cx) {
+                        } else if let Some(command) = state.take_requested_command(&session_id) {
+                            if commands.try_send(command).is_err() {
                                 state.report_error(RuntimeError::ProcessGone, cx);
                             }
-                        } else {
-                            if let Some((checkpoint_id, mode)) =
-                                state.pending_native_rewinds.get(&session_id).cloned()
-                            {
-                                if commands
-                                    .try_send(SessionCommand::Rewind {
-                                        checkpoint_id,
-                                        mode,
-                                    })
-                                    .is_err()
-                                {
-                                    state.pending_native_rewinds.remove(&session_id);
-                                    state.report_error(RuntimeError::ProcessGone, cx);
-                                }
-                            } else if let Some(command) = state.take_requested_command(&session_id) {
-                                if commands.try_send(command).is_err() {
-                                    state.report_error(RuntimeError::ProcessGone, cx);
-                                }
-                            } else {
-                                // Work through the parked queue exactly as a
-                                // finished background turn would.
-                                state.on_background_turn_completed(&session_id, cx);
-                            }
+                        } else if !matches_active {
+                            // Work through the parked queue exactly as a
+                            // finished background turn would.
+                            state.on_background_turn_completed(&session_id, cx);
+                        } else if state.dispatch_next_queued(&session_id, cx).is_err() {
+                            state.report_error(RuntimeError::ProcessGone, cx);
                         }
                     }
                     Err(err) => {
@@ -317,7 +244,11 @@ impl AppState {
                                 resident.turn_in_flight = false;
                                 resident.background_task_count = 0;
                             }
-                            state.pending_native_rewinds.remove(&session_id);
+                            state.settle_rewind_unanswered(
+                                &session_id,
+                                agent::RewindFailureReason::ProcessGone,
+                                cx,
+                            );
                             let error_event = AgentEvent::ProviderStartFailed {
                                 error: err.to_string(),
                             };
@@ -478,7 +409,7 @@ impl AppState {
             .map(str::to_string)
         {
             self.clear_approvals(&session_id);
-            self.pending_native_rewinds.remove(&session_id);
+            self.drop_rewind_requests(&session_id);
         }
         if let Some(active) = self.residents.live.remove(target_id) {
             if active.draft && self.archived_sharing_affected(&active.meta) {
@@ -515,7 +446,8 @@ impl AppState {
         // Drop every conversation-owned PTY, including those parked while an
         // idle thread was off screen.
         self.terminal_workspaces.clear();
-        self.pending_native_rewinds.clear();
+        self.rewind_requests.clear();
+        self.rewind_previews.clear();
     }
 
     /// Leave the active session without killing its provider or in-memory work.
@@ -529,7 +461,7 @@ impl AppState {
             self.archived_revision += 1;
         }
         self.park_terminal_workspace(&mut active);
-        let native_rewind_pending = self.pending_native_rewinds.contains_key(&active.meta.id);
+        let native_rewind_pending = self.rewind_requests.contains_key(&active.meta.id);
         let has_work = active.turn_in_flight
             || active.delivery_in_flight.is_some()
             || !active.queue.is_empty()
@@ -558,7 +490,7 @@ impl AppState {
     /// keeps the grace its last turn end started, so parking a thread does not
     /// extend its process's life.
     pub(super) fn mark_resident_idle(&mut self, session_id: &str, cx: &mut HostCx) {
-        let rewind_pending = self.pending_native_rewinds.contains_key(session_id);
+        let rewind_pending = self.rewind_requests.contains_key(session_id);
         let Some(session) = self
             .residents
             .resident_mut(session_id)
@@ -577,7 +509,7 @@ impl AppState {
             .parked
             .iter()
             .filter(|(id, session)| {
-                session.fully_idle() && !self.pending_native_rewinds.contains_key(id.as_str())
+                session.fully_idle() && !self.rewind_requests.contains_key(id.as_str())
             })
             .filter_map(|(id, session)| {
                 session.idle_since.map(|idle| {
@@ -640,7 +572,7 @@ impl AppState {
         idle_since: Instant,
         cx: &mut HostCx,
     ) {
-        let still_idle = !self.pending_native_rewinds.contains_key(session_id)
+        let still_idle = !self.rewind_requests.contains_key(session_id)
             && self.residents.resident(session_id).is_some_and(|session| {
                 session.idle_since == Some(idle_since) && session.fully_idle()
             });
@@ -661,7 +593,7 @@ impl AppState {
     pub(super) fn drop_background(&mut self, session_id: &str, cx: &mut HostCx) {
         self.revoke_computer_use_registration(session_id);
         self.clear_approvals(session_id);
-        self.pending_native_rewinds.remove(session_id);
+        self.drop_rewind_requests(session_id);
         if let Some(parked) = self.residents.evict(session_id)
             && let Runtime::Live(commands) = parked.runtime
         {

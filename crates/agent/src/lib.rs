@@ -80,9 +80,10 @@ pub enum ProviderKind {
 pub struct Caps {
     pub supports_steering: bool,
     pub supports_fork: bool,
-    /// What the harness restores of a checkpointed turn
-    /// ([`SessionCommand::Rewind`]), when it can.
-    pub native_rewind: Option<RewindControl>,
+    /// What the harness's own rewind does ([`SessionCommand::Rewind`]), when
+    /// it has one. A thread can withdraw it ([`AgentEvent::RewindAvailability`])
+    /// and a preview narrows it for one message ([`AgentEvent::RewindPreviewed`]).
+    pub rewind: Option<RewindControl>,
     /// The harness compacts its context on request ([`SessionCommand::Compact`]).
     pub manual_compaction: bool,
     /// How the harness's standing goal is driven ([`SessionCommand::SetGoal`]),
@@ -111,21 +112,70 @@ pub struct Caps {
     pub session_transfer: bool,
 }
 
-/// What a harness restores of a turn it checkpointed.
+/// What a harness's own rewind does. Tcode offers exactly this and never
+/// emulates a missing part with Git or transcript edits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RewindControl {
-    /// The scopes it restores, in the order a menu offers them.
+    /// The scopes it restores, in the order the panel offers them.
     pub modes: &'static [RewindMode],
     /// The conversation can be restored to before the thread's first turn.
     pub first_turn_conversation: bool,
+    /// A steer (a message added to a running turn) is a target for the
+    /// conversation alone; it has no restore point for files.
+    pub steer_targets: bool,
+    pub later_history: LaterHistory,
+    pub preview: RewindPreviewKind,
+    pub running_turn: RunningTurnPolicy,
+    /// Files the agent changed by running commands are restored too, not only
+    /// those its own edit tools wrote.
+    pub restores_command_edits: bool,
 }
 
 impl RewindControl {
-    /// Whether `mode` can restore turn `turn`, counted from the thread's first.
-    pub fn offers(self, mode: RewindMode, turn: usize) -> bool {
+    /// Whether `mode` can restore turn `turn`, counted from the thread's first,
+    /// or a steer inside it.
+    pub fn offers(self, mode: RewindMode, turn: usize, steer: bool) -> bool {
         self.modes.contains(&mode)
-            && (turn > 0 || self.first_turn_conversation || !mode.includes_conversation())
+            && (!steer || (self.steer_targets && mode == RewindMode::Conversation))
+            && (turn > 0 || steer || self.first_turn_conversation || !mode.includes_conversation())
     }
+}
+
+/// What becomes of the conversation after a rewind's target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaterHistory {
+    /// The later turns leave the harness's conversation for good.
+    #[default]
+    Truncated,
+    /// The later turns are hidden, and the rewind can be undone until the
+    /// next message is sent, which makes it final.
+    HiddenUntilNextSend,
+    /// The conversation goes on in a new branch; the original is kept and can
+    /// be returned to.
+    Branch,
+}
+
+/// What a harness can show of a rewind before it is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindPreviewKind {
+    None,
+    /// The files a restore would change, with line counts where it has them.
+    Files,
+    /// The files a restore would change, and those changed outside the agent
+    /// since, which the restore would overwrite.
+    Conflicts,
+}
+
+/// What a rewind does to a turn that is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunningTurnPolicy {
+    /// The harness stops the turn first, as its own rewind does.
+    Interrupt,
+    /// A rewind waits until no turn runs.
+    Refuse,
 }
 
 /// What a harness lets a client do with its standing goal.
@@ -197,7 +247,7 @@ impl ProviderKind {
             ProviderKind::ClaudeCode => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: Some(RewindControl {
+                rewind: Some(RewindControl {
                     modes: &[
                         RewindMode::FilesAndConversation,
                         RewindMode::Conversation,
@@ -206,6 +256,11 @@ impl ProviderKind {
                     // Claude Code 2.1.214 cannot persist a conversation rewind
                     // before the first assistant anchor.
                     first_turn_conversation: false,
+                    steer_targets: false,
+                    later_history: LaterHistory::Truncated,
+                    preview: RewindPreviewKind::None,
+                    running_turn: RunningTurnPolicy::Refuse,
+                    restores_command_edits: false,
                 }),
                 manual_compaction: true,
                 goals: Some(GoalControl {
@@ -240,7 +295,7 @@ impl ProviderKind {
             ProviderKind::Codex => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: None,
+                rewind: None,
                 manual_compaction: true,
                 goals: Some(GoalControl {
                     pause: true,
@@ -274,7 +329,7 @@ impl ProviderKind {
             ProviderKind::Acp => Caps {
                 supports_steering: false,
                 supports_fork: false,
-                native_rewind: None,
+                rewind: None,
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
@@ -296,7 +351,7 @@ impl ProviderKind {
             ProviderKind::Pi => Caps {
                 supports_steering: true,
                 supports_fork: false,
-                native_rewind: None,
+                rewind: None,
                 manual_compaction: true,
                 goals: None,
                 per_turn_effort: false,
@@ -324,9 +379,14 @@ impl ProviderKind {
                 supports_fork: true,
                 // A revert restores the conversation, with or without the
                 // files its steps changed; there is no files-only revert.
-                native_rewind: Some(RewindControl {
+                rewind: Some(RewindControl {
                     modes: &[RewindMode::FilesAndConversation, RewindMode::Conversation],
                     first_turn_conversation: true,
+                    steer_targets: false,
+                    later_history: LaterHistory::Truncated,
+                    preview: RewindPreviewKind::None,
+                    running_turn: RunningTurnPolicy::Refuse,
+                    restores_command_edits: false,
                 }),
                 manual_compaction: true,
                 goals: None,
@@ -353,7 +413,7 @@ impl ProviderKind {
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
                 supports_fork: false,
-                native_rewind: None,
+                rewind: None,
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
@@ -379,7 +439,7 @@ impl ProviderKind {
             ProviderKind::Grok => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                native_rewind: None,
+                rewind: None,
                 manual_compaction: false,
                 goals: None,
                 per_turn_effort: false,
@@ -1803,10 +1863,27 @@ pub enum SessionCommand {
     },
     /// Ask the provider to restore one of its own message checkpoints. The
     /// provider remains the sole owner of both the checkpoint and the restore
-    /// semantics; adapters without a native implementation reject this.
+    /// semantics; adapters without a native implementation reject this. Where
+    /// [`RewindControl::running_turn`] interrupts, the adapter stops a running
+    /// turn first the way its harness does. Answered by
+    /// [`AgentEvent::RewindCompleted`] or [`AgentEvent::RewindFailed`].
     Rewind {
         checkpoint_id: String,
         mode: RewindMode,
+    },
+    /// Ask what [`Self::Rewind`] would restore, without restoring anything,
+    /// where [`RewindControl::preview`] says the harness can tell. Answered by
+    /// [`AgentEvent::RewindPreviewed`].
+    PreviewRewind {
+        checkpoint_id: String,
+        mode: RewindMode,
+    },
+    /// Undo a rewind the harness keeps undoable: the `undo_token` of its
+    /// [`AgentEvent::RewindCompleted`]. Answered by
+    /// [`AgentEvent::RewindUndone`] or [`AgentEvent::RewindUndoFailed`].
+    UndoRewind {
+        checkpoint_id: String,
+        undo_token: String,
     },
     /// Ask the provider to compact its context now, the way its own `/compact`
     /// does (Codex `thread/compact/start`, pi `compact`, Claude Code's
@@ -2031,20 +2108,67 @@ pub enum AgentEvent {
         turn_id: String,
         checkpoint_id: String,
     },
-    /// The provider successfully applied a native restore operation. A
-    /// conversation restore also returns the selected prompt for composer
-    /// prefill, matching the provider's own edit-after-rewind behavior.
+    /// A provider-owned restore point for a steer: the conversation alone
+    /// can be rewound to before it ([`RewindControl::steer_targets`]).
+    SteerCheckpoint {
+        request_id: String,
+        checkpoint_id: String,
+    },
+    /// The restore points recorded so far no longer address the harness's
+    /// session (the thread was forked into a new one); none of them is a
+    /// rewind target any more.
+    CheckpointsCleared,
+    /// Whether this thread's harness session can be rewound at all, where
+    /// that differs between sessions of one harness (Codex's legacy history).
+    RewindAvailability {
+        /// Why it cannot; `None` once it can.
+        unavailable: Option<RewindFailureReason>,
+    },
+    /// What a [`SessionCommand::PreviewRewind`] found. Transient, like
+    /// [`Self::TurnAccepted`]: the runtime answers the client that asked.
+    RewindPreviewed {
+        checkpoint_id: String,
+        mode: RewindMode,
+        result: RewindPreviewResult,
+    },
+    /// The provider applied a native restore operation. `mode` is what it
+    /// restored; when that is less than was asked, `incomplete` says what
+    /// failed. A conversation restore also returns the selected prompt for
+    /// composer prefill, matching the provider's own edit-after-rewind
+    /// behavior.
     RewindCompleted {
         checkpoint_id: String,
         mode: RewindMode,
         prefill: Option<String>,
+        /// Local paths of the images the restored prompt carried.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prefill_attachments: Vec<String>,
+        #[serde(default)]
+        later_history: LaterHistory,
+        /// The files the restore changed, when the harness said.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files: Option<RewindFiles>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        incomplete: Option<RewindIncomplete>,
+        /// Present while the harness keeps this rewind undoable; returned in
+        /// [`SessionCommand::UndoRewind`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undo_token: Option<String>,
     },
-    /// A native restore request was rejected without changing tcode's local
-    /// conversation state.
+    /// A native restore request was rejected without changing anything.
     RewindFailed {
         checkpoint_id: String,
         mode: RewindMode,
-        error: String,
+        failure: RewindFailure,
+    },
+    /// The harness undid the rewind to `checkpoint_id`: the later turns are
+    /// its conversation again.
+    RewindUndone {
+        checkpoint_id: String,
+    },
+    RewindUndoFailed {
+        checkpoint_id: String,
+        failure: RewindFailure,
     },
     TurnCompleted {
         turn_id: String,
@@ -2237,12 +2361,165 @@ pub enum TurnStatus {
 
 /// Provider-native restore scopes. These describe what the upstream agent
 /// changes; tcode never emulates a missing scope with Git or transcript edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RewindMode {
     Files,
     Conversation,
     FilesAndConversation,
+}
+
+impl SessionCommand {
+    /// The answer to a rewind command the adapter cannot carry out: the
+    /// failure event that command expects, or `None` for any other command.
+    pub fn rewind_refusal(&self, failure: RewindFailure) -> Option<AgentEvent> {
+        Some(match self {
+            Self::Rewind {
+                checkpoint_id,
+                mode,
+            } => AgentEvent::RewindFailed {
+                checkpoint_id: checkpoint_id.clone(),
+                mode: *mode,
+                failure,
+            },
+            Self::PreviewRewind {
+                checkpoint_id,
+                mode,
+            } => AgentEvent::RewindPreviewed {
+                checkpoint_id: checkpoint_id.clone(),
+                mode: *mode,
+                result: RewindPreviewResult::Refused(failure),
+            },
+            Self::UndoRewind { checkpoint_id, .. } => AgentEvent::RewindUndoFailed {
+                checkpoint_id: checkpoint_id.clone(),
+                failure,
+            },
+            _ => return None,
+        })
+    }
+}
+
+/// Why a harness did not rewind, in the terms the UI explains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindFailureReason {
+    /// A turn is running and the harness does not stop it for a rewind.
+    TurnRunning,
+    /// Input the harness has not taken yet is waiting.
+    Busy,
+    /// The target is no longer in the harness's conversation (compacted,
+    /// forked away, already rewound).
+    TargetNotFound,
+    /// The conversation changed since the target was chosen.
+    ConversationChanged,
+    /// The harness cannot cut the conversation at that point.
+    CannotCutHere,
+    /// There was nothing to restore.
+    NothingToRestore,
+    /// Files changed outside the agent since; restoring would overwrite them.
+    Conflicts,
+    UsageLimited,
+    Expired,
+    /// The harness could not save the result.
+    SaveFailed,
+    /// This thread's session cannot be rewound.
+    Unsupported,
+    /// The harness process stopped before it answered.
+    ProcessGone,
+    #[serde(other)]
+    Other,
+}
+
+/// A refusal or failure, with the harness's own words for the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindFailure {
+    pub reason: RewindFailureReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl RewindFailure {
+    pub fn new(reason: RewindFailureReason, detail: impl Into<Option<String>>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The part of a rewind that failed after another part was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindIncomplete {
+    pub requested: RewindMode,
+    pub failure: RewindFailure,
+}
+
+/// Files a rewind restores or would restore.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindFiles {
+    pub files: Vec<RewindFile>,
+    /// Totals, when the harness counts lines only across all files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insertions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+    /// Paths the harness leaves alone for link safety.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub skipped_links: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindFile {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insertions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+}
+
+impl RewindFile {
+    pub fn path(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            insertions: None,
+            deletions: None,
+        }
+    }
+}
+
+/// What a rewind would do, before it is made.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindPreview {
+    pub files: RewindFiles,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<RewindConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RewindConflict {
+    pub path: String,
+    pub kind: RewindConflictKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RewindConflictKind {
+    ModifiedExternally,
+    CreatedExternally,
+    DeletedExternally,
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum RewindPreviewResult {
+    Ready(RewindPreview),
+    Refused(RewindFailure),
 }
 
 impl RewindMode {

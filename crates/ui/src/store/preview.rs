@@ -33,6 +33,13 @@ pub(crate) enum PreviewPlace {
     Settling,
 }
 
+impl PreviewReplica {
+    /// How this client names itself to the host, for what is meant for it alone.
+    pub(super) fn client_id(&self) -> &str {
+        &self.client.id
+    }
+}
+
 pub(super) struct PreviewReplica {
     /// How this client names itself on its [`Topic::Preview`].
     client: PreviewClient,

@@ -1088,8 +1088,36 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RewindTurn {
             session_id,
             turn,
+            steer,
             mode,
-        } => app.rewind_turn(&session_id, turn, mode, cx),
+            client_id,
+        } => {
+            app.rewind_turn(&session_id, turn, steer.as_deref(), mode, client_id, cx);
+        }
+        Command::PreviewRewind {
+            session_id,
+            turn,
+            steer,
+            mode,
+        } => {
+            let answer = app.preview_rewind(&session_id, turn, steer.as_deref(), mode, cx);
+            return CommandOutcome::Pending(cx.spawn_background(async move {
+                answer
+                    .recv()
+                    .await
+                    .map(CommandResponse::RewindPreview)
+                    .map_err(|error| ProtocolError {
+                        code: "rewind_preview_unanswered".into(),
+                        message: error.to_string(),
+                    })
+            }));
+        }
+        Command::UndoRewind {
+            session_id,
+            checkpoint_id,
+        } => {
+            app.undo_rewind(&session_id, &checkpoint_id, cx);
+        }
     }
     CommandOutcome::Immediate(Ok(response))
 }
@@ -1400,7 +1428,9 @@ mod tests {
                 Command::RewindTurn {
                     session_id: id.clone(),
                     turn: 999,
+                    steer: None,
                     mode: agent::RewindMode::Files,
+                    client_id: None,
                 },
                 "rewind_unavailable",
             ),

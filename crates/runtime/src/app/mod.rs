@@ -264,6 +264,7 @@ mod pull_request_stacks;
 mod pull_request_watch;
 mod pull_requests;
 mod revisioned;
+mod rewind;
 mod send;
 mod session_index;
 mod sessions;
@@ -400,10 +401,11 @@ pub struct AppState {
     next_command_output_feed: u64,
     previews: preview::Previews,
     dev_servers: dev_servers::DevServerReads,
-    /// Provider-native rewind requested while a session is live or starting.
-    /// Kept here (rather than in persisted session metadata) because the
-    /// provider response is the only authority that can complete it.
-    pending_native_rewinds: HashMap<String, (String, RewindMode)>,
+    /// The rewind or undo each thread's harness was asked for and has not
+    /// answered.
+    rewind_requests: HashMap<String, rewind::RewindRequest>,
+    /// Clients waiting for what a rewind would restore, by thread.
+    rewind_previews: HashMap<String, Vec<rewind::PreviewRequest>>,
     /// Provider-native subagent item ids mapped to their read-only mirror sessions.
     native_subagent_sessions: HashMap<(String, String), String>,
     /// Synthetic turn state survives eviction; false remembers a finished child.
@@ -630,7 +632,8 @@ impl AppState {
             next_command_output_feed: 0,
             previews: Default::default(),
             dev_servers: Default::default(),
-            pending_native_rewinds: HashMap::new(),
+            rewind_requests: HashMap::new(),
+            rewind_previews: HashMap::new(),
             native_subagent_sessions: HashMap::new(),
             native_subagent_turns: HashMap::new(),
             nested_subagent_spawns: HashMap::new(),

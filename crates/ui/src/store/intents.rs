@@ -886,7 +886,10 @@ impl WorkspaceStore {
         });
     }
     pub fn rewind_turn_for(&mut self, session_id: String, turn: usize, mode: RewindMode) {
+        let client_id = Some(self.preview.client_id().to_owned());
         self.dispatch(Command::RewindTurn {
+            steer: None,
+            client_id,
             turn: self.absolute_turn_for(Some(&session_id), turn),
             session_id,
             mode,

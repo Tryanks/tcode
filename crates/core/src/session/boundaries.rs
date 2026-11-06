@@ -10,6 +10,20 @@ pub struct TurnBoundaries {
     turns: Vec<Boundary>,
     users: HashMap<String, User>,
     compacting: bool,
+    /// Steer restore points, by checkpoint id: the steer's request id.
+    #[serde(default)]
+    steer_checkpoints: HashMap<String, String>,
+    /// What the latest rewind removed while the harness can still undo it.
+    #[serde(default)]
+    undo: Option<Box<UndoState>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct UndoState {
+    checkpoint: String,
+    turns: Vec<Boundary>,
+    users: HashMap<String, User>,
+    steer_checkpoints: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +46,19 @@ pub struct TurnBoundaryChange {
     pub opened: bool,
     pub changed: bool,
     pub target: Option<usize>,
-    pub rewind: Option<usize>,
+    /// A conversation rewind cut here; the row opened the turn the cut
+    /// leaves for what comes next.
+    pub rewind: Option<RewindCut>,
+    /// The latest rewind was undone: the turns it removed are back.
+    pub undone: bool,
+}
+
+/// Where a conversation rewind cut: before turn `turn`, or before the steer
+/// `steer` inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindCut {
+    pub turn: usize,
+    pub steer: Option<String>,
 }
 
 impl TurnBoundaries {
@@ -75,6 +101,7 @@ impl TurnBoundaries {
             changed: opened,
             target: self.current(),
             rewind: None,
+            undone: false,
         };
         change.changed |= matches!(
             event,
@@ -84,6 +111,9 @@ impl TurnBoundaries {
                 | AgentEvent::TurnChangesUpdated { .. }
                 | AgentEvent::TurnCheckpoint { .. }
                 | AgentEvent::RewindCompleted { .. }
+                | AgentEvent::RewindUndone { .. }
+                | AgentEvent::SteerCheckpoint { .. }
+                | AgentEvent::CheckpointsCleared
                 | AgentEvent::SteerRequested { .. }
                 | AgentEvent::SteerAccepted { .. }
                 | AgentEvent::SteerRejected { .. }
@@ -123,21 +153,68 @@ impl TurnBoundaries {
                     turn.running = false;
                 }
             }
+            AgentEvent::SteerCheckpoint {
+                request_id,
+                checkpoint_id,
+            } => {
+                change.target = self.users.get(request_id).map(|user| user.turn);
+                self.steer_checkpoints
+                    .insert(checkpoint_id.clone(), request_id.clone());
+            }
+            AgentEvent::CheckpointsCleared => {
+                for turn in &mut self.turns {
+                    turn.checkpoint = None;
+                }
+                self.steer_checkpoints.clear();
+                self.undo = None;
+            }
             AgentEvent::RewindCompleted {
                 checkpoint_id,
                 mode,
+                undo_token,
                 ..
             } => {
                 if mode.includes_conversation()
-                    && let Some(target) = self
-                        .turns
-                        .iter()
-                        .position(|turn| turn.checkpoint.as_deref() == Some(checkpoint_id))
+                    && let Some(cut) = self.cut(checkpoint_id)
                 {
-                    change.rewind = Some(target);
-                    self.turns.truncate(target);
-                    self.users.retain(|_, user| user.turn < target);
+                    let before = UndoState {
+                        checkpoint: checkpoint_id.clone(),
+                        turns: self.turns.clone(),
+                        users: self.users.clone(),
+                        steer_checkpoints: self.steer_checkpoints.clone(),
+                    };
+                    let kept = match &cut.steer {
+                        Some(steer) => {
+                            self.users.remove(steer);
+                            if let Some(turn) = self.turns.get_mut(cut.turn) {
+                                turn.closed = true;
+                                turn.running = false;
+                            }
+                            cut.turn + 1
+                        }
+                        None => cut.turn,
+                    };
+                    self.turns.truncate(kept);
+                    self.users.retain(|_, user| user.turn < kept);
+                    let users = &self.users;
+                    self.steer_checkpoints
+                        .retain(|_, steer| users.contains_key(steer));
                     self.compacting = false;
+                    self.undo = undo_token.is_some().then(|| Box::new(before));
+                    // What follows the cut joins a turn of its own, which the
+                    // rewind's divider opens.
+                    self.turns.push(Boundary::default());
+                    change.opened = true;
+                    change.rewind = Some(cut);
+                    change.target = self.current();
+                }
+            }
+            AgentEvent::RewindUndone { checkpoint_id } => {
+                if let Some(undo) = self.undo.take_if(|undo| undo.checkpoint == *checkpoint_id) {
+                    self.turns = undo.turns;
+                    self.users = undo.users;
+                    self.steer_checkpoints = undo.steer_checkpoints;
+                    change.undone = true;
                     change.target = self.current();
                 }
             }
@@ -148,6 +225,8 @@ impl TurnBoundaries {
             {
                 if matches!(item.content, ItemContent::UserMessage { .. }) {
                     change.changed = true;
+                    // A message sent after a rewind makes it final.
+                    self.undo = None;
                     if let Some(turn) = self.current() {
                         self.users.entry(item.id.clone()).or_insert(User {
                             turn,
@@ -160,6 +239,7 @@ impl TurnBoundaries {
                 }
             }
             AgentEvent::SteerRequested { request_id, .. } => {
+                self.undo = None;
                 if let Some(turn) = self.current() {
                     self.users.entry(request_id.clone()).or_insert(User {
                         turn,
@@ -199,6 +279,23 @@ impl TurnBoundaries {
             _ => {}
         }
         change
+    }
+
+    /// Where the restore point `checkpoint` cuts the conversation.
+    fn cut(&self, checkpoint: &str) -> Option<RewindCut> {
+        if let Some(turn) = self
+            .turns
+            .iter()
+            .position(|turn| turn.checkpoint.as_deref() == Some(checkpoint))
+        {
+            return Some(RewindCut { turn, steer: None });
+        }
+        let steer = self.steer_checkpoints.get(checkpoint)?;
+        let user = self.users.get(steer)?;
+        (user.turn < self.turns.len()).then(|| RewindCut {
+            turn: user.turn,
+            steer: Some(steer.clone()),
+        })
     }
 
     fn opens_turn(&self, event: &AgentEvent) -> bool {
@@ -244,6 +341,12 @@ impl TurnBoundaries {
             | AgentEvent::ModelFallbackDetected { .. }
             | AgentEvent::RewindCompleted { .. }
             | AgentEvent::RewindFailed { .. }
+            | AgentEvent::RewindUndone { .. }
+            | AgentEvent::RewindUndoFailed { .. }
+            | AgentEvent::RewindPreviewed { .. }
+            | AgentEvent::RewindAvailability { .. }
+            | AgentEvent::SteerCheckpoint { .. }
+            | AgentEvent::CheckpointsCleared
             | AgentEvent::ApprovalRequested(_)
             | AgentEvent::ApprovalResolved { .. }
             | AgentEvent::UserInputRequested { .. }

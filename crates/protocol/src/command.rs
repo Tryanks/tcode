@@ -626,10 +626,34 @@ pub enum Command {
         profile_id: Option<String>,
         model: String,
     },
+    /// Rewind the thread to before the prompt that opened absolute turn
+    /// `turn`, or before the steer `steer` in it, through its harness.
     RewindTurn {
         session_id: String,
         turn: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steer: Option<String>,
         mode: RewindMode,
+        /// The client that asked: it alone puts the restored prompt in its
+        /// composer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+    /// What [`Self::RewindTurn`] would restore, where the harness can tell
+    /// before restoring anything; answered with
+    /// [`CommandResponse::RewindPreview`].
+    PreviewRewind {
+        session_id: String,
+        turn: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steer: Option<String>,
+        mode: RewindMode,
+    },
+    /// Undo the thread's latest rewind while its harness keeps it undoable
+    /// (until the next message), or return to the branch it left.
+    UndoRewind {
+        session_id: String,
+        checkpoint_id: String,
     },
 }
 
@@ -663,6 +687,7 @@ pub enum CommandResponse {
     },
     /// `VerifyHostToken`: what the host answered; the token was saved only when accepted.
     TokenCheck(tcode_core::settings::TokenCheck),
+    RewindPreview(agent::RewindPreviewResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -749,7 +774,9 @@ impl Command {
             | Self::SetActiveOption { session_id, .. }
             | Self::LoadBranches { session_id, .. }
             | Self::CheckoutBranch { session_id, .. }
-            | Self::RewindTurn { session_id, .. } => Some(session_id),
+            | Self::RewindTurn { session_id, .. }
+            | Self::PreviewRewind { session_id, .. }
+            | Self::UndoRewind { session_id, .. } => Some(session_id),
             Self::ForkThread { id } => Some(id),
             _ => None,
         }
@@ -791,6 +818,7 @@ impl Command {
                 | Self::OpenLatestSession
                 | Self::RefreshHostCredentials
                 | Self::RunPullRequestAction { .. }
+                | Self::PreviewRewind { .. }
                 | Self::RefreshProviderStatus
                 | Self::RefreshProviderUsage
                 | Self::CheckProviderVersions

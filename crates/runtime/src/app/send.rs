@@ -243,6 +243,13 @@ impl AppState {
             message.author = cx.author.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
+        // The first message after a rewind goes ahead of the messages the
+        // rewind held, which follow it.
+        if std::mem::take(&mut active.queue_held)
+            && let Some(message) = active.queue.pop()
+        {
+            active.queue.insert(0, message);
+        }
 
         let model_changed = active.model_changed_while_live();
         let restart_deferred = active.settings_restart_deferred();

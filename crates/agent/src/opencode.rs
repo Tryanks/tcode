@@ -2,6 +2,7 @@
 //! --stdio` per Tcode session, the server's `/api` routes, and its
 //! `/api/event` SSE stream.
 
+use crate::{LaterHistory, RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -614,14 +615,27 @@ impl SessionActor for OpenCodeActor {
                         checkpoint_id,
                         mode,
                         prefill,
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Truncated,
+                        files: None,
+                        incomplete: None,
+                        undo_token: None,
                     },
                     Err(error) => AgentEvent::RewindFailed {
                         checkpoint_id,
                         mode,
-                        error,
+                        failure: RewindFailure::new(RewindFailureReason::Other, error),
                     },
                 };
                 self.events.emit(event).await;
+            }
+            command
+            @ (SessionCommand::PreviewRewind { .. } | SessionCommand::UndoRewind { .. }) => {
+                if let Some(event) = command
+                    .rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
+                {
+                    self.events.emit(event).await;
+                }
             }
             SessionCommand::RetryTurn { .. }
             | SessionCommand::SetGoal { .. }
@@ -3437,7 +3451,7 @@ cat > /dev/null
             .await;
             assert_eq!(
                 serde_json::to_value(recv(&handle).await).unwrap(),
-                json!({"type": "rewind_completed", "checkpoint_id": PROMPT_ID, "mode": "files_and_conversation", "prefill": "Reply with exactly: PONG"})
+                json!({"type": "rewind_completed", "checkpoint_id": PROMPT_ID, "mode": "files_and_conversation", "prefill": "Reply with exactly: PONG", "later_history": "truncated"})
             );
             shut_down(handle).await;
             assert_eq!(

@@ -294,6 +294,8 @@ impl AppState {
                 | Command::ReorderPinned { session_id, .. }
                 | Command::ReorderActive { session_id, .. }
                 | Command::RewindTurn { session_id, .. }
+                | Command::PreviewRewind { session_id, .. }
+                | Command::UndoRewind { session_id, .. }
                 | Command::AddReviewComment { session_id, .. }
                 | Command::RemoveReviewComment { session_id, .. }
                 | Command::SetTerminalHeight { session_id, .. }

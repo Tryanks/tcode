@@ -6405,84 +6405,6 @@ fn queued_message_stamps_live_context_window_change() {
 }
 
 #[test]
-fn native_rewind_waits_for_provider_confirmation_before_pruning() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-native-rewind-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let (commands, receiver) = smol::channel::unbounded();
-
-    state.update(cx, |state, cx| {
-        let mut active = live_session(ProviderKind::ClaudeCode, commands);
-        active.meta.id = "claude-session".into();
-        for index in 1..=2 {
-            active.timeline.apply_at(
-                Some(index * 10),
-                &AgentEvent::TurnStarted {
-                    turn_id: format!("turn-{index}"),
-                },
-            );
-            active.timeline.apply_at(
-                Some(index * 10 + 1),
-                &AgentEvent::TurnCheckpoint {
-                    turn_id: format!("turn-{index}"),
-                    checkpoint_id: format!("checkpoint-{index}"),
-                },
-            );
-            active.timeline.apply_at(
-                Some(index * 10 + 2),
-                &AgentEvent::TurnCompleted {
-                    turn_id: format!("turn-{index}"),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                },
-            );
-        }
-        state.install_selected(active);
-        state.rewind_turn("claude-session", 1, RewindMode::Conversation, cx);
-        assert_eq!(state.selected_session().unwrap().timeline.turns.len(), 2);
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::Rewind {
-                checkpoint_id,
-                mode: RewindMode::Conversation,
-            }) if checkpoint_id == "checkpoint-2"
-        ));
-
-        state.on_event(
-            "claude-session",
-            AgentEvent::RewindCompleted {
-                checkpoint_id: "checkpoint-2".into(),
-                mode: RewindMode::Conversation,
-                prefill: Some("original prompt".into()),
-            },
-            cx,
-        );
-        assert_eq!(state.selected_session().unwrap().timeline.turns.len(), 1);
-        assert!(
-            !state
-                .session_status_snapshot("claude-session")
-                .unwrap()
-                .native_rewind_pending
-        );
-    });
-    let mut serialized_prefill = None;
-    while let Ok(line) = cx.outgoing_rx.try_recv() {
-        let output = tcode_protocol::decode_host_line(&line).expect("decode host test output");
-        if let HostMessage::Event(EventEnvelope {
-            request_id: None,
-            event: ServerEvent::NativeRewindPrefill { session_id, text },
-            ..
-        }) = output
-            && session_id == "claude-session"
-        {
-            serialized_prefill = Some(text);
-        }
-    }
-    assert_eq!(serialized_prefill.as_deref(), Some("original prompt"));
-}
-
-#[test]
 fn shutdown_all_notifies_active_and_parked_live_providers() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-app-test");
@@ -7319,10 +7241,16 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
                 .contains(&source.id)
         );
         assert!(!active.timeline.turn_running);
-        assert_eq!(state.store.read_events(&fork.id).unwrap().len(), 1);
-        assert_eq!(
-            state.store.read_event_log(&fork.id).unwrap(),
-            state.store.read_event_log(&source.id).unwrap()
+        // The source's log, then the restore points' end in the new session.
+        let events = state.store.read_events(&fork.id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[1].event, AgentEvent::CheckpointsCleared));
+        assert!(
+            state
+                .store
+                .read_event_log(&fork.id)
+                .unwrap()
+                .starts_with(&state.store.read_event_log(&source.id).unwrap())
         );
     });
 
@@ -7360,7 +7288,11 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
                 .unwrap()
                 .is_empty()
         );
-        assert!(state.store.read_event_log(&fork.id).unwrap().is_empty());
+        // Nothing local was copied: only the end of the parent's restore points.
+        assert!(matches!(
+            state.store.read_events(&fork.id).unwrap().as_slice(),
+            [record] if matches!(record.event, AgentEvent::CheckpointsCleared)
+        ));
     });
 }
 

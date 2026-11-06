@@ -30,9 +30,12 @@ impl AppState {
         }
 
         match &event {
-            AgentEvent::RewindFailed { error, .. } => {
-                self.pending_native_rewinds.remove(session_id);
-                self.report_error(RuntimeError::ProviderMessage(error.clone()), cx);
+            AgentEvent::RewindPreviewed { .. }
+            | AgentEvent::RewindCompleted { .. }
+            | AgentEvent::RewindFailed { .. }
+            | AgentEvent::RewindUndone { .. }
+            | AgentEvent::RewindUndoFailed { .. } => {
+                self.on_rewind_outcome(session_id, event, cx);
                 return;
             }
             AgentEvent::TurnAccepted { delivery_id } => {
@@ -75,7 +78,11 @@ impl AppState {
                 {
                     resident.fail_session_transfer();
                 }
-                self.pending_native_rewinds.remove(session_id);
+                self.settle_rewind_unanswered(
+                    session_id,
+                    agent::RewindFailureReason::ProcessGone,
+                    cx,
+                );
                 self.clear_approvals(session_id);
                 self.interrupt_native_subagent_work(session_id, cx);
                 self.close_orchestrator_children(session_id, cx);
@@ -317,35 +324,6 @@ impl AppState {
                     self.refresh_git_status(session_id, cx);
                 }
             }
-            AgentEvent::RewindCompleted { mode, prefill, .. } => {
-                self.pending_native_rewinds.remove(session_id);
-                if mode.includes_conversation()
-                    && let Some(prefill) = prefill
-                {
-                    // Ownership of this one-shot value crosses serde exactly
-                    // once. The client replica retains it per session until
-                    // the composer consumes it.
-                    self.emit_domain(
-                        Topic::SessionStatus {
-                            session_id: session_id.to_owned(),
-                        },
-                        ServerEvent::NativeRewindPrefill {
-                            session_id: session_id.to_owned(),
-                            text: prefill.clone(),
-                        },
-                        cx,
-                    );
-                }
-                if let Some(meta) = self.meta_mut(session_id) {
-                    meta.updated_at = now_secs();
-                    let meta = meta.clone();
-                    self.persist_meta(&meta, cx);
-                }
-                emit_runtime(
-                    cx,
-                    RuntimeEvent::Notice(RuntimeNotice::NativeRewindCompleted { mode: *mode }),
-                );
-            }
             AgentEvent::Error { message, .. } => {
                 emit_runtime(
                     cx,
@@ -429,6 +407,9 @@ impl AppState {
             | AgentEvent::ServedModel { .. }
             | AgentEvent::TurnChangesUpdated { .. }
             | AgentEvent::TurnCheckpoint { .. }
+            | AgentEvent::SteerCheckpoint { .. }
+            | AgentEvent::CheckpointsCleared
+            | AgentEvent::RewindAvailability { .. }
             | AgentEvent::ItemStarted(_)
             | AgentEvent::ItemUpdated(_)
             | AgentEvent::ItemCompleted(_)
@@ -543,12 +524,6 @@ impl AppState {
                 self.fire_control_watches(session_id, WatchEvent::Idle, cx);
             }
             self.settle_self_if_due(session_id, true, cx);
-        }
-
-        if matches!(event, AgentEvent::RewindCompleted { .. })
-            && !self.residents.live.contains_key(session_id)
-        {
-            self.on_background_turn_completed(session_id, cx);
         }
     }
 

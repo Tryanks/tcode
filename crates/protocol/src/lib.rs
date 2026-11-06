@@ -43,14 +43,14 @@ pub use event::{
     EndpointPresetDescription, EventEnvelope, ExternalImportState, ExternalImportStatus,
     ForkAvailability, GitActionRequest, GitStatusStatus, HarnessDescription, IndexSnapshot,
     IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
-    MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
-    PluginOperationTarget, PluginStaleReason, ProviderDiskUsage, ProviderPluginCatalog,
-    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
-    RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity,
-    SessionEventRecord, SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    ThreadReferenceStatus, Topic,
+    MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
+    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderDiskUsage,
+    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
+    ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord, SessionPlan,
+    SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, Topic,
 };
 pub use query::{
     DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
@@ -328,6 +328,19 @@ pub use wire::{
 // env is EnvVar rows and AcpAgentPatch has SetLaunchArgs and SetEnv instead
 // of SetLaunchOptions; ProviderLogin's AwaitingDevice and the MissingApiKey
 // probe diagnostic.
+// Rewind follows each harness's own: RewindTurn takes an optional steer and
+// client_id; the PreviewRewind command (answered with
+// CommandResponse::RewindPreview) and the UndoRewind command are new;
+// ServerEvent::NativeRewindPrefill becomes RewindPrefill (client_id,
+// attachments); SessionStatus drops native_rewind_blocked,
+// native_rewind_pending and native_rewind_prefill_available for rewind
+// (RewindStatus with RewindBlocked and PendingRewind) and queue_held;
+// RuntimeError drops native_rewind_blocked and RuntimeNotice
+// native_rewind_completed. The rewind agent events change (RewindFailed's
+// failure, RewindCompleted's later_history, files, incomplete, undo_token
+// and prefill_attachments) and SteerCheckpoint, CheckpointsCleared,
+// RewindAvailability, RewindPreviewed, RewindUndone and RewindUndoFailed
+// are new.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

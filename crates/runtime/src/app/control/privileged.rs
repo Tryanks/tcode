@@ -391,51 +391,96 @@ impl AppState {
         Ok(serde_json::json!({ "results": results }))
     }
 
+    /// Rewind a thread through its harness and answer with what the harness
+    /// did, once it has.
     pub(super) fn op_rewind(
         &mut self,
         caller: &Caller,
         params: RewindParams,
         cx: &mut HostCx,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Answer {
         let target = params.thread_id;
         if self
             .find_meta(&target)
-            .is_some_and(|meta| meta.provider.caps().native_rewind.is_none())
+            .is_some_and(|meta| meta.provider.caps().rewind.is_none())
         {
-            return Err(format!(
+            return Answer::Now(Err(format!(
                 "refused: thread {target}'s provider has no native rewind"
-            ));
+            )));
         }
-        if self.resident(&target).is_none() {
-            return Err(format!(
+        let Some(active) = self.resident(&target) else {
+            return Answer::Now(Err(format!(
                 "refused: thread {target}'s history is not loaded on the host; send it a message or open it first"
-            ));
-        }
+            )));
+        };
         let mode = match params.mode {
             RewindScope::Files => RewindMode::Files,
             RewindScope::Conversation => RewindMode::Conversation,
             RewindScope::FilesAndConversation => RewindMode::FilesAndConversation,
         };
-        self.validate_command_target(&Command::RewindTurn {
-            session_id: target.clone(),
-            turn: params.turn,
-            mode,
-        })
-        .map_err(refusal)?;
-        let mut cx = agent_cx(cx);
-        self.rewind_turn(&target, params.turn, mode, &mut cx);
+        let Some(status) = self.rewind_status(active) else {
+            return Answer::Now(Err(format!(
+                "refused: thread {target}'s session cannot be rewound"
+            )));
+        };
+        if let Some(blocked) = status.blocked {
+            return Answer::Now(Err(format!("refused: {blocked:?}")));
+        }
+        let mut agent_cx = agent_cx(cx);
+        let Some(answer) = self.rewind_turn(&target, params.turn, None, mode, None, &mut agent_cx)
+        else {
+            return Answer::Now(Err(format!(
+                "refused: turn {} of thread {target} cannot be restored as {:?}",
+                params.turn, params.mode
+            )));
+        };
         self.audit(
             caller,
             &target,
             action::REWIND,
             Some(params.turn.to_string()),
-            &mut cx,
+            &mut agent_cx,
         );
-        Ok(serde_json::json!({
-            "thread_id": target,
-            "turn": params.turn,
-            "mode": params.mode,
-            "status": "requested",
+        let turn = params.turn;
+        Answer::Later(cx.spawn_background(async move {
+            let outcome = answer
+                .recv()
+                .await
+                .map_err(|_| "the rewind was abandoned before the harness answered".to_owned())?;
+            Ok(match outcome {
+                AgentEvent::RewindCompleted {
+                    mode,
+                    prefill,
+                    later_history,
+                    files,
+                    incomplete,
+                    undo_token,
+                    ..
+                } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": if incomplete.is_some() { "partial" } else { "completed" },
+                    "restored": mode,
+                    "later_history": later_history,
+                    "files": files,
+                    "incomplete": incomplete,
+                    "undoable": undo_token.is_some(),
+                    "restored_prompt": prefill,
+                }),
+                AgentEvent::RewindFailed { failure, .. } => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "failed",
+                    "reason": failure.reason,
+                    "detail": failure.detail,
+                }),
+                other => serde_json::json!({
+                    "thread_id": target,
+                    "turn": turn,
+                    "status": "unexpected",
+                    "event": other,
+                }),
+            })
         }))
     }
 

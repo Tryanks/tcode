@@ -121,12 +121,11 @@ impl Planner {
         match decode_row(bare) {
             Ok(Some(record)) => {
                 let stored = record.into_stored(None);
-                self.drop_diffs.extend(self.snapshots.apply_at(
-                    &mut self.fold,
-                    stored.ts,
-                    &stored.event,
-                    position,
-                ));
+                self.drop_diffs.extend(
+                    self.snapshots
+                        .apply_at(&mut self.fold, stored.ts, &stored.event, position)
+                        .1,
+                );
                 self.groups.extend(self.streams.follow(
                     &mut self.fold,
                     stored.ts,
