@@ -21,6 +21,14 @@ use crate::{
     TokenUsage, TurnStatus, UserInputOption, UserInputQuestion,
 };
 
+/// The directory Grok launched with `launch_env` keeps its configuration and
+/// sessions in: `GROK_HOME`, else `~/.grok`.
+pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    launch_env
+        .child_path(ProviderKind::Grok, "GROK_HOME")
+        .or_else(|| dirs::home_dir().map(|home| home.join(".grok")))
+}
+
 /// The non-interactive auth method: it validates `XAI_API_KEY` (or the key in
 /// Grok's `config.toml`). The other advertised method signs in through a
 /// browser and is never driven from here.

@@ -246,6 +246,7 @@ mod command_output;
 mod command_validation;
 mod control;
 mod dev_servers;
+mod disk_usage;
 mod events;
 mod git;
 mod history;
@@ -464,6 +465,8 @@ pub struct AppState {
     /// The move of an older build's threads, while one runs or waits for
     /// disk space.
     storage_migration: Option<tcode_protocol::StorageMigration>,
+    /// The last disk-usage measurement, and whether one runs.
+    disk_usage: tcode_protocol::DiskUsageState,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
@@ -654,6 +657,7 @@ impl AppState {
             log_hydrations: HashMap::new(),
             storage_pass: None,
             storage_migration: None,
+            disk_usage: Default::default(),
             review_comment_drafts: HashMap::new(),
             pending_relaunch,
             external_imports: HashMap::new(),

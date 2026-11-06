@@ -381,6 +381,7 @@ async fn pump(
                                             | "preview_rendering_replaced"
                                             | "dev_servers_replaced"
                                             | "storage_migration_replaced"
+                                            | "disk_usage_replaced"
                                     )
                                 })
                                 .map(|kind| format!("{kind}:{topic}"));

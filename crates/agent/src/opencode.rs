@@ -25,6 +25,16 @@ use crate::{
     ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
+/// The directory OpenCode launched with `launch_env` keeps its sessions,
+/// database and sign-ins in: `opencode` under `XDG_DATA_HOME`, else under
+/// `~/.local/share`, on every platform.
+pub fn data_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    launch_env
+        .child_path(ProviderKind::OpenCode, "XDG_DATA_HOME")
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")))
+        .map(|data| data.join("opencode"))
+}
+
 /// The first release with the server API this adapter speaks; 1.x servers
 /// expose an incompatible one.
 const MIN_VERSION: (u32, u32, u32) = (2, 0, 0);

@@ -73,15 +73,7 @@ fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
 /// The directory the CLI launched with `launch_env` keeps its settings,
 /// sign-in and transcripts in.
 pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
-    let pairs = launch_env.pairs(ProviderKind::ClaudeCode);
-    let child_env = |key: &str| {
-        pairs
-            .iter()
-            .rev()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| PathBuf::from(value))
-            .or_else(|| std::env::var_os(key).map(PathBuf::from))
-    };
+    let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
     child_env("CLAUDE_CONFIG_DIR").or_else(|| child_env("HOME").map(|home| home.join(".claude")))
 }
 

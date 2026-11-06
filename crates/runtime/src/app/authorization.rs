@@ -125,6 +125,7 @@ impl AppState {
                 | Topic::DevServers { .. }
                 | Topic::Hosting
                 | Topic::StorageMigration
+                | Topic::DiskUsage
                 | Topic::ExternalImport { .. } => Err(refusal("subscription")),
             },
             ClientPayload::Command(command) => match command {
@@ -374,6 +375,7 @@ impl AppState {
                 | Command::RefreshProviderStatus
                 | Command::RefreshProviderUsage
                 | Command::CheckProviderVersions
+                | Command::MeasureDiskUsage
                 | Command::UpdateProviders { .. }
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }

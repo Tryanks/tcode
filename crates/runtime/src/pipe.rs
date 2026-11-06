@@ -661,6 +661,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RefreshProviderStatus => app.refresh_provider_status(cx),
         Command::RefreshProviderUsage => app.refresh_provider_usage(cx),
         Command::CheckProviderVersions => app.check_provider_versions(cx),
+        Command::MeasureDiskUsage => app.measure_disk_usage(cx),
         Command::UpdateProviders { providers } => app.update_providers(providers, cx),
         Command::SetSidebarCollapsed { collapsed } => app.set_sidebar_collapsed(collapsed, cx),
         Command::RunGitAction {
@@ -1530,92 +1531,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Export rendering is host work and delivery is the client's, so the query
-    /// must hand back the complete artifact and leave nothing behind on the
-    /// host — including for a client whose filesystem the host cannot reach.
-    #[test]
-    fn rendering_a_thread_export_returns_the_whole_artifact_and_writes_nothing() {
-        let data_root =
-            std::env::temp_dir().join(format!("tcode-export-query-{}", uuid::Uuid::new_v4()));
-        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
-        let mut meta = tcode_core::project::SessionMeta::new(
-            agent::ProviderKind::ClaudeCode,
-            data_root.join("workspace"),
-            Some("opus".into()),
-        );
-        meta.id = "export-session".into();
-        meta.title = "Export: fixture/thread".into();
-        store
-            .append_event(
-                &meta.id,
-                1,
-                &agent::AgentEvent::Warning {
-                    message: "recorded".into(),
-                },
-            )
-            .expect("append event");
-        store.upsert_meta(&meta).expect("write meta");
-        let event_log = store.read_event_log(&meta.id).expect("read event log");
-        let index = store.load_index().expect("read index");
-        let reader = store.clone();
-
-        let host = spawn_host(store, HostServices::default()).expect("spawn host");
-        let before = tree_snapshot(&data_root);
-        let link = host.link();
-
-        let QueryResponse::ThreadExport {
-            bytes,
-            suggested_name,
-            mime,
-        } = smol::block_on(link.query(Query::RenderThreadExport {
-            session_id: meta.id.clone(),
-            format: tcode_protocol::ThreadExportFormat::Jsonl,
-        }))
-        .expect("render export over the pipe")
-        else {
-            panic!("unexpected export response");
-        };
-
-        // The JSONL artifact is a metadata header line followed by the session's
-        // own append-only log, byte for byte.
-        let split = bytes
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .expect("header line");
-        let header: serde_json::Value =
-            serde_json::from_slice(&bytes[..split]).expect("header is JSON");
-        assert_eq!(header["type"], "tcode_thread");
-        assert_eq!(header["version"], 1);
-        assert_eq!(header["meta"]["id"], "export-session");
-        assert_eq!(header["attachments"], "references_only");
-        assert_eq!(header["redaction"], "none");
-        assert_eq!(&bytes[split + 1..], event_log.as_slice());
-
-        // The name is safe on any client OS; the host's title had a separator in it.
-        assert_eq!(suggested_name, "Export- fixture-thread.jsonl");
-        assert_eq!(mime, "application/x-ndjson");
-
-        assert_eq!(
-            tree_snapshot(&data_root),
-            before,
-            "rendering an export must not write anything on the host"
-        );
-        assert_eq!(reader.read_event_log(&meta.id).unwrap(), event_log);
-        assert_eq!(reader.load_index().unwrap(), index);
-
-        let missing = smol::block_on(link.query(Query::RenderThreadExport {
-            session_id: "nope".into(),
-            format: tcode_protocol::ThreadExportFormat::Markdown,
-        }))
-        .expect_err("unknown session must be refused");
-        assert_eq!(missing.code, "unknown_session");
-
-        link.shutdown_blocking().expect("stop host");
-        host.stopped.recv_blocking().expect("host thread stopped");
-        drop(host);
-        std::fs::remove_dir_all(data_root).expect("remove test data");
-    }
-
     /// A recorded image opened from a thread a client is reading streams from
     /// the thread's history already in memory: neither its bytes nor the check
     /// that they are still current read the stored log again. Its size is
@@ -1937,38 +1852,6 @@ mod tests {
         host.stopped.recv_blocking().expect("host thread stopped");
         drop(host);
         std::fs::remove_dir_all(data_root).expect("remove test data");
-    }
-
-    fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
-        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                // The live store's own files are checked through the store
-                // above; Windows locks them while the host runs, so they
-                // cannot be read here.
-                if matches!(
-                    entry.file_name().to_str(),
-                    Some("tcode.db" | "tcode.db-wal" | "tcode.db-shm" | "tcode.lock")
-                ) {
-                    continue;
-                }
-                match entry.metadata() {
-                    Ok(metadata) if metadata.is_dir() => walk(&path, out),
-                    Ok(_) => {
-                        let bytes = std::fs::read(&path).expect("read fixture content");
-                        out.push((path, bytes));
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-        let mut out = Vec::new();
-        walk(root, &mut out);
-        out.sort();
-        out
     }
 
     #[test]

@@ -81,6 +81,10 @@ pub enum Topic {
     /// The host's move of an older build's threads into its current storage,
     /// for a full device: answered on subscribe, and pushed while it runs.
     StorageMigration,
+    /// What the host's data and its providers' take on its disk, for a full
+    /// device: answered on subscribe with the last measurement, and pushed
+    /// when one starts or ends. The first subscription measures.
+    DiskUsage,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +240,9 @@ pub enum ServerEvent {
     /// push at most about once a second while the move runs, and `None` once
     /// none runs.
     StorageMigrationReplaced(Option<StorageMigration>),
+    /// A [`Topic::DiskUsage`]'s state: the answer to subscribing, and a push
+    /// when a measurement starts or ends.
+    DiskUsageReplaced(DiskUsageState),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,6 +283,75 @@ pub struct StorageMigration {
     pub total: u64,
     /// The move is paused until the disk has room for it.
     pub waiting_for_space: bool,
+}
+
+/// The host's disk usage: its last measurement, and whether one runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskUsageState {
+    /// `None` until the first measurement ends.
+    pub last: Option<DiskUsage>,
+    pub measuring: bool,
+}
+
+/// What the host's data and its providers' took on its disk when measured,
+/// as the host's `disk_usage` service counts it: a symbolic link counts as
+/// itself, never as what it points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskUsage {
+    /// When the measurement ended, in seconds since the Unix epoch.
+    pub measured_at: u64,
+    pub tcode: TcodeDiskUsage,
+    /// Largest first; a provider with nothing on disk is left out.
+    pub providers: Vec<ProviderDiskUsage>,
+}
+
+/// Tcode's data directory, by part. An extra account's directory inside it
+/// counts under its provider instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcodeDiskUsage {
+    /// The data directory, `~` standing for the host's home.
+    pub dir: String,
+    /// The thread store, its write-ahead files, an older build's store while
+    /// it moves, and the images cut out of stored events.
+    pub conversations: u64,
+    /// Files attached to messages and the previews made of images.
+    pub images: u64,
+    /// Project copies threads work in.
+    pub worktrees: u64,
+    pub other: u64,
+}
+
+impl TcodeDiskUsage {
+    pub fn total(&self) -> u64 {
+        self.conversations + self.images + self.worktrees + self.other
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderDiskUsage {
+    pub provider: ProviderKind,
+    pub bytes: u64,
+    /// Each account whose directories hold something, largest first.
+    pub accounts: Vec<AccountDiskUsage>,
+}
+
+/// The directories one provider account's CLI keeps its state in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountDiskUsage {
+    /// The first profile launching with these directories.
+    pub profile_id: String,
+    /// `~` standing for the host's home.
+    pub dirs: Vec<String>,
+    pub bytes: u64,
+    /// The largest entries directly inside those directories, largest first.
+    pub parts: Vec<DiskUsagePart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskUsagePart {
+    /// The entry's file name.
+    pub name: String,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

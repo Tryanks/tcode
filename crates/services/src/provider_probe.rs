@@ -126,10 +126,7 @@ pub async fn probe_provider(
             json.as_deref().and_then(parse_codex_auth)
         }
         ProviderKind::Pi => {
-            let home = launch_env
-                .home
-                .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")));
-            let path = home.map(|home| home.join("auth.json"));
+            let path = agent::pi::agent_dir(&launch_env).map(|home| home.join("auth.json"));
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_aggregator_auth)
         }

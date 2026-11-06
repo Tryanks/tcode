@@ -289,11 +289,11 @@ async fn initialize(
     send_json(stdin, &json!({ "method": "initialized" }))
 }
 
-/// Codex's home: the profile override, else `~/.codex`.
+/// Codex's home: `CODEX_HOME` as the CLI launched with `launch_env` sees it,
+/// else `~/.codex`.
 pub fn home_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     launch_env
-        .home
-        .clone()
+        .child_path(ProviderKind::Codex, "CODEX_HOME")
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
 }
 
@@ -4100,6 +4100,17 @@ fn model_reroute(params: &Value) -> Option<(String, Option<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `CODEX_HOME` the user set in the profile's environment is where the
+    /// CLI keeps its sign-in and sessions, so it is where Tcode reads them.
+    #[test]
+    fn home_dir_follows_a_configured_codex_home() {
+        let launch_env = LaunchEnv {
+            env: vec![("CODEX_HOME".into(), "/configured".into())],
+            home: None,
+        };
+        assert_eq!(home_dir(&launch_env), Some(PathBuf::from("/configured")));
+    }
 
     #[test]
     fn native_permissions_apply_and_confirm_on_next_turn() {

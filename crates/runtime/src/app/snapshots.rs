@@ -1063,6 +1063,7 @@ impl AppState {
             Topic::StorageMigration => {
                 ServerEvent::StorageMigrationReplaced(self.storage_migration.clone())
             }
+            Topic::DiskUsage => ServerEvent::DiskUsageReplaced(self.disk_usage.clone()),
             // Retained latest-run status, so a client that subscribes after a
             // fast completion still recovers the outcome. `None` means no run
             // has ever started for this project.
