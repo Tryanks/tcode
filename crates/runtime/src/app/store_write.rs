@@ -1,5 +1,8 @@
 use super::*;
-use tcode_services::store::{DiffPass, Mutation};
+use tcode_core::session::SupersededStream;
+use tcode_services::store::Mutation;
+
+use super::storage_pass::{StorageJob, StorageJobDone};
 
 /// A drain of the queue is committed in transactions of at most this many
 /// writes and about this many bytes; streamed deltas then share a commit
@@ -24,6 +27,9 @@ pub(super) enum StoreWrite {
         author: Option<Author>,
         origin: Option<MessageOrigin>,
         event: Box<AgentEvent>,
+        /// What the resident log's fold found the record supersedes, when
+        /// the log is resident.
+        streams: Option<Option<SupersededStream<u64>>>,
     },
     UpsertMeta {
         meta: Box<SessionMeta>,
@@ -66,11 +72,11 @@ pub(super) enum StoreWrite {
         completion: smol::channel::Sender<Result<(), String>>,
     },
     ClearProfileSecrets(String),
-    /// [`SessionStore::drop_superseded_diffs`] for one thread, answered with
-    /// what it did and how long it held the writer.
-    DropSupersededDiffs {
-        id: String,
-        completion: smol::channel::Sender<Result<(DiffPass, Duration), String>>,
+    /// One step of the storage pass, answered with what it did and how long
+    /// it held the writer.
+    Storage {
+        job: StorageJob,
+        completion: smol::channel::Sender<Result<(StorageJobDone, Duration), String>>,
     },
     /// Pin the committed end and turn index after all earlier queued writes
     /// have been attempted. A failed write does not prevent a read.
@@ -118,6 +124,7 @@ impl StoreWrite {
                 author,
                 origin,
                 event,
+                streams,
             } => {
                 match Mutation::append_authored_event(
                     id,
@@ -127,7 +134,10 @@ impl StoreWrite {
                     *origin,
                     |bytes| history::append_projection(bytes, *ts, event, author.as_ref(), *origin),
                 ) {
-                    Ok(mutation) => vec![mutation],
+                    Ok(mutation) => vec![match streams {
+                        Some(superseded) => mutation.superseding(superseded.clone()),
+                        None => mutation,
+                    }],
                     Err(error) => return Some(Err(error.to_string())),
                 }
             }
@@ -190,7 +200,7 @@ impl StoreWrite {
                 |error| RuntimeError::PersistEvent { error },
                 Some(completion),
             ),
-            StoreWrite::DropSupersededDiffs { .. } | StoreWrite::SnapshotLog { .. } => {
+            StoreWrite::Storage { .. } | StoreWrite::SnapshotLog { .. } => {
                 (|error| RuntimeError::PersistEvent { error }, None)
             }
             StoreWrite::SaveCommands { .. }
@@ -212,7 +222,7 @@ impl StoreWrite {
     /// anything else is reported like a failed write.
     pub(super) fn reject(self, reason: &str) -> Option<StoreWriteFailure> {
         match self {
-            StoreWrite::DropSupersededDiffs { completion, .. } => {
+            StoreWrite::Storage { completion, .. } => {
                 let _ = completion.try_send(Err(reason.to_owned()));
                 return None;
             }
@@ -453,9 +463,9 @@ impl StoreWriter {
                 .clear_profile_secrets(&profile_id)
                 .err()
                 .map(settings_failure),
-            StoreWrite::DropSupersededDiffs { id, completion } => {
+            StoreWrite::Storage { job, completion } => {
                 let started = Instant::now();
-                let outcome = self.store.drop_superseded_diffs(&id);
+                let outcome = job.run(&self.store);
                 let held = started.elapsed();
                 let failed = outcome.is_err() && self.store.is_failed();
                 let outcome = outcome.map_err(|error| error.to_string());

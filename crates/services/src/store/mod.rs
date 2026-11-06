@@ -4,16 +4,23 @@
 //! database, `tcode.db`, in the data dir ([`data_dir`]):
 //!   * `projects` and `sessions` hold each [`Project`] / [`SessionMeta`] as the
 //!     JSON serde produces for it.
-//!   * `events` holds each thread's log as raw byte segments, one per line
-//!     including its `\n`, densely numbered from 0: the bytes of a `{ ts, event }`
-//!     record, or whatever a migrated or imported log contained. A turn-changes
-//!     snapshot that a later one supersedes is kept without its diffs
-//!     ([`tcode_core::session::TurnSnapshots`]).
-//!   * `diff_pass` names the threads whose superseded snapshots
-//!     [`SessionStore::drop_superseded_diffs`] has dealt with.
-//!   * `turn_index_v2` holds append-maintained turn boundaries.
+//!   * `threads` gives every thread a key; `events` holds each thread's log
+//!     as one row per line, keyed by the thread's key and the line's position
+//!     ([`rows`]). A row's canonical bytes are a `{ ts, event }` record, or
+//!     whatever a migrated or imported log contained, with its `\n`; it is
+//!     stored compressed, with its base64 images in files under `blobs/`
+//!     ([`codec`], [`blobs`]). Positions only grow, and a gap is a row that
+//!     held nothing a fold needs: a turn-changes snapshot that a later one
+//!     supersedes is kept without its diffs
+//!     ([`tcode_core::session::TurnSnapshots`]), and the streamed deltas an
+//!     item's completion repeats are not kept at all
+//!     ([`tcode_core::session::ItemStreams`]).
+//!   * `turn_index` holds append-maintained turn boundaries.
 //!   * `kept_worktrees` holds the path of every worktree whose thread was
 //!     deleted with the worktree kept.
+//!
+//! An older build's `tcode.db` is moved into this layout in the background,
+//! a thread at a time, while the store serves ([`source`], [`moving`]).
 //!
 //! Model and command caches stay as JSON files beside it.
 //!
@@ -21,22 +28,28 @@
 //! then folds [`StoredEvent`]s into a [`tcode_core::session::Timeline`].
 
 mod activity;
+mod blobs;
+mod codec;
+mod compact;
 mod db;
 mod log_read;
 mod migrate;
+mod moving;
 mod projection;
 mod relocate;
+mod rows;
 mod search;
-mod superseded;
+mod source;
 #[cfg(test)]
 mod tests;
 mod turn_index;
 
+pub use compact::{Compaction, CompactionPlan};
 pub use log_read::LogRead;
 pub use migrate::{Migration, MigrationPhase, MigrationProgress};
+pub use moving::{ChunkWait, MovePlan, StepOutcome, StorageStep, StorageWork};
 pub use projection::ProjectionPublication;
 pub use search::{IndexedEntry, SearchMatch, SearchSource};
-pub use superseded::DiffPass;
 pub use turn_index::TurnIndex;
 
 use std::collections::HashMap;
@@ -52,9 +65,11 @@ use agent::{AgentEvent, ModelSpec, ProviderCommand, ProviderKind};
 use serde::{Deserialize, Serialize};
 
 use tcode_core::project::{IndexFile, Project, SessionMeta};
-use tcode_core::session::{Author, StoredEvent};
+use tcode_core::session::{Author, StoredEvent, SupersededStream};
 
-use db::{Broken, Db, KEPT_WORKTREES, SCHEMA_VERSION, blob, integer, is_broken};
+use codec::{Decoder, Encoder, Mode};
+use db::{Broken, Db, SCHEMA_VERSION, blob, integer, is_broken};
+use rows::{Storage, Stored, Thread};
 
 const DATA_DIR_ENV: &str = "TCODE_DATA_DIR";
 const DB_FILE: &str = "tcode.db";
@@ -82,6 +97,11 @@ struct EventEnvelope {
     #[serde(default)]
     item_version: Option<u8>,
 }
+
+/// The version of what reading a row does beyond parsing it ([`legacy_item`],
+/// the Codex mappings it calls): anything extracted from read records, such
+/// as search entries, is extracted again when it changes.
+const READ_VERSION: u16 = 1;
 
 /// Stamped on every item row written since adapters record items
 /// canonically: a tool call's `output` is its text, with its images in
@@ -248,7 +268,7 @@ enum State {
 }
 
 struct Live {
-    db: Arc<Db>,
+    db: Arc<Storage>,
     ownership: File,
     in_flight: usize,
 }
@@ -270,6 +290,8 @@ enum Op {
         line: Vec<u8>,
         projection: Option<(String, Vec<u8>)>,
         record: Box<StoredEvent>,
+        /// `None` when no fold followed the log up to this record.
+        streams: Option<Option<SupersededStream<u64>>>,
     },
     ReplaceEventLog {
         session_id: String,
@@ -318,7 +340,18 @@ impl Mutation {
                 origin,
                 elided: None,
             }),
+            streams: None,
         }))
+    }
+
+    /// An append whose log a fold followed up to it, with the deltas the fold
+    /// found it supersedes: they leave the log in the same transaction. An
+    /// append no fold followed leaves its thread to the compaction pass.
+    pub fn superseding(mut self, superseded: Option<SupersededStream<u64>>) -> Self {
+        if let Op::AppendEvent { streams, .. } = &mut self.0 {
+            *streams = Some(superseded);
+        }
+        self
     }
 
     /// Replace a session's whole native event log with `bytes`, kept exactly.
@@ -603,13 +636,15 @@ impl SessionStore {
                     let Live { db, ownership, .. } = live;
                     db.close_readers();
                     let result = match Arc::try_unwrap(db) {
-                        Ok(db) => catch_unwind(AssertUnwindSafe(|| db.checkpoint()))
-                            .unwrap_or_else(|panic| {
-                                Err(io::Error::other(format!(
-                                    "session store panicked during the closing checkpoint: {}",
-                                    panic_message(panic.as_ref())
-                                )))
-                            }),
+                        Ok(storage) => {
+                            catch_unwind(AssertUnwindSafe(|| storage.into_db().checkpoint()))
+                                .unwrap_or_else(|panic| {
+                                    Err(io::Error::other(format!(
+                                        "session store panicked during the closing checkpoint: {}",
+                                        panic_message(panic.as_ref())
+                                    )))
+                                })
+                        }
                         Err(_) => Err(io::Error::other(
                             "session store is still referenced after its last operation",
                         )),
@@ -632,7 +667,11 @@ impl SessionStore {
     /// Run `body` against the open database. A panic inside it (Turso asserts
     /// its invariants by panicking) becomes an error naming `operation` and
     /// fails the store for every handle.
-    fn run<R>(&self, operation: &str, body: impl FnOnce(&Db) -> io::Result<R>) -> io::Result<R> {
+    fn run<R>(
+        &self,
+        operation: &str,
+        body: impl FnOnce(&Storage) -> io::Result<R>,
+    ) -> io::Result<R> {
         let db = self.acquire(operation)?;
         let outcome = catch_unwind(AssertUnwindSafe(|| body(&db)));
         drop(db);
@@ -656,7 +695,7 @@ impl SessionStore {
         result
     }
 
-    fn acquire(&self, operation: &str) -> io::Result<Arc<Db>> {
+    fn acquire(&self, operation: &str) -> io::Result<Arc<Storage>> {
         let mut state = self.shared.lock_state()?;
         let ownership = match std::mem::replace(&mut *state, State::Unopened) {
             State::Unopened => Some(acquire_ownership(&self.root)?),
@@ -703,18 +742,27 @@ impl SessionStore {
         if mutations.is_empty() {
             return Ok(());
         }
-        let icons = self.run("write", |db| {
-            db.write(|db, connection| {
+        let icons = self.run("write", |st| {
+            st.write(|st, connection| {
+                let codec = st.codec();
+                let mut encoder = codec.encoder()?;
                 let mut icons = Vec::new();
                 let mut indices = turn_index::Batch::new();
                 for mutation in mutations {
                     if !matches!(mutation.0, Op::AppendEvent { .. }) {
-                        turn_index::flush(db, connection, &indices)?;
+                        turn_index::flush(st, connection, &indices)?;
                         indices.clear();
                     }
-                    apply_op(db, connection, &mutation.0, &mut icons, &mut indices)?;
+                    apply_op(
+                        st,
+                        connection,
+                        &mut encoder,
+                        &mutation.0,
+                        &mut icons,
+                        &mut indices,
+                    )?;
                 }
-                turn_index::flush(db, connection, &indices)?;
+                turn_index::flush(st, connection, &indices)?;
                 Ok(icons)
             })
         })?;
@@ -752,16 +800,23 @@ impl SessionStore {
 
     /// Read a native event log back as the exact bytes it holds.
     pub fn read_event_log(&self, id: &str) -> io::Result<Vec<u8>> {
-        self.run("read event log", |db| {
-            db.read(|db, connection| {
+        self.run("read event log", |st| {
+            st.read(|st, connection| {
                 let mut bytes = Vec::new();
-                db.query(
+                let Some(thread) = rows::thread(st, connection, id)? else {
+                    return Ok(bytes);
+                };
+                let codec = st.codec();
+                let mut decoder = codec.decoder();
+                rows::visit(
+                    st,
                     connection,
-                    "SELECT line FROM events WHERE session_id = ?1 ORDER BY position",
-                    (id,),
-                    |row| {
-                        bytes.extend_from_slice(&blob(row, 0)?);
-                        Ok(())
+                    &thread,
+                    0..u64::MAX,
+                    false,
+                    |position, row| {
+                        bytes.extend(canonical(st, &mut decoder, &row, id, position)?);
+                        Ok(true)
                     },
                 )?;
                 Ok(bytes)
@@ -871,13 +926,13 @@ impl SessionStore {
     /// A row this build cannot decode is skipped with a warning and left in
     /// the database untouched.
     pub fn read_file(&self) -> io::Result<IndexFile> {
-        self.run("read index", |db| {
-            db.read(|db, connection| {
+        self.run("read index", |st| {
+            st.read(|st, connection| {
                 // One read transaction, so projects and sessions come from the
                 // same snapshot.
-                db.execute(connection, "BEGIN", ())?;
-                let file = read_index(db, connection);
-                db.execute(connection, "COMMIT", ())?;
+                st.execute(connection, "BEGIN", ())?;
+                let file = read_index(st, connection);
+                st.execute(connection, "COMMIT", ())?;
                 file
             })
         })
@@ -951,24 +1006,29 @@ impl SessionStore {
     /// The records of the rows at `positions` of a session's log, without
     /// reading the rest of it.
     pub fn read_rows(&self, id: &str, positions: std::ops::Range<u64>) -> io::Result<EventLog> {
-        let bound = |position: u64| i64::try_from(position).unwrap_or(i64::MAX);
-        self.run("read events", |db| {
-            db.read(|db, connection| {
+        self.run("read events", |st| {
+            st.read(|st, connection| {
                 let mut log = EventLog::default();
+                let Some(thread) = rows::thread(st, connection, id)? else {
+                    return Ok(log);
+                };
+                let codec = st.codec();
+                let mut decoder = codec.decoder();
                 let mut provider = None;
-                db.query(
+                rows::visit(
+                    st,
                     connection,
-                    "SELECT position, line FROM events \
-                     WHERE session_id = ?1 AND position >= ?2 AND position < ?3 ORDER BY position",
-                    (id, bound(positions.start), bound(positions.end)),
-                    |row| {
-                        let position = integer(row, 0)?;
-                        let line = blob(row, 1)?;
-                        log.next_row = position as u64 + 1;
+                    &thread,
+                    positions,
+                    false,
+                    |position, row| {
+                        log.next_row = position + 1;
+                        let line = canonical(st, &mut decoder, &row, id, position)?;
                         match decode_row(&line) {
                             Ok(Some(record)) => {
                                 if record.legacy_file_diff && provider.is_none() {
-                                    provider = stored_provider_at(db, connection, id, position)?;
+                                    provider =
+                                        stored_provider_at(st, connection, &thread, position)?;
                                 }
                                 let stored = record.into_stored(provider);
                                 if let AgentEvent::ProviderRelay { to_provider, .. } = &stored.event
@@ -976,7 +1036,7 @@ impl SessionStore {
                                     provider = Some(*to_provider);
                                 }
                                 log.records.push(stored);
-                                log.rows.push(position as u64);
+                                log.rows.push(position);
                             }
                             Ok(None) => {}
                             Err(reason) => {
@@ -984,7 +1044,7 @@ impl SessionStore {
                                 log::warn!("skipping event {position} of {id}: {reason}");
                             }
                         }
-                        Ok(())
+                        Ok(true)
                     },
                 )?;
                 Ok(log)
@@ -999,10 +1059,10 @@ impl SessionStore {
 
     /// Every worktree recorded by [`Mutation::keep_worktree`].
     pub fn kept_worktrees(&self) -> io::Result<Vec<PathBuf>> {
-        self.run("read kept worktrees", |db| {
-            db.read(|db, connection| {
+        self.run("read kept worktrees", |st| {
+            st.read(|st, connection| {
                 let mut paths = Vec::new();
-                db.query(connection, "SELECT path FROM kept_worktrees", (), |row| {
+                st.query(connection, "SELECT path FROM kept_worktrees", (), |row| {
                     paths.push(PathBuf::from(db::text(row, 0)?));
                     Ok(())
                 })?;
@@ -1010,6 +1070,22 @@ impl SessionStore {
             })
         })
     }
+}
+
+/// The canonical bytes of a row. A row whose images are missing reads
+/// without them and says so.
+fn canonical(
+    st: &Storage,
+    decoder: &mut Decoder<'_>,
+    row: &Stored,
+    id: &str,
+    position: u64,
+) -> io::Result<Vec<u8>> {
+    let decoded = st.decode(decoder, row, Mode::Full)?;
+    if decoded.missing {
+        log::warn!("event {position} of {id} names an image file that is missing or damaged");
+    }
+    Ok(decoded.bytes)
 }
 
 impl Shared {
@@ -1108,8 +1184,11 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
         )));
     }
     migrate::prepare(root)?;
+    if source::needed(root)? {
+        source::switch(root)?;
+    }
     let path = root.join(DB_FILE);
-    let db = Db::open(&path, false)?;
+    let db = Db::open(&path, None)?;
     match db.user_version()? {
         SCHEMA_VERSION => {}
         0 => {
@@ -1134,17 +1213,17 @@ fn open_live(root: &Path, previous: Option<&Path>, ownership: File) -> io::Resul
         }
     }
     db.write(|db, connection| {
-        db.execute(connection, KEPT_WORKTREES, ())?;
-        db.execute(connection, superseded::DIFF_PASS_TABLE, ())?;
         turn_index::create_tables(db, connection)?;
         search::create_tables(db, connection)?;
         activity::create_table(db, connection)?;
         projection::create_cache(db, connection)
     })?;
+    let codec = moving::load_codec(&db)?;
+    let source = source::Source::open(root)?;
     migrate::warn_about_stray_sources(root);
     migrate::remove_legacy(root);
     Ok(Live {
-        db: Arc::new(db),
+        db: Arc::new(Storage::new(db, root, codec, source)),
         ownership,
         in_flight: 0,
     })
@@ -1257,28 +1336,10 @@ fn segments(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     bytes.split_inclusive(|byte| *byte == b'\n')
 }
 
-fn insert_segments(
-    db: &Db,
-    connection: &turso::Connection,
-    session_id: &str,
-    first: i64,
-    lines: impl IntoIterator<Item = impl AsRef<[u8]>>,
-) -> io::Result<i64> {
-    let mut position = first;
-    for line in lines {
-        db.execute(
-            connection,
-            "INSERT INTO events (session_id, position, line) VALUES (?1, ?2, ?3)",
-            (session_id, position, line.as_ref()),
-        )?;
-        position += 1;
-    }
-    Ok(position)
-}
-
 fn apply_op(
-    db: &Db,
+    st: &Storage,
     connection: &turso::Connection,
+    encoder: &mut Encoder<'_>,
     op: &Op,
     icons: &mut Vec<Option<PathBuf>>,
     indices: &mut turn_index::Batch,
@@ -1289,91 +1350,87 @@ fn apply_op(
             line,
             projection,
             record,
+            streams,
         } => {
-            let mut last = None;
-            db.query(
-                connection,
-                "SELECT position, substr(line, -1) = x'0a' FROM events \
-                 WHERE session_id = ?1 ORDER BY position DESC LIMIT 1",
-                (session_id.as_str(),),
-                |row| {
-                    last = Some((integer(row, 0)?, integer(row, 1)? != 0));
-                    Ok(())
-                },
-            )?;
-            let next = match last {
-                None => 0,
-                Some((position, terminated)) => {
-                    if !terminated {
-                        // A log imported without a final newline: terminate
-                        // its last line so the new record starts a line.
-                        let mut unterminated = Vec::new();
-                        db.query(
-                            connection,
-                            "SELECT line FROM events WHERE session_id = ?1 AND position = ?2",
-                            (session_id.as_str(), position),
-                            |row| {
-                                unterminated = blob(row, 0)?;
-                                Ok(())
-                            },
-                        )?;
-                        unterminated.push(b'\n');
-                        db.execute(
-                            connection,
-                            "UPDATE events SET line = ?3 WHERE session_id = ?1 AND position = ?2",
-                            (session_id.as_str(), position, unterminated),
-                        )?;
+            let thread = rows::ensure_thread(st, connection, session_id)?;
+            let next = rows::end(st, connection, &thread)?;
+            if let Some(last) = next.checked_sub(1)
+                && let Some(row) = rows::get(st, connection, &thread, last)?
+            {
+                let terminated = match &row {
+                    Stored::New(bytes) => codec::header(bytes)?.ends_line(),
+                    Stored::Old(bytes) => bytes.ends_with(b"\n"),
+                };
+                if !terminated {
+                    // A log imported without a final newline: terminate its
+                    // last line so the new record starts a line.
+                    let codec = st.codec();
+                    let mut decoder = codec.decoder();
+                    let decoded = st.decode(&mut decoder, &row, Mode::Full)?;
+                    if decoded.missing {
+                        return Err(io::Error::other(format!(
+                            "cannot end row {last} of {session_id}: an image it names is missing"
+                        )));
                     }
-                    position + 1
+                    let mut unterminated = decoded.bytes;
+                    unterminated.push(b'\n');
+                    rows::put(st, connection, encoder, &thread, last, &unterminated)?;
                 }
-            };
-            insert_segments(db, connection, session_id, next, [line])?;
-            if tcode_core::settlement::ThreadActivity::moves_clock(&record.event) {
-                activity::append(db, connection, session_id, record)?;
             }
-            turn_index::append(db, connection, indices, session_id, next as u64, record)?;
+            rows::put(st, connection, encoder, &thread, next, line)?;
+            if let AgentEvent::ItemCompleted(item) = &record.event {
+                let removed = match streams {
+                    Some(Some(superseded)) => compact::remove_superseded(
+                        st, connection, encoder, &thread, &item.id, superseded,
+                    )?,
+                    Some(None) => true,
+                    None => !compact::streamed(&item.content),
+                };
+                if !removed {
+                    rows::needs_compaction(st, connection, thread.key)?;
+                }
+            }
+            if tcode_core::settlement::ThreadActivity::moves_clock(&record.event) {
+                activity::append(st, connection, &thread, record)?;
+            }
+            turn_index::append(st, connection, encoder, indices, &thread, next, record)?;
             if let Some((version, body)) = projection
-                && let Err(error) = db.execute(
+                && let Err(error) = st.execute(
                     connection,
-                    "INSERT INTO event_preview_v1 (session_id, position, version, token, body) VALUES (?1, ?2, ?3, '', ?4)",
-                    (session_id.as_str(), next, version.as_str(), body.as_slice()),
+                    "INSERT INTO event_preview (key, version, token, body) VALUES (?1, ?2, '', ?3)",
+                    (thread.row(next)?, version.as_str(), body.as_slice()),
                 )
             {
                 log::warn!("could not persist appended history preview: {error}");
             }
         }
         Op::ReplaceEventLog { session_id, bytes } => {
-            turn_index::replace_revision(db, connection, session_id)?;
-            db.execute(
-                connection,
-                "DELETE FROM events WHERE session_id = ?1",
-                (session_id.as_str(),),
-            )?;
-            insert_segments(db, connection, session_id, 0, segments(bytes))?;
-            activity::recompute(db, connection, session_id)?;
-            superseded::forget_pass(db, connection, session_id)?;
-            turn_index::forget(db, connection, session_id)?;
+            let thread = rows::ensure_thread(st, connection, session_id)?;
+            rows::clear(st, connection, &thread)?;
+            let thread = rows::ensure_thread(st, connection, session_id)?;
+            for (position, line) in segments(bytes).enumerate() {
+                rows::put(st, connection, encoder, &thread, position as u64, line)?;
+            }
+            activity::recompute(st, connection, &thread)?;
+            rows::needs_compaction(st, connection, thread.key)?;
+            turn_index::forget(st, connection, &thread)?;
         }
         Op::CloneEvents { src, dst } => {
-            turn_index::replace_revision(db, connection, dst)?;
-            db.execute(
-                connection,
-                "DELETE FROM events WHERE session_id = ?1",
-                (dst.as_str(),),
-            )?;
-            db.execute(
-                connection,
-                "INSERT INTO events (session_id, position, line) \
-                 SELECT ?2, position, line FROM events WHERE session_id = ?1",
-                (src.as_str(), dst.as_str()),
-            )?;
-            activity::recompute(db, connection, dst)?;
-            superseded::forget_pass(db, connection, dst)?;
-            turn_index::copy(db, connection, src, dst)?;
+            let target = rows::ensure_thread(st, connection, dst)?;
+            rows::clear(st, connection, &target)?;
+            let target = rows::ensure_thread(st, connection, dst)?;
+            let source = rows::thread(st, connection, src)?;
+            if let Some(source) = &source {
+                rows::copy(st, connection, source, &target)?;
+            }
+            let target = rows::ensure_thread(st, connection, dst)?;
+            activity::recompute(st, connection, &target)?;
+            rows::needs_compaction(st, connection, target.key)?;
+            turn_index::copy(st, connection, source.as_ref(), &target)?;
         }
         Op::UpsertMeta(meta) => {
             let mut previous_parent = None;
-            db.query(
+            st.query(
                 connection,
                 "SELECT json_extract(body, '$.parent_session_id') IS NOT NULL FROM sessions WHERE id = ?1",
                 [meta.id.as_str()],
@@ -1383,25 +1440,25 @@ fn apply_op(
                 },
             )?;
             let body = serde_json::to_vec(meta.as_ref()).map_err(invalid_data)?;
-            db.execute(
+            st.execute(
                 connection,
                 "INSERT INTO sessions (id, body) VALUES (?1, ?2) \
                  ON CONFLICT (id) DO UPDATE SET body = excluded.body",
                 (meta.id.as_str(), body),
             )?;
-            superseded::mark_empty(db, connection, &meta.id)?;
             if previous_parent != Some(meta.parent_session_id.is_some()) {
-                activity::recompute(db, connection, &meta.id)?;
+                let thread = rows::ensure_thread(st, connection, &meta.id)?;
+                activity::recompute(st, connection, &thread)?;
             }
         }
         Op::UpsertProject(project) => {
-            if let Some(previous) = stored_project(db, connection, &project.id)?
+            if let Some(previous) = stored_project(st, connection, &project.id)?
                 && previous.icon_path != project.icon_path
             {
                 icons.push(previous.icon_path);
             }
             let body = serde_json::to_vec(project.as_ref()).map_err(invalid_data)?;
-            db.execute(
+            st.execute(
                 connection,
                 "INSERT INTO projects (id, body) VALUES (?1, ?2) \
                  ON CONFLICT (id) DO UPDATE SET body = excluded.body",
@@ -1409,34 +1466,35 @@ fn apply_op(
             )?;
         }
         Op::RemoveSession(id) => {
-            turn_index::replace_revision(db, connection, id)?;
-            activity::remove(db, connection, id)?;
-            db.execute(
-                connection,
-                "DELETE FROM events WHERE session_id = ?1",
-                (id.as_str(),),
-            )?;
-            db.execute(
+            if let Some(thread) = rows::thread(st, connection, id)? {
+                activity::remove(st, connection, &thread)?;
+                rows::clear(st, connection, &thread)?;
+                st.execute(
+                    connection,
+                    "UPDATE threads SET compacted = 1 WHERE key = ?1",
+                    [thread.key],
+                )?;
+                turn_index::forget(st, connection, &thread)?;
+                search::forget(st, connection, &thread)?;
+            }
+            st.execute(
                 connection,
                 "DELETE FROM sessions WHERE id = ?1",
                 (id.as_str(),),
             )?;
-            superseded::forget_pass(db, connection, id)?;
-            turn_index::forget(db, connection, id)?;
-            search::forget(db, connection, id)?;
         }
         Op::RemoveProject(id) => {
-            if let Some(previous) = stored_project(db, connection, id)? {
+            if let Some(previous) = stored_project(st, connection, id)? {
                 icons.push(previous.icon_path);
             }
-            db.execute(
+            st.execute(
                 connection,
                 "DELETE FROM projects WHERE id = ?1",
                 (id.as_str(),),
             )?;
         }
         Op::KeepWorktree(path) => {
-            db.execute(
+            st.execute(
                 connection,
                 "INSERT INTO kept_worktrees (path) VALUES (?1) ON CONFLICT (path) DO NOTHING",
                 (path.to_string_lossy().as_ref(),),
@@ -1447,7 +1505,7 @@ fn apply_op(
 }
 
 fn stored_project(
-    db: &Db,
+    db: &Storage,
     connection: &turso::Connection,
     id: &str,
 ) -> io::Result<Option<Project>> {
@@ -1575,29 +1633,26 @@ pub(crate) fn parse_stored_line(line: &str) -> Result<ParsedRecord, serde_json::
 }
 
 fn stored_provider_at(
-    db: &Db,
+    st: &Storage,
     connection: &turso::Connection,
-    id: &str,
-    position: i64,
+    thread: &Thread,
+    position: u64,
 ) -> io::Result<Option<ProviderKind>> {
     // Metadata names the current provider. The next relay names the provider
     // before it, including when a history page starts in the middle of a turn.
     let mut provider = None;
     let mut start = position;
-    loop {
-        let mut next = None;
-        db.query(
-            connection,
-            "SELECT position, line FROM events WHERE session_id = ?1 AND position >= ?2 \
-             AND instr(line, ?3) > 0 ORDER BY position LIMIT 1",
-            (id, start, b"\"provider_relay\"".as_slice()),
-            |row| {
-                next = Some((integer(row, 0)?, blob(row, 1)?));
-                Ok(())
-            },
-        )?;
-        let Some((position, line)) = next else { break };
-        if let Ok(Some(record)) = decode_row(&line) {
+    let codec = st.codec();
+    let mut decoder = codec.decoder();
+    while let Some((position, row)) = rows::find(
+        st,
+        connection,
+        thread,
+        start,
+        codec::type_code("provider_relay"),
+        b"\"provider_relay\"",
+    )? {
+        if let Ok(Some(record)) = decode_row(&st.decode(&mut decoder, &row, Mode::Bare)?.bytes) {
             provider = record.previous_provider();
             if provider.is_some() {
                 break;
@@ -1609,10 +1664,10 @@ fn stored_provider_at(
         start = next;
     }
     if provider.is_none() {
-        db.query(
+        st.query(
             connection,
             "SELECT body FROM sessions WHERE id = ?1",
-            (id,),
+            [thread.id.as_str()],
             |row| {
                 provider = serde_json::from_slice::<SessionMeta>(&blob(row, 0)?)
                     .ok()

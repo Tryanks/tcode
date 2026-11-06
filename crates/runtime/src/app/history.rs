@@ -3,7 +3,7 @@ use agent::DeltaKind;
 use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::LazyLock;
-use tcode_core::session::{TurnSnapshots, drop_turn_diffs};
+use tcode_core::session::{ItemStreams, SupersededStream, TurnSnapshots, drop_turn_diffs};
 use tcode_protocol::{
     CommandResponse, HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES,
     SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, Subscription,
@@ -517,6 +517,8 @@ pub(super) struct SessionLog {
     fold: Timeline,
     /// The record index of each turn's latest snapshot.
     snapshots: TurnSnapshots<usize>,
+    /// Item streams, by the row each record is in.
+    streams: ItemStreams<u64>,
     /// The stored row the next append takes.
     next_row: u64,
     /// The end flushed by the release barrier in flight, if any.
@@ -532,6 +534,7 @@ impl SessionLog {
             turn_starts: Vec::new(),
             fold: Timeline::default(),
             snapshots: TurnSnapshots::default(),
+            streams: ItemStreams::default(),
             next_row: log.next_row,
             release_barrier: None,
         };
@@ -541,18 +544,24 @@ impl SessionLog {
         session_log
     }
 
-    pub(super) fn push(&mut self, record: SessionEventRecord) {
+    /// Append the record the store is about to append, returning the rows of
+    /// the streamed deltas it supersedes. The log keeps them: its fold is the
+    /// same either way.
+    pub(super) fn push(&mut self, record: SessionEventRecord) -> Option<SupersededStream<u64>> {
         let row = self.next_row;
         self.next_row += 1;
-        self.push_at(record, row);
+        self.push_at(record, row)
     }
 
-    fn push_at(&mut self, record: SessionEventRecord, row: u64) {
+    fn push_at(&mut self, record: SessionEventRecord, row: u64) -> Option<SupersededStream<u64>> {
         let turns = self.fold.turns.len();
         let index = self.records.len();
         let superseded = self
             .snapshots
             .apply_at(&mut self.fold, record.ts, &record.event, index);
+        let stream = self
+            .streams
+            .follow(&mut self.fold, record.ts, &record.event, row);
         if self.fold.turns.len() > turns {
             self.turn_starts.push(row);
         }
@@ -564,6 +573,7 @@ impl SessionLog {
             drop_turn_diffs(&mut self.records[earlier].event);
             self.retained_bytes += wire_len(&self.records[earlier]);
         }
+        stream
     }
 
     pub(super) fn retained_bytes(&self) -> usize {

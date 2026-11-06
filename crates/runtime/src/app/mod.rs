@@ -246,11 +246,11 @@ mod command_output;
 mod command_validation;
 mod control;
 mod dev_servers;
-mod diff_pass;
 mod events;
 mod git;
 mod history;
 mod original;
+mod storage_pass;
 use history::{Hydration, SessionLog};
 mod lifecycle;
 mod options;
@@ -460,7 +460,7 @@ pub struct AppState {
     /// Logs being read off the mailbox, by session; never one that is in
     /// `event_records`.
     log_hydrations: HashMap<String, Hydration>,
-    diff_pass: Option<diff_pass::DiffPassRun>,
+    storage_pass: Option<storage_pass::StoragePassRun>,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
@@ -649,7 +649,7 @@ impl AppState {
             subscriptions: HashSet::new(),
             event_records: HashMap::new(),
             log_hydrations: HashMap::new(),
-            diff_pass: None,
+            storage_pass: None,
             review_comment_drafts: HashMap::new(),
             pending_relaunch,
             external_imports: HashMap::new(),

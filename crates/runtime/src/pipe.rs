@@ -227,7 +227,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.refresh_provider_status(&mut cx);
                 state.index_session_search(&mut cx);
             }
-            state.start_diff_pass(&mut cx);
+            state.start_storage_pass(&mut cx);
             state.sync_terminal_handles();
             state.start_activity(&mut cx);
             let _ = ready_tx.send(Ok(()));
