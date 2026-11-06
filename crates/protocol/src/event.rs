@@ -78,6 +78,9 @@ pub enum Topic {
     /// Traverse status. The transport that owns hosting answers it, not the
     /// runtime.
     Hosting,
+    /// The host's move of an older build's threads into its current storage,
+    /// for a full device: answered on subscribe, and pushed while it runs.
+    StorageMigration,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -229,6 +232,10 @@ pub enum ServerEvent {
         project_id: String,
         status: Option<ExternalImportStatus>,
     },
+    /// A [`Topic::StorageMigration`]'s state: the answer to subscribing, a
+    /// push at most about once a second while the move runs, and `None` once
+    /// none runs.
+    StorageMigrationReplaced(Option<StorageMigration>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,6 +265,17 @@ pub struct ExternalImportStatus {
     /// the run it started.
     pub run_id: u64,
     pub state: ExternalImportState,
+}
+
+/// The host moving an older build's threads into its current storage, in
+/// the background while it serves them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageMigration {
+    /// Stored rows moved so far, of `total` across every thread to move.
+    pub moved: u64,
+    pub total: u64,
+    /// The move is paused until the disk has room for it.
+    pub waiting_for_space: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -380,6 +380,7 @@ async fn pump(
                                             | "preview_session_replaced"
                                             | "preview_rendering_replaced"
                                             | "dev_servers_replaced"
+                                            | "storage_migration_replaced"
                                     )
                                 })
                                 .map(|kind| format!("{kind}:{topic}"));

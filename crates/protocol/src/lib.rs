@@ -46,7 +46,7 @@ pub use event::{
     ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
     ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
     RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
-    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus,
+    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus, StorageMigration,
     TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
     ThreadReferenceStatus, Topic,
 };
@@ -280,7 +280,10 @@ pub use wire::{
 // struct variant with an optional ref and full_page. The DevServers topic
 // carries the host's dev servers for one thread (DevServersReplaced with
 // DevServer port, pid, process and cwd). The settings_unreadable runtime
-// error.
+// error. The StorageMigration topic carries the host's move of an older
+// build's threads into its storage (StorageMigrationReplaced with
+// StorageMigration moved, total and waiting_for_space, or null when none
+// runs).
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

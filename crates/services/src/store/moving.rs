@@ -202,6 +202,30 @@ impl SessionStore {
         })
     }
 
+    /// How far moving the source's rows has come: how many have moved, of
+    /// how many its threads hold; `None` once there is no source.
+    pub fn move_progress(&self) -> io::Result<Option<(u64, u64)>> {
+        self.run("read the move's progress", |st| {
+            if st.source().is_none() {
+                return Ok(None);
+            }
+            st.read(|st, connection| {
+                let mut progress = (0, 0);
+                st.query(
+                    connection,
+                    "SELECT COALESCE(SUM(MIN(moved, old_end)), 0), COALESCE(SUM(old_end), 0) \
+                     FROM threads WHERE old_id IS NOT NULL",
+                    (),
+                    |row| {
+                        progress = (integer(row, 0)? as u64, integer(row, 1)? as u64);
+                        Ok(())
+                    },
+                )?;
+                Ok(Some(progress))
+            })
+        })
+    }
+
     /// Train the dictionary from rows spread over the source, or this file
     /// when there is none; `None` when there are too few rows yet.
     pub fn prepare_dictionary(&self) -> io::Result<Option<StorageStep>> {

@@ -452,6 +452,10 @@ settings:
   provider_updates:
     title: "Provider update checks"
     description: "Check for newer Tcode and provider CLI versions on launch, and refresh the Claude Code model list from t3code."
+  storage_migration:
+    section: "DATA UPGRADE"
+    title: "Moving threads to the new storage format"
+    waiting_for_space: "Paused: the disk is low on free space. Tcode tries again later."
   inactive_frame_throttle:
     title: "Background frame throttle"
     description: "Lower the frame rate while the window is unfocused to save energy. Takes effect after restart."

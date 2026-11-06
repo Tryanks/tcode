@@ -10632,6 +10632,96 @@ fn the_storage_pass_drops_superseded_diffs_of_every_stored_thread() {
     restarted.read(|state| assert!(state.storage_pass.is_none()));
 }
 
+/// A full device subscribed to the storage migration hears nothing while no
+/// move runs; while the startup pass moves an older build's threads it hears
+/// how far the move has come, as does one that subscribes then; once every
+/// thread has moved it hears that none runs.
+#[test]
+fn clients_hear_of_the_move_of_an_older_builds_threads_only_while_it_runs() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("storage-migration");
+    // An older build's index and log, which a start migrates into an older
+    // build's database before the host opens it.
+    let mut log = String::new();
+    for turn in 0..3 {
+        log.push_str(&format!(
+            "{{\"ts\":{turn},\"event\":{{\"type\":\"turn_started\",\"turn_id\":\"t{turn}\"}}}}\n"
+        ));
+        log.push_str(&format!(
+            "{{\"ts\":{turn},\"event\":{{\"type\":\"turn_completed\",\"turn_id\":\"t{turn}\",\"status\":\"completed\",\"usage\":null}}}}\n"
+        ));
+    }
+    std::fs::write(store.root().join("older.jsonl"), log).unwrap();
+    std::fs::write(
+        store.root().join("sessions.json"),
+        serde_json::json!({
+            "projects": [],
+            "sessions": [{
+                "id": "older", "title": "Older", "provider": "codex",
+                "cwd": "/work", "created_at": 1, "updated_at": 2
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(store.needs_migration().unwrap());
+    store
+        .migrate(|_| {}, &std::sync::atomic::AtomicBool::new(false))
+        .unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let migration = |message: &HostMessage| match message {
+        HostMessage::Event(EventEnvelope {
+            request_id,
+            topic: Topic::StorageMigration,
+            event: ServerEvent::StorageMigrationReplaced(migration),
+        }) => Some((*request_id, migration.clone())),
+        _ => None,
+    };
+    let subscription = tcode_protocol::ClientPayload::Subscribe(Subscription {
+        topic: Topic::StorageMigration,
+        after: None,
+        known_index: None,
+    });
+
+    state.deliver(cx, 1, subscription.clone());
+    let (reply, _) = cx.run_until_sent(migration);
+    assert_eq!(reply, (Some(1), None), "no move runs before the pass");
+
+    state.update(cx, |state, cx| state.start_storage_pass(cx));
+    // One host turn at a time: the pass then waits on its first write while
+    // a second client subscribes.
+    let pushed = loop {
+        cx.run_next();
+        if let Some(pushed) = cx.drain_outgoing().iter().find_map(migration) {
+            break pushed;
+        }
+    };
+    let (None, Some(running)) = pushed else {
+        panic!("the move was not pushed while it runs: {pushed:?}");
+    };
+    assert!(
+        running.moved < running.total && !running.waiting_for_space,
+        "{running:?}"
+    );
+    state.deliver(cx, 2, subscription.clone());
+    assert_eq!(
+        cx.drain_outgoing().iter().find_map(migration),
+        Some((Some(2), Some(running))),
+        "a client subscribing now hears the move"
+    );
+
+    let (finished, _) = cx.run_until_sent(|message| {
+        migration(message)
+            .filter(|(request_id, migration)| request_id.is_none() && migration.is_none())
+    });
+    assert_eq!(finished, (None, None));
+    cx.run_until(|state| state.storage_pass.is_none());
+    assert_eq!(store.move_progress().unwrap(), None, "every thread moved");
+    state.deliver(cx, 3, subscription);
+    let (reply, _) = cx.run_until_sent(migration);
+    assert_eq!(reply, (Some(3), None));
+}
+
 /// A completion appended to an open thread drops the deltas it repeats in
 /// the same commit: the one that created the entry stays with its text
 /// emptied, a stream the completion only abbreviates stays whole, and every
