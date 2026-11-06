@@ -642,7 +642,7 @@ pub(crate) fn select_row<T: Clone + 'static>(
     menu_id: &'static str,
     menu_width: f32,
     title: SharedString,
-    description: SharedString,
+    description: Option<SharedString>,
     selected_label: SharedString,
     options: Vec<SelectRowOption<T>>,
     reset: impl Into<Option<AnyElement>>,
@@ -707,7 +707,7 @@ pub(crate) fn select_row<T: Clone + 'static>(
         });
 
     let layout = row.row(
-        row_labels(title, Some(description), reset, compact, cx),
+        row_labels(title, description, reset, compact, cx),
         dropdown,
         cx,
     );

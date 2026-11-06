@@ -759,83 +759,56 @@ impl AcpPanel {
     }
 
     /// The provider entries shown above the ACP marketplace: Claude Code (opens
-    /// the third-party endpoint form), another Claude account, and Codex
-    /// (present but disabled for now).
+    /// the third-party endpoint form) and another Claude account.
     fn render_provider_entries(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         type Open = fn(&mut AcpPanel, &mut Window, &mut Context<AcpPanel>);
         let entry = |id: &'static str,
                      glyph: Icon,
                      title: String,
                      subtitle: String,
-                     open: Option<Open>,
+                     open: Open,
                      window: &mut Window,
                      cx: &mut Context<Self>|
          -> AnyElement {
-            let enabled = open.is_some();
             let muted = cx.theme().muted_foreground;
-            let hover = enabled.then(|| {
-                crate::motion::hover_fill(
-                    crate::motion::Clock::Element,
-                    id,
-                    cx.theme().list_hover.opacity(0.),
-                    cx.theme().list_hover,
-                    &crate::material::HOVER.into(),
-                    window,
-                    cx,
-                )
-            });
-            let (fill, on_hover) = hover.unzip();
+            let (fill, on_hover) = crate::motion::hover_fill(
+                crate::motion::Clock::Element,
+                id,
+                cx.theme().list_hover.opacity(0.),
+                cx.theme().list_hover,
+                &crate::material::HOVER.into(),
+                window,
+                cx,
+            );
             let row = material::card(cx)
                 .flex_row()
                 .w_full()
                 .items_center()
                 .text_body(false, cx)
                 // Under the content, over the card's own fill.
-                .when_some(fill, |row, fill| {
-                    row.relative().child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded(material::radius_card(cx))
-                            .bg(fill),
-                    )
-                })
-                .child(glyph.text_color(if enabled {
-                    cx.theme().foreground
-                } else {
-                    muted
-                }))
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(material::radius_card(cx))
+                        .bg(fill),
+                )
+                .child(glyph.text_color(cx.theme().foreground))
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
                         .gap_0p5()
-                        .child(
-                            div()
-                                .text_color(if enabled {
-                                    cx.theme().foreground
-                                } else {
-                                    muted
-                                })
-                                .child(title.clone()),
-                        )
+                        .child(div().text_color(cx.theme().foreground).child(title.clone()))
                         .child(div().text_secondary(false, cx).truncate().child(subtitle)),
                 );
-            if let Some((open, on_hover)) = open.zip(on_hover) {
-                material::accessible_clickable(row, id, gpui::Role::Button, title, cx)
-                    .cursor_pointer()
-                    .on_hover(on_hover)
-                    .child(Icon::new(IconName::ChevronRight).text_color(muted))
-                    .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
-                    .into_any_element()
-            } else {
-                row.id(id)
-                    .child(material::chip(
-                        crate::tr!("providers.third_party.soon").into_owned(),
-                        cx,
-                    ))
-                    .into_any_element()
-            }
+            material::accessible_clickable(row, id, gpui::Role::Button, title, cx)
+                .cursor_pointer()
+                .on_hover(on_hover)
+                .child(Icon::new(IconName::ChevronRight).text_color(muted))
+                .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
+                .into_any_element()
         };
 
         v_flex()
@@ -851,7 +824,7 @@ impl AcpPanel {
                 crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode),
                 crate::tr!("providers.third_party.claude_title").into_owned(),
                 crate::tr!("providers.third_party.claude_subtitle").into_owned(),
-                Some(|this, window, cx| this.open_third_party(TpPreset::Kimi, window, cx)),
+                |this, window, cx| this.open_third_party(TpPreset::Kimi, window, cx),
                 window,
                 cx,
             ))
@@ -863,21 +836,12 @@ impl AcpPanel {
                         crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode),
                         crate::tr!("providers.account.title").into_owned(),
                         crate::tr!("providers.account.subtitle").into_owned(),
-                        Some(Self::open_account),
+                        Self::open_account,
                         window,
                         cx,
                     ))
                 },
             )
-            .child(entry(
-                "provider-entry-codex",
-                crate::provider_card::provider_glyph(agent::ProviderKind::Codex),
-                crate::tr!("providers.third_party.codex_title").into_owned(),
-                crate::tr!("providers.third_party.codex_subtitle").into_owned(),
-                None,
-                window,
-                cx,
-            ))
             .into_any_element()
     }
 

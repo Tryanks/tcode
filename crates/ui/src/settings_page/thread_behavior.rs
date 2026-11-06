@@ -389,9 +389,11 @@ impl SettingsPage {
                     crate::tr!("settings.auto_settle.overrides")
                         .into_owned()
                         .into(),
-                    crate::tr!("settings.auto_settle.overrides_description")
-                        .into_owned()
-                        .into(),
+                    Some(
+                        crate::tr!("settings.auto_settle.overrides_description")
+                            .into_owned()
+                            .into(),
+                    ),
                     crate::tr!("settings.auto_settle.add_override")
                         .into_owned()
                         .into(),
