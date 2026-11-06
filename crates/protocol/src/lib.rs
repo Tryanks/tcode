@@ -305,6 +305,12 @@ pub use wire::{
 // protocol adds the VerifyHostToken command, which saves a token only when
 // the host takes it, and its TokenCheck response (accepted with an optional
 // account, rejected, missing_scopes, unreachable, unconfirmed).
+// Computer use asks before typing with an app in front: Settings'
+// computer_use drops allow_foreground_fallback for foreground_default and
+// foreground_apps (a stored true reads as allow), the
+// ComputerUseForegroundDefault and ComputerUseForegroundApp patches replace
+// ComputerUseAllowForegroundFallback, SessionStatus carries
+// foreground_prompt, and the protocol adds RespondForegroundPrompt.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

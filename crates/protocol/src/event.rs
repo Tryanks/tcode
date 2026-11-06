@@ -630,6 +630,9 @@ pub struct SessionStatus {
     /// begin after they opened, and a provider can stop without a record.
     pub running_turn: Option<RunningTurn>,
     pub pending_approvals: Vec<ApprovalRequest>,
+    /// Computer use asks whether an app may come to the front for typing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_prompt: Option<tcode_core::computer_use::ForegroundPrompt>,
     pub pending_user_input: Option<PendingUserInput>,
     #[serde(rename = "supports_steering")]
     pub steering_supported: bool,

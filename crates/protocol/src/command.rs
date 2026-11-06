@@ -414,6 +414,13 @@ pub enum Command {
         request_id: String,
         approve: bool,
     },
+    /// Answer computer use's question whether an app may come to the front
+    /// for typing.
+    RespondForegroundPrompt {
+        session_id: String,
+        prompt_id: String,
+        answer: tcode_core::computer_use::ForegroundAnswer,
+    },
     AddThreadReference {
         session_id: String,
         thread_id: String,
@@ -698,6 +705,7 @@ impl Command {
             | Self::SettleSession { session_id, .. }
             | Self::SetControlGrant { session_id, .. }
             | Self::RespondControlGrant { session_id, .. }
+            | Self::RespondForegroundPrompt { session_id, .. }
             | Self::AddThreadReference { session_id, .. }
             | Self::RemoveThreadReference { session_id, .. }
             | Self::SetFollowUp { session_id, .. }

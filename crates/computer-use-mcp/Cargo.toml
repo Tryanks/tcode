@@ -52,3 +52,6 @@ windows = { version = "=0.62.2", features = [
 [[test]]
 name = "macos_overlay"
 harness = false
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "test-util"] }

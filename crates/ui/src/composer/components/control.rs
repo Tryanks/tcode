@@ -91,7 +91,7 @@ impl Composer {
             })
             .unwrap_or_default();
         if !context.is_empty() {
-            context.push(' ');
+            context.push_str(&crate::tr!("list.sentence_separator"));
         }
         context.push_str(&crate::tr!("control.request.applies"));
         // The caption and the count sit on the title's first line however

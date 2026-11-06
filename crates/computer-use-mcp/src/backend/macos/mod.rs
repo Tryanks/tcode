@@ -217,28 +217,18 @@ pub(crate) fn perform_action_with_feedback(
                     } else {
                         None
                     };
-                    Ok(
-                        match background(root, |dispatcher| {
-                            if let Some((x, y)) = click_point {
-                                dispatcher.click(x, y, super::MouseButton::Left, 1)?;
-                            }
-                            dispatcher.keypress(&["cmd+a".into()])?;
-                            dispatcher.type_text(text)
-                        }) {
-                            Ok(()) => ActionResult::unknown(
-                                format!(
-                                    "{ax_error}; keyboard replacement events were posted directly to the target pid"
-                                ),
-                                Delivery::BackgroundPid,
-                            ),
-                            Err(error) => ActionResult::didnt(
-                                format!(
-                                    "{ax_error}; background keyboard replacement delivery failed: {error}"
-                                ),
-                                Delivery::None,
-                            ),
-                        },
-                    )
+                    let attempt = background(root, |dispatcher| {
+                        if let Some((x, y)) = click_point {
+                            dispatcher.click(x, y, super::MouseButton::Left, 1)?;
+                        }
+                        dispatcher.keypress(&["cmd+a".into()])?;
+                        dispatcher.type_text(text)
+                    });
+                    Ok(keyboard_result(
+                        attempt,
+                        click_point,
+                        &format!("{ax_error}; keyboard replacement events"),
+                    ))
                 }
             }
         }
@@ -269,10 +259,9 @@ pub(crate) fn perform_action_with_feedback(
                 }
                 dispatcher.type_text(text)
             });
-            Ok(keyboard_result_with_optional_foreground(
-                root,
+            Ok(keyboard_result(
                 attempt,
-                |root| foreground_keyboard(root, click_point, || input::foreground_type_text(text)),
+                click_point,
                 "Unicode keyboard events",
             ))
         }
@@ -303,12 +292,7 @@ pub(crate) fn perform_action_with_feedback(
                 }
                 dispatcher.keypress(keys)
             });
-            Ok(keyboard_result_with_optional_foreground(
-                root,
-                attempt,
-                |root| foreground_keyboard(root, click_point, || input::foreground_keypress(keys)),
-                "keyboard events",
-            ))
+            Ok(keyboard_result(attempt, click_point, "keyboard events"))
         }
         ActionKind::Scroll => {
             let action_point =
@@ -389,35 +373,47 @@ fn background(
     action(&dispatcher)
 }
 
-/// The opt-in foreground retry activates the target app and types through the
-/// HID stream, which reaches only the now-frontmost app. It never posts a
-/// pointer event: when the target refused AX focus and would need a click to
-/// take it, the retry is refused instead.
-fn foreground_keyboard(
+/// The foreground step activates the target app and types through the HID
+/// stream, which reaches only the frontmost app, then the guard restores
+/// the app the user was in. It never posts a pointer event: a target that
+/// refuses AX focus is refused here, as it would need a click.
+pub(super) fn type_in_foreground(
     root: &RootInfo,
-    click_point: Option<(f64, f64)>,
-    send: impl FnOnce() -> Result<(), BackendError>,
+    request: &ActionRequest,
 ) -> Result<(), BackendError> {
-    if click_point.is_some() {
+    if request.target_path.is_some() && target(root, request)?.focus().is_err() {
         return Err(BackendError::new(
             BackendErrorCode::OperationFailed,
-            "the target refused AX focus, and the foreground keyboard retry never clicks to focus it",
+            "the target refused AX focus, and typing in the foreground never clicks to focus it",
         ));
     }
     let focus_guard = FocusGuard::acquire(root);
     if !focus_guard.is_ready() {
         return Err(BackendError::new(
             BackendErrorCode::OperationFailed,
-            "foreground keyboard retry could not activate and raise the target window",
+            "could not activate and raise the target window",
         ));
     }
-    send()
+    match request.kind {
+        ActionKind::TypeText => input::foreground_type_text(request.text.as_deref().unwrap_or("")),
+        ActionKind::Keypress => input::foreground_keypress(request.keys.as_deref().unwrap_or(&[])),
+        ActionKind::SetText => {
+            input::foreground_keypress(&["cmd+a".into()])?;
+            input::foreground_type_text(request.text.as_deref().unwrap_or(""))
+        }
+        _ => Err(BackendError::new(
+            BackendErrorCode::InvalidAction,
+            "only keyboard steps are typed in the foreground",
+        )),
+    }
 }
 
-fn keyboard_result_with_optional_foreground(
-    root: &RootInfo,
+/// A keyboard step's result. When the background delivery could not start
+/// and the target takes focus without a click, the step reports that it
+/// needs the app in front; whether that happens is the caller's to decide.
+fn keyboard_result(
     background_attempt: Result<(), BackendError>,
-    foreground_attempt: impl FnOnce(&RootInfo) -> Result<(), BackendError>,
+    click_point: Option<(f64, f64)>,
     action_name: &str,
 ) -> ActionResult {
     match background_attempt {
@@ -425,26 +421,13 @@ fn keyboard_result_with_optional_foreground(
             format!("{action_name} were posted directly to the target pid"),
             Delivery::BackgroundPid,
         ),
-        Err(background_error) if crate::config::get().allow_foreground_fallback => {
-            match foreground_attempt(root) {
-                Ok(()) => ActionResult::unknown(
-                    format!(
-                        "background PID delivery failed ({background_error}); the target app was activated and {action_name} were retried through foreground HID keyboard delivery; no pointer events were sent"
-                    ),
-                    Delivery::ForegroundHid,
-                ),
-                Err(foreground_error) => ActionResult::didnt(
-                    format!(
-                        "background PID delivery failed ({background_error}); foreground keyboard retry also failed: {foreground_error}"
-                    ),
-                    Delivery::None,
-                ),
-            }
-        }
-        Err(error) => ActionResult::didnt(
-            format!("background PID delivery failed: {error}"),
+        Err(error) if click_point.is_some() => ActionResult::didnt(
+            format!(
+                "background key delivery could not start ({error}); the target refused AX focus, and keys are never typed in the foreground behind a click, so the user was not asked"
+            ),
             Delivery::None,
         ),
+        Err(error) => ActionResult::needs_foreground(error.to_string()),
     }
 }
 

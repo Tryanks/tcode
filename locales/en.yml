@@ -490,9 +490,30 @@ computer_use:
   allow_input:
     title: "Allow input actions"
     description: "When off, the tools are observe-only: clicks, typing, and other actions are rejected."
-  allow_foreground_fallback:
-    title: "Foreground keyboard fallback"
-    description: "If background delivery can't start, retry keyboard input by briefly focusing the target window. Off by default; pointer actions never fall back to the foreground."
+  foreground:
+    section: "BRING TO FRONT FOR TYPING"
+    other_apps: "Other apps"
+    ask: "Ask each time"
+    allow: "Allow"
+    deny: "Don't allow"
+    always_allow: "Always allow"
+    forget: "Forget %{app}"
+    empty: "No app remembered yet. When an app has to come to the front for typing, Tcode asks you in the thread."
+    footnote: "Used only when keys can't be delivered to an app in the background, and only for the keyboard; clicks, drags and other pointer actions never bring an app to the front."
+  prompt:
+    caption: "Computer use"
+    title: "Let %{harness} bring “%{app}” to the front to type?"
+    window: "Typing in the background didn't start for the “%{window}” window."
+    window_untitled: "Typing in the background didn't start for this app."
+    type: "If you allow it, Tcode brings it to the front, types %{count} characters and switches back to the app you're in; keys only, no clicks or pointer movement."
+    keys: "If you allow it, Tcode brings it to the front, presses %{keys} and switches back to the app you're in; keys only, no clicks or pointer movement."
+    replace: "If you allow it, Tcode brings it to the front, replaces the field's text with %{count} characters and switches back to the app you're in; keys only, no clicks or pointer movement."
+    while: "Keys you press meanwhile go to that window too."
+    remote: "This happens on %{host}; if someone is typing on that computer, their keys go to that window too."
+    once: "Allow this once"
+    always: "Always allow “%{app}”"
+    deny: "Don't allow"
+    timeout: "Unanswered after 45 seconds, the step goes back to the model as not done; the question stays, and an answer given later still counts."
   show_agent_cursor:
     title: "Show action cursor"
     description: "Show a cursor that glides to each point acted on in the target window. The real pointer is never moved."
@@ -1163,6 +1184,7 @@ time:
   span_minutes: "%{minutes}m"
 list:
   separator: ", "
+  sentence_separator: " "
 export:
   title: "Export thread"
   ready: "%{name} · %{size}"
@@ -3053,6 +3075,15 @@ tools:
   actions_one: "1 action"
   actions: "%{count} actions"
   actions_failed: "%{count} failed"
+  foreground:
+    in_front: "brought to front"
+    allowed_once: "Typing in the background didn't start; with your permission “%{app}” came to the front for the keys, then your app came back."
+    allowed_always: "Typing in the background didn't start; with your permission “%{app}” came to the front for the keys, then your app came back. “%{app}” is now always allowed."
+    allowed_by_setting: "Typing in the background didn't start; as set in Computer Use, “%{app}” came to the front for the keys, then your app came back."
+    declined: "You didn't allow “%{app}” to come to the front."
+    declined_by_setting: "As set in Computer Use, “%{app}” doesn't come to the front for typing."
+    unanswered: "The question wasn't answered within 45 seconds. It's still open; your answer applies when the model tries again."
+    not_asked: "Typing in the background didn't start, and Tcode couldn't ask you, so “%{app}” didn't come to the front."
   outcome:
     worked: "worked"
     didnt: "didn't work"

@@ -2,6 +2,7 @@ mod approval;
 mod checkout;
 mod context_window;
 mod control;
+mod foreground;
 pub(super) mod goal_strip;
 pub(super) mod images;
 mod pickers;

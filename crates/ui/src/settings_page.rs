@@ -1,5 +1,6 @@
 //! Full-page settings route with section navigation and editable settings.
 
+mod computer_use;
 mod control;
 mod disk_usage;
 pub(crate) mod thread_behavior;
@@ -512,6 +513,7 @@ pub struct SettingsPage {
     project_rules_editor: Option<Entity<thread_behavior::ProjectRulesEditor>>,
     project_rules_subscription: Option<Subscription>,
     control: control::ControlSection,
+    computer_use: computer_use::ComputerUseSection,
     /// The page's size-class motion: the window draws the page under
     /// another parent when it turns compact or wide.
     motion: crate::motion::owned::Owned,
@@ -736,6 +738,7 @@ impl SettingsPage {
             project_rules_editor: None,
             project_rules_subscription: None,
             control: control::ControlSection::default(),
+            computer_use: computer_use::ComputerUseSection::default(),
             motion: Default::default(),
             remote_attachment_limit_input: SettingsInput {
                 state: remote_attachment_limit_input.clone(),
@@ -1451,6 +1454,7 @@ impl SettingsPage {
         }
         if self.section != Section::ComputerUse {
             self.host_permissions = None;
+            self.computer_use.hidden();
         }
         if self.section != Section::Control {
             self.control.hidden();
@@ -1477,7 +1481,7 @@ impl SettingsPage {
             Section::Providers => self.render_providers(window, cx),
             Section::Usage => self.render_usage(window, cx),
             Section::Browser => self.render_browser(cx),
-            Section::ComputerUse => self.render_computer_use(cx),
+            Section::ComputerUse => self.render_computer_use(window, cx),
             Section::Control => self.render_control(window, cx),
             Section::Plugins => v_flex().child(self.plugins_panel.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -2654,7 +2658,7 @@ impl SettingsPage {
         });
     }
 
-    fn render_computer_use(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_computer_use(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let compact = self.window_state.read(cx).compact;
         let settings = self.store.read(cx).settings();
         let enabled_reset = crate::settings_rows::reset_action(
@@ -2669,16 +2673,6 @@ impl SettingsPage {
             !settings.computer_use.allow_input,
             cx.listener(|this, _, _, cx| {
                 this.dispatch_settings(|store| store.set_computer_use_allow_input(true), cx)
-            }),
-        );
-        let allow_foreground_fallback_reset = crate::settings_rows::reset_action(
-            "reset-cu-allow-foreground-fallback",
-            settings.computer_use.allow_foreground_fallback,
-            cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(
-                    |store| store.set_computer_use_allow_foreground_fallback(false),
-                    cx,
-                )
             }),
         );
         let show_agent_cursor_reset = crate::settings_rows::reset_action(
@@ -2707,15 +2701,6 @@ impl SettingsPage {
                 allow_input_reset,
                 cx,
                 WorkspaceStore::set_computer_use_allow_input,
-            ),
-            self.toggle_row(
-                "cu-allow-foreground-fallback",
-                crate::tr!("computer_use.allow_foreground_fallback.title"),
-                crate::tr!("computer_use.allow_foreground_fallback.description"),
-                settings.computer_use.allow_foreground_fallback,
-                allow_foreground_fallback_reset,
-                cx,
-                WorkspaceStore::set_computer_use_allow_foreground_fallback,
             ),
             self.toggle_row(
                 "cu-show-agent-cursor",
@@ -2753,6 +2738,7 @@ impl SettingsPage {
                             }),
                     ),
             )
+            .children(self.foreground_group(window, cx))
             .child(self.permissions_group(cx))
     }
 
@@ -3410,6 +3396,67 @@ mod tests {
                 )
                 .unwrap();
             cx.run_until_parked();
+        }
+    }
+
+    /// "Bring to front for typing" is about how a Mac host types into apps;
+    /// a client of a Windows host, whose computer use never brings an app to
+    /// the front, does not show it.
+    #[gpui::test]
+    fn the_foreground_choices_show_only_for_a_mac_host(cx: &mut TestAppContext) {
+        use tcode_core::permissions::{ComputerUsePermissions, PermissionStatus};
+        use tcode_protocol::{
+            ClientPayload, HostMessage, Query, QueryResponse, decode_client_line, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        for (host, shown) in [
+            (ComputerUsePermissions::NotRequired, false),
+            (
+                ComputerUsePermissions::MacOs(PermissionStatus {
+                    accessibility: true,
+                    screen_recording: true,
+                }),
+                true,
+            ),
+        ] {
+            let attachment = WorkspaceAttachment::Remote {
+                host_id: "host".into(),
+                host_name: "Host".into(),
+            };
+            let (store, outgoing, incoming, _pump) = scripted_store(attachment, cx);
+            let window_state = cx.new(|_| WindowState::new(false));
+            let (page, vcx) = cx.add_window_view(|window, cx| {
+                SettingsPage::new(store.clone(), window_state, window, cx)
+            });
+            vcx.simulate_resize(size(px(1000.), px(2000.)));
+            page.update(vcx, |page, cx| {
+                page.select_section(Section::ComputerUse, cx)
+            });
+            crate::test_frames::draw_settled(vcx);
+            let mut answered = 0;
+            while let Ok(line) = outgoing.try_recv() {
+                let message = decode_client_line(&line).unwrap();
+                if let ClientPayload::Query(Query::ComputerUsePermissions) = message.payload {
+                    answered += 1;
+                    incoming
+                        .try_send(
+                            encode_line(&HostMessage::QueryResult {
+                                id: message.id,
+                                result: Ok(QueryResponse::ComputerUsePermissions(host)),
+                            })
+                            .unwrap(),
+                        )
+                        .unwrap();
+                }
+            }
+            assert!(answered > 0, "the page asks what the host is");
+            crate::test_frames::draw_settled(vcx);
+            assert_eq!(
+                vcx.debug_bounds("cu-foreground").is_some(),
+                shown,
+                "{host:?}"
+            );
         }
     }
 

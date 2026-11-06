@@ -267,8 +267,28 @@ impl WorkspaceStore {
     pub fn set_computer_use_allow_input(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ComputerUseAllowInput(value));
     }
-    pub fn set_computer_use_allow_foreground_fallback(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::ComputerUseAllowForegroundFallback(value));
+    pub fn set_foreground_default(&mut self, value: tcode_core::settings::ForegroundChoice) {
+        self.patch_settings(SettingsPatch::ComputerUseForegroundDefault(value));
+    }
+    /// Remember whether the app may come to the front for typing, or forget it.
+    pub fn set_foreground_app(
+        &mut self,
+        bundle_id: String,
+        app: Option<tcode_core::settings::ForegroundApp>,
+    ) {
+        self.patch_settings(SettingsPatch::ComputerUseForegroundApp { bundle_id, app });
+    }
+    pub fn respond_foreground_prompt(
+        &mut self,
+        session_id: String,
+        prompt_id: String,
+        answer: tcode_core::computer_use::ForegroundAnswer,
+    ) {
+        self.dispatch(Command::RespondForegroundPrompt {
+            session_id,
+            prompt_id,
+            answer,
+        });
     }
     pub fn set_computer_use_show_agent_cursor(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ComputerUseShowAgentCursor(value));
