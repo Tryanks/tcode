@@ -8,7 +8,8 @@ use tcode_core::provider_status::{
 };
 
 use crate::provider_auth::{
-    parse_aggregator_auth, parse_claude_auth, parse_codex_auth, parse_opencode_auth,
+    claude_account_plan_name, parse_aggregator_auth, parse_claude_auth, parse_codex_auth,
+    parse_opencode_auth,
 };
 
 /// The bare command name for a provider (fallback when no path resolves).
@@ -116,10 +117,13 @@ pub async fn probe_provider(
 
     let auth = match provider {
         // `claude auth status` exits 1 when signed out.
-        ProviderKind::ClaudeCode => run_stdout_env(&program, &["auth", "status", "--json"], &env)
-            .await
-            .as_deref()
-            .and_then(parse_claude_auth),
+        ProviderKind::ClaudeCode => {
+            let plan_name = claude_account_plan_name(&launch_env);
+            run_stdout_env(&program, &["auth", "status", "--json"], &env)
+                .await
+                .as_deref()
+                .and_then(|json| parse_claude_auth(json, plan_name.as_deref()))
+        }
         ProviderKind::Codex => {
             let path = agent::codex::home_dir(&launch_env).map(|home| home.join("auth.json"));
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());

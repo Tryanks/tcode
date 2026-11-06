@@ -1114,12 +1114,14 @@ impl AppState {
                 }),
                 None => None,
             };
+            let launch_env = launch_env.await;
             let usage = match answered {
                 Some(usage) => Some(usage),
                 None => {
-                    let launch_env = match launch_env.await {
-                        Ok(env) => env,
+                    let launch_env = match &launch_env {
+                        Ok(env) => env.clone(),
                         Err(error) => {
+                            let error = error.clone();
                             host_cx.enqueue(move |state, cx| {
                                 state.providers.complete_usage(profile_id, revision, None);
                                 state.report_error(RuntimeError::PersistSettings { error }, cx);
@@ -1133,6 +1135,18 @@ impl AppState {
                     .await
                 }
             };
+            // Claude Code reports `max` for both the Max and the Ultra plan;
+            // its account file names which one.
+            let usage = usage.map(|mut usage| {
+                if provider == ProviderKind::ClaudeCode
+                    && let Ok(launch_env) = &launch_env
+                    && let Some(name) =
+                        tcode_services::provider_auth::claude_account_plan_name(launch_env)
+                {
+                    usage.plan = Some(name);
+                }
+                usage
+            });
             host_cx.enqueue(move |state, _cx| {
                 if state.settings.resolved_profile(&profile_id).as_ref() == Some(&profile) {
                     state.providers.complete_usage(profile_id, revision, usage);

@@ -76,6 +76,15 @@ pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
     child_env("CLAUDE_CONFIG_DIR").or_else(|| child_env("HOME").map(|home| home.join(".claude")))
 }
 
+/// The CLI's account file, `.claude.json`: in `CLAUDE_CONFIG_DIR` when that
+/// is set, else in the home directory itself rather than in `~/.claude`.
+pub fn account_file(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
+    child_env("CLAUDE_CONFIG_DIR")
+        .or_else(|| child_env("HOME"))
+        .map(|dir| dir.join(".claude.json"))
+}
+
 // Credentials and per-account state (`.claude.json`, `projects/`) must not
 // cross accounts, and `plugins/` records absolute paths into its own config
 // directory. The one exception is `transfer_session`: when the user switches a
@@ -3957,6 +3966,31 @@ mod tests {
             home: None,
         };
         assert_eq!(config_dir(&launch_env), Some(PathBuf::from("/configured")));
+    }
+
+    /// claude 2.1.318 reads its account file as `join(CLAUDE_CONFIG_DIR ??
+    /// home, ".claude.json")`: inside a configured directory, but beside
+    /// `~/.claude`, not in it, for the default account.
+    #[test]
+    fn account_file_sits_in_a_configured_dir_and_beside_dot_claude_otherwise() {
+        let launch_env = |pairs: &[(&str, &str)]| LaunchEnv {
+            env: pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            home: None,
+        };
+        assert_eq!(
+            account_file(&launch_env(&[
+                ("CLAUDE_CONFIG_DIR", "/configured"),
+                ("HOME", "/home")
+            ])),
+            Some(PathBuf::from("/configured/.claude.json"))
+        );
+        assert_eq!(
+            account_file(&launch_env(&[("HOME", "/home")])),
+            Some(PathBuf::from("/home/.claude.json"))
+        );
     }
 
     /// claude 2.1.317 records a usage read in its config directory on its way

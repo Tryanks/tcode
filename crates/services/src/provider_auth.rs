@@ -25,7 +25,7 @@ pub struct ClaudeAuthStatus {
 /// Labels are `Claude API Key` or `Claude <plan> Subscription`, with the plan
 /// normalized to Claude's plan names: Free / Pro / Max / Ultra / Team /
 /// Enterprise.
-pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
+pub fn parse_claude_auth(json: &str, plan_name: Option<&str>) -> Option<ProviderAuth> {
     let status: ClaudeAuthStatus = serde_json::from_str(json).ok()?;
     if !status.logged_in {
         return Some(ProviderAuth {
@@ -45,10 +45,13 @@ pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
     let label = if is_api_key {
         Some("Claude API Key".to_string())
     } else {
-        status
-            .subscription_type
-            .as_deref()
-            .and_then(normalize_claude_plan)
+        plan_name
+            .or_else(|| {
+                status
+                    .subscription_type
+                    .as_deref()
+                    .and_then(normalize_claude_plan)
+            })
             .map(|plan| format!("Claude {plan} Subscription"))
     };
     Some(ProviderAuth {
@@ -56,6 +59,26 @@ pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
         label,
         email: status.email.filter(|e| !e.is_empty()),
     })
+}
+
+/// The plan name Claude Code shows for the signed-in account, which it keeps
+/// as `oauthAccount.planDisplayName` in its account file (`.claude.json`):
+/// unlike `subscriptionType`, it tells Max from Ultra.
+pub fn claude_plan_name(account_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(account_json).ok()?;
+    value
+        .pointer("/oauthAccount/planDisplayName")?
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+/// [`claude_plan_name`] of the account a Claude Code child launched with
+/// `launch_env` signs in as.
+pub fn claude_account_plan_name(launch_env: &agent::LaunchEnv) -> Option<String> {
+    let path = agent::claude::account_file(launch_env)?;
+    claude_plan_name(&std::fs::read_to_string(path).ok()?)
 }
 
 /// Normalize Claude's `subscriptionType` to its display plan name. Claude
@@ -243,6 +266,7 @@ mod tests {
         let auth = parse_claude_auth(
             r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty",
                 "email":"dev@example.com","orgId":"x","orgName":"y","subscriptionType":"max"}"#,
+            None,
         )
         .unwrap();
         assert_eq!(auth.status, AuthStatus::Authenticated);
@@ -260,22 +284,48 @@ mod tests {
         ] {
             let json = format!(r#"{{"loggedIn":true,"subscriptionType":"{raw}"}}"#);
             assert_eq!(
-                parse_claude_auth(&json).unwrap().label.as_deref(),
+                parse_claude_auth(&json, None).unwrap().label.as_deref(),
                 Some(expected)
             );
         }
 
+        // Claude Code reports `max` for Ultra too; the plan name it keeps in
+        // its account file names the plan.
+        assert_eq!(
+            parse_claude_auth(
+                r#"{"loggedIn":true,"subscriptionType":"max"}"#,
+                Some("Ultra")
+            )
+            .unwrap()
+            .label
+            .as_deref(),
+            Some("Claude Ultra Subscription")
+        );
+        // The account file's shape, as claude 2.1.318 writes it.
+        assert_eq!(
+            claude_plan_name(
+                r#"{"oauthAccount":{"billingType":"google_play_subscription","organizationType":"claude_max",
+                    "organizationRateLimitTier":"default_claude_max_20x","planDisplayName":"Ultra"}}"#
+            )
+            .as_deref(),
+            Some("Ultra")
+        );
+        assert_eq!(claude_plan_name(r#"{"oauthAccount":{}}"#), None);
+
         // API-key logins.
-        let auth =
-            parse_claude_auth(r#"{"loggedIn":true,"authMethod":"apiKey","email":null}"#).unwrap();
+        let auth = parse_claude_auth(
+            r#"{"loggedIn":true,"authMethod":"apiKey","email":null}"#,
+            None,
+        )
+        .unwrap();
         assert_eq!(auth.label.as_deref(), Some("Claude API Key"));
 
         // Signed out.
-        let auth = parse_claude_auth(r#"{"loggedIn":false}"#).unwrap();
+        let auth = parse_claude_auth(r#"{"loggedIn":false}"#, None).unwrap();
         assert_eq!(auth.status, AuthStatus::Unauthenticated);
 
         // Garbage in → nothing claimed.
-        assert!(parse_claude_auth("not json").is_none());
+        assert!(parse_claude_auth("not json", None).is_none());
     }
 
     #[test]
