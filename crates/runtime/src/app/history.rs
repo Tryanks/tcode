@@ -3,7 +3,9 @@ use agent::DeltaKind;
 use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::LazyLock;
-use tcode_core::session::{ItemStreams, SupersededStream, TurnSnapshots, drop_turn_diffs};
+use tcode_core::session::{
+    ItemStreams, SupersededStream, TurnSnapshots, TurnStarts, drop_turn_diffs,
+};
 use tcode_protocol::{
     CommandResponse, HostMessage, MAX_SESSION_HISTORY_BYTES, OUTPUT_PREVIEW_BYTES,
     SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES, Subscription,
@@ -509,8 +511,8 @@ pub(super) struct SessionLog {
     retained_bytes: usize,
     /// The stored row each record is in, ascending.
     rows: Vec<u64>,
-    /// The rows of the records that opened a turn in `fold`, ascending.
-    turn_starts: Vec<u64>,
+    /// The rows of the records that opened the turns `fold` holds.
+    turn_starts: TurnStarts,
     /// `Timeline::fold_events(records)`, extended by every push so an append
     /// can tell whether it opens a turn, and cloned by timeline loads instead
     /// of folding the records again.
@@ -531,7 +533,7 @@ impl SessionLog {
             records: Vec::new(),
             retained_bytes: 0,
             rows: Vec::new(),
-            turn_starts: Vec::new(),
+            turn_starts: TurnStarts::default(),
             fold: Timeline::default(),
             snapshots: TurnSnapshots::default(),
             streams: ItemStreams::default(),
@@ -561,9 +563,7 @@ impl SessionLog {
         let stream = self
             .streams
             .follow(&mut self.fold, record.ts, &record.event, row);
-        if change.opened {
-            self.turn_starts.push(row);
-        }
+        self.turn_starts.apply(&change, row);
         self.retained_bytes += wire_len(&record) + 1;
         self.records.push(record);
         self.rows.push(row);
@@ -615,7 +615,7 @@ impl SessionLog {
             rows: &self.rows,
             end: self.next_row,
             covered_end: self.next_row,
-            turn_starts: &self.turn_starts,
+            turn_starts: self.turn_starts.rows(),
             turns: self.fold.turns.len() as u64,
         }
     }
@@ -1532,7 +1532,7 @@ mod tests {
             store.turn_index("fixture").unwrap(),
             Some(TurnIndex {
                 turns: log.fold.turns.len() as u64,
-                starts: log.turn_starts,
+                starts: log.turn_starts.rows().to_vec(),
             })
         );
         store.close().unwrap();

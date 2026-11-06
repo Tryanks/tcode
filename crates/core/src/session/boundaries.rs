@@ -382,3 +382,38 @@ impl TurnBoundaries {
         }
     }
 }
+
+/// The log rows that opened the turns a fold holds now, in order. A reader
+/// of the log is sent windows that begin at one of them: a window that began
+/// inside turns a later rewind took out would hold the rewind but not its
+/// target, and the reader's fold could not cut where the whole log's does.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnStarts {
+    rows: Vec<u64>,
+    /// The rows before the latest rewind, which its undo puts back.
+    #[serde(default)]
+    before_rewind: Option<Vec<u64>>,
+}
+
+impl TurnStarts {
+    pub fn rows(&self) -> &[u64] {
+        &self.rows
+    }
+
+    /// Follow what the record at `row` did to the turns.
+    pub fn apply(&mut self, change: &TurnBoundaryChange, row: u64) {
+        if change.undone
+            && let Some(rows) = self.before_rewind.take()
+        {
+            self.rows = rows;
+        }
+        if let Some(cut) = &change.rewind {
+            self.before_rewind = Some(self.rows.clone());
+            self.rows
+                .truncate(cut.turn + usize::from(cut.steer.is_some()));
+        }
+        if change.opened {
+            self.rows.push(row);
+        }
+    }
+}
