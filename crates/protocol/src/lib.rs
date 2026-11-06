@@ -311,6 +311,12 @@ pub use wire::{
 // ComputerUseForegroundDefault and ComputerUseForegroundApp patches replace
 // ComputerUseAllowForegroundFallback, SessionStatus carries
 // foreground_prompt, and the protocol adds RespondForegroundPrompt.
+// Plugin management has no switches: Settings drops plugins with the
+// PluginManagementEnabled and PluginManagementProvider patches, and the host
+// keeps two catalogs per profile, one listed from outside any project and one
+// for the project last asked about, so ProvidersStatus.plugins may name a
+// profile twice, told apart by context_cwd; ProviderPluginEntry adds
+// latest_version and always_on, and PluginInstallation adds other_project.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

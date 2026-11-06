@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
+use crate::plugin_command::grok::{op_args, operand};
 use crate::{
     AgentError, CommandAcceptance, MarketplaceAction, PluginAction, PluginContext,
     PluginInstallation, PluginListing, PluginOp, PluginOpOutcome, PluginScope, PluginSource,
@@ -109,59 +110,6 @@ pub(crate) async fn run(
 
 fn args(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|part| (*part).to_string()).collect()
-}
-
-/// The argv for one mutation, without consent: `--trust` is added only for an
-/// install whose challenge a person accepted ([`install_step`]), and
-/// `--confirm`, which uninstalls every plugin of a multi-plugin repository, is
-/// never passed. Plugins are named as `grok plugin list` names them; installs
-/// take the `name@marketplace` id.
-fn op_args(op: &PluginOp) -> Result<Vec<String>, AgentError> {
-    let plugin = |verb: &str, target: String, scope: PluginScope| match scope {
-        PluginScope::User => Ok(vec!["plugin".into(), verb.into(), target]),
-        other => Err(AgentError::Protocol(format!(
-            "Grok installs plugins for the user only, not in the {other:?} scope"
-        ))),
-    };
-    let marketplace = |verb: &str, target: &str| {
-        Ok(vec![
-            "plugin".into(),
-            "marketplace".into(),
-            verb.into(),
-            operand(target)?,
-        ])
-    };
-    match op {
-        PluginOp::Install { id, scope, .. } => plugin("install", operand(id)?, *scope),
-        PluginOp::Update { id, scope, .. } => plugin("update", name(id)?, *scope),
-        PluginOp::Uninstall { id, scope } => plugin("uninstall", name(id)?, *scope),
-        PluginOp::SetEnabled { .. } => Err(AgentError::Protocol(
-            "Grok plugin enablement cannot be read back through its CLI".into(),
-        )),
-        PluginOp::AddMarketplace { source } => marketplace("add", source),
-        PluginOp::RemoveMarketplace { name } => marketplace("remove", name),
-    }
-}
-
-fn name(id: &str) -> Result<String, AgentError> {
-    operand(split_id(id).0)
-}
-
-/// A value placed in a positional slot must not be read as an option.
-fn operand(value: &str) -> Result<String, AgentError> {
-    if value.is_empty() || value.starts_with('-') {
-        return Err(AgentError::Protocol(format!(
-            "refusing to pass {value:?} to `grok plugin`"
-        )));
-    }
-    Ok(value.to_string())
-}
-
-fn split_id(id: &str) -> (&str, Option<&str>) {
-    match id.rsplit_once('@') {
-        Some((name, marketplace)) if !name.is_empty() => (name, Some(marketplace)),
-        _ => (id, None),
-    }
 }
 
 fn management_command(
@@ -430,6 +378,7 @@ fn listing(listed: Vec<Listed>, marketplaces: Vec<ProviderPluginMarketplace>) ->
             },
             name: plugin.name.clone(),
             version: plugin.version.clone(),
+            latest_version: None,
             description: plugin.description.clone(),
             source: PluginSource {
                 marketplace: plugin.marketplace.clone(),
@@ -441,12 +390,14 @@ fn listing(listed: Vec<Listed>, marketplaces: Vec<ProviderPluginMarketplace>) ->
                     location: plugin.path.clone(),
                     version: plugin.version.clone(),
                     scope_enabled: None,
+                    other_project: false,
                 }]
             } else {
                 Vec::new()
             },
             enabled: Tri::Unknown,
             declared: None,
+            always_on: None,
             errors: Vec::new(),
             actions,
             diagnostics: Vec::new(),
@@ -567,6 +518,7 @@ mod tests {
                 ),
                 version: Some("1.0.0".into()),
                 scope_enabled: None,
+                other_project: false,
             }]
         );
         assert_eq!(

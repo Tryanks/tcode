@@ -371,8 +371,9 @@ pub struct ProvidersStatus {
     /// Environment-variable names present for each profile. Values never cross
     /// the protocol boundary.
     pub secret_names: HashMap<String, HashSet<String>>,
-    /// Native plugin catalogs of the profiles a client asked about, for
-    /// providers whose plugin management is switched on.
+    /// Native plugin catalogs of the profiles a client asked about: for each,
+    /// the listing from outside any project and the listing of the one
+    /// project last asked about.
     #[serde(default)]
     pub plugins: Vec<ProviderPluginCatalog>,
 }

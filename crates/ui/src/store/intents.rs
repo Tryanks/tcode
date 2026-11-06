@@ -1346,12 +1346,6 @@ impl WorkspaceStore {
 }
 
 impl WorkspaceStore {
-    pub fn set_plugin_management_enabled(&mut self, enabled: bool) {
-        self.patch_settings(SettingsPatch::PluginManagementEnabled(enabled));
-    }
-    pub fn set_provider_plugin_management(&mut self, provider: ProviderKind, enabled: bool) {
-        self.patch_settings(SettingsPatch::PluginManagementProvider { provider, enabled });
-    }
     pub fn refresh_provider_plugins(&mut self, profile_id: String, cwd: Option<PathBuf>) {
         self.dispatch(Command::RefreshProviderPlugins { profile_id, cwd });
     }

@@ -1,30 +1,30 @@
-//! Settings → Plugins: a tab per enabled provider profile whose native
-//! plugins Tcode can manage, each with Installed, Available and Marketplaces
-//! views of the catalog the host listed for it. Every action, marketplace
-//! operation and confirmation comes from the host's catalog; a control the
-//! host did not offer is never drawn. A provider whose management is switched
-//! off shows only its switch.
+//! Settings → Plugins: one page per Harness whose plugins Tcode manages.
+//! A Harness keeps plugins in each account's own configuration directory,
+//! so the page lists plugins as rows and accounts as columns, one switch per
+//! account; a project's own scopes are files every account shares, so a
+//! project's plugins get one switch and a line on which accounts have them.
+//! Every action, scope and confirmation comes from the catalogs the host
+//! listed and the Harness's capabilities; a control the host did not offer is
+//! never drawn.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::widgets::scrollbar::Scrollbar;
 use agent::{
-    DeclaredComponents, MarketplaceAction, PluginAction, PluginActionKind, PluginManagement,
-    PluginScope, PluginSourceKind, ProviderPluginEntry, Tri,
+    MarketplaceAction, PluginAction, PluginActionKind, PluginOp, PluginScope, PluginSourceKind,
+    ProviderKind, ProviderPluginEntry, ProviderPluginMarketplace, Tri, UnmanagedPluginsKind,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Axis, Context, ElementId, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _, Render,
-    ScrollHandle, SharedString, Styled as _, Subscription, Window, div, list, point,
+    Action, AnyElement, App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{ScrollableMask, h_flex, v_flex};
-use tcode_core::settings::{PluginManagementSettings, ResolvedProfile};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_protocol::{
-    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginStaleReason,
-    ProviderPluginCatalog, RuntimeOperationId,
+    PluginCatalogState, PluginChallenge, PluginChallengeKind, ProviderPluginCatalog,
+    RuntimeOperationId,
 };
 
 use crate::icon::{Icon, IconName};
@@ -36,81 +36,236 @@ use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::checkbox::Checkbox;
+use crate::widgets::choice::{Choice, ChoiceGroup};
 use crate::widgets::input::{Input, InputState};
+use crate::widgets::menu::DropdownMenu as _;
 use crate::widgets::switch::Switch;
 use crate::widgets::tabs::{TabBar, TabItem};
-use crate::widgets::{Collapsible, Spinner};
+use crate::widgets::tooltip::{Tooltip, TooltipTrigger as _};
+use crate::widgets::{Collapsible, Popover, Spinner};
 use crate::window_state::WindowState;
 
-/// How long a value drawn here takes to glide to a new one.
-const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+/// More accounts than this get one column and a switcher between them.
+const MAX_COLUMNS: usize = 4;
 
-/// How long what is drawn here only some of the time takes to come in or go.
-const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+/// The width of one account's column.
+const CELL_WIDTH: f32 = 120.;
 
 /// How long a row drawn here takes to fold in or out, or to move to a new place.
 const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How long a part drawn here takes to cross-fade to another of its states.
-const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+/// The window width below which a plugin's accounts stack under it.
+const STACKED_BELOW: f32 = 1000.;
 
-const SCOPES: [PluginScope; 5] = [
-    PluginScope::User,
-    PluginScope::Project,
-    PluginScope::Local,
-    PluginScope::Managed,
-    PluginScope::Session,
-];
+/// The width of a row's trailing menu.
+const MENU_WIDTH: f32 = 28.;
 
-/// The views of one provider's catalog.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
-    Installed,
-    Available,
-    Marketplaces,
+/// Which page of Settings → Plugins shows. A compact window starts at the
+/// list of Harnesses; a wide one at the Harness picked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Page {
+    Overview,
+    Harness,
+    Browse,
 }
 
-impl View {
-    fn key(self) -> &'static str {
-        match self {
-            Self::Installed => "installed",
-            Self::Available => "available",
-            Self::Marketplaces => "marketplaces",
-        }
-    }
+/// The install a person is composing for one plugin.
+struct InstallDraft {
+    entry_id: String,
+    accounts: BTreeSet<String>,
+    scope: PluginScope,
+}
+
+/// Run an action the host offered, chosen from a row's menu.
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(namespace = plugins_settings, no_json)]
+struct RunPluginAction {
+    profile_id: String,
+    entry_id: String,
+    action: PluginAction,
+    cwd: Option<PathBuf>,
+}
+
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(namespace = plugins_settings, no_json)]
+struct ChooseProject {
+    project_id: String,
+}
+
+#[derive(Action, Clone, PartialEq, serde::Deserialize)]
+#[action(namespace = plugins_settings, no_json)]
+struct RemoveMarketplace {
+    profile_id: String,
+    name: String,
 }
 
 pub struct PluginsSettingsPanel {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
-    /// The settings page's content scroll, returned to the top when a
-    /// provider's tab is opened from elsewhere.
+    /// The settings page's content scroll, returned to the top when the page
+    /// changes.
     page_scroll: ScrollHandle,
-    /// Whether the page is on screen. Entering it lists every managed
-    /// profile again, and challenges are only presented while it shows.
+    /// Whether the page is on screen. Entering it lists every account again,
+    /// and challenges are only presented while it shows.
     shown: bool,
-    /// The provider tab picked last; the first tab while it is not shown.
-    selected: Option<String>,
-    view: View,
-    /// Filters the Available view.
+    harness: Option<ProviderKind>,
+    page: Page,
+    /// The project whose scopes the page shows; until one is picked, the
+    /// open thread's.
+    project: Option<String>,
+    /// `(profile id, directory)` listings asked for since the page showed.
+    listed: HashSet<(String, Option<PathBuf>)>,
+    /// Plugin ids whose details are open.
+    expanded: HashSet<String>,
     search: Entity<InputState>,
-    /// Each profile's Available list, so a profile leaving keeps drawing
-    /// its own while the next one's comes in.
-    lists: std::collections::HashMap<String, AvailableList>,
-    /// `(profile id, entry id, catalog index)` rows whose details disclosure is open.
-    expanded: HashSet<(String, String, usize)>,
+    marketplace_filter: Option<String>,
+    install: Option<InstallDraft>,
+    /// The account shown when there are too many for a column each.
+    column: Option<String>,
+    /// Whether the window is laid out for touch: larger text, a page per
+    /// level and sheets instead of popovers.
+    touch: bool,
+    marketplace_source: Entity<InputState>,
+    marketplace_accounts: BTreeSet<String>,
     /// The challenge whose dialog is open.
     challenge: Option<RuntimeOperationId>,
     /// Challenges this client already answered; the replica keeps showing
     /// them until the host's answer arrives.
     answered: HashSet<RuntimeOperationId>,
-    /// The switches the shown page last listed for; a provider switched on
-    /// since is listed then.
-    switches: PluginManagementSettings,
     /// The page's size-class motion: the window draws it under another
     /// parent when it turns compact or wide.
     motion: crate::motion::owned::Owned,
     _subscriptions: Vec<Subscription>,
+}
+
+/// One account of the Harness shown, with what the host listed for it.
+#[derive(Clone)]
+struct Account {
+    id: String,
+    name: String,
+    color: Hsla,
+    binary: Option<PathBuf>,
+    /// Listed from outside any project: its own user scope.
+    user: Option<ProviderPluginCatalog>,
+    /// Listed from the project shown: the scopes it shares.
+    project: Option<ProviderPluginCatalog>,
+}
+
+impl Account {
+    fn entry(&self, project: bool, id: &str) -> Option<&ProviderPluginEntry> {
+        let catalog = if project { &self.project } else { &self.user };
+        catalog
+            .as_ref()?
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+    }
+
+    fn busy(&self) -> bool {
+        [&self.user, &self.project]
+            .into_iter()
+            .flatten()
+            .any(|catalog| !catalog.pending.is_empty())
+    }
+
+    fn pending(&self, id: &str) -> bool {
+        [&self.user, &self.project]
+            .into_iter()
+            .flatten()
+            .any(|catalog| catalog.pending.iter().any(|pending| pending == id))
+    }
+
+    fn loading(&self) -> bool {
+        [&self.user, &self.project]
+            .into_iter()
+            .flatten()
+            .any(|catalog| catalog.loading)
+    }
+
+    fn failure(&self) -> Option<String> {
+        [&self.user, &self.project]
+            .into_iter()
+            .flatten()
+            .find_map(|catalog| match &catalog.state {
+                PluginCatalogState::Error { message } => Some(message.clone()),
+                _ => None,
+            })
+    }
+}
+
+/// One plugin as the page draws it: what describes it, from whichever
+/// account listed it first, and each account's own entry.
+struct Row {
+    entry: ProviderPluginEntry,
+    cells: Vec<Option<ProviderPluginEntry>>,
+}
+
+impl Row {
+    fn versions_differ(&self, scope: PluginScope) -> bool {
+        let versions: BTreeSet<&str> = self
+            .cells
+            .iter()
+            .flatten()
+            .filter_map(|entry| installation(entry, scope)?.version.as_deref())
+            .collect();
+        versions.len() > 1
+    }
+}
+
+/// The installation of `entry` in `scope` that the listing's own context
+/// holds.
+fn installation(
+    entry: &ProviderPluginEntry,
+    scope: PluginScope,
+) -> Option<&agent::PluginInstallation> {
+    entry
+        .installations
+        .iter()
+        .find(|installation| installation.scope == scope && !installation.other_project)
+}
+
+fn offers(entry: &ProviderPluginEntry, action: PluginAction) -> bool {
+    entry.actions.contains(&action)
+}
+
+/// The value a scope's switch shows: the scope's own where the CLI reports
+/// it, else the effective one.
+fn scope_enabled(entry: &ProviderPluginEntry, scope: PluginScope) -> bool {
+    installation(entry, scope)
+        .and_then(|installation| installation.scope_enabled)
+        .unwrap_or(entry.enabled == Tri::Yes)
+}
+
+/// Plugins in `scope` across `accounts`, keyed by id in first-listed order.
+fn rows(accounts: &[Account], project: bool, scope: PluginScope) -> Vec<Row> {
+    let mut ids: Vec<String> = Vec::new();
+    for account in accounts {
+        let catalog = if project {
+            &account.project
+        } else {
+            &account.user
+        };
+        for entry in catalog.iter().flat_map(|catalog| &catalog.entries) {
+            if installation(entry, scope).is_some() && !ids.contains(&entry.id) {
+                ids.push(entry.id.clone());
+            }
+        }
+    }
+    ids.into_iter()
+        .filter_map(|id| {
+            let cells: Vec<Option<ProviderPluginEntry>> = accounts
+                .iter()
+                .map(|account| account.entry(project, &id).cloned())
+                .collect();
+            let entry = cells
+                .iter()
+                .flatten()
+                .find(|entry| installation(entry, scope).is_some())
+                .cloned()?;
+            Some(Row { entry, cells })
+        })
+        .collect()
 }
 
 impl PluginsSettingsPanel {
@@ -122,14 +277,15 @@ impl PluginsSettingsPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx));
+        let marketplace_source = cx.new(|cx| InputState::new(window, cx));
         let subscriptions = vec![
             cx.subscribe_in(
                 &store,
                 window,
                 |this, _, change: &StoreChange, window, cx| match change.topic {
-                    TopicKind::Providers | TopicKind::Settings => {
+                    TopicKind::Providers | TopicKind::Settings | TopicKind::Index => {
                         if this.shown {
-                            this.list_switched_on(cx);
+                            this.list_missing(cx);
                             this.sync_challenge(window, cx);
                         }
                         cx.notify();
@@ -146,14 +302,20 @@ impl PluginsSettingsPanel {
             window_state,
             page_scroll,
             shown: false,
-            selected: None,
-            view: View::Installed,
-            search,
-            lists: Default::default(),
+            harness: None,
+            page: Page::Overview,
+            project: None,
+            listed: HashSet::new(),
             expanded: HashSet::new(),
+            search,
+            marketplace_filter: None,
+            install: None,
+            column: None,
+            touch: false,
+            marketplace_source,
+            marketplace_accounts: BTreeSet::new(),
             challenge: None,
             answered: HashSet::new(),
-            switches: PluginManagementSettings::default(),
             motion: Default::default(),
             _subscriptions: subscriptions,
         }
@@ -162,63 +324,147 @@ impl PluginsSettingsPanel {
     /// The page left the screen; entering it again lists the catalogs anew.
     pub fn hide(&mut self) {
         self.shown = false;
+        self.listed.clear();
     }
 
-    /// Open `profile_id`'s installed plugins.
+    /// Open the Harness of `profile_id`'s plugins.
     pub fn focus_profile(&mut self, profile_id: String, cx: &mut Context<Self>) {
-        self.selected = Some(profile_id);
-        self.view = View::Installed;
+        let kind = self.store.read(cx).provider_profile_kind(&profile_id);
+        self.harness = Some(kind);
+        self.page = Page::Harness;
+        self.column = Some(profile_id);
         self.page_scroll.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }
 
-    /// Enabled profiles whose provider can have its plugins managed.
-    fn tab_profiles(&self, cx: &App) -> Vec<ResolvedProfile> {
-        self.store
-            .read(cx)
+    fn compact(&self, cx: &App) -> bool {
+        self.window_state.read(cx).compact
+    }
+
+    /// Harnesses whose plugins Tcode manages, with an enabled account.
+    fn harnesses(&self, cx: &App) -> Vec<ProviderKind> {
+        let profiles = self.store.read(cx).enabled_profiles();
+        ProviderKind::NATIVE
+            .into_iter()
+            .filter(|kind| kind.caps().plugin_management.manages())
+            .filter(|kind| profiles.iter().any(|profile| profile.kind == *kind))
+            .collect()
+    }
+
+    fn harness_shown(&self, cx: &App) -> Option<ProviderKind> {
+        let harnesses = self.harnesses(cx);
+        self.harness
+            .filter(|kind| harnesses.contains(kind))
+            .or(harnesses.first().copied())
+    }
+
+    /// The project whose scopes show: the one picked, else the open
+    /// thread's, else the one last worked in.
+    fn project(&self, cx: &App) -> Option<tcode_core::project::Project> {
+        let store = self.store.read(cx);
+        let projects = store.projects();
+        let picked = self
+            .project
+            .clone()
+            .or_else(|| {
+                let thread = crate::shell::current_thread(cx)?;
+                store.thread_meta(&thread)?.project_id.clone()
+            })
+            .or_else(|| store.last_project_id().map(str::to_string))?;
+        projects.into_iter().find(|project| project.id == picked)
+    }
+
+    fn project_root(&self, cx: &App) -> Option<PathBuf> {
+        self.project(cx).map(|project| project.root)
+    }
+
+    fn accounts(&self, kind: ProviderKind, cx: &App) -> Vec<Account> {
+        let store = self.store.read(cx);
+        let root = self.project_root(cx);
+        store
             .enabled_profiles()
             .into_iter()
-            .filter(|profile| manages(profile.kind.caps().plugin_management))
+            .filter(|profile| profile.kind == kind)
+            .map(|profile| Account {
+                name: store.provider_profile_display_name(&profile.id),
+                color: gpui::rgb(store.provider_profile_color(&profile.id)).into(),
+                binary: profile.settings.binary_path.clone(),
+                user: store.provider_plugin_catalog(&profile.id, None).cloned(),
+                project: root.as_deref().and_then(|root| {
+                    store
+                        .provider_plugin_catalog(&profile.id, Some(root))
+                        .cloned()
+                }),
+                id: profile.id,
+            })
             .collect()
     }
 
-    /// Profiles Tcode lists plugins for under `switches`.
-    fn managed_profiles(&self, switches: &PluginManagementSettings, cx: &App) -> Vec<String> {
-        self.tab_profiles(cx)
-            .into_iter()
-            .filter(|profile| switches.provider_enabled(profile.kind))
-            .map(|profile| profile.id)
-            .collect()
-    }
-
-    fn list_switched_on(&mut self, cx: &mut App) {
-        let switches = self.store.read(cx).plugin_management().clone();
-        let before = self.managed_profiles(&self.switches, cx);
-        for profile_id in self.managed_profiles(&switches, cx) {
-            if !before.contains(&profile_id) {
-                self.refresh(&profile_id, cx);
+    /// The listings each account needs: its own scope, and the project's
+    /// where the Harness has project scopes.
+    fn wanted(&self, cx: &App) -> Vec<(String, Option<PathBuf>)> {
+        let root = self.project_root(cx);
+        let store = self.store.read(cx);
+        let mut wanted = Vec::new();
+        for profile in store.enabled_profiles() {
+            let management = profile.kind.caps().plugin_management;
+            if !management.manages() {
+                continue;
+            }
+            wanted.push((profile.id.clone(), None));
+            if management.scopes.contains(&PluginScope::Project)
+                && let Some(root) = &root
+            {
+                wanted.push((profile.id.clone(), Some(root.clone())));
             }
         }
-        self.switches = switches;
+        wanted
     }
 
-    /// List a profile's catalog from the open thread's directory, or from
-    /// outside any project when no thread is open.
-    fn refresh(&self, profile_id: &str, cx: &mut App) {
-        let profile_id = profile_id.to_string();
-        let thread = crate::shell::current_thread(cx);
-        self.store.update(cx, |store, cx| {
-            let cwd = store.session_cwd_for(thread.as_deref(), cx);
-            store.refresh_provider_plugins(profile_id, cwd);
+    fn list_missing(&mut self, cx: &mut App) {
+        for (profile_id, cwd) in self.wanted(cx) {
+            if self.listed.insert((profile_id.clone(), cwd.clone())) {
+                self.store.update(cx, |store, _| {
+                    store.refresh_provider_plugins(profile_id, cwd)
+                });
+            }
+        }
+    }
+
+    fn relist(&mut self, kind: ProviderKind, cx: &mut App) {
+        let store = self.store.read(cx);
+        let ours: Vec<(String, Option<PathBuf>)> = self
+            .wanted(cx)
+            .into_iter()
+            .filter(|(profile_id, _)| store.provider_profile_kind(profile_id) == kind)
+            .collect();
+        for (profile_id, cwd) in ours {
+            self.listed.insert((profile_id.clone(), cwd.clone()));
+            self.store.update(cx, |store, _| {
+                store.refresh_provider_plugins(profile_id, cwd)
+            });
+        }
+    }
+
+    fn run(
+        &self,
+        account: &str,
+        entry: &str,
+        action: PluginAction,
+        cwd: Option<PathBuf>,
+        cx: &mut App,
+    ) {
+        let (account, entry) = (account.to_string(), entry.to_string());
+        self.store.update(cx, |store, _| {
+            store.run_provider_plugin_action(account, entry, action, cwd)
         });
     }
 
     fn pending_challenges(&self, cx: &App) -> Vec<PluginChallenge> {
-        let store = self.store.read(cx);
-        store
-            .enabled_profiles()
+        self.store
+            .read(cx)
+            .provider_plugin_catalogs()
             .iter()
-            .filter_map(|profile| store.provider_plugin_catalog(&profile.id))
             .flat_map(|catalog| catalog.challenges.iter().cloned())
             .collect()
     }
@@ -325,29 +571,38 @@ impl PluginsSettingsPanel {
         });
     }
 
+    /// Ask for a marketplace source and the accounts to add it to.
     fn open_add_marketplace(
-        &self,
-        profile_id: String,
-        cwd: Option<PathBuf>,
+        &mut self,
+        accounts: Vec<Account>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::tr!(
-                "providers.plugins.marketplace_source_placeholder"
-            ))
+        let first = self.default_account(&accounts, cx);
+        self.marketplace_accounts = first.into_iter().collect();
+        self.marketplace_source.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_placeholder(
+                crate::tr!("providers.plugins.marketplace_source_placeholder"),
+                window,
+                cx,
+            );
         });
+        let panel = cx.entity();
+        let input = self.marketplace_source.clone();
         let store = self.store.clone();
         window.open_dialog(cx, move |dialog, _, _| {
+            let panel = panel.clone();
             let field = input.clone();
             let submit_input = input.clone();
+            let submit_panel = panel.clone();
+            let accounts = accounts.clone();
             let store = store.clone();
-            let profile_id = profile_id.clone();
-            let cwd = cwd.clone();
             dialog
                 .wide()
                 .title(crate::tr!("providers.plugins.add_marketplace_title").into_owned())
                 .content(move |content, _, cx| {
+                    let chosen = panel.read(cx).marketplace_accounts.clone();
                     content.child(
                         v_flex()
                             .w_full()
@@ -362,7 +617,39 @@ impl PluginsSettingsPanel {
                                 div()
                                     .text_secondary(false, cx)
                                     .child(crate::tr!("providers.plugins.marketplace_source_help")),
-                            ),
+                            )
+                            .child(
+                                div()
+                                    .pt_2()
+                                    .text_caption(cx)
+                                    .child(crate::tr!("providers.plugins.add_to_accounts")),
+                            )
+                            .children(accounts.iter().map(|account| {
+                                let id = account.id.clone();
+                                let panel = panel.clone();
+                                let selector = format!("plugin-marketplace-account-{id}");
+                                div().debug_selector(move || selector.clone()).child(
+                                    Checkbox::new(SharedString::from(format!(
+                                        "plugin-marketplace-account-{id}"
+                                    )))
+                                    .label(account.name.clone())
+                                    .checked(chosen.contains(&id))
+                                    .on_click(
+                                        move |checked, _, cx| {
+                                            let id = id.clone();
+                                            let checked = *checked;
+                                            panel.update(cx, |panel, cx| {
+                                                if checked {
+                                                    panel.marketplace_accounts.insert(id);
+                                                } else {
+                                                    panel.marketplace_accounts.remove(&id);
+                                                }
+                                                cx.notify();
+                                            });
+                                        },
+                                    ),
+                                )
+                            })),
                     )
                 })
                 .footer(
@@ -380,12 +667,18 @@ impl PluginsSettingsPanel {
                                 .label(crate::tr!("providers.plugins.add").into_owned())
                                 .on_click(move |_, window, cx| {
                                     let source = submit_input.read(cx).value().trim().to_string();
-                                    if source.is_empty() {
+                                    let chosen = submit_panel.read(cx).marketplace_accounts.clone();
+                                    if source.is_empty() || chosen.is_empty() {
                                         return;
                                     }
-                                    let (profile_id, cwd) = (profile_id.clone(), cwd.clone());
                                     store.update(cx, |store, _| {
-                                        store.add_provider_marketplace(profile_id, source, cwd)
+                                        for profile_id in chosen {
+                                            store.add_provider_marketplace(
+                                                profile_id,
+                                                source.clone(),
+                                                None,
+                                            );
+                                        }
                                     });
                                     window.close_dialog(cx);
                                 }),
@@ -394,37 +687,317 @@ impl PluginsSettingsPanel {
         });
     }
 
-    fn provider_tabs(
-        &self,
-        profiles: &[ResolvedProfile],
-        selected: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let tabs = profiles
+    /// The account an install or a marketplace starts ticked for: the open
+    /// thread's when it is one of these, else the first.
+    fn default_account(&self, accounts: &[Account], cx: &App) -> Option<String> {
+        let store = self.store.read(cx);
+        let thread_profile = crate::shell::current_thread(cx)
+            .and_then(|thread| store.thread_meta(&thread).cloned())
+            .map(|meta| {
+                meta.profile_id
+                    .unwrap_or_else(|| tcode_core::settings::provider_key(meta.provider).into())
+            });
+        thread_profile
+            .filter(|id| accounts.iter().any(|account| account.id == *id))
+            .or_else(|| accounts.first().map(|account| account.id.clone()))
+    }
+
+    /// Start composing an install of `entry_id`, ticking one account.
+    fn begin_install(&mut self, entry_id: String, accounts: &[Account], cx: &mut Context<Self>) {
+        let installable: Vec<Account> = accounts
             .iter()
-            .map(|profile| {
-                let name = self
-                    .store
-                    .read(cx)
-                    .provider_profile_display_name(&profile.id);
-                let profile_id = profile.id.clone();
-                TabItem::new(
-                    SharedString::from(format!("plugins-tab-{}", profile.id)),
-                    name,
+            .filter(|account| !install_scopes(account, &entry_id).is_empty())
+            .cloned()
+            .collect();
+        let first = self
+            .default_account(&installable, cx)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let scope = first
+            .iter()
+            .filter_map(|id| installable.iter().find(|account| account.id == *id))
+            .flat_map(|account| install_scopes(account, &entry_id))
+            .next()
+            .unwrap_or(PluginScope::User);
+        self.install = Some(InstallDraft {
+            entry_id,
+            accounts: first,
+            scope,
+        });
+        cx.notify();
+    }
+
+    fn confirm_install(&mut self, cx: &mut Context<Self>) {
+        let Some(draft) = self.install.take() else {
+            return;
+        };
+        let cwd = match draft.scope {
+            PluginScope::User => None,
+            _ => self.project_root(cx),
+        };
+        for account in &draft.accounts {
+            self.run(
+                account,
+                &draft.entry_id,
+                PluginAction::Install { scope: draft.scope },
+                cwd.clone(),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    fn back(&mut self, cx: &mut Context<Self>) {
+        self.page = match self.page {
+            Page::Browse => Page::Harness,
+            Page::Harness | Page::Overview => Page::Overview,
+        };
+        self.install = None;
+        self.page_scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
+    }
+
+    fn open(&mut self, page: Page, kind: ProviderKind, cx: &mut Context<Self>) {
+        self.harness = Some(kind);
+        self.page = page;
+        self.install = None;
+        self.page_scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
+    }
+}
+
+/// The scopes `account` can install `entry_id` in: its own from its own
+/// listing, the project's from the project's.
+fn install_scopes(account: &Account, entry_id: &str) -> Vec<PluginScope> {
+    let mut scopes = Vec::new();
+    for (project, catalog) in [(false, &account.user), (true, &account.project)] {
+        let Some(entry) = catalog
+            .as_ref()
+            .and_then(|catalog| catalog.entries.iter().find(|entry| entry.id == entry_id))
+        else {
+            continue;
+        };
+        for action in &entry.actions {
+            if let PluginAction::Install { scope } = action
+                && (*scope == PluginScope::User) != project
+                && !scopes.contains(scope)
+            {
+                scopes.push(*scope);
+            }
+        }
+    }
+    scopes
+}
+
+impl Render for PluginsSettingsPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.shown && self.store.read(cx).settings_hydrated() {
+            self.shown = true;
+            self.list_missing(cx);
+            cx.defer_in(window, |this, window, cx| this.sync_challenge(window, cx));
+        }
+        let compact = self.compact(cx);
+        self.touch = compact;
+        // Below this width the columns do not fit beside a plugin's name, so
+        // each plugin stacks its accounts under it as on a phone.
+        let stacked = compact || window.viewport_size().width < px(STACKED_BELOW);
+        let kind = self.harness_shown(cx);
+        let page = match (self.page, kind) {
+            (_, None) => Page::Overview,
+            (Page::Overview, Some(_)) if !compact => Page::Harness,
+            (page, Some(_)) => page,
+        };
+        let body = match (page, kind) {
+            (Page::Overview, _) | (_, None) => self.overview(window, cx),
+            (Page::Harness, Some(kind)) => self.harness_page(kind, stacked, window, cx),
+            (Page::Browse, Some(kind)) => self.browse_page(kind, stacked, window, cx),
+        };
+        v_flex()
+            .w_full()
+            .gap(if compact {
+                cx.theme().tokens.spacing.lg
+            } else {
+                material::section_gap(cx)
+            })
+            .on_action(cx.listener(|this, action: &RunPluginAction, _, cx| {
+                this.run(
+                    &action.profile_id,
+                    &action.entry_id,
+                    action.action,
+                    action.cwd.clone(),
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|this, action: &ChooseProject, _, cx| {
+                this.project = Some(action.project_id.clone());
+                this.list_missing(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, action: &RemoveMarketplace, _, cx| {
+                let (profile_id, name) = (action.profile_id.clone(), action.name.clone());
+                this.store.update(cx, |store, _| {
+                    store.remove_provider_marketplace(profile_id, name, None)
+                });
+            }))
+            .child(body)
+    }
+}
+
+impl PluginsSettingsPanel {
+    /// The list of Harnesses: the first page on a compact window, and what
+    /// shows when none is managed.
+    fn overview(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let harnesses = self.harnesses(cx);
+        let rows: Vec<AnyElement> = harnesses
+            .iter()
+            .map(|kind| {
+                let kind = *kind;
+                let accounts = self.accounts(kind, cx);
+                let installed = rows(&accounts, false, PluginScope::User).len();
+                let id = format!(
+                    "plugins-harness-{}",
+                    tcode_core::settings::provider_key(kind)
+                );
+                let subtitle = crate::tr!(
+                    "providers.plugins.harness_summary",
+                    accounts = accounts.len(),
+                    plugins = installed
+                );
+                material::list_row(
+                    SharedString::from(id.clone()),
+                    kind.display_name().into(),
+                    cx,
                 )
-                .icon(crate::provider_card::profile_glyph(
-                    self.store.read(cx),
-                    profile.kind,
-                    Some(&profile.id),
+                .debug_selector(move || id.clone())
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_body(self.touch, cx).child(kind.display_name()))
+                        .child(
+                            div()
+                                .text_secondary(self.touch, cx)
+                                .child(subtitle.into_owned()),
+                        ),
+                )
+                .child(Icon::new(IconName::ChevronRight).text_color(cx.theme().muted_foreground))
+                .on_click(cx.listener(move |this, _, _, cx| this.open(Page::Harness, kind, cx)))
+                .into_any_element()
+            })
+            .collect();
+        let empty = rows.is_empty();
+        v_flex()
+            .w_full()
+            .gap(cx.theme().tokens.spacing.lg)
+            .when(!self.touch, |page| {
+                page.child(material::group_caption(
+                    crate::tr!("settings.plugins_section"),
+                    cx,
                 ))
-                .selected(profile.id == selected)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.selected = Some(profile_id.clone());
-                    cx.notify();
-                }))
+            })
+            .child(if empty {
+                material::grouped(
+                    vec![note_row(
+                        crate::tr!("providers.plugins.no_providers").into_owned(),
+                        cx,
+                    )],
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                material::grouped(rows, cx).into_any_element()
+            })
+            .children(self.other_harnesses(cx))
+            .into_any_element()
+    }
+
+    /// One honest line for each Harness with an account whose plugins Tcode
+    /// does not manage.
+    fn other_harnesses(&self, cx: &App) -> Option<AnyElement> {
+        let profiles = self.store.read(cx).enabled_profiles();
+        let rows: Vec<AnyElement> = ProviderKind::NATIVE
+            .into_iter()
+            .filter(|kind| profiles.iter().any(|profile| profile.kind == *kind))
+            .filter_map(|kind| {
+                let unmanaged = kind.caps().plugin_management.unmanaged?;
+                let name = kind.display_name();
+                let command = unmanaged.command.unwrap_or_default();
+                let line = match unmanaged.kind {
+                    UnmanagedPluginsKind::Packages => {
+                        crate::tr!(
+                            "providers.plugins.unmanaged.packages",
+                            name = name,
+                            command = command
+                        )
+                    }
+                    UnmanagedPluginsKind::SharedConfig => crate::tr!(
+                        "providers.plugins.unmanaged.shared_config",
+                        name = name,
+                        command = command
+                    ),
+                    UnmanagedPluginsKind::EditorOnly => {
+                        crate::tr!("providers.plugins.unmanaged.editor_only", name = name)
+                    }
+                };
+                let id = format!("plugins-other-{}", tcode_core::settings::provider_key(kind));
+                Some(
+                    material::group_row_stacked(cx)
+                        .debug_selector(move || id.clone())
+                        .gap_0p5()
+                        .child(div().text_body(self.touch, cx).child(name))
+                        .child(
+                            div()
+                                .text_secondary(self.touch, cx)
+                                .child(line.into_owned()),
+                        )
+                        .into_any_element(),
+                )
+            })
+            .collect();
+        (!rows.is_empty()).then(|| {
+            v_flex()
+                .w_full()
+                .child(material::group_caption(
+                    crate::tr!("providers.plugins.other_harnesses"),
+                    cx,
+                ))
+                .child(material::grouped(rows, cx))
+                .into_any_element()
+        })
+    }
+
+    fn back_bar(&self, label: String, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .child(
+                Button::new("plugins-back")
+                    .debug_selector(|| "plugins-back".into())
+                    .ghost()
+                    .when(!compact, |button| button.small())
+                    .icon(IconName::ChevronLeft)
+                    .label(label)
+                    .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
+            )
+            .into_any_element()
+    }
+
+    fn harness_tabs(&self, kind: ProviderKind, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = self
+            .harnesses(cx)
+            .into_iter()
+            .map(|harness| {
+                let installed = rows(&self.accounts(harness, cx), false, PluginScope::User).len();
+                let key = tcode_core::settings::provider_key(harness);
+                TabItem::new(
+                    SharedString::from(format!("plugins-tab-{key}")),
+                    harness.display_name(),
+                )
+                .count(installed)
+                .selected(harness == kind)
+                .on_click(cx.listener(move |this, _, _, cx| this.open(Page::Harness, harness, cx)))
             })
             .collect::<Vec<_>>();
-        TabBar::new("plugins-provider-tabs")
+        TabBar::new("plugins-harness-tabs")
             .underline()
             .w_full()
             .aria_label(crate::tr!("settings.plugins"))
@@ -432,1484 +1005,2113 @@ impl PluginsSettingsPanel {
             .into_any_element()
     }
 
-    fn render_profile(
+    fn harness_page(
         &mut self,
-        profile: &ResolvedProfile,
+        kind: ProviderKind,
+        compact: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let store = self.store.read(cx);
-        let name = store.provider_profile_display_name(&profile.id);
-        let catalog = store.provider_plugin_catalog(&profile.id).cloned();
-        let requested_cwd = store.session_cwd_for(crate::shell::current_thread(cx).as_deref(), cx);
-        let switches = store.plugin_management();
-        let (master, switch_on) = (switches.enabled, switches.provider_switch(profile.kind));
-        let muted = cx.theme().muted_foreground;
-        let profile_id = profile.id.clone();
-        let kind = profile.kind;
-        let switch_id = format!("plugins-switch-{profile_id}");
-        let switch = div().debug_selector(move || switch_id.clone()).child(
-            Switch::new(SharedString::from(format!("plugins-switch-{profile_id}")))
-                .checked(switch_on)
-                .disabled(!master)
-                .tooltip(crate::tr!("providers.plugins.provider_switch", name = name).into_owned())
-                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                    let checked = *checked;
-                    this.store.update(cx, |store, _| {
-                        store.set_provider_plugin_management(kind, checked)
-                    });
-                })),
-        );
-
-        let off = if !master {
-            Some(crate::tr!("providers.plugins.management_off"))
-        } else if !switch_on {
-            Some(crate::tr!("providers.plugins.provider_off", name = name))
-        } else {
-            None
-        };
-        let subtitle = match &off {
-            Some(note) => note.clone(),
-            None => match catalog
+        let management = kind.caps().plugin_management;
+        let accounts = self.accounts(kind, cx);
+        let columns: Vec<Account> = if accounts.len() > MAX_COLUMNS && !compact {
+            let shown = self
+                .column
                 .as_ref()
-                .map_or(requested_cwd, |catalog| catalog.context_cwd.clone())
-            {
-                Some(path) => {
-                    crate::tr!("providers.plugins.project_context", path = path.display())
-                }
-                None => crate::tr!("providers.plugins.no_project_context"),
-            },
+                .and_then(|id| accounts.iter().find(|account| account.id == *id))
+                .or(accounts.first())
+                .cloned();
+            shown.into_iter().collect()
+        } else {
+            accounts.clone()
         };
-        let on = off.is_none();
-        let loading = on && catalog.as_ref().is_none_or(|catalog| catalog.loading);
-        let refresh_id = format!("plugins-refresh-{profile_id}");
-        let spinner = crate::motion::shown(
-            SharedString::from(format!("plugins-loading-{profile_id}")),
-            loading.then_some(()),
-            SHOW,
+        let user_rows = rows(&columns, false, PluginScope::User);
+        let managed_rows = rows(&columns, false, PluginScope::Managed);
+        let has_project = management.scopes.contains(&PluginScope::Project);
+        let project = has_project.then(|| self.project(cx)).flatten();
+
+        let mut page = v_flex().w_full().gap(if compact {
+            cx.theme().tokens.spacing.lg
+        } else {
+            material::section_gap(cx)
+        });
+        if self.touch {
+            page = page.child(self.back_bar(
+                crate::tr!("settings.plugins").into_owned(),
+                self.touch,
+                cx,
+            ));
+        } else {
+            page = page.child(self.harness_tabs(kind, cx));
+        }
+        page = page.child(self.harness_header(kind, &accounts, compact, window, cx));
+        if accounts.len() > MAX_COLUMNS && !compact {
+            page = page.child(self.column_switcher(&accounts, &columns, cx));
+        }
+        page = page.children(self.failures(&accounts, kind, cx));
+
+        // User scope: one switch per account.
+        let caption = crate::tr!("providers.plugins.user_scope").into_owned();
+        let note = (!management.supports(PluginActionKind::Enable)).then(|| {
+            crate::tr!(
+                "providers.plugins.no_enablement",
+                name = kind.display_name()
+            )
+            .into_owned()
+        });
+        let listing = columns.iter().all(|account| {
+            account.user.is_none()
+                || (account.loading()
+                    && account
+                        .user
+                        .as_ref()
+                        .is_some_and(|catalog| catalog.entries.is_empty()))
+        });
+        let body = if user_rows.is_empty() {
+            if listing {
+                note_card(crate::tr!("providers.plugins.listing").into_owned(), cx)
+            } else {
+                self.empty_user(kind, cx)
+            }
+        } else {
+            self.plugin_rows(
+                &columns,
+                user_rows,
+                false,
+                PluginScope::User,
+                kind,
+                compact,
+                window,
+                cx,
+            )
+        };
+        page = page.child(self.section(caption, None, &columns, compact, body, note, cx));
+
+        if has_project {
+            page = page.child(self.project_section(kind, &columns, project, compact, window, cx));
+        }
+        if !managed_rows.is_empty() {
+            let body = self.plugin_rows(
+                &columns,
+                managed_rows,
+                false,
+                PluginScope::Managed,
+                kind,
+                compact,
+                window,
+                cx,
+            );
+            page = page.child(self.section(
+                crate::tr!("providers.plugins.managed_scope").into_owned(),
+                None,
+                &columns,
+                compact,
+                body,
+                None,
+                cx,
+            ));
+        }
+        if management.marketplaces {
+            page = page.child(self.marketplaces(&columns, &accounts, compact, cx));
+        }
+        if !self.touch {
+            page = page.children(self.other_harnesses(cx));
+        }
+        page.into_any_element()
+    }
+
+    fn harness_header(
+        &self,
+        kind: ProviderKind,
+        accounts: &[Account],
+        compact: bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let chips = accounts.iter().map(|account| {
+            let state: AnyElement = if account.loading() {
+                Spinner::new().xsmall().color(muted).into_any_element()
+            } else if account.failure().is_some() {
+                Icon::new(IconName::TriangleAlert)
+                    .xsmall()
+                    .text_color(cx.theme().danger)
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            };
+            let id = format!("plugins-account-{}", account.id);
+            material::chip_surface(cx.theme().secondary, cx.theme().foreground, cx)
+                .debug_selector(move || id.clone())
+                .child(material::status_dot(account.color))
+                .child(account.name.clone())
+                .child(state)
+        });
+        let refresh = Button::new("plugins-refresh")
+            .debug_selector(|| "plugins-refresh".into())
+            .ghost()
+            .small()
+            .icon(IconName::RotateCcw)
+            .tooltip(crate::tr!(
+                "providers.plugins.refresh",
+                name = kind.display_name()
+            ))
+            .on_click(cx.listener(move |this, _, _, cx| this.relist(kind, cx)));
+        let installs = kind
+            .caps()
+            .plugin_management
+            .supports(PluginActionKind::Install);
+        let browse = installs.then(|| {
+            Button::new("plugins-browse")
+                .debug_selector(|| "plugins-browse".into())
+                .primary()
+                .when(!compact, |button| button.small())
+                .when(compact, |button| button.w_full())
+                .icon(IconName::Search)
+                .label(crate::tr!("providers.plugins.browse").into_owned())
+                .on_click(cx.listener(move |this, _, _, cx| this.open(Page::Browse, kind, cx)))
+        });
+        let description = div()
+            .text_secondary(self.touch, cx)
+            .child(crate::tr!("providers.plugins.where_kept").into_owned());
+        if compact {
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .children(browse.map(|b| div().flex_1().child(b)))
+                        .child(refresh),
+                )
+                .child(description)
+                .child(h_flex().w_full().flex_wrap().gap_1p5().children(chips))
+                .into_any_element()
+        } else {
+            h_flex()
+                .w_full()
+                .items_start()
+                .gap_3()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .child(description)
+                        .child(h_flex().w_full().flex_wrap().gap_1p5().children(chips)),
+                )
+                .child(refresh)
+                .children(browse)
+                .into_any_element()
+        }
+    }
+
+    fn column_switcher(
+        &self,
+        accounts: &[Account],
+        columns: &[Account],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let shown = columns.first().map(|account| account.id.clone());
+        let items = accounts.iter().map(|account| {
+            let id = account.id.clone();
+            TabItem::new(
+                SharedString::from(format!("plugins-column-{id}")),
+                account.name.clone(),
+            )
+            .selected(shown.as_ref() == Some(&account.id))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.column = Some(id.clone());
+                cx.notify();
+            }))
+        });
+        TabBar::new("plugins-columns")
+            .segmented()
+            .items(items.collect::<Vec<_>>())
+            .into_any_element()
+    }
+
+    /// A notice for each account whose listing failed, with its native text.
+    fn failures(
+        &self,
+        accounts: &[Account],
+        kind: ProviderKind,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut notices = Vec::new();
+        for account in accounts {
+            let errors: Vec<String> = account
+                .failure()
+                .into_iter()
+                .chain(
+                    [&account.user, &account.project]
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|catalog| catalog.errors.iter().cloned()),
+                )
+                .collect();
+            if errors.is_empty() {
+                continue;
+            }
+            let failed = account.failure().is_some();
+            let tone = if failed {
+                cx.theme().danger
+            } else {
+                cx.theme().warning
+            };
+            let id = format!("plugins-failure-{}", account.id);
+            notices.push(
+                material::notice(tone, cx)
+                    .debug_selector(move || id.clone())
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_start()
+                            .gap_3()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(div().text_body(false, cx).child(if failed {
+                                        crate::tr!(
+                                            "providers.plugins.list_failed",
+                                            name = account.name
+                                        )
+                                        .into_owned()
+                                    } else {
+                                        crate::tr!(
+                                            "providers.plugins.catalog_errors",
+                                            name = account.name
+                                        )
+                                        .into_owned()
+                                    }))
+                                    .children(errors.into_iter().map(|error| {
+                                        div().text_meta_mono(false, cx).child(verbatim(error, cx))
+                                    })),
+                            )
+                            .when(failed, |row| {
+                                row.child(
+                                    Button::new(SharedString::from(format!(
+                                        "plugins-retry-{}",
+                                        account.id
+                                    )))
+                                    .outline()
+                                    .small()
+                                    .label(crate::tr!("providers.plugins.retry").into_owned())
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.relist(kind, cx)),
+                                    ),
+                                )
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        notices
+    }
+
+    fn empty_user(&self, kind: ProviderKind, cx: &mut Context<Self>) -> AnyElement {
+        let installs = kind
+            .caps()
+            .plugin_management
+            .supports(PluginActionKind::Install);
+        material::grouped(
+            vec![
+                material::group_row_stacked(cx)
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_secondary(self.touch, cx)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                crate::tr!(
+                                    "providers.plugins.no_installed",
+                                    name = kind.display_name()
+                                )
+                                .into_owned(),
+                            ),
+                    )
+                    .when(installs, |col| {
+                        col.child(
+                            Button::new("plugins-empty-browse")
+                                .primary()
+                                .small()
+                                .icon(IconName::Search)
+                                .label(crate::tr!("providers.plugins.browse").into_owned())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open(Page::Browse, kind, cx)
+                                })),
+                        )
+                    })
+                    .into_any_element(),
+            ],
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// A captioned group; wide, the caption carries a heading per column.
+    #[allow(clippy::too_many_arguments)]
+    fn section(
+        &self,
+        caption: String,
+        lead: Option<AnyElement>,
+        columns: &[Account],
+        compact: bool,
+        body: AnyElement,
+        note: Option<String>,
+        cx: &App,
+    ) -> AnyElement {
+        let headings = (!compact).then(|| {
+            h_flex()
+                .flex_none()
+                .children(columns.iter().map(|account| {
+                    h_flex()
+                        .w(px(CELL_WIDTH))
+                        .justify_center()
+                        .gap_1()
+                        .overflow_hidden()
+                        .child(material::status_dot(account.color))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_caption(cx)
+                                .child(account.name.clone()),
+                        )
+                }))
+                .child(div().w(px(MENU_WIDTH)))
+        });
+        v_flex()
+            .w_full()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .pl(px(material::CARD_INSET))
+                    .pr(px(material::CARD_INSET))
+                    .pb(cx.theme().tokens.spacing.sm)
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .text_caption(cx)
+                            .child(caption)
+                            .children(lead),
+                    )
+                    .children(headings),
+            )
+            .child(body)
+            .children(note.map(|note| {
+                div()
+                    .pt_2()
+                    .pl(px(material::CARD_INSET))
+                    .text_secondary(self.touch, cx)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(note)
+            }))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plugin_rows(
+        &mut self,
+        columns: &[Account],
+        rows: Vec<Row>,
+        project: bool,
+        scope: PluginScope,
+        kind: ProviderKind,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Rows are keyed by plugin, so one installed or removed folds in or
+        // out where it is and the rest glide to their places.
+        let id = format!("plugin-rows-{}", scope_key(scope));
+        let rows = rows
+            .into_iter()
+            .map(|row| (SharedString::from(row.entry.id.clone()), Rc::new(row)));
+        if compact {
+            let cards = crate::motion::keyed(
+                SharedString::from(id),
+                rows,
+                ROWS,
+                window,
+                cx,
+                |_, row, window, cx| {
+                    div()
+                        .w_full()
+                        .pb_3()
+                        .child(self.plugin_card(columns, row, project, scope, kind, window, cx))
+                        .into_any_element()
+                },
+            );
+            return cards.render(v_flex().w_full()).into_any_element();
+        }
+        let rows = crate::settings_rows::grouped_keyed(
+            SharedString::from(id),
+            rows,
             window,
             cx,
+            |_, row, window, cx| self.plugin_row(columns, row, project, scope, kind, window, cx),
         );
-        let refresh = crate::motion::shown(
-            SharedString::from(format!("plugins-refresh-slot-{profile_id}")),
-            on.then_some(()),
-            SHOW,
-            window,
+        material::group(cx).child(rows).into_any_element()
+    }
+
+    /// What describes a plugin, the same in every account.
+    fn plugin_summary(&self, row: &Row, scope: PluginScope, cx: &mut Context<Self>) -> AnyElement {
+        let entry = &row.entry;
+        let expanded = self.expanded.contains(&entry.id);
+        let id = entry.id.clone();
+        let toggle_id = format!("plugin-details-{}-{}", scope_key(scope), entry.id);
+        let muted = cx.theme().muted_foreground;
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap_0p5()
+            .child(
+                h_flex()
+                    .id(SharedString::from(toggle_id.clone()))
+                    .debug_selector(move || toggle_id.clone())
+                    .w_full()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded.remove(&id) {
+                            this.expanded.insert(id.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_body(self.touch, cx)
+                            .font_medium()
+                            .child(entry.name.clone()),
+                    )
+                    .child(source_chip(entry, cx))
+                    .child(
+                        Icon::new(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .text_color(muted),
+                    ),
+            )
+            .when_some(entry.description.clone(), |col, description| {
+                col.child(div().text_secondary(self.touch, cx).child(description))
+            })
+            .children(components_line(entry, self.touch, cx))
+            .children(entry.errors.iter().map(|error| {
+                div()
+                    .text_secondary(self.touch, cx)
+                    .text_color(cx.theme().danger)
+                    .child(verbatim(error.clone(), cx))
+            }))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plugin_row(
+        &self,
+        columns: &[Account],
+        row: &Row,
+        project: bool,
+        scope: PluginScope,
+        kind: ProviderKind,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row_id = format!("plugin-row-{}-{}", scope_key(scope), row.entry.id);
+        let differ = row.versions_differ(scope);
+        let right: AnyElement = if project {
+            self.project_switches(columns, row, cx)
+        } else {
+            h_flex()
+                .flex_none()
+                .items_start()
+                .children(columns.iter().zip(&row.cells).map(|(account, cell)| {
+                    div()
+                        .w(px(CELL_WIDTH))
+                        .flex()
+                        .justify_center()
+                        .child(self.cell(
+                            account,
+                            cell.as_ref(),
+                            &row.entry,
+                            scope,
+                            differ,
+                            false,
+                            cx,
+                        ))
+                }))
+                .into_any_element()
+        };
+        let expanded = self.expanded.contains(&row.entry.id);
+        let summary = self.plugin_summary(row, scope, cx);
+        let readiness = project.then(|| self.readiness(columns, row, kind, cx));
+        material::group_row_stacked(cx)
+            .id(SharedString::from(row_id.clone()))
+            .debug_selector(move || row_id.clone())
+            .gap_2()
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        Icon::new(IconName::Puzzle)
+                            .text_color(cx.theme().muted_foreground)
+                            .mt_0p5(),
+                    )
+                    .child(summary)
+                    .child(right)
+                    .child(self.row_menu(columns, row, project, scope, cx)),
+            )
+            .children(readiness)
+            .child(
+                Collapsible::new(
+                    SharedString::from(format!("plugin-more-{}", row.entry.id)),
+                    expanded,
+                )
+                .motion(&self.motion)
+                .w_full()
+                .content(details(columns, row, project, scope, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// A phone's card for one plugin: what describes it, then a row per
+    /// account, or one row for the project every account shares.
+    #[allow(clippy::too_many_arguments)]
+    fn plugin_card(
+        &self,
+        columns: &[Account],
+        row: &Row,
+        project: bool,
+        scope: PluginScope,
+        kind: ProviderKind,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row_id = format!("plugin-row-{}-{}", scope_key(scope), row.entry.id);
+        let differ = row.versions_differ(scope);
+        let expanded = self.expanded.contains(&row.entry.id);
+        let mut lines = vec![
+            material::group_row_stacked(cx)
+                .gap_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .gap_2()
+                        .child(self.plugin_summary(row, scope, cx))
+                        .child(self.row_menu(columns, row, project, scope, cx)),
+                )
+                .child(
+                    Collapsible::new(
+                        SharedString::from(format!("plugin-more-{}", row.entry.id)),
+                        expanded,
+                    )
+                    .motion(&self.motion)
+                    .w_full()
+                    .content(details(columns, row, project, scope, cx)),
+                )
+                .into_any_element(),
+        ];
+        if project {
+            lines.push(
+                material::group_row(cx)
+                    .child(
+                        div().flex_1().min_w_0().text_body(self.touch, cx).child(
+                            crate::tr!("providers.plugins.this_project_shared").into_owned(),
+                        ),
+                    )
+                    .child(self.project_switches(columns, row, cx))
+                    .into_any_element(),
+            );
+            lines.push(
+                material::group_row_stacked(cx)
+                    .child(self.readiness(columns, row, kind, cx))
+                    .into_any_element(),
+            );
+        } else {
+            for (account, cell) in columns.iter().zip(&row.cells) {
+                lines.push(
+                    material::group_row(cx)
+                        .when(self.touch, |row| row.min_h(px(material::TOUCH_TARGET)))
+                        .gap_2()
+                        .child(material::status_dot(account.color))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_body(self.touch, cx)
+                                .child(account.name.clone()),
+                        )
+                        .child(self.cell(
+                            account,
+                            cell.as_ref(),
+                            &row.entry,
+                            scope,
+                            differ,
+                            true,
+                            cx,
+                        ))
+                        .into_any_element(),
+                );
+            }
+        }
+        div()
+            .id(SharedString::from(row_id.clone()))
+            .debug_selector(move || row_id.clone())
+            .w_full()
+            .child(material::grouped(lines, cx))
+            .into_any_element()
+    }
+
+    /// One account's state for a plugin in its own scope.
+    #[allow(clippy::too_many_arguments)]
+    fn cell(
+        &self,
+        account: &Account,
+        entry: Option<&ProviderPluginEntry>,
+        described: &ProviderPluginEntry,
+        scope: PluginScope,
+        differ: bool,
+        inline: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let cell_id = format!("plugin-cell-{}-{}", account.id, described.id);
+        let busy = account.busy();
+        let lines = if inline {
+            h_flex().items_center().gap_2()
+        } else {
+            v_flex().items_center().gap_0p5()
+        };
+        let lines = lines.debug_selector({
+            let cell_id = cell_id.clone();
+            move || cell_id.clone()
+        });
+        let Some(catalog) = account.user.as_ref() else {
+            return lines
+                .child(Spinner::new().small().color(muted))
+                .into_any_element();
+        };
+        let Some(entry) = entry else {
+            if catalog.loading && catalog.entries.is_empty() {
+                return lines
+                    .child(Spinner::new().small().color(muted))
+                    .into_any_element();
+            }
+            let reason = match described.source.marketplace.as_deref() {
+                Some(marketplace)
+                    if !catalog
+                        .marketplaces
+                        .iter()
+                        .any(|known| known.name == marketplace) =>
+                {
+                    crate::tr!(
+                        "providers.plugins.no_marketplace",
+                        name = account.name,
+                        marketplace = marketplace
+                    )
+                }
+                _ => crate::tr!("providers.plugins.not_offered", name = account.name),
+            };
+            return lines
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{cell_id}-none")))
+                        .text_color(muted)
+                        .child("—")
+                        .with_tooltip({
+                            let reason = reason.into_owned();
+                            move |_, _| Tooltip::new(reason.clone())
+                        }),
+                )
+                .into_any_element();
+        };
+        let installed = installation(entry, scope);
+        let pending = account.pending(&entry.id);
+        let enable = PluginAction::Enable { scope };
+        let disable = PluginAction::Disable { scope };
+        let toggles = offers(entry, enable) || offers(entry, disable);
+        let control: AnyElement = if pending {
+            Spinner::new().small().color(muted).into_any_element()
+        } else if installed.is_some() && toggles {
+            let on = scope_enabled(entry, scope);
+            let (account_id, entry_id) = (account.id.clone(), entry.id.clone());
+            let action = if on { disable } else { enable };
+            let switch_id = format!("plugin-switch-{}-{}", account.id, entry.id);
+            div()
+                .debug_selector(move || switch_id.clone())
+                .child(
+                    Switch::new(SharedString::from(format!(
+                        "plugin-switch-{}-{}",
+                        account.id, entry.id
+                    )))
+                    .checked(on)
+                    .disabled(busy || !offers(entry, action))
+                    .tooltip(account.name.clone())
+                    .on_click(cx.listener(
+                        move |this, checked: &bool, _, cx| {
+                            let action = if *checked { enable } else { disable };
+                            this.run(&account_id, &entry_id, action, None, cx);
+                        },
+                    )),
+                )
+                .into_any_element()
+        } else if installed.is_some() {
+            material::semantic_chip(
+                crate::tr!("providers.plugins.installed_state").into_owned(),
+                cx.theme().muted,
+                muted,
+                cx,
+            )
+            .into_any_element()
+        } else if offers(entry, PluginAction::Install { scope }) {
+            let (account_id, entry_id) = (account.id.clone(), entry.id.clone());
+            let id = format!("plugin-install-{}-{}", account.id, entry.id);
+            Button::new(SharedString::from(id.clone()))
+                .debug_selector(move || id.clone())
+                .outline()
+                .small()
+                .disabled(busy)
+                .label(crate::tr!("providers.plugins.action.install").into_owned())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.run(
+                        &account_id,
+                        &entry_id,
+                        PluginAction::Install { scope },
+                        None,
+                        cx,
+                    )
+                }))
+                .into_any_element()
+        } else {
+            div().text_color(muted).child("—").into_any_element()
+        };
+        let version = installed.and_then(|installation| installation.version.clone());
+        let fact: Option<AnyElement> = match (&entry.latest_version, installed) {
+            (Some(latest), Some(_)) => Some(
+                div()
+                    .text_token(&cx.theme().tokens.typography.xs)
+                    .text_color(cx.theme().primary)
+                    .child(crate::tr!("providers.plugins.latest", version = latest).into_owned())
+                    .into_any_element(),
+            ),
+            (None, Some(_)) if differ => Some(
+                div()
+                    .text_token(&cx.theme().tokens.typography.xs)
+                    .text_color(cx.theme().warning)
+                    .child(crate::tr!("providers.plugins.versions_differ").into_owned())
+                    .into_any_element(),
+            ),
+            (_, None) if !inline => Some(
+                div()
+                    .text_token(&cx.theme().tokens.typography.xs)
+                    .text_color(muted)
+                    .child(crate::tr!("providers.plugins.not_installed").into_owned())
+                    .into_any_element(),
+            ),
+            _ => None,
+        };
+        let update = PluginAction::Update { scope };
+        let update_button = (entry.latest_version.is_some() && offers(entry, update) && !pending)
+            .then(|| {
+                let (account_id, entry_id) = (account.id.clone(), entry.id.clone());
+                Button::new(SharedString::from(format!(
+                    "plugin-update-{}-{}",
+                    account.id, entry.id
+                )))
+                .outline()
+                .xsmall()
+                .disabled(busy)
+                .label(crate::tr!("providers.plugins.action.update").into_owned())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.run(&account_id, &entry_id, update, None, cx)
+                }))
+            });
+        let version = version.map(|version| div().text_meta_mono(inline, cx).child(version));
+        if inline {
+            lines
+                .children(fact)
+                .children(version)
+                .children(update_button)
+                .child(control)
+                .into_any_element()
+        } else {
+            lines
+                .child(control)
+                .children(version)
+                .children(fact)
+                .children(update_button)
+                .into_any_element()
+        }
+    }
+
+    /// The project's own switch for each project scope the plugin is in,
+    /// changed through any account that offers it: the file is shared.
+    fn project_switches(
+        &self,
+        columns: &[Account],
+        row: &Row,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let root = self.project_root(cx);
+        let muted = cx.theme().muted_foreground;
+        let scopes = [PluginScope::Project, PluginScope::Local];
+        let pending = columns.iter().any(|account| account.pending(&row.entry.id));
+        let busy = columns.iter().any(Account::busy);
+        let switches = scopes.into_iter().filter_map(|scope| {
+            let holder = row
+                .cells
+                .iter()
+                .flatten()
+                .find(|entry| installation(entry, scope).is_some())?;
+            let on = scope_enabled(holder, scope);
+            let wanted = if on {
+                PluginAction::Disable { scope }
+            } else {
+                PluginAction::Enable { scope }
+            };
+            let via = columns
+                .iter()
+                .zip(&row.cells)
+                .find(|(_, cell)| cell.as_ref().is_some_and(|entry| offers(entry, wanted)))
+                .map(|(account, _)| account.id.clone());
+            let label = match scope {
+                PluginScope::Local => crate::tr!("providers.plugins.local_only"),
+                _ => crate::tr!("providers.plugins.this_project"),
+            };
+            let id = format!(
+                "plugin-project-switch-{}-{}",
+                scope_key(scope),
+                row.entry.id
+            );
+            let entry_id = row.entry.id.clone();
+            let root = root.clone();
+            Some(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .justify_end()
+                    .child(
+                        div()
+                            .text_secondary(false, cx)
+                            .text_color(muted)
+                            .child(label.into_owned()),
+                    )
+                    .child(
+                        div().debug_selector(move || id.clone()).child(
+                            Switch::new(SharedString::from(format!(
+                                "plugin-project-switch-{}-{}",
+                                scope_key(scope),
+                                row.entry.id
+                            )))
+                            .checked(on)
+                            .disabled(busy || via.is_none())
+                            .on_click(cx.listener(
+                                move |this, checked: &bool, _, cx| {
+                                    let Some(via) = via.clone() else {
+                                        return;
+                                    };
+                                    let action = if *checked {
+                                        PluginAction::Enable { scope }
+                                    } else {
+                                        PluginAction::Disable { scope }
+                                    };
+                                    this.run(&via, &entry_id, action, root.clone(), cx);
+                                },
+                            )),
+                        ),
+                    ),
+            )
+        });
+        v_flex()
+            .flex_none()
+            .items_end()
+            .gap_1()
+            .when(pending, |col| {
+                col.child(Spinner::new().small().color(muted))
+            })
+            .children(switches)
+            .into_any_element()
+    }
+
+    /// Whether each account's sessions in the project get the plugin: the
+    /// enablement is shared, the files are each account's own.
+    fn readiness(
+        &self,
+        columns: &[Account],
+        row: &Row,
+        kind: ProviderKind,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let root = self.project_root(cx);
+        let muted = cx.theme().muted_foreground;
+        let items = columns.iter().zip(&row.cells).map(|(account, cell)| {
+            let ready = cell.as_ref().and_then(|entry| {
+                installation(entry, PluginScope::Project)
+                    .or(installation(entry, PluginScope::Local))
+            });
+            let install = cell.as_ref().is_some_and(|entry| {
+                offers(
+                    entry,
+                    PluginAction::Install {
+                        scope: PluginScope::Project,
+                    },
+                )
+            });
+            let id = format!("plugin-ready-{}-{}", account.id, row.entry.id);
+            // A short state beside the account, and for an account the
+            // project's plugin does not reach, what the Harness does then.
+            let (state, color, why) = match ready {
+                Some(installation) => (
+                    match &installation.version {
+                        Some(version) => {
+                            crate::tr!("providers.plugins.ready_version", version = version)
+                        }
+                        None => crate::tr!("providers.plugins.ready"),
+                    },
+                    cx.theme().success,
+                    None,
+                ),
+                None if install => (
+                    crate::tr!("providers.plugins.not_installed"),
+                    cx.theme().warning,
+                    Some(crate::tr!(
+                        "providers.plugins.not_installed_here",
+                        harness = kind.display_name()
+                    )),
+                ),
+                None => (
+                    crate::tr!("providers.plugins.cannot_install"),
+                    cx.theme().danger,
+                    Some(match row.entry.source.marketplace.as_deref() {
+                        Some(marketplace) => crate::tr!(
+                            "providers.plugins.cannot_install_here",
+                            marketplace = marketplace
+                        ),
+                        None => crate::tr!("providers.plugins.not_offered", name = account.name),
+                    }),
+                ),
+            };
+            let (account_id, entry_id, root) =
+                (account.id.clone(), row.entry.id.clone(), root.clone());
+            let install_button = (ready.is_none() && install).then(|| {
+                let button_id = format!("plugin-ready-install-{}-{}", account.id, row.entry.id);
+                Button::new(SharedString::from(button_id.clone()))
+                    .debug_selector(move || button_id.clone())
+                    .ghost()
+                    .xsmall()
+                    .disabled(account.busy())
+                    .label(
+                        crate::tr!("providers.plugins.install_in", name = account.name)
+                            .into_owned(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run(
+                            &account_id,
+                            &entry_id,
+                            PluginAction::Install {
+                                scope: PluginScope::Project,
+                            },
+                            root.clone(),
+                            cx,
+                        )
+                    }))
+            });
+            v_flex()
+                .debug_selector(move || id.clone())
+                .w_full()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1p5()
+                        .child(material::status_dot(account.color))
+                        .child(div().text_color(muted).child(account.name.clone()))
+                        .child(div().text_color(color).child(state.into_owned()))
+                        .children(install_button),
+                )
+                .children(why.map(|why| {
+                    div()
+                        .w_full()
+                        .pl_3p5()
+                        .text_color(muted)
+                        .child(why.into_owned())
+                }))
+        });
+        v_flex()
+            .w_full()
+            .gap_1()
+            .text_secondary(self.touch, cx)
+            .children(items)
+            .into_any_element()
+    }
+
+    /// The row's menu: each account's update and uninstall the host offered.
+    fn row_menu(
+        &self,
+        columns: &[Account],
+        row: &Row,
+        project: bool,
+        scope: PluginScope,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cwd = if project { self.project_root(cx) } else { None };
+        let scopes: Vec<PluginScope> = if project {
+            vec![PluginScope::Project, PluginScope::Local]
+        } else {
+            vec![scope]
+        };
+        let mut items: Vec<(String, RunPluginAction)> = Vec::new();
+        for (account, cell) in columns.iter().zip(&row.cells) {
+            let Some(entry) = cell else {
+                continue;
+            };
+            for &scope in &scopes {
+                for (action, key) in [
+                    (
+                        PluginAction::Update { scope },
+                        if entry.latest_version.is_some() {
+                            "providers.plugins.menu.update"
+                        } else {
+                            "providers.plugins.menu.check_update"
+                        },
+                    ),
+                    (
+                        PluginAction::Uninstall { scope },
+                        "providers.plugins.menu.uninstall",
+                    ),
+                ] {
+                    if offers(entry, action) {
+                        items.push((
+                            crate::tr!(key, name = account.name).into_owned(),
+                            RunPluginAction {
+                                profile_id: account.id.clone(),
+                                entry_id: entry.id.clone(),
+                                action,
+                                cwd: cwd.clone(),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        let id = format!("plugin-menu-{}-{}", scope_key(scope), row.entry.id);
+        if items.is_empty() {
+            return div().w(px(MENU_WIDTH)).flex_none().into_any_element();
+        }
+        let busy = columns.iter().any(Account::busy);
+        div()
+            .w(px(MENU_WIDTH))
+            .flex_none()
+            .debug_selector({
+                let id = id.clone();
+                move || id.clone()
+            })
+            .child(
+                Button::new(SharedString::from(id))
+                    .ghost()
+                    .xsmall()
+                    .disabled(busy)
+                    .icon(IconName::Ellipsis)
+                    .tooltip(
+                        crate::tr!("providers.plugins.more", name = row.entry.name).into_owned(),
+                    )
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (label, action) in &items {
+                            menu = menu.menu(label.clone(), Box::new(action.clone()));
+                        }
+                        menu
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn project_section(
+        &mut self,
+        kind: ProviderKind,
+        columns: &[Account],
+        project: Option<tcode_core::project::Project>,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let projects = self.store.read(cx).projects();
+        let picked = project.as_ref().map(|project| project.id.clone());
+        let label = project
+            .as_ref()
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| crate::tr!("providers.plugins.pick_project").into_owned());
+        let picker = Button::new("plugins-project-picker")
+            .debug_selector(|| "plugins-project-picker".into())
+            .outline()
+            .xsmall()
+            .icon(IconName::Folder)
+            .label(label)
+            .dropdown_menu(move |mut menu, _, _| {
+                for project in &projects {
+                    menu = menu.menu_with_check(
+                        project.name.clone(),
+                        picked.as_ref() == Some(&project.id),
+                        Box::new(ChooseProject {
+                            project_id: project.id.clone(),
+                        }),
+                    );
+                }
+                menu
+            });
+        let lead = h_flex()
+            .items_center()
+            .gap_2()
+            .child(picker)
+            .child(crate::tr!("providers.plugins.project_shared").into_owned())
+            .into_any_element();
+        let body = match &project {
+            None => note_card(
+                crate::tr!("providers.plugins.project_needed").into_owned(),
+                cx,
+            ),
+            Some(_) => {
+                let project_rows = {
+                    let mut rows_found = rows(columns, true, PluginScope::Project);
+                    for row in rows(columns, true, PluginScope::Local) {
+                        if !rows_found
+                            .iter()
+                            .any(|found| found.entry.id == row.entry.id)
+                        {
+                            rows_found.push(row);
+                        }
+                    }
+                    rows_found
+                };
+                let listing = columns.iter().all(|account| {
+                    account
+                        .project
+                        .as_ref()
+                        .is_none_or(|catalog| catalog.loading && catalog.entries.is_empty())
+                });
+                if !project_rows.is_empty() {
+                    self.plugin_rows(
+                        columns,
+                        project_rows,
+                        true,
+                        PluginScope::Project,
+                        kind,
+                        compact,
+                        window,
+                        cx,
+                    )
+                } else if listing {
+                    note_card(crate::tr!("providers.plugins.listing").into_owned(), cx)
+                } else {
+                    note_card(
+                        crate::tr!("providers.plugins.no_project_plugins").into_owned(),
+                        cx,
+                    )
+                }
+            }
+        };
+        let note = (project.is_some()
+            && kind
+                .caps()
+                .plugin_management
+                .scopes
+                .contains(&PluginScope::Local))
+        .then(|| crate::tr!("providers.plugins.local_note").into_owned());
+        let caption = crate::tr!("providers.plugins.project_scope").into_owned();
+        // A project's plugins have one switch for every account, so the
+        // caption carries no account headings.
+        self.section(caption, Some(lead), &[], compact, body, note, cx)
+    }
+
+    fn marketplaces(
+        &self,
+        columns: &[Account],
+        accounts: &[Account],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut names: Vec<ProviderPluginMarketplace> = Vec::new();
+        for account in columns {
+            for marketplace in account
+                .user
+                .iter()
+                .flat_map(|catalog| &catalog.marketplaces)
+            {
+                if !names.iter().any(|known| known.name == marketplace.name) {
+                    names.push(marketplace.clone());
+                }
+            }
+        }
+        let success = cx.theme().success;
+        let muted = cx.theme().muted_foreground;
+        let mut rows: Vec<AnyElement> = names
+            .into_iter()
+            .map(|marketplace| {
+                let cells = columns.iter().map(|account| {
+                    let catalog = account.user.as_ref();
+                    let added = catalog.is_some_and(|catalog| {
+                        catalog.marketplaces.iter().any(|known| known.name == marketplace.name)
+                    });
+                    let can_add = catalog.is_some_and(|catalog| {
+                        catalog.marketplace_actions.contains(&MarketplaceAction::Add)
+                    });
+                    let pending = account.pending(&marketplace.name) || account.pending(&marketplace.source);
+                    let id = format!("plugin-marketplace-{}-{}", account.id, marketplace.name);
+                    let content: AnyElement = if pending {
+                        Spinner::new().small().color(muted).into_any_element()
+                    } else if added {
+                        div()
+                            .text_secondary(self.touch, cx)
+                            .text_color(success)
+                            .child(crate::tr!("providers.plugins.added").into_owned())
+                            .into_any_element()
+                    } else if can_add {
+                        let (profile_id, source) = (account.id.clone(), marketplace.source.clone());
+                        let store = self.store.clone();
+                        Button::new(SharedString::from(format!("{id}-add")))
+                            .outline()
+                            .small()
+                            .disabled(account.busy())
+                            .label(crate::tr!("providers.plugins.add").into_owned())
+                            .on_click(move |_, _, cx| {
+                                let (profile_id, source) = (profile_id.clone(), source.clone());
+                                store.update(cx, |store, _| {
+                                    store.add_provider_marketplace(profile_id, source, None)
+                                });
+                            })
+                            .into_any_element()
+                    } else {
+                        div().text_color(muted).child("—").into_any_element()
+                    };
+                    let cell = div().debug_selector(move || id.clone());
+                    if compact {
+                        cell.w_full()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .items_center()
+                                    .child(material::status_dot(account.color))
+                                    .child(div().flex_1().min_w_0().truncate().child(account.name.clone()))
+                                    .child(content),
+                            )
+                            .into_any_element()
+                    } else {
+                        cell.w(px(CELL_WIDTH)).flex().justify_center().child(content).into_any_element()
+                    }
+                });
+                let removals: Vec<(String, RemoveMarketplace)> = columns
+                    .iter()
+                    .filter(|account| {
+                        account.user.as_ref().is_some_and(|catalog| {
+                            catalog.marketplace_actions.iter().any(|action| {
+                                matches!(action, MarketplaceAction::Remove { marketplace: name, .. } if *name == marketplace.name)
+                            })
+                        })
+                    })
+                    .map(|account| {
+                        (
+                            crate::tr!("providers.plugins.menu.remove_marketplace", name = account.name).into_owned(),
+                            RemoveMarketplace {
+                                profile_id: account.id.clone(),
+                                name: marketplace.name.clone(),
+                            },
+                        )
+                    })
+                    .collect();
+                let menu: AnyElement = if removals.is_empty() {
+                    div().w(px(MENU_WIDTH)).into_any_element()
+                } else {
+                    div()
+                        .w(px(MENU_WIDTH))
+                        .flex_none()
+                        .child(
+                            Button::new(SharedString::from(format!("plugin-marketplace-menu-{}", marketplace.name)))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Ellipsis)
+                                .dropdown_menu(move |mut menu, _, _| {
+                                    for (label, action) in &removals {
+                                        menu = menu.menu(label.clone(), Box::new(action.clone()));
+                                    }
+                                    menu
+                                }),
+                        )
+                        .into_any_element()
+                };
+                let describe = v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_body(self.touch, cx).child(marketplace.name.clone()))
+                            .child(material::semantic_chip(
+                                source_kind_label(marketplace.kind),
+                                cx.theme().muted,
+                                muted,
+                                cx,
+                            )),
+                    )
+                    .child(div().text_meta_mono(self.touch, cx).child(marketplace.source.clone()));
+                if compact {
+                    material::group_row_stacked(cx)
+                        .gap_2()
+                        .child(h_flex().w_full().items_start().gap_2().child(describe).child(menu))
+                        .children(cells)
+                        .into_any_element()
+                } else {
+                    material::group_row_stacked(cx)
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .child(Icon::new(IconName::Puzzle).text_color(muted))
+                        .child(describe)
+                        .child(h_flex().flex_none().children(cells))
+                        .child(menu)
+                        .into_any_element()
+                }
+            })
+            .collect();
+        let can_add = accounts.iter().any(|account| {
+            account.user.as_ref().is_some_and(|catalog| {
+                catalog
+                    .marketplace_actions
+                    .contains(&MarketplaceAction::Add)
+            })
+        });
+        if can_add {
+            let accounts = accounts.to_vec();
+            rows.push(
+                material::group_row(cx)
+                    .child(
+                        Button::new("plugin-marketplace-add")
+                            .debug_selector(|| "plugin-marketplace-add".into())
+                            .ghost()
+                            .small()
+                            .icon(IconName::Plus)
+                            .label(crate::tr!("providers.plugins.add_marketplace").into_owned())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_add_marketplace(accounts.clone(), window, cx)
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let body = if rows.is_empty() {
+            note_card(
+                crate::tr!("providers.plugins.no_marketplaces").into_owned(),
+                cx,
+            )
+        } else {
+            material::grouped(rows, cx).into_any_element()
+        };
+        self.section(
+            crate::tr!("providers.plugins.marketplaces").into_owned(),
+            None,
+            columns,
+            compact,
+            body,
+            None,
             cx,
-        );
-        let header = material::group_row(cx)
+        )
+    }
+
+    fn browse_page(
+        &mut self,
+        kind: ProviderKind,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let accounts = self.accounts(kind, cx);
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        let mut entries: Vec<ProviderPluginEntry> = Vec::new();
+        for account in &accounts {
+            for entry in account.user.iter().flat_map(|catalog| &catalog.entries) {
+                if !entries.iter().any(|known| known.id == entry.id) {
+                    entries.push(entry.clone());
+                }
+            }
+        }
+        let mut marketplaces: Vec<(String, usize)> = Vec::new();
+        for entry in &entries {
+            if let Some(marketplace) = &entry.source.marketplace {
+                match marketplaces
+                    .iter_mut()
+                    .find(|(name, _)| name == marketplace)
+                {
+                    Some((_, count)) => *count += 1,
+                    None => marketplaces.push((marketplace.clone(), 1)),
+                }
+            }
+        }
+        let total = entries.len();
+        let filter = self
+            .marketplace_filter
+            .clone()
+            .filter(|name| marketplaces.iter().any(|(known, _)| known == name));
+        let matches: Vec<ProviderPluginEntry> = entries
+            .into_iter()
+            .filter(|entry| filter.is_none() || entry.source.marketplace == filter)
+            .filter(|entry| {
+                query.is_empty()
+                    || entry.name.to_lowercase().contains(&query)
+                    || entry
+                        .description
+                        .as_deref()
+                        .is_some_and(|text| text.to_lowercase().contains(&query))
+            })
+            .collect();
+        let chips = std::iter::once((
+            None,
+            crate::tr!("providers.plugins.all").into_owned(),
+            total,
+        ))
+        .chain(
+            marketplaces
+                .into_iter()
+                .map(|(name, count)| (Some(name.clone()), name, count)),
+        )
+        .map(|(name, label, count)| {
+            let id = format!("plugins-filter-{}", name.as_deref().unwrap_or("all"));
+            let selected = filter == name;
+            TabItem::new(SharedString::from(id), label)
+                .count(count)
+                .selected(selected)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.marketplace_filter = name.clone();
+                    cx.notify();
+                }))
+        })
+        .collect::<Vec<_>>();
+        let listing = accounts.iter().any(|account| {
+            account
+                .user
+                .as_ref()
+                .is_none_or(|catalog| catalog.loading && catalog.entries.is_empty())
+        });
+        let body = if matches.is_empty() {
+            note_card(
+                if listing && total == 0 {
+                    crate::tr!("providers.plugins.listing")
+                } else if total == 0 {
+                    crate::tr!("providers.plugins.no_available")
+                } else {
+                    crate::tr!("providers.plugins.no_matches")
+                }
+                .into_owned(),
+                cx,
+            )
+        } else {
+            let rows: Vec<AnyElement> = matches
+                .iter()
+                .map(|entry| self.browse_row(kind, &accounts, entry, compact, window, cx))
+                .collect();
+            material::grouped(rows, cx).into_any_element()
+        };
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(self.back_bar(kind.display_name().to_string(), compact, cx))
+            .child(
+                div().text_title(cx).child(
+                    crate::tr!("providers.plugins.browse_title", name = kind.display_name())
+                        .into_owned(),
+                ),
+            )
+            .child(Input::new(&self.search).placeholder(crate::tr!("providers.plugins.search")))
+            .child(TabBar::new("plugins-filters").segmented().items(chips))
+            .child(body)
+            .into_any_element()
+    }
+
+    fn browse_row(
+        &mut self,
+        kind: ProviderKind,
+        accounts: &[Account],
+        entry: &ProviderPluginEntry,
+        compact: bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let installed_in: Vec<&Account> = accounts
+            .iter()
+            .filter(|account| {
+                account
+                    .entry(false, &entry.id)
+                    .is_some_and(|entry| installation(entry, PluginScope::User).is_some())
+            })
+            .collect();
+        let installable = accounts
+            .iter()
+            .any(|account| !install_scopes(account, &entry.id).is_empty());
+        let pending = accounts.iter().any(|account| account.pending(&entry.id));
+        let row_id = format!("plugin-available-{}", entry.id);
+        let install: Option<AnyElement> = installable.then(|| {
+            let open = self
+                .install
+                .as_ref()
+                .is_some_and(|draft| draft.entry_id == entry.id);
+            let trigger_id = format!("plugin-install-open-{}", entry.id);
+            let entry_id = entry.id.clone();
+            let accounts_for = accounts.to_vec();
+            let trigger = Button::new(SharedString::from(trigger_id.clone()))
+                .debug_selector(move || trigger_id.clone())
+                .outline()
+                .small()
+                .label(crate::tr!("providers.plugins.install_more").into_owned())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.begin_install(entry_id.clone(), &accounts_for, cx)
+                }));
+            let panel = cx.entity();
+            let accounts = accounts.to_vec();
+            let popover = Popover::new(SharedString::from(format!("plugin-install-{}", entry.id)))
+                .open(open)
+                .anchor(gpui::Anchor::TopRight)
+                .on_open_change({
+                    let panel = panel.clone();
+                    move |open, _, cx| {
+                        if !*open {
+                            panel.update(cx, |this, cx| {
+                                this.install = None;
+                                cx.notify();
+                            });
+                        }
+                    }
+                })
+                .trigger(trigger);
+            let popover = if self.touch {
+                popover.bottom_sheet(
+                    crate::tr!("providers.plugins.install_title", name = entry.name).into_owned(),
+                )
+            } else {
+                popover
+            };
+            let (name, touch) = (entry.name.clone(), self.touch);
+            popover
+                .content(move |_, _, cx| install_body(&panel, kind, &accounts, &name, touch, cx))
+                .into_any_element()
+        });
+        let badges = installed_in.iter().map(|account| {
+            material::semantic_chip(
+                crate::tr!("providers.plugins.installed_in", name = account.name).into_owned(),
+                cx.theme().success.opacity(0.12),
+                cx.theme().success,
+                cx,
+            )
+        });
+        material::group_row_stacked(cx)
+            .id(SharedString::from(row_id.clone()))
+            .debug_selector(move || row_id.clone())
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .when(!compact, |row| {
+                row.child(Icon::new(IconName::Puzzle).text_color(muted).mt_0p5())
+            })
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .gap_0p5()
                     .child(
-                        div()
-                            .text_body(false, cx)
-                            .child(crate::tr!("providers.plugins.provider_switch", name = name)),
-                    )
-                    .child(div().text_secondary(false, cx).child(subtitle.into_owned())),
-            )
-            .children(spinner.map(|spinner| spinner.fade(Spinner::new().color(muted))))
-            .children(refresh.map(|refresh| {
-                refresh.fade(
-                    Button::new(SharedString::from(refresh_id.clone()))
-                        .debug_selector(move || refresh_id.clone())
-                        .ghost()
-                        .small()
-                        .icon(Icon::empty().path("icons/rotate-ccw.svg"))
-                        .tooltip(crate::tr!("providers.plugins.refresh", name = name))
-                        .on_click(cx.listener({
-                            let profile_id = profile_id.clone();
-                            move |this, _, _, cx| this.refresh(&profile_id, cx)
-                        })),
-                )
-            }))
-            .child(switch);
-        let section_id = format!("plugins-section-{profile_id}");
-        let section = v_flex()
-            .id(SharedString::from(section_id.clone()))
-            .debug_selector(move || section_id.clone())
-            .w_full();
-
-        let status = self.status_rows(&profile_id, catalog.as_ref().filter(|_| on), window, cx);
-        // Switching a provider off folds its catalog away under the header;
-        // a shut fold is not built.
-        let body_id = SharedString::from(format!("plugins-body-{profile_id}"));
-        let unfolded = gpui_base::motion::transition(
-            (body_id.clone(), "built"),
-            if on { 1. } else { 0. },
-            gpui_base::motion::Transition::new(GLIDE),
-            window,
-            cx,
-        );
-        let body = (on || unfolded > 0.).then(|| {
-            let listed = crate::motion::CrossFade::new(
-                SharedString::from(format!("plugins-listed-{profile_id}")),
-                usize::from(catalog.is_some()),
-                2,
-                CHANGE,
-                window,
-                cx,
-            );
-            let mut layers = Vec::new();
-            if listed.shows(0) {
-                layers.push((
-                    0,
-                    self.note_card(crate::tr!("providers.plugins.listing"), cx),
-                ));
-            }
-            if let Some(catalog) = catalog.filter(|_| listed.shows(1)) {
-                layers.push((1, self.views(profile, &profile_id, catalog, window, cx)));
-            }
-            listed.render(layers).w_full()
-        });
-        section
-            .child(material::group(cx).child(header).children(status))
-            .child(
-                Collapsible::new(body_id, on)
-                    .motion(&self.motion)
-                    .w_full()
-                    .content(v_flex().w_full().pt_3().children(body)),
-            )
-            .into_any_element()
-    }
-
-    /// The catalog's views (Installed, Available, Marketplaces) and the one
-    /// shown.
-    fn views(
-        &mut self,
-        profile: &ResolvedProfile,
-        profile_id: &str,
-        catalog: ProviderPluginCatalog,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let management = profile.kind.caps().plugin_management;
-        let profile_id = profile_id.to_string();
-        let installed: Vec<(usize, &ProviderPluginEntry)> = catalog
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| !entry.installations.is_empty())
-            .collect();
-        let available = catalog
-            .entries
-            .iter()
-            .filter(|entry| entry.installations.is_empty())
-            .count();
-        let mut views = vec![(
-            View::Installed,
-            crate::tr!("providers.plugins.installed", count = installed.len()),
-        )];
-        if management.supports(PluginActionKind::Install) {
-            views.push((
-                View::Available,
-                crate::tr!("providers.plugins.available", count = available),
-            ));
-        }
-        if management.marketplaces {
-            views.push((
-                View::Marketplaces,
-                crate::tr!(
-                    "providers.plugins.marketplaces",
-                    count = catalog.marketplaces.len()
-                ),
-            ));
-        }
-        let view = if views.iter().any(|(view, _)| *view == self.view) {
-            self.view
-        } else {
-            View::Installed
-        };
-        let track = (views.len() > 1).then(|| {
-            let panel = cx.entity().downgrade();
-            let segments = views.into_iter().map(|(option, label)| {
-                let panel = panel.clone();
-                TabItem::new(
-                    SharedString::from(format!("plugins-view-{}-{profile_id}", option.key())),
-                    label.into_owned(),
-                )
-                .selected(option == view)
-                .on_click(move |_, _, cx| {
-                    _ = panel.update(cx, |this, cx| {
-                        this.view = option;
-                        cx.notify();
-                    });
-                })
-            });
-            let track_id = format!("plugins-views-{profile_id}");
-            div()
-                .debug_selector({
-                    let track_id = track_id.clone();
-                    move || track_id.clone()
-                })
-                .w(px(440.))
-                .max_w_full()
-                .child(
-                    TabBar::new(SharedString::from(track_id))
-                        .segmented()
-                        .items(segments),
-                )
-        });
-
-        let busy = !catalog.pending.is_empty();
-        // Each view keeps a layer, so the one left fades out under the one
-        // chosen.
-        let views = [View::Installed, View::Available, View::Marketplaces];
-        let fade = crate::motion::CrossFade::new(
-            SharedString::from(format!("plugins-views-body-{profile_id}")),
-            views.iter().position(|shown| *shown == view).unwrap_or(0),
-            views.len(),
-            CHANGE,
-            window,
-            cx,
-        );
-        let mut bodies = Vec::new();
-        for (layer, shown) in views.into_iter().enumerate() {
-            if !fade.shows(layer) {
-                continue;
-            }
-            let body = match shown {
-                View::Installed => {
-                    let installed = installed.clone();
-                    let unlisted = matches!(
-                        catalog.state,
-                        PluginCatalogState::Error { .. }
-                            | PluginCatalogState::Stale {
-                                reason: PluginStaleReason::NotLoaded
-                            }
-                    );
-                    // Unlisted shows nothing, so the status row above speaks.
-                    let state = crate::motion::CrossFade::new(
-                        SharedString::from(format!("plugins-installed-{profile_id}")),
-                        match (installed.is_empty(), unlisted) {
-                            (false, _) => 2,
-                            (true, false) => 1,
-                            (true, true) => 0,
-                        },
-                        3,
-                        CHANGE,
-                        window,
-                        cx,
-                    );
-                    let mut layers = Vec::new();
-                    if state.shows(1) {
-                        layers.push((
-                            1,
-                            self.note_card(crate::tr!("providers.plugins.no_installed"), cx),
-                        ));
-                    }
-                    if state.shows(2) && !installed.is_empty() {
-                        let rows = installed.into_iter().map(|(index, entry)| {
-                            (SharedString::from(entry.id.clone()), (index, entry.clone()))
-                        });
-                        let rows = crate::settings_rows::grouped_keyed(
-                            SharedString::from(format!("plugins-installed-rows-{profile_id}")),
-                            rows,
-                            window,
-                            cx,
-                            |_, (index, entry), window, cx| {
-                                self.installed_row(&profile_id, &catalog, *index, entry, window, cx)
-                            },
-                        );
-                        layers.push((2, material::group(cx).child(rows).into_any_element()));
-                    }
-                    state.render(layers).w_full().into_any_element()
-                }
-                View::Available => self.available(&profile_id, catalog.clone(), window, cx),
-                View::Marketplaces => self.marketplaces(&profile_id, &catalog, busy, window, cx),
-            };
-            bodies.push((layer, body));
-        }
-        let content = fade.span().render(bodies).w_full();
-
-        v_flex()
-            .w_full()
-            .gap_3()
-            .children(track)
-            .child(content)
-            .into_any_element()
-    }
-
-    fn status_rows(
-        &self,
-        profile_id: &str,
-        catalog: Option<&ProviderPluginCatalog>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let muted = cx.theme().muted_foreground;
-        let danger = cx.theme().danger;
-        let warning = cx.theme().warning;
-        let status = catalog.and_then(|catalog| match &catalog.state {
-            PluginCatalogState::Fresh => None,
-            PluginCatalogState::Stale { .. } if catalog.loading => Some(CatalogStatus::Note(
-                crate::tr!("providers.plugins.listing").into_owned(),
-            )),
-            PluginCatalogState::Stale { reason } => Some(CatalogStatus::Note(
-                match reason {
-                    PluginStaleReason::NotLoaded => crate::tr!("providers.plugins.not_listed"),
-                    PluginStaleReason::ContextChanged => {
-                        crate::tr!("providers.plugins.stale_context")
-                    }
-                    PluginStaleReason::Changed => crate::tr!("providers.plugins.stale_changed"),
-                }
-                .into_owned(),
-            )),
-            PluginCatalogState::Error { message } => Some(CatalogStatus::Failed(message.clone())),
-        });
-        let mut rows = Vec::new();
-        let status_id = SharedString::from(format!("plugins-status-{profile_id}"));
-        if let Some(slot) = crate::motion::shown(status_id.clone(), status, SHOW, window, cx) {
-            let row = match slot.value.clone() {
-                CatalogStatus::Note(text) => {
-                    let text = crate::motion::cross_fade(
-                        (ElementId::from(status_id), "text"),
-                        text,
-                        CHANGE,
-                        window,
-                        cx,
-                        |text, _, _| div().child(text.clone()).into_any_element(),
-                    );
-                    material::group_row_stacked(cx)
-                        .justify_center()
-                        .text_secondary(false, cx)
-                        .text_color(muted)
-                        .child(text)
-                }
-                CatalogStatus::Failed(message) => material::group_row_stacked(cx)
-                    .debug_selector(|| "plugins-list-error".into())
-                    .gap_1()
-                    .text_secondary(false, cx)
-                    .text_color(danger)
-                    .child(crate::tr!("providers.plugins.list_failed").into_owned())
-                    .child(verbatim(message, cx)),
-            };
-            rows.push(slot.fold(crate::settings_rows::hairlined(row, cx)));
-        }
-        // Each line under the header draws the hairline above it, so the
-        // line comes and goes with it.
-        let errors = text_keys(catalog.iter().flat_map(|catalog| &catalog.errors));
-        let errors = crate::motion::keyed(
-            SharedString::from(format!("plugins-catalog-errors-{profile_id}")),
-            errors,
-            ROWS,
-            window,
-            cx,
-            |_, error, _, cx| {
-                crate::settings_rows::hairlined(
-                    material::group_row_stacked(cx)
-                        .text_secondary(false, cx)
-                        .text_color(warning)
-                        .child(verbatim(error.clone(), cx)),
-                    cx,
-                )
-            },
-        );
-        rows.push(errors.render(v_flex().w_full()));
-        rows
-    }
-
-    fn installed_row(
-        &self,
-        profile_id: &str,
-        catalog: &ProviderPluginCatalog,
-        index: usize,
-        entry: &ProviderPluginEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let busy = !catalog.pending.is_empty();
-        let pending = catalog.pending.contains(&entry.id);
-        let key = (profile_id.to_string(), entry.id.clone(), index);
-        let expanded = self.expanded.contains(&key);
-        let has_details = entry.declared.is_some()
-            || !entry.diagnostics.is_empty()
-            || entry
-                .installations
-                .iter()
-                .any(|installation| installation.location.is_some());
-        let (enabled_label, enabled_bg, enabled_fg) = match entry.enabled {
-            Tri::Yes => (
-                crate::tr!("providers.plugins.effective_enabled"),
-                cx.theme().success.opacity(0.12),
-                cx.theme().success_foreground,
-            ),
-            Tri::No => (
-                crate::tr!("providers.plugins.effective_disabled"),
-                cx.theme().muted,
-                muted,
-            ),
-            Tri::Unknown => (
-                crate::tr!("providers.plugins.effective_unknown"),
-                cx.theme().muted,
-                muted,
-            ),
-        };
-        let row_id = format!("plugin-row-{profile_id}-{}", entry.id);
-        let toggle_id = format!("plugin-details-{profile_id}-{}", entry.id);
-        let settle = || gpui_base::motion::Transition::new(GLIDE);
-        let enabled_id = SharedString::from(format!("{row_id}-enabled"));
-        let enabled_bg = gpui_base::motion::transition(
-            (enabled_id.clone(), "bg"),
-            enabled_bg,
-            settle(),
-            window,
-            cx,
-        );
-        let enabled_fg = gpui_base::motion::transition(
-            (enabled_id.clone(), "fg"),
-            enabled_fg,
-            settle(),
-            window,
-            cx,
-        );
-        let enabled_label = crate::motion::cross_fade(
-            (ElementId::from(enabled_id), "label"),
-            SharedString::from(enabled_label.into_owned()),
-            CHANGE,
-            window,
-            cx,
-            |label, _, _| label.clone().into_any_element(),
-        );
-        let spinner = crate::motion::shown(
-            SharedString::from(format!("{row_id}-pending")),
-            pending.then_some(()),
-            SHOW,
-            window,
-            cx,
-        );
-        let turn = gpui_base::motion::transition(
-            (SharedString::from(toggle_id.clone()), "turn"),
-            if expanded { 1. } else { 0. },
-            settle(),
-            window,
-            cx,
-        );
-        let title = h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_body(false, cx).child(entry.name.clone()))
-                    .when_some(entry.version.clone(), |row, version| {
-                        row.child(div().text_meta_mono(false, cx).child(version))
-                    })
-                    .child(
-                        material::chip_surface(enabled_bg, enabled_fg, cx)
-                            .overflow_hidden()
-                            .child(enabled_label),
-                    )
-                    .children(spinner.map(|spinner| spinner.fade(Spinner::new().color(muted)))),
-            )
-            .when(has_details, |row| {
-                row.child(
-                    Button::new(SharedString::from(toggle_id.clone()))
-                        .debug_selector(move || toggle_id.clone())
-                        .ghost()
-                        .small()
-                        .icon(
-                            Icon::new(IconName::ChevronDown)
-                                .rotate(gpui::radians(std::f32::consts::PI * turn)),
-                        )
-                        .label(crate::tr!("providers.plugins.details").into_owned())
-                        .tooltip(crate::tr!(
-                            "providers.plugins.toggle_details",
-                            name = entry.name
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.expanded.remove(&key) {
-                                this.expanded.insert(key.clone());
-                            }
-                            cx.notify();
-                        })),
-                )
-            });
-
-        let scopes: Vec<(SharedString, PluginScope)> = SCOPES
-            .into_iter()
-            .filter(|scope| {
-                entry
-                    .installations
-                    .iter()
-                    .any(|installation| installation.scope == *scope)
-                    || entry.actions.iter().any(|action| action.scope() == *scope)
-            })
-            .map(|scope| (SharedString::from(scope_key(scope)), scope))
-            .collect();
-        let any_scope = !scopes.is_empty();
-        // A scope's line, and an action on it, comes and goes as an install,
-        // an enable or a removal changes what the entry has where.
-        let scope_lines = crate::motion::keyed(
-            SharedString::from(format!("{row_id}-scopes")),
-            scopes,
-            ROWS,
-            window,
-            cx,
-            |scope_id, scope, window, cx| {
-                let scope = *scope;
-                let installation = entry
-                    .installations
-                    .iter()
-                    .find(|installation| installation.scope == scope);
-                let facts = h_flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_x_2()
-                    .text_color(muted)
-                    .map(|row| match installation {
-                        None => row.child(crate::tr!("providers.plugins.not_installed_in_scope")),
-                        Some(installation) => row
-                            .when_some(installation.version.clone(), |row, version| {
-                                row.child(
-                                    div()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .child(version),
-                                )
-                            })
-                            .when_some(installation.scope_enabled, |row, enabled| {
-                                row.child(if enabled {
-                                    crate::tr!("providers.plugins.scope_enabled")
-                                } else {
-                                    crate::tr!("providers.plugins.scope_disabled")
-                                })
-                            }),
-                    });
-                let actions: Vec<(SharedString, PluginAction)> = ordered(
-                    entry
-                        .actions
-                        .iter()
-                        .copied()
-                        .filter(|action| action.scope() == scope)
-                        .collect(),
-                )
-                .into_iter()
-                .map(|action| (SharedString::from(format!("{action:?}")), action))
-                .collect();
-                // Each button carries the gap before it, so the gap goes
-                // with the button.
-                let actions = crate::motion::keyed_across(
-                    SharedString::from(format!("{row_id}-{scope_id}-actions")),
-                    actions,
-                    ROWS,
-                    window,
-                    cx,
-                    |_, action, _, _| {
-                        div()
-                            .pl_1()
-                            .child(action_button(
-                                &self.store,
-                                profile_id,
-                                &entry.id,
-                                *action,
-                                catalog.context_cwd.clone(),
-                                busy,
-                            ))
-                            .into_any_element()
-                    },
-                );
-                div()
-                    .w_full()
-                    .pt(cx.theme().tokens.spacing.sm)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .min_h(px(material::bar_height(material::Bar::Section, false)))
-                            .flex_wrap()
-                            .items_center()
-                            .gap_x_3()
-                            .gap_y_1()
-                            .text_token(&cx.theme().tokens.typography.xs)
-                            .child(
-                                div()
-                                    .flex_none()
-                                    // One column, so the scopes' facts line up.
-                                    .w(px(72.))
-                                    .text_caption(cx)
-                                    .child(scope_label(scope)),
-                            )
-                            .child(facts)
-                            .child(actions.render(h_flex().ml_auto())),
-                    )
-                    .into_any_element()
-            },
-        );
-
-        let errors = crate::motion::keyed(
-            SharedString::from(format!("{row_id}-errors")),
-            text_keys(&entry.errors),
-            ROWS,
-            window,
-            cx,
-            |_, error, _, cx| {
-                div()
-                    .pt_1p5()
-                    .text_secondary(false, cx)
-                    .text_color(cx.theme().danger)
-                    .child(verbatim(error.clone(), cx))
-                    .into_any_element()
-            },
-        );
-        material::group_row_stacked(cx)
-            .id((SharedString::from(row_id.clone()), index))
-            .debug_selector(move || row_id.clone())
-            .gap_1p5()
-            .child(title)
-            .when_some(entry.description.clone(), |col, description| {
-                col.child(div().text_secondary(false, cx).child(description))
-            })
-            .child(source_line(entry, cx))
-            .when(any_scope, |col| {
-                // Each line carries the gap above it, so it goes with it.
-                col.child(scope_lines.render(material::card(cx).w_full().gap_0().pt_0()))
-            })
-            // Each error carries the gap above it; the list gives back the
-            // gap the column puts before it, so no errors take no room.
-            .child(errors.render(v_flex().w_full().mt(gpui::rems(-0.375))))
-            .child(
-                Collapsible::new("plugin-details", expanded)
-                    .motion(&self.motion)
-                    .w_full()
-                    .content(details(entry, cx)),
-            )
-            .into_any_element()
-    }
-
-    /// The plugins the catalog offers but has not installed, filtered by the
-    /// search field.
-    fn available(
-        &mut self,
-        profile_id: &str,
-        catalog: ProviderPluginCatalog,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let query = self.search.read(cx).value().trim().to_lowercase();
-        let none_available = !catalog
-            .entries
-            .iter()
-            .any(|entry| entry.installations.is_empty());
-        let matches: Vec<usize> = catalog
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                entry.installations.is_empty()
-                    && (query.is_empty()
-                        || entry.name.to_lowercase().contains(&query)
-                        || entry
-                            .description
-                            .as_deref()
-                            .is_some_and(|text| text.to_lowercase().contains(&query)))
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let listed = matches
-            .iter()
-            .map(|&index| (index, catalog.entries[index].id.clone()))
-            .collect::<Vec<_>>();
-        let row_key = |id: &str| {
-            use std::hash::{Hash as _, Hasher as _};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            id.hash(&mut hasher);
-            hasher.finish()
-        };
-        let keys: Rc<[u64]> = listed.iter().map(|(_, id)| row_key(id)).collect();
-        let available = self.lists.entry(profile_id.to_string()).or_default();
-        if available.listed.as_ref() != Some(&listed) {
-            // A keystroke or an install folds rows in and out and glides the
-            // rest; the list first shown, or shown after none, is in place.
-            if let Some(old) = available.listed.as_ref().filter(|old| !old.is_empty()) {
-                let old_keys: Vec<u64> = old.iter().map(|(_, id)| row_key(id)).collect();
-                let old_indices: Vec<usize> = old.iter().map(|(index, _)| *index).collect();
-                available.flip.replace(
-                    &available.list,
-                    |index| old_keys.get(index).copied(),
-                    &keys,
-                    window,
-                );
-                available.rows.replace(
-                    &old_keys,
-                    &keys,
-                    |_, _| Some(()),
-                    |index| old_indices.get(index).copied(),
-                    cx,
-                );
-            }
-            available.list.reset(matches.len());
-            available.listed = Some(listed);
-        }
-        available
-            .rows
-            .settle_list(&available.list, &keys, window, cx);
-        let list_state = available.list.clone();
-        // Listing cross-fades to what it found; which of those shows follows
-        // the search keystrokes and does not.
-        let listing = matches.is_empty() && catalog.loading && none_available;
-        let state = crate::motion::CrossFade::new(
-            SharedString::from(format!("plugins-available-{profile_id}")),
-            usize::from(!listing),
-            2,
-            CHANGE,
-            window,
-            cx,
-        )
-        .fill();
-        let mut layers = Vec::new();
-        if state.shows(0) {
-            layers.push((
-                0,
-                self.note_row(
-                    crate::tr!("providers.plugins.listing").into_owned(),
-                    cx.theme().muted_foreground,
-                    cx,
-                ),
-            ));
-        }
-        let results = state.shows(1).then(|| {
-            if !matches.is_empty() {
-                let catalog = Rc::new(catalog);
-                let profile_id = profile_id.to_string();
-                crate::scroll::page_viewport(
-                    "plugins-available-bounce",
-                    &list_state,
-                    list(
-                        list_state.clone(),
-                        cx.processor(move |this, ix: usize, window, cx| {
-                            let index = matches[ix];
-                            let row = this.available_row(
-                                &profile_id,
-                                &catalog,
-                                index,
-                                &catalog.entries[index],
-                                window,
-                                cx,
-                            );
-                            let row =
-                                v_flex()
-                                    .w_full()
-                                    .child(row)
-                                    .when(ix + 1 != matches.len(), |col| {
-                                        col.child(material::row_hairline(
-                                            px(material::CARD_INSET),
-                                            cx,
-                                        ))
-                                    });
-                            let key = keys[ix];
-                            let Some(available) = this.lists.get(&profile_id) else {
-                                return row.into_any_element();
-                            };
-                            let around = available.rows.around(key, cx);
-                            let mut left: std::collections::HashMap<usize, AnyElement> = around
-                                .above
-                                .iter()
-                                .chain(&around.below)
-                                .filter_map(|(_, index, _)| {
-                                    let entry = catalog.entries.get(*index)?;
-                                    let row = this.available_row(
-                                        &profile_id,
-                                        &catalog,
-                                        *index,
-                                        entry,
-                                        window,
-                                        cx,
-                                    );
-                                    Some((*index, row))
-                                })
-                                .collect();
-                            let row = around.draw(
-                                "plugins-available-row",
-                                key,
-                                crate::motion::list_rows::Glide::Rest,
-                                row,
-                                |index, _| {
-                                    left.remove(index)
-                                        .unwrap_or_else(|| gpui::Empty.into_any_element())
-                                },
-                                window,
-                            );
-                            match this.lists.get(&profile_id) {
-                                Some(available) => {
-                                    available.flip.row(ix, ("plugins-available-row", key), row)
-                                }
-                                None => row,
-                            }
-                        }),
-                    )
-                    .size_full(),
-                )
-                .into_any_element()
-            } else if none_available {
-                self.note_row(
-                    crate::tr!("providers.plugins.no_available").into_owned(),
-                    cx.theme().muted_foreground,
-                    cx,
-                )
-            } else {
-                self.note_row(
-                    crate::tr!("providers.plugins.no_matches").into_owned(),
-                    cx.theme().muted_foreground,
-                    cx,
-                )
-            }
-        });
-        layers.extend(results.map(|results| (1, results)));
-        let body = state.render(layers).size_full();
-        v_flex()
-            .w_full()
-            .gap_2()
-            .when(!none_available, |col| {
-                col.child(
-                    Input::new(&self.search).placeholder(crate::tr!("providers.plugins.search")),
-                )
-            })
-            .child(
-                material::group(cx)
-                    .h(px(crate::overlay::DIALOG_LIST_HEIGHT))
-                    .relative()
-                    .child(body)
-                    .child(crate::scroll::list_height_hint(&list_state, px(100.)))
-                    .child(
-                        ScrollableMask::new(Axis::Vertical, &list_state)
-                            .id("plugins-available-mask"),
-                    )
-                    .when(!none_available && !window.is_inspector_picking(cx), |col| {
-                        col.child(
-                            Scrollbar::vertical(&list_state)
-                                .id("plugins-available-scrollbar")
-                                .motion(&self.motion),
-                        )
-                    }),
-            )
-            .into_any_element()
-    }
-
-    fn available_row(
-        &self,
-        profile_id: &str,
-        catalog: &ProviderPluginCatalog,
-        index: usize,
-        entry: &ProviderPluginEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let busy = !catalog.pending.is_empty();
-        let pending = catalog.pending.contains(&entry.id);
-        let row_id = format!("plugin-available-{profile_id}-{}", entry.id);
-        let spinner = crate::motion::shown(
-            SharedString::from(format!("{row_id}-pending")),
-            pending.then_some(()),
-            SHOW,
-            window,
-            cx,
-        );
-        let installs: Vec<PluginAction> = entry
-            .actions
-            .iter()
-            .copied()
-            .filter(|action| action.kind() == PluginActionKind::Install)
-            .collect();
-        let button = |action: PluginAction| {
-            action_button(
-                &self.store,
-                profile_id,
-                &entry.id,
-                action,
-                catalog.context_cwd.clone(),
-                busy,
-            )
-        };
-        let install = match installs.as_slice() {
-            [] => None,
-            [only] => Some(button(*only).into_any_element()),
-            several => Some(
-                h_flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_end()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_secondary(false, cx)
-                            .child(crate::tr!("providers.plugins.install_to")),
-                    )
-                    .children(
-                        several
-                            .iter()
-                            .map(|action| button(*action).label(scope_label(action.scope()))),
-                    )
-                    .into_any_element(),
-            ),
-        };
-        material::group_row_stacked(cx)
-            .id((SharedString::from(row_id.clone()), index))
-            .debug_selector(move || row_id.clone())
-            .flex_row()
-            .items_start()
-            .gap_3()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_1()
-                    .child(
                         h_flex()
                             .w_full()
                             .flex_wrap()
                             .items_center()
                             .gap_2()
-                            .child(div().text_body(false, cx).child(entry.name.clone()))
-                            .when_some(entry.version.clone(), |row, version| {
-                                row.child(div().text_meta_mono(false, cx).child(version))
-                            })
-                            .children(
-                                spinner.map(|spinner| spinner.fade(Spinner::new().color(muted))),
-                            ),
+                            .child(
+                                div()
+                                    .text_body(self.touch, cx)
+                                    .font_medium()
+                                    .child(entry.name.clone()),
+                            )
+                            .child(source_chip(entry, cx))
+                            .children(badges)
+                            .when(pending, |row| {
+                                row.child(Spinner::new().xsmall().color(muted))
+                            }),
                     )
                     .when_some(entry.description.clone(), |col, description| {
-                        col.child(div().text_secondary(false, cx).child(description))
+                        col.child(div().text_secondary(self.touch, cx).child(description))
                     })
-                    .child(source_line(entry, cx))
+                    .children(components_line(entry, self.touch, cx))
                     .when(entry.source.kind == PluginSourceKind::Command, |col| {
                         col.child(
                             div()
-                                .text_secondary(false, cx)
+                                .text_secondary(self.touch, cx)
                                 .text_color(cx.theme().warning)
                                 .child(crate::tr!("providers.plugins.command_source")),
                         )
-                    })
-                    .when_some(entry.declared.as_ref(), |col, declared| {
-                        col.child(declared_chips(declared, cx))
-                    })
-                    .children(entry.errors.iter().map(|error| {
-                        div()
-                            .text_secondary(false, cx)
-                            .text_color(cx.theme().danger)
-                            .child(verbatim(error.clone(), cx))
-                    })),
+                    }),
             )
-            .children(install.map(|install| div().flex_none().max_w(px(240.)).child(install)))
+            .children(install.map(|install| div().flex_none().child(install)))
             .into_any_element()
     }
+}
 
-    fn marketplaces(
-        &self,
-        profile_id: &str,
-        catalog: &ProviderPluginCatalog,
-        busy: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let muted = cx.theme().muted_foreground;
-        let listed = !catalog.marketplaces.is_empty();
-        let rows = catalog.marketplaces.iter().map(|marketplace| {
-            (
-                SharedString::from(marketplace.name.clone()),
-                marketplace.clone(),
-            )
+/// The install popover's body: the accounts to install to, the scope, and
+/// the command each account runs.
+fn install_body(
+    panel: &Entity<PluginsSettingsPanel>,
+    kind: ProviderKind,
+    accounts: &[Account],
+    name: &str,
+    compact: bool,
+    cx: &mut App,
+) -> AnyElement {
+    let this = panel.read(cx);
+    let Some(draft) = this.install.as_ref() else {
+        return div().into_any_element();
+    };
+    let project = this.project(cx);
+    let entry_id = draft.entry_id.clone();
+    let chosen = draft.accounts.clone();
+    let scope = draft.scope;
+    let muted = cx.theme().muted_foreground;
+    // The scopes every ticked account can install to, in the Harness's order.
+    let offered: Vec<PluginScope> = kind
+        .caps()
+        .plugin_management
+        .scopes
+        .iter()
+        .copied()
+        .filter(|scope| {
+            let mut ticked = accounts
+                .iter()
+                .filter(|account| chosen.contains(&account.id))
+                .peekable();
+            ticked.peek().is_some()
+                && ticked.all(|account| install_scopes(account, &entry_id).contains(scope))
+        })
+        .collect();
+    let scope = if offered.contains(&scope) {
+        scope
+    } else {
+        offered.first().copied().unwrap_or(scope)
+    };
+    let project_name = project
+        .as_ref()
+        .map(|project| project.name.clone())
+        .unwrap_or_default();
+    let account_rows = accounts.iter().map(|account| {
+        let scopes = install_scopes(account, &entry_id);
+        let id = account.id.clone();
+        let panel = panel.clone();
+        let selector = format!("plugin-install-account-{}", account.id);
+        let reason = scopes.is_empty().then(|| {
+            account
+                .user
+                .as_ref()
+                .and_then(|catalog| catalog.entries.iter().find(|entry| entry.id == entry_id))
+                .and_then(|entry| entry.source.marketplace.clone())
+                .or_else(|| {
+                    entry_id
+                        .rsplit_once('@')
+                        .map(|(_, marketplace)| marketplace.to_string())
+                })
+                .map(|marketplace| {
+                    crate::tr!(
+                        "providers.plugins.no_marketplace",
+                        name = account.name,
+                        marketplace = marketplace
+                    )
+                    .into_owned()
+                })
+                .unwrap_or_else(|| {
+                    crate::tr!("providers.plugins.not_offered", name = account.name).into_owned()
+                })
         });
-        let rows = crate::settings_rows::grouped_keyed(
-            SharedString::from(format!("plugin-marketplace-rows-{profile_id}")),
-            rows,
-            window,
-            cx,
-            |_, marketplace, window, cx| {
-                let removable = catalog.marketplace_actions.iter().any(|action| {
-                    matches!(action, MarketplaceAction::Remove { marketplace: name, .. } if *name == marketplace.name)
-                });
-                let spinner = crate::motion::shown(
-                    SharedString::from(format!(
-                        "plugin-marketplace-pending-{profile_id}-{}",
-                        marketplace.name
-                    )),
-                    catalog.pending.contains(&marketplace.name).then_some(()),
-                    SHOW,
-                    window,
-                    cx,
-                );
-                let remove_id = format!(
-                    "plugin-marketplace-remove-{profile_id}-{}",
-                    marketplace.name
-                );
-                let location = marketplace
-                    .location
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .filter(|location| *location != marketplace.source);
-                material::group_row_stacked(cx)
-                    .flex_row()
+        v_flex()
+            .debug_selector(move || selector.clone())
+            .gap_0p5()
+            .child(
+                h_flex()
+                    .gap_2()
                     .items_center()
-                    .gap_3()
+                    .child(material::status_dot(account.color))
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_0p5()
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div().text_body(false, cx).child(marketplace.name.clone()),
-                                    )
-                                    .child(material::semantic_chip(
-                                        source_kind_label(marketplace.kind),
-                                        cx.theme().muted,
-                                        muted,
-                                        cx,
-                                    ))
-                                    .children(
-                                        spinner.map(|spinner| {
-                                            spinner.fade(Spinner::new().color(muted))
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_meta_mono(false, cx)
-                                    .child(marketplace.source.clone()),
-                            )
-                            .when_some(location, |col, location| {
-                                col.child(div().text_meta_mono(false, cx).child(location))
+                        Checkbox::new(SharedString::from(format!(
+                            "plugin-install-account-{}",
+                            account.id
+                        )))
+                        .label(account.name.clone())
+                        .checked(chosen.contains(&account.id))
+                        .disabled(scopes.is_empty())
+                        .on_click(move |checked, _, cx| {
+                            let checked = *checked;
+                            let id = id.clone();
+                            panel.update(cx, |this, cx| {
+                                if let Some(draft) = this.install.as_mut() {
+                                    if checked {
+                                        draft.accounts.insert(id);
+                                    } else {
+                                        draft.accounts.remove(&id);
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }),
+                    ),
+            )
+            .children(reason.map(|reason| {
+                div()
+                    .pl_5()
+                    .text_secondary(compact, cx)
+                    .text_color(muted)
+                    .child(reason)
+            }))
+    });
+    let scope_label = |scope: PluginScope| match scope {
+        PluginScope::Project => crate::tr!(
+            "providers.plugins.install_scope.project",
+            project = project_name
+        )
+        .into_owned(),
+        PluginScope::Local => crate::tr!(
+            "providers.plugins.install_scope.local",
+            project = project_name
+        )
+        .into_owned(),
+        _ => crate::tr!("providers.plugins.install_scope.user").into_owned(),
+    };
+    let scope_help = match scope {
+        PluginScope::Project => crate::tr!("providers.plugins.install_scope.project_help"),
+        PluginScope::Local => crate::tr!("providers.plugins.install_scope.local_help"),
+        _ => crate::tr!("providers.plugins.install_scope.user_help"),
+    };
+    let scopes = (offered.len() > 1).then(|| {
+        let choices = offered.iter().map(|option| {
+            let option = *option;
+            let panel = panel.clone();
+            Choice::new(
+                SharedString::from(format!("plugin-install-scope-{}", scope_key(option))),
+                scope_label(option),
+            )
+            .selected(option == scope)
+            .on_select(move |_, cx| {
+                panel.update(cx, |this, cx| {
+                    if let Some(draft) = this.install.as_mut() {
+                        draft.scope = option;
+                    }
+                    cx.notify();
+                });
+            })
+        });
+        v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .text_caption(cx)
+                    .child(crate::tr!("providers.plugins.scope_title")),
+            )
+            .child(
+                ChoiceGroup::new("plugin-install-scopes")
+                    .compact(compact)
+                    .choices(choices.collect::<Vec<_>>()),
+            )
+            .child(
+                div()
+                    .text_secondary(compact, cx)
+                    .text_color(muted)
+                    .child(scope_help.into_owned()),
+            )
+    });
+    let commands: Vec<AnyElement> = accounts
+        .iter()
+        .filter(|account| chosen.contains(&account.id))
+        .filter_map(|account| {
+            let op = PluginOp::Install {
+                id: entry_id.clone(),
+                scope,
+                accept_command: None,
+            };
+            let line = agent::plugin_op_command(kind, account.binary.as_deref(), &op)?;
+            let selector = format!("plugin-install-command-{}", account.id);
+            Some(
+                v_flex()
+                    .debug_selector(move || selector.clone())
+                    .gap_0p5()
+                    .child(div().text_code(cx).child(verbatim(line, cx)))
+                    .child(div().text_secondary(compact, cx).text_color(muted).child(
+                        crate::tr!("providers.plugins.runs_as", name = account.name).into_owned(),
+                    ))
+                    .into_any_element(),
+            )
+        })
+        .collect();
+    let count = chosen.len();
+    let confirm_panel = panel.clone();
+    let cancel_panel = panel.clone();
+    v_flex()
+        .id("plugin-install-body")
+        .map(|col| {
+            if compact {
+                col.w_full()
+            } else {
+                col.w(px(380.))
+            }
+        })
+        .p_3()
+        .gap_3()
+        .when(!compact, |col| {
+            col.child(
+                div()
+                    .text_body(false, cx)
+                    .font_medium()
+                    .child(crate::tr!("providers.plugins.install_title", name = name).into_owned()),
+            )
+        })
+        .child(
+            v_flex()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_caption(cx)
+                        .child(crate::tr!("providers.plugins.install_accounts")),
+                )
+                .children(account_rows),
+        )
+        .children(scopes)
+        .when(!commands.is_empty(), |col| {
+            col.child(material::card(cx).w_full().gap_2().children(commands))
+        })
+        .child(
+            h_flex()
+                .w_full()
+                .justify_end()
+                .gap_2()
+                .when(!compact, |row| {
+                    row.child(
+                        Button::new("plugin-install-cancel")
+                            .ghost()
+                            .label(crate::tr!("settings.cancel").into_owned())
+                            .on_click(move |_, _, cx| {
+                                cancel_panel.update(cx, |this, cx| {
+                                    this.install = None;
+                                    cx.notify();
+                                })
                             }),
                     )
-                    .when(removable, |row| {
-                        let name = marketplace.name.clone();
-                        let profile_id = profile_id.to_string();
-                        let cwd = catalog.context_cwd.clone();
-                        let store = self.store.clone();
-                        row.child(
-                            Button::new(SharedString::from(remove_id.clone()))
-                                .debug_selector(move || remove_id.clone())
-                                .outline()
-                                .danger()
-                                .small()
-                                .disabled(busy)
-                                .label(crate::tr!("providers.plugins.remove").into_owned())
-                                .on_click(move |_, _, cx| {
-                                    let (profile_id, name, cwd) =
-                                        (profile_id.clone(), name.clone(), cwd.clone());
-                                    store.update(cx, |store, _| {
-                                        store.remove_provider_marketplace(profile_id, name, cwd)
-                                    });
-                                }),
-                        )
-                    })
-                    .into_any_element()
-            },
-        );
-        let state = crate::motion::CrossFade::new(
-            SharedString::from(format!("plugin-marketplaces-{profile_id}")),
-            usize::from(listed),
-            2,
-            CHANGE,
-            window,
-            cx,
-        );
-        let mut layers = Vec::new();
-        if state.shows(0) {
-            layers.push((
-                0,
-                self.note_card(crate::tr!("providers.plugins.no_marketplaces"), cx),
-            ));
-        }
-        if state.shows(1) && listed {
-            layers.push((1, material::group(cx).child(rows).into_any_element()));
-        }
-        let list = state.render(layers).w_full();
-        let can_add = catalog
-            .marketplace_actions
-            .contains(&MarketplaceAction::Add);
-        let add_id = format!("plugin-marketplace-add-{profile_id}");
-        v_flex()
-            .w_full()
-            .gap_2()
-            .when(can_add, |col| {
-                col.child(
-                    h_flex().w_full().justify_end().child(
-                        Button::new(SharedString::from(add_id.clone()))
-                            .debug_selector(move || add_id.clone())
-                            .outline()
-                            .small()
-                            .icon(IconName::Plus)
-                            .disabled(busy)
-                            .label(crate::tr!("providers.plugins.add_marketplace").into_owned())
-                            .on_click(cx.listener({
-                                let profile_id = profile_id.to_string();
-                                let cwd = catalog.context_cwd.clone();
-                                move |this, _, window, cx| {
-                                    this.open_add_marketplace(
-                                        profile_id.clone(),
-                                        cwd.clone(),
-                                        window,
-                                        cx,
-                                    )
+                })
+                .child(
+                    Button::new("plugin-install-confirm")
+                        .debug_selector(|| "plugin-install-confirm".into())
+                        .primary()
+                        .when(compact, |button| button.w_full())
+                        .disabled(count == 0)
+                        .label(if count > 1 {
+                            crate::tr!("providers.plugins.install_to_count", count = count)
+                                .into_owned()
+                        } else {
+                            crate::tr!("providers.plugins.action.install").into_owned()
+                        })
+                        .on_click(move |_, _, cx| {
+                            confirm_panel.update(cx, |this, cx| {
+                                if let Some(draft) = this.install.as_mut() {
+                                    draft.scope = scope;
                                 }
-                            })),
-                    ),
-                )
-            })
-            .child(list)
-            .into_any_element()
-    }
-
-    fn master_switch(&self, cx: &mut Context<Self>) -> AnyElement {
-        let enabled = self.store.read(cx).plugin_management().enabled;
-        material::group(cx)
-            .child(
-                material::group_row(cx)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_body(false, cx)
-                            .child(crate::tr!("providers.plugins.management")),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "plugins-management-switch".into())
-                            .child(
-                                Switch::new("plugins-management-switch")
-                                    .checked(enabled)
-                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                        let checked = *checked;
-                                        this.store.update(cx, |store, _| {
-                                            store.set_plugin_management_enabled(checked)
-                                        });
-                                    })),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn note_row(&self, text: String, color: Hsla, cx: &Context<Self>) -> AnyElement {
-        material::group_row_stacked(cx)
-            .justify_center()
-            .text_secondary(false, cx)
-            .text_color(color)
-            .child(text)
-            .into_any_element()
-    }
-
-    /// A card holding one muted line, for a view with nothing to list.
-    fn note_card(&self, text: std::borrow::Cow<'static, str>, cx: &Context<Self>) -> AnyElement {
-        material::grouped(
-            vec![self.note_row(text.into_owned(), cx.theme().muted_foreground, cx)],
-            cx,
+                                this.confirm_install(cx)
+                            })
+                        }),
+                ),
         )
         .into_any_element()
-    }
 }
 
-/// One profile's Available list: its rows as last listed, by catalog index
-/// and entry id, and the rows a search or an install brings in and takes
-/// away, drawn from their catalog index as they fold.
-struct AvailableList {
-    list: ListState,
-    listed: Option<Vec<(usize, String)>>,
-    rows: crate::motion::list_rows::ListRows<(), usize>,
-    flip: crate::motion::ListFlip,
-}
-
-impl Default for AvailableList {
-    fn default() -> Self {
-        Self {
-            list: ListState::new(0, ListAlignment::Top, px(120.)),
-            listed: None,
-            rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
-            flip: Default::default(),
-        }
-    }
-}
-
-impl Render for PluginsSettingsPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.shown && self.store.read(cx).settings_hydrated() {
-            self.shown = true;
-            self.switches = self.store.read(cx).plugin_management().clone();
-            for profile_id in self.managed_profiles(&self.switches, cx) {
-                self.refresh(&profile_id, cx);
-            }
-            cx.defer_in(window, |this, window, cx| this.sync_challenge(window, cx));
-        }
-        let profiles = self.tab_profiles(cx);
-        let selected = profiles
-            .iter()
-            .find(|profile| self.selected.as_ref() == Some(&profile.id))
-            .or(profiles.first())
-            .cloned();
-        let compact = self.window_state.read(cx).compact;
-        let gap = self.motion.transition(
-            "page-gap",
-            if compact {
-                cx.theme().tokens.spacing.lg
-            } else {
-                material::section_gap(cx)
-            },
-            GLIDE,
-            window,
-            cx,
-        );
-        v_flex()
-            .w_full()
-            .gap(gap)
-            .child(material::group_caption(
-                crate::tr!("settings.plugins_section"),
-                cx,
-            ))
-            .child(self.master_switch(cx))
-            .map(|page| match selected {
-                None => {
-                    page.child(self.note_card(crate::tr!("providers.plugins.no_providers"), cx))
-                }
-                Some(profile) => {
-                    // Each provider's body keeps a layer, so the one left
-                    // fades out under the one chosen.
-                    let current = profiles
-                        .iter()
-                        .position(|shown| shown.id == profile.id)
-                        .unwrap_or(0);
-                    let fade = crate::motion::CrossFade::new(
-                        "plugins-profile-body",
-                        current,
-                        profiles.len(),
-                        CHANGE,
-                        window,
-                        cx,
-                    );
-                    let bodies: Vec<(usize, AnyElement)> = profiles
-                        .iter()
-                        .enumerate()
-                        .filter(|(layer, _)| fade.shows(*layer))
-                        .map(|(layer, shown)| (layer, self.render_profile(shown, window, cx)))
-                        .collect();
-                    page.child(
-                        v_flex()
-                            .w_full()
-                            .gap_3()
-                            .child(self.provider_tabs(&profiles, &profile.id, cx))
-                            .child(fade.span().render(bodies).w_full()),
-                    )
-                }
-            })
-    }
-}
-
-/// Keys for lines that are only their text, such as errors: a line keeps its
-/// key while it stays, and two alike are told apart by their order.
-fn text_keys<'a>(lines: impl IntoIterator<Item = &'a String>) -> Vec<(SharedString, String)> {
-    let mut seen = std::collections::HashMap::<&str, usize>::new();
-    lines
-        .into_iter()
-        .map(|line| {
-            let count = seen.entry(line.as_str()).or_default();
-            *count += 1;
-            (SharedString::from(format!("{count}-{line}")), line.clone())
-        })
-        .collect()
-}
-
-fn manages(management: PluginManagement) -> bool {
-    !management.actions.is_empty() || management.marketplaces
-}
-
-/// What the catalog's status row says, if it shows one.
-#[derive(Clone, PartialEq)]
-enum CatalogStatus {
-    Note(String),
-    Failed(String),
-}
-
-/// Enable and Disable side by side first, then Update, then Uninstall.
-fn ordered(mut actions: Vec<PluginAction>) -> Vec<PluginAction> {
-    actions.sort_by_key(|action| match action.kind() {
-        PluginActionKind::Install => 0,
-        PluginActionKind::Enable => 1,
-        PluginActionKind::Disable => 2,
-        PluginActionKind::Update => 3,
-        PluginActionKind::Uninstall => 4,
-    });
-    actions
-}
-
-fn action_button(
-    store: &Entity<WorkspaceStore>,
-    profile_id: &str,
-    entry_id: &str,
-    action: PluginAction,
-    cwd: Option<PathBuf>,
-    busy: bool,
-) -> Button {
-    let (verb, label) = match action.kind() {
-        PluginActionKind::Install => ("install", crate::tr!("providers.plugins.action.install")),
-        PluginActionKind::Uninstall => (
-            "uninstall",
-            crate::tr!("providers.plugins.action.uninstall"),
-        ),
-        PluginActionKind::Enable => ("enable", crate::tr!("providers.plugins.action.enable")),
-        PluginActionKind::Disable => ("disable", crate::tr!("providers.plugins.action.disable")),
-        PluginActionKind::Update => ("update", crate::tr!("providers.plugins.action.update")),
-    };
-    let id = format!(
-        "plugin-{verb}-{profile_id}-{entry_id}-{}",
-        scope_key(action.scope())
-    );
-    let store = store.clone();
-    let (profile_id, entry_id) = (profile_id.to_string(), entry_id.to_string());
-    let button = Button::new(SharedString::from(id.clone()))
-        .debug_selector(move || id.clone())
-        .outline()
-        .small()
-        .disabled(busy)
-        .label(label.into_owned())
-        .on_click(move |_, _, cx| {
-            let (profile_id, entry_id, cwd) = (profile_id.clone(), entry_id.clone(), cwd.clone());
-            store.update(cx, |store, _| {
-                store.run_provider_plugin_action(profile_id, entry_id, action, cwd)
-            });
-        });
-    if action.kind() == PluginActionKind::Uninstall {
-        button.danger()
-    } else {
-        button
-    }
-}
-
-fn source_line(entry: &ProviderPluginEntry, cx: &App) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    h_flex()
-        .w_full()
-        .flex_wrap()
-        .items_center()
-        .gap_2()
+fn note_row(text: String, cx: &App) -> AnyElement {
+    material::group_row_stacked(cx)
+        .justify_center()
         .text_secondary(false, cx)
-        .when_some(entry.source.marketplace.as_ref(), |row, marketplace| {
-            row.child(
-                crate::tr!(
-                    "providers.plugins.from_marketplace",
-                    marketplace = marketplace
-                )
-                .into_owned(),
-            )
-        })
-        .child(material::semantic_chip(
-            source_kind_label(entry.source.kind),
-            cx.theme().muted,
-            muted,
-            cx,
-        ))
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
         .into_any_element()
 }
 
-/// Where each installation lives, the declared components and the host's
-/// read-only facts for an entry.
-fn details(entry: &ProviderPluginEntry, cx: &App) -> AnyElement {
-    v_flex()
-        .w_full()
-        .pt_1()
-        .gap_2()
-        .children(entry.installations.iter().filter_map(|installation| {
-            let location = installation.location.as_ref()?;
-            Some(
+/// A card holding one muted line, for a section with nothing to list.
+fn note_card(text: String, cx: &App) -> AnyElement {
+    material::grouped(vec![note_row(text, cx)], cx).into_any_element()
+}
+
+fn source_chip(entry: &ProviderPluginEntry, cx: &App) -> AnyElement {
+    let label = match (&entry.source.marketplace, entry.source.kind) {
+        (Some(marketplace), PluginSourceKind::Unknown) => marketplace.clone(),
+        (Some(marketplace), kind) => format!("{marketplace} · {}", source_kind_label(kind)),
+        (None, kind) => source_kind_label(kind),
+    };
+    material::semantic_chip(label, cx.theme().muted, cx.theme().muted_foreground, cx)
+        .into_any_element()
+}
+
+/// The counts of what a plugin declares, and what it adds to every session.
+fn components_line(entry: &ProviderPluginEntry, compact: bool, cx: &App) -> Option<AnyElement> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(declared) = &entry.declared {
+        for (key, names) in [
+            ("skills", &declared.skills),
+            ("agents", &declared.agents),
+            ("hooks", &declared.hooks),
+            ("mcp_servers", &declared.mcp_servers),
+            ("lsp_servers", &declared.lsp_servers),
+            ("apps", &declared.apps),
+        ] {
+            if let Some(names) = names.as_ref().filter(|names| !names.is_empty()) {
+                parts.push(format!(
+                    "{} {}",
+                    crate::tr!(format!("providers.plugins.declared.{key}")),
+                    names.len()
+                ));
+            }
+        }
+        if let Some(untrusted) = declared
+            .untrusted_hooks
+            .as_ref()
+            .filter(|hooks| !hooks.is_empty())
+        {
+            parts.push(format!(
+                "{} {}",
+                crate::tr!("providers.plugins.declared.untrusted_hooks"),
+                untrusted.len()
+            ));
+        }
+    }
+    if let Some(cost) = &entry.always_on {
+        parts.push(crate::tr!("providers.plugins.always_on", cost = cost).into_owned());
+    }
+    (!parts.is_empty()).then(|| {
+        div()
+            .text_secondary(compact, cx)
+            .text_color(cx.theme().muted_foreground)
+            .child(parts.join(" · "))
+            .into_any_element()
+    })
+}
+
+/// A plugin's details: what it declares by name, and each account's copy.
+fn details(
+    columns: &[Account],
+    row: &Row,
+    project: bool,
+    scope: PluginScope,
+    cx: &App,
+) -> AnyElement {
+    let entry = &row.entry;
+    let muted = cx.theme().muted_foreground;
+    let mut col = v_flex().w_full().pt_2().gap_2();
+    if let Some(declared) = &entry.declared {
+        for (key, names) in [
+            ("skills", &declared.skills),
+            ("agents", &declared.agents),
+            ("hooks", &declared.hooks),
+            ("untrusted_hooks", &declared.untrusted_hooks),
+            ("mcp_servers", &declared.mcp_servers),
+            ("lsp_servers", &declared.lsp_servers),
+            ("apps", &declared.apps),
+        ] {
+            let Some(names) = names else {
+                continue;
+            };
+            col = col.child(
                 h_flex()
                     .w_full()
                     .items_start()
                     .gap_2()
                     .text_secondary(false, cx)
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_caption(cx)
-                            .child(scope_label(installation.scope)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .child(location.display().to_string()),
-                    ),
-            )
-        }))
-        .when_some(entry.declared.as_ref(), |col, declared| {
-            col.child(declared_chips(declared, cx))
-        })
-        .children(entry.diagnostics.iter().map(|(key, text)| {
-            v_flex()
-                .w_full()
-                .gap_0p5()
-                .child(div().text_caption(cx).child(diagnostic_label(key)))
-                .child(
-                    material::card(cx)
-                        .w_full()
-                        .text_code(cx)
-                        .child(verbatim(text.clone(), cx)),
-                )
-        }))
-        .into_any_element()
-}
-
-fn declared_chips(declared: &DeclaredComponents, cx: &App) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    let groups = [
-        ("skills", &declared.skills, false),
-        ("agents", &declared.agents, false),
-        ("hooks", &declared.hooks, false),
-        ("untrusted_hooks", &declared.untrusted_hooks, true),
-        ("mcp_servers", &declared.mcp_servers, false),
-        ("lsp_servers", &declared.lsp_servers, false),
-        ("apps", &declared.apps, false),
-    ];
-    v_flex()
-        .w_full()
-        .gap_1()
-        .children(groups.into_iter().filter_map(|(key, names, warn)| {
-            let names = names.as_ref()?;
-            let (bg, fg) = if warn {
-                (
-                    cx.theme().warning.opacity(0.14),
-                    cx.theme().warning_foreground,
-                )
-            } else {
-                (cx.theme().muted, muted)
+                    .child(div().w(px(96.)).flex_none().text_color(muted).child(
+                        crate::tr!(format!("providers.plugins.declared.{key}")).into_owned(),
+                    ))
+                    .child(div().flex_1().min_w_0().child(if names.is_empty() {
+                        crate::tr!("providers.plugins.none_declared").into_owned()
+                    } else {
+                        names.join(", ")
+                    })),
+            );
+        }
+    }
+    for (account, cell) in columns.iter().zip(&row.cells) {
+        let Some(cell) = cell else {
+            continue;
+        };
+        let scopes: Vec<PluginScope> = if project {
+            vec![PluginScope::Project, PluginScope::Local]
+        } else {
+            vec![scope]
+        };
+        for scope in scopes {
+            let Some(installation) = installation(cell, scope) else {
+                continue;
             };
-            Some(
-                h_flex()
+            col = col.child(
+                v_flex()
                     .w_full()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1()
+                    .gap_0p5()
+                    .text_secondary(false, cx)
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(material::status_dot(account.color))
+                            .child(account.name.clone())
+                            .child(div().text_color(muted).child(scope_label(scope)))
+                            .children(
+                                installation
+                                    .version
+                                    .clone()
+                                    .map(|version| div().text_meta_mono(false, cx).child(version)),
+                            ),
+                    )
+                    .children(installation.location.as_ref().map(|location| {
+                        div()
+                            .pl_3()
+                            .text_meta_mono(false, cx)
+                            .child(location.display().to_string())
+                    })),
+            );
+        }
+        for (key, text) in &cell.diagnostics {
+            col = col.child(
+                v_flex()
+                    .w_full()
+                    .gap_0p5()
                     .child(div().text_caption(cx).child(format!(
                         "{} · {}",
-                        crate::tr!(format!("providers.plugins.declared.{key}")),
-                        names.len()
+                        diagnostic_label(key),
+                        account.name
                     )))
-                    .when(names.is_empty(), |row| {
-                        row.child(
-                            div()
-                                .text_secondary(false, cx)
-                                .child(crate::tr!("providers.plugins.none_declared")),
-                        )
-                    })
-                    .children(
-                        names
-                            .iter()
-                            .map(|name| material::semantic_chip(name.clone(), bg, fg, cx)),
+                    .child(
+                        material::card(cx)
+                            .w_full()
+                            .text_code(cx)
+                            .child(verbatim(text.clone(), cx)),
                     ),
-            )
-        }))
-        .into_any_element()
+            );
+        }
+    }
+    col.into_any_element()
 }
 
 fn challenge_body(challenge: &PluginChallenge, cx: &App) -> AnyElement {
@@ -2038,15 +3240,20 @@ fn diagnostic_label(key: &str) -> String {
 mod tests {
     use agent::{PluginInstallation, PluginSource};
     use gpui::{TestAppContext, VisualTestContext, size};
-    use tcode_core::settings::Settings;
+    use tcode_core::project::Project;
+    use tcode_core::settings::{ProviderProfile, ProviderSettings, Settings};
     use tcode_protocol::{
-        ClientPayload, Command, CommandResponse, EventEnvelope, HostMessage, ProvidersStatus,
-        ServerEvent, SettingsPatch, Topic, decode_client_line, encode_line,
+        ClientPayload, Command, CommandResponse, EventEnvelope, HostMessage, IndexSnapshot,
+        ProvidersStatus, ServerEvent, Topic, decode_client_line, encode_line,
     };
 
     use super::*;
     use crate::settings_page::SettingsPage;
     use crate::store::WorkspaceAttachment;
+
+    /// The project as the host names it: a path on the host, which this
+    /// client never reads.
+    const ROOT: &str = "/host/work/tcode";
 
     struct Host {
         outgoing: async_channel::Receiver<String>,
@@ -2056,17 +3263,8 @@ mod tests {
     }
 
     impl Host {
-        fn replicate(&self, catalog: ProviderPluginCatalog, cx: &mut VisualTestContext) {
-            send_providers(&self.incoming, catalog);
-            self.settle(cx);
-        }
-
-        fn replicate_settings(&self, settings: Settings, cx: &mut VisualTestContext) {
-            send_settings(&self.incoming, settings);
-            self.settle(cx);
-        }
-
-        fn settle(&self, cx: &mut VisualTestContext) {
+        fn replicate(&self, catalogs: Vec<ProviderPluginCatalog>, cx: &mut VisualTestContext) {
+            send(&self.incoming, Topic::Providers, providers(catalogs));
             cx.run_until_parked();
             self.store
                 .update(cx, |store, cx| store.drain_host_events_for_test(cx));
@@ -2101,73 +3299,213 @@ mod tests {
         }
     }
 
+    fn providers(plugins: Vec<ProviderPluginCatalog>) -> ServerEvent {
+        ServerEvent::ProvidersReplaced(ProvidersStatus {
+            plugins,
+            ..Default::default()
+        })
+    }
+
+    fn send(incoming: &async_channel::Sender<String>, topic: Topic, event: ServerEvent) {
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic,
+                    event,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// Two Claude Code accounts, the built-in `claude` and `tryanks`, with
+    /// the project last worked in.
+    fn settings() -> Settings {
+        let mut settings = Settings {
+            last_project_id: Some("tcode".into()),
+            ..Default::default()
+        };
+        settings.profiles.insert(
+            "tryanks".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    display_name: Some("tryanks".into()),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        settings
+    }
+
+    fn project() -> Project {
+        Project {
+            id: "tcode".into(),
+            name: "tcode".into(),
+            root: ROOT.into(),
+            quick_chat: false,
+            icon_path: None,
+            permission_defaults: Default::default(),
+            created_at: 0,
+        }
+    }
+
+    fn entry(id: &str, actions: Vec<PluginAction>) -> ProviderPluginEntry {
+        let (name, marketplace) = id.split_once('@').unwrap();
+        ProviderPluginEntry {
+            id: id.into(),
+            name: name.into(),
+            version: Some("1.0.0".into()),
+            latest_version: None,
+            description: Some(format!("The {name} plugin")),
+            source: PluginSource {
+                marketplace: Some(marketplace.into()),
+                kind: PluginSourceKind::LocalPath,
+            },
+            installations: Vec::new(),
+            enabled: Tri::Unknown,
+            declared: None,
+            always_on: None,
+            errors: Vec::new(),
+            actions,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn installed(
+        mut entry: ProviderPluginEntry,
+        scope: PluginScope,
+        on: bool,
+    ) -> ProviderPluginEntry {
+        entry.installations.push(PluginInstallation {
+            scope,
+            location: Some(format!("/host/cache/{}", entry.name).into()),
+            version: entry.version.clone(),
+            scope_enabled: Some(on),
+            other_project: false,
+        });
+        entry.enabled = Tri::from(on);
+        entry
+    }
+
     fn catalog(
+        profile: &str,
+        cwd: Option<&str>,
         entries: Vec<ProviderPluginEntry>,
-        challenges: Vec<PluginChallenge>,
     ) -> ProviderPluginCatalog {
         ProviderPluginCatalog {
-            profile_id: "claude".into(),
-            context_cwd: Some("/work/project".into()),
-            marketplaces: Vec::new(),
-            marketplace_actions: Vec::new(),
+            profile_id: profile.into(),
+            context_cwd: cwd.map(PathBuf::from),
+            marketplaces: vec![ProviderPluginMarketplace {
+                name: "mkt".into(),
+                source: "/host/mkt".into(),
+                kind: PluginSourceKind::LocalPath,
+                location: None,
+            }],
+            marketplace_actions: vec![MarketplaceAction::Add],
             entries,
             errors: Vec::new(),
             state: PluginCatalogState::Fresh,
             loading: false,
             pending: Vec::new(),
-            challenges,
+            challenges: Vec::new(),
         }
     }
 
-    /// Settings with Claude Code's plugin management switched on.
-    fn claude_managed() -> Settings {
-        let mut settings = Settings::default();
-        settings
-            .apply(SettingsPatch::PluginManagementProvider {
-                provider: agent::ProviderKind::ClaudeCode,
-                enabled: true,
-            })
-            .unwrap();
-        settings
+    const USER: PluginScope = PluginScope::User;
+    const PROJECT: PluginScope = PluginScope::Project;
+
+    /// What the host listed for the two accounts. `alpha` is installed in
+    /// both, on in `claude` and off in `tryanks`; `delta` only in `claude`,
+    /// from a marketplace `tryanks` lacks; `beta` is enabled by the project
+    /// and only `claude` has its files; `gamma` is offered to both.
+    fn catalogs() -> Vec<ProviderPluginCatalog> {
+        let alpha = |on: bool| {
+            installed(
+                entry(
+                    "alpha@mkt",
+                    vec![
+                        if on {
+                            PluginAction::Disable { scope: USER }
+                        } else {
+                            PluginAction::Enable { scope: USER }
+                        },
+                        PluginAction::Uninstall { scope: USER },
+                    ],
+                ),
+                USER,
+                on,
+            )
+        };
+        let gamma = || entry("gamma@mkt", vec![PluginAction::Install { scope: USER }]);
+        vec![
+            catalog(
+                "claude",
+                None,
+                vec![
+                    alpha(true),
+                    installed(
+                        entry("delta@other", vec![PluginAction::Disable { scope: USER }]),
+                        USER,
+                        true,
+                    ),
+                    gamma(),
+                ],
+            ),
+            catalog("tryanks", None, vec![alpha(false), gamma()]),
+            catalog(
+                "claude",
+                Some(ROOT),
+                vec![installed(
+                    entry(
+                        "beta@mkt",
+                        vec![
+                            PluginAction::Disable { scope: PROJECT },
+                            PluginAction::Uninstall { scope: PROJECT },
+                        ],
+                    ),
+                    PROJECT,
+                    true,
+                )],
+            ),
+            catalog(
+                "tryanks",
+                Some(ROOT),
+                vec![entry(
+                    "beta@mkt",
+                    vec![PluginAction::Install { scope: PROJECT }],
+                )],
+            ),
+        ]
     }
 
-    /// Open Settings → Plugins the way navigation does, against a host
-    /// whose replicated state holds `settings` and `catalog`.
+    /// Open Settings → Plugins the way navigation does, on a client attached
+    /// to a remote host whose replicated state holds `settings`, one project
+    /// and `catalogs`.
     fn open_plugins(
         settings: Settings,
-        catalog: ProviderPluginCatalog,
+        catalogs: Vec<ProviderPluginCatalog>,
         cx: &mut TestAppContext,
     ) -> (Host, &mut VisualTestContext) {
-        let host = plugins_host(settings, catalog, cx);
-        let window_state = cx.new(|_| {
-            let mut state = WindowState::new(false);
-            state.pending_settings_section = Some("plugins".into());
-            state
-        });
-        let page_store = host.store.clone();
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let page = cx.new(|cx| SettingsPage::new(page_store, window_state, window, cx));
-            gpui_base::Root::new(page, window, cx)
-        });
-        cx.simulate_resize(size(px(1000.), px(1400.)));
-        cx.run_until_parked();
-        host.store
-            .update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        draw(cx);
-        (host, cx)
-    }
-
-    /// A host whose replicated state holds `settings` and `catalog`.
-    fn plugins_host(
-        settings: Settings,
-        catalog: ProviderPluginCatalog,
-        cx: &mut TestAppContext,
-    ) -> Host {
         cx.update(crate::theme::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
-        send_settings(&incoming, settings);
-        send_providers(&incoming, catalog);
+        send(
+            &incoming,
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(settings),
+        );
+        send(
+            &incoming,
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                summary: Default::default(),
+                sessions: Vec::new(),
+                projects: vec![project()],
+            }),
+        );
+        send(&incoming, Topic::Providers, providers(catalogs));
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
@@ -2178,44 +3516,41 @@ mod tests {
                 .await;
         });
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(
+                link,
+                WorkspaceAttachment::Remote {
+                    host_id: "studio".into(),
+                    host_name: "Studio".into(),
+                },
+                None,
+                None,
+                false,
+                cx,
+            )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        Host {
+        let host = Host {
             outgoing,
             incoming,
             store,
             _pump: pump,
-        }
-    }
-
-    fn send_settings(incoming: &async_channel::Sender<String>, settings: Settings) {
-        incoming
-            .try_send(
-                encode_line(&HostMessage::Event(EventEnvelope {
-                    request_id: None,
-                    topic: Topic::Settings,
-                    event: ServerEvent::SettingsSnapshot(settings),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-    }
-
-    fn send_providers(incoming: &async_channel::Sender<String>, catalog: ProviderPluginCatalog) {
-        incoming
-            .try_send(
-                encode_line(&HostMessage::Event(EventEnvelope {
-                    request_id: None,
-                    topic: Topic::Providers,
-                    event: ServerEvent::ProvidersReplaced(ProvidersStatus {
-                        plugins: vec![catalog],
-                        ..Default::default()
-                    }),
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+        };
+        let window_state = cx.new(|_| {
+            let mut state = WindowState::new(false);
+            state.pending_settings_section = Some("plugins".into());
+            state
+        });
+        let page_store = host.store.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let page = cx.new(|cx| SettingsPage::new(page_store, window_state, window, cx));
+            gpui_base::Root::new(page, window, cx)
+        });
+        cx.simulate_resize(size(px(1400.), px(1600.)));
+        cx.run_until_parked();
+        host.store
+            .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        draw(cx);
+        (host, cx)
     }
 
     fn draw(cx: &mut VisualTestContext) {
@@ -2228,132 +3563,175 @@ mod tests {
         }
     }
 
-    fn alpha() -> ProviderPluginEntry {
-        ProviderPluginEntry {
-            id: "alpha@mkt".into(),
-            name: "alpha".into(),
-            version: Some("1.0.0".into()),
-            description: Some("Alpha plugin".into()),
-            source: PluginSource {
-                marketplace: Some("mkt".into()),
-                kind: PluginSourceKind::LocalPath,
-            },
-            installations: vec![PluginInstallation {
-                scope: PluginScope::Project,
-                location: Some("/work/project/.claude/plugins/alpha".into()),
-                version: Some("1.0.0".into()),
-                scope_enabled: Some(true),
-            }],
-            enabled: Tri::Yes,
-            declared: None,
-            errors: Vec::new(),
-            actions: vec![
-                PluginAction::Install {
-                    scope: PluginScope::User,
-                },
-                PluginAction::Disable {
-                    scope: PluginScope::Project,
-                },
-            ],
-            diagnostics: Vec::new(),
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        draw(cx);
+    }
+
+    /// Accounts are columns: each account's switch shows and changes that
+    /// account's own scope; a cell an account's listing has nothing for draws
+    /// no control. The project's plugin has one switch, run through an
+    /// account that offers it, and the account without its files can install
+    /// them. Every listing and change names the host's project path.
+    #[gpui::test]
+    fn each_account_has_its_column_and_the_project_one_switch(cx: &mut TestAppContext) {
+        let (host, cx) = open_plugins(settings(), catalogs(), cx);
+        let listed: Vec<(String, Option<PathBuf>)> = host
+            .commands(cx)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::RefreshProviderPlugins { profile_id, cwd } => Some((profile_id, cwd)),
+                _ => None,
+            })
+            .collect();
+        for wanted in [
+            ("claude", None),
+            ("claude", Some(ROOT)),
+            ("tryanks", None),
+            ("tryanks", Some(ROOT)),
+        ] {
+            let wanted = (wanted.0.to_string(), wanted.1.map(PathBuf::from));
+            assert!(listed.contains(&wanted), "{wanted:?} in {listed:?}");
         }
+
+        for drawn in [
+            "plugin-switch-claude-alpha@mkt",
+            "plugin-switch-tryanks-alpha@mkt",
+            "plugin-switch-claude-delta@other",
+            "plugin-cell-tryanks-delta@other",
+            "plugin-project-switch-project-beta@mkt",
+            "plugin-ready-claude-beta@mkt",
+            "plugin-ready-tryanks-beta@mkt",
+        ] {
+            assert!(cx.debug_bounds(drawn).is_some(), "{drawn}");
+        }
+        for absent in [
+            "plugin-switch-tryanks-delta@other",
+            "plugin-install-tryanks-delta@other",
+            // Offered but installed nowhere: it is browsed, not listed.
+            "plugin-row-user-gamma@mkt",
+        ] {
+            assert!(cx.debug_bounds(absent).is_none(), "{absent}");
+        }
+
+        click("plugin-switch-tryanks-alpha@mkt", cx);
+        click("plugin-project-switch-project-beta@mkt", cx);
+        click("plugin-ready-install-tryanks-beta@mkt", cx);
+        let changes: Vec<Command> = host
+            .commands(cx)
+            .into_iter()
+            .filter(|command| !matches!(command, Command::RefreshProviderPlugins { .. }))
+            .collect();
+        assert_eq!(
+            changes,
+            [
+                Command::SetProviderPluginEnabled {
+                    profile_id: "tryanks".into(),
+                    entry_id: "alpha@mkt".into(),
+                    scope: USER,
+                    enabled: true,
+                    cwd: None,
+                },
+                Command::SetProviderPluginEnabled {
+                    profile_id: "claude".into(),
+                    entry_id: "beta@mkt".into(),
+                    scope: PROJECT,
+                    enabled: false,
+                    cwd: Some(ROOT.into()),
+                },
+                Command::InstallProviderPlugin {
+                    profile_id: "tryanks".into(),
+                    entry_id: "beta@mkt".into(),
+                    scope: PROJECT,
+                    cwd: Some(ROOT.into()),
+                },
+            ]
+        );
+    }
+
+    /// Installing ticks one account and shows the command it runs there;
+    /// confirming installs where ticked and nowhere else.
+    #[gpui::test]
+    fn an_install_runs_only_for_the_accounts_ticked(cx: &mut TestAppContext) {
+        let (host, cx) = open_plugins(settings(), catalogs(), cx);
+        host.commands(cx);
+        click("plugins-browse", cx);
+        click("plugin-install-open-gamma@mkt", cx);
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("plugin-install-command-claude").is_some());
+        assert!(cx.debug_bounds("plugin-install-command-tryanks").is_none());
+        click("plugin-install-confirm", cx);
+        let installs = |host: &Host, cx: &mut VisualTestContext| -> Vec<String> {
+            host.commands(cx)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::InstallProviderPlugin {
+                        profile_id,
+                        entry_id,
+                        scope: USER,
+                        cwd: None,
+                    } if entry_id == "gamma@mkt" => Some(profile_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(installs(&host, cx), ["claude"]);
+
+        crate::test_frames::draw_settled(cx);
+        click("plugin-install-open-gamma@mkt", cx);
+        crate::test_frames::draw_settled(cx);
+        click("plugin-install-account-tryanks", cx);
+        assert!(cx.debug_bounds("plugin-install-command-tryanks").is_some());
+        click("plugin-install-confirm", cx);
+        assert_eq!(installs(&host, cx), ["claude", "tryanks"]);
     }
 
     /// An uninstalled plugin's row folds away where it was, and the row below
     /// it moves up as it goes rather than jumping into its place.
     #[gpui::test]
     fn an_uninstalled_plugin_folds_away_and_the_next_moves_up(cx: &mut TestAppContext) {
-        let beta = ProviderPluginEntry {
-            id: "beta@mkt".into(),
-            name: "beta".into(),
-            ..alpha()
-        };
-        let (host, cx) = open_plugins(
-            claude_managed(),
-            catalog(vec![alpha(), beta.clone()], Vec::new()),
-            cx,
-        );
+        let (host, cx) = open_plugins(settings(), catalogs(), cx);
         crate::test_frames::draw_settled(cx);
         let top = |row: &'static str, cx: &mut VisualTestContext| {
             cx.debug_bounds(row).expect("the row is drawn").top()
         };
-        let first = top("plugin-row-claude-alpha@mkt", cx);
-        let second = top("plugin-row-claude-beta@mkt", cx);
+        let first = top("plugin-row-user-alpha@mkt", cx);
+        let second = top("plugin-row-user-delta@other", cx);
 
-        host.replicate(catalog(vec![beta], Vec::new()), cx);
+        let mut after = catalogs();
+        for catalog in after
+            .iter_mut()
+            .filter(|catalog| catalog.context_cwd.is_none())
+        {
+            catalog.entries.retain(|entry| entry.id != "alpha@mkt");
+        }
+        host.replicate(after, cx);
         assert!(
-            cx.debug_bounds("plugin-row-claude-alpha@mkt").is_some(),
+            cx.debug_bounds("plugin-row-user-alpha@mkt").is_some(),
             "an uninstalled plugin is drawn while it leaves"
         );
         cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
         crate::test_frames::draw(cx);
-        let moving = top("plugin-row-claude-beta@mkt", cx);
+        let moving = top("plugin-row-user-delta@other", cx);
         assert!(
             moving > first && moving < second,
-            "beta is on its way up, at {moving:?}"
+            "delta is on its way up, at {moving:?}"
         );
 
         crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds("plugin-row-claude-alpha@mkt").is_none());
-        assert_eq!(top("plugin-row-claude-beta@mkt", cx), first);
-    }
-
-    #[gpui::test]
-    fn switching_language_relocalizes_the_search_placeholder(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
-        let mut uninstalled = alpha();
-        uninstalled.installations.clear();
-        let host = plugins_host(claude_managed(), catalog(vec![uninstalled], Vec::new()), cx);
-        let window_state = cx.new(|_| WindowState::new(false));
-        let store = host.store.clone();
-        let (panel, cx) = cx.add_window_view(|window, cx| {
-            PluginsSettingsPanel::new(store, window_state, ScrollHandle::new(), window, cx)
-        });
-        // The first frame shows the page, which lists the switched-on providers.
-        draw(cx);
-        cx.run_until_parked();
-        host.store
-            .update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        panel.update(cx, |panel, cx| {
-            panel.view = View::Available;
-            cx.notify();
-        });
-        crate::settings::assert_follows_language_switch(cx, "providers.plugins.search", |cx| {
-            panel.read_with(cx, |panel, cx| {
-                let search = panel.search.read(cx);
-                search.presentation().placeholder().to_string()
-            })
-        });
-    }
-
-    /// The host decides which actions an entry offers in its context; the
-    /// page draws exactly those and no control the host did not compute.
-    #[gpui::test]
-    fn only_host_computed_plugin_actions_are_rendered(cx: &mut TestAppContext) {
-        let (host, cx) = open_plugins(claude_managed(), catalog(vec![alpha()], Vec::new()), cx);
-        assert!(cx.debug_bounds("plugin-row-claude-alpha@mkt").is_some());
-
-        let offered = [
-            "plugin-install-claude-alpha@mkt-user",
-            "plugin-disable-claude-alpha@mkt-project",
-        ];
-        for verb in ["install", "uninstall", "enable", "disable", "update"] {
-            for scope in SCOPES {
-                // Debug selectors are looked up by `'static` name.
-                let id: &'static str =
-                    format!("plugin-{verb}-claude-alpha@mkt-{}", scope_key(scope)).leak();
-                assert_eq!(cx.debug_bounds(id).is_some(), offered.contains(&id), "{id}");
-            }
-        }
-        drop(host);
+        assert!(cx.debug_bounds("plugin-row-user-alpha@mkt").is_none());
+        assert_eq!(top("plugin-row-user-delta@other", cx), first);
     }
 
     /// A marketplace removal waits on the person: the dialog lists what it
     /// uninstalls, and Remove answers exactly that challenge, once.
     #[gpui::test]
     fn destructive_challenge_lists_uninstalls_and_accept_answers_it(cx: &mut TestAppContext) {
-        let challenge = PluginChallenge {
+        let mut pending = catalogs();
+        pending[0].challenges.push(PluginChallenge {
             op_id: RuntimeOperationId(7),
             profile_id: "claude".into(),
             entry_id: "mkt".into(),
@@ -2361,9 +3739,8 @@ mod tests {
                 uninstalls: vec!["alpha@mkt".into(), "beta@mkt".into()],
             },
             native_text: None,
-        };
-        let pending = catalog(Vec::new(), vec![challenge]);
-        let (host, cx) = open_plugins(claude_managed(), pending.clone(), cx);
+        });
+        let (host, cx) = open_plugins(settings(), pending.clone(), cx);
         assert!(
             cx.debug_bounds("plugin-challenge-uninstall-alpha@mkt")
                 .is_some()
@@ -2374,75 +3751,22 @@ mod tests {
         );
         host.commands(cx);
 
-        let accept = cx.debug_bounds("plugin-challenge-accept").unwrap();
-        cx.simulate_click(accept.center(), gpui::Modifiers::default());
-        draw(cx);
+        click("plugin-challenge-accept", cx);
         let answers: Vec<Command> = host
             .commands(cx)
             .into_iter()
             .filter(|command| matches!(command, Command::ResolvePluginChallenge { .. }))
             .collect();
-        assert!(
-            matches!(
-                answers.as_slice(),
-                [Command::ResolvePluginChallenge {
-                    op_id: RuntimeOperationId(7),
-                    accept: true
-                }]
-            ),
-            "{answers:?}"
+        assert_eq!(
+            answers,
+            [Command::ResolvePluginChallenge {
+                op_id: RuntimeOperationId(7),
+                accept: true
+            }]
         );
         // The replica still shows the challenge until the host has acted on
         // the answer; the person is not asked again meanwhile.
         host.replicate(pending, cx);
         assert!(cx.debug_bounds("plugin-challenge-accept").is_none());
-    }
-
-    /// Off, a provider's section is its switch: a catalog still in the
-    /// replica draws no controls and nothing is listed until the switch is
-    /// turned on, which lists it.
-    #[gpui::test]
-    fn a_switched_off_provider_shows_only_its_switch_until_switched_on(cx: &mut TestAppContext) {
-        let (host, cx) = open_plugins(Settings::default(), catalog(vec![alpha()], Vec::new()), cx);
-        assert!(cx.debug_bounds("plugins-switch-claude").is_some());
-        for id in [
-            "plugin-row-claude-alpha@mkt",
-            "plugin-install-claude-alpha@mkt-user",
-            "plugin-disable-claude-alpha@mkt-project",
-            "plugins-views-claude",
-            "plugins-refresh-claude",
-        ] {
-            assert!(cx.debug_bounds(id).is_none(), "{id}");
-        }
-        let refreshed = |commands: &[Command]| -> Vec<String> {
-            commands
-                .iter()
-                .filter_map(|command| match command {
-                    Command::RefreshProviderPlugins { profile_id, .. } => Some(profile_id.clone()),
-                    _ => None,
-                })
-                .collect()
-        };
-        assert_eq!(refreshed(&host.commands(cx)), ["codex"]);
-
-        let switch = cx.debug_bounds("plugins-switch-claude").unwrap();
-        cx.simulate_click(switch.center(), gpui::Modifiers::default());
-        draw(cx);
-        let commands = host.commands(cx);
-        assert!(
-            commands.iter().any(|command| matches!(
-                command,
-                Command::PatchSettings {
-                    patch: SettingsPatch::PluginManagementProvider {
-                        provider: agent::ProviderKind::ClaudeCode,
-                        enabled: true,
-                    }
-                }
-            )),
-            "{commands:?}"
-        );
-        host.replicate_settings(claude_managed(), cx);
-        assert_eq!(refreshed(&host.commands(cx)), ["claude"]);
-        assert!(cx.debug_bounds("plugins-views-claude").is_some());
     }
 }
