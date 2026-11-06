@@ -479,6 +479,109 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
     });
 }
 
+/// The canonical events OpenCode's recorded `subagent_turn.jsonl` maps to
+/// (asserted by `opencode::tests::a_subagents_activity_nests_under_the_call_that_spawned_it`):
+/// the child's text arrives as `ItemStarted` / `Delta` / `ItemCompleted`, and
+/// only the two snapshots carry `parent_item_id`. The child's reply belongs to
+/// its mirror; the parent shows only the spawn and its own reply.
+#[test]
+fn a_subagents_streamed_text_stays_out_of_the_parent_thread() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-opencode-subagent-deltas");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let spawn = "msg_198acc1db0013V4MEKRcfmYvtt:chatcmpl-tool-b5f7774ecdb70d58";
+    let child = "msg_198accaf2001JTZdDPBbxetEk2:text:0";
+    let reply = "msg_198accd89001hG3ffj4MheRnb9:text:0";
+    let subagent = |status, summary: Option<&str>| ThreadItem {
+        id: spawn.into(),
+        parent_item_id: None,
+        content: ItemContent::Subagent {
+            agent_type: "general".into(),
+            description: "Reply with KIWI".into(),
+            status,
+            summary: summary.map(Into::into),
+            model: Some("opencode/deepseek-v4.1-flash-free".into()),
+            effort: None,
+        },
+    };
+    let text = |id: &str, parent: Option<&str>, text: &str| ThreadItem {
+        id: id.into(),
+        parent_item_id: parent.map(Into::into),
+        content: ItemContent::AssistantMessage {
+            text: text.into(),
+            summarized: false,
+        },
+    };
+    let delta = |id: &str, text: &str| AgentEvent::Delta {
+        item_id: id.into(),
+        kind: agent::DeltaKind::AssistantText,
+        text: text.into(),
+    };
+    state.update(cx, |state, cx| {
+        let mut meta = SessionMeta::new(ProviderKind::OpenCode, PathBuf::from("/tmp"), None);
+        meta.id = "parent".into();
+        state.sessions.push(meta.clone());
+        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "opencode-turn-1".into(),
+            },
+            AgentEvent::ItemStarted(subagent(ItemStatus::InProgress, None)),
+            AgentEvent::ItemStarted(text(child, Some(spawn), "")),
+            delta(child, "KIWI"),
+            AgentEvent::ItemCompleted(text(child, Some(spawn), "KIWI")),
+            AgentEvent::ItemCompleted(subagent(ItemStatus::Completed, Some("KIWI"))),
+            AgentEvent::ItemStarted(text(reply, None, "")),
+            delta(reply, "The subagent said: KIWI"),
+            AgentEvent::ItemCompleted(text(reply, None, "The subagent said: KIWI")),
+            AgentEvent::TurnCompleted {
+                turn_id: "opencode-turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ] {
+            state.on_event("parent", event, cx);
+        }
+    });
+    cx.run_until_parked();
+    let ids = |timeline: &Timeline| -> Vec<String> {
+        timeline
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.content, EntryContent::Item(_)))
+            .map(|entry| entry.id.clone())
+            .collect()
+    };
+    state.update(cx, |state, _| {
+        let mirror = state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.as_deref() == Some(spawn))
+            .unwrap()
+            .id
+            .clone();
+        assert_eq!(
+            ids(&Timeline::fold_events(
+                state.store.read_events(&mirror).unwrap()
+            )),
+            [child],
+            "the mirror holds the child's reply"
+        );
+        assert_eq!(
+            ids(&state.resident("parent").unwrap().timeline),
+            [spawn, reply],
+            "the live parent thread"
+        );
+        assert_eq!(
+            ids(&Timeline::fold_events(
+                state.store.read_events("parent").unwrap()
+            )),
+            [spawn, reply],
+            "the parent thread reopened from its log"
+        );
+    });
+}
+
 /// How the mirror's single turn ends: the Subagent item reaching a terminal
 /// status, or the parent process closing while it is still running. A parent
 /// `TurnCompleted` is never an ending — a background subagent outlives it.
