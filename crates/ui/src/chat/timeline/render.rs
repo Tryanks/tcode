@@ -400,10 +400,10 @@ impl TimelineView {
         }
         let mut column = v_flex().w_full().gap(px(SEGMENT_GAP));
         let mut trailing = false;
-        // The trailer keeps its motion under the turn's number in the whole
-        // thread, not its place in the window: a page of history renumbers
-        // the window's turns, and each would take up the motion of the turn
-        // whose place it took.
+        // The trailer keeps its motion and what the reader opened in it under
+        // the turn's number in the whole thread, not its place in the window:
+        // a page of history renumbers the window's turns, and each would take
+        // up the state of the turn whose place it took.
         let number = self
             .workspace_store
             .read(cx)
@@ -430,7 +430,7 @@ impl TimelineView {
             )
             .filter(|_| !changes.is_empty());
         let changes = changes_fold.map(|fold| {
-            let more_key = format!("changed-files-more-{index}");
+            let more_key = format!("changed-files-more-{number}");
             let show_all = self.expanded.contains(&more_key);
             let toggle_more_key = more_key;
             let handlers = components::changed_files::ChangedFilesHandlers {
@@ -1149,7 +1149,7 @@ impl TimelineView {
     ) -> AnyElement {
         let (index, part, turn, cwd, activities, is_last) = args;
         let segment_id = activities[0].id.as_str();
-        let section_key = work_log_key(index, segment_id);
+        let section_key = work_log_key(segment_id);
         let running = is_last && turn.running;
         let live_reasoning_id = running
             .then(|| activities.last().copied())

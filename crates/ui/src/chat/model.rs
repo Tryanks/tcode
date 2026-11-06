@@ -840,9 +840,9 @@ pub(crate) fn plain_text_as_markdown(text: &str) -> String {
 }
 
 /// The expansion key of the Work Log folding a run whose first activity is
-/// `segment_id`.
-pub(crate) fn work_log_key(turn: usize, segment_id: &str) -> String {
-    format!("worklog-{turn}-{segment_id}")
+/// `segment_id`, an id no other entry of the thread has.
+pub(crate) fn work_log_key(segment_id: &str) -> String {
+    format!("worklog-{segment_id}")
 }
 
 /// The notice the host wrote as a user message, read past any injected context the turn
