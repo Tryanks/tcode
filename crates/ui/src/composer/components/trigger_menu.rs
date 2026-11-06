@@ -119,7 +119,7 @@ impl Composer {
             }
             TriggerKind::SlashCommand | TriggerKind::SlashModel => {
                 let composer = self.composer_state(cx);
-                let harness = harness_name(&composer);
+                let harness = harness_name(&composer, self.workspace_store.read(cx));
                 let compact_offered = compact_offered(&composer);
                 let goal_offered = goal_offered(&composer).is_some();
                 let mut builtins: Vec<(&str, &str, MenuAccept)> = vec![
@@ -311,7 +311,7 @@ impl Composer {
         } = menu.clone();
 
         let compact = self.compact;
-        let harness = harness_name(&self.composer_state(cx));
+        let harness = harness_name(&self.composer_state(cx), self.workspace_store.read(cx));
         let list =
             if rows.is_empty() {
                 let text: gpui::SharedString = if loading {
@@ -417,10 +417,24 @@ fn menu_row_key(row: &MenuRow) -> u64 {
 
 /// The product name of the thread's provider, which names its own commands and
 /// skills in the menu.
-fn harness_name(composer: &crate::store::ComposerState) -> &'static str {
+/// The product name the composer's Harness goes by: an ACP agent's own name,
+/// else the native Harness's.
+fn harness_name(
+    composer: &crate::store::ComposerState,
+    store: &crate::store::WorkspaceStore,
+) -> String {
     composer
-        .provider
-        .map_or("Harness", crate::settings::provider_label)
+        .active_model
+        .as_ref()
+        .and_then(|active| active.acp_agent_id.as_deref())
+        .and_then(|id| store.installed_acp_agent(id))
+        .map(|agent| agent.name)
+        .unwrap_or_else(|| {
+            composer
+                .provider
+                .map_or("Harness", crate::settings::provider_label)
+                .to_owned()
+        })
 }
 
 fn render_menu_row(
