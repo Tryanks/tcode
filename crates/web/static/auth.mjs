@@ -43,9 +43,11 @@ export async function authorizeBrowser() {
 
   const browserLanguage = navigator.language.toLowerCase();
   const translations = __AUTH_LOCALES__;
-  const text = translations[
-    browserLanguage.startsWith('zh') ? 'zh-CN' : browserLanguage.startsWith('ja') ? 'ja' : 'en'
-  ];
+  const language =
+    browserLanguage.startsWith('zh') ? 'zh-CN' : browserLanguage.startsWith('ja') ? 'ja' : 'en';
+  const text = translations[language];
+  // The browser picks Han glyph forms by the document's language.
+  document.documentElement.lang = language;
   const loading = document.getElementById('loading');
   loading.hidden = true;
   const form = document.createElement('form');

@@ -171,6 +171,7 @@ pub(crate) fn working_indicator(
     let below_centre = |text: SharedString, family: SharedString, size: Pixels| {
         let font = gpui::Font {
             family,
+            fallbacks: crate::i18n::cjk_font_fallbacks(),
             ..Default::default()
         };
         let run = gpui::TextRun {
