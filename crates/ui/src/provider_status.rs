@@ -254,10 +254,10 @@ mod tests {
         // No snapshot yet → neutral loading dot + "checking" copy.
         let s = summarize(None, true);
         assert_eq!(s.dot, StatusDot::Loading);
-        assert_eq!(s.headline, "Checking provider status");
+        assert_eq!(s.headline, "Checking Harness status");
         assert_eq!(
             s.detail,
-            "Waiting for the server to report installation and authentication details."
+            "Waiting for the machine to report installation and authentication details."
         );
 
         // Disabled wins over everything else, with a server message when present.
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(s.headline, "Disabled");
         assert_eq!(
             s.detail,
-            "This provider is installed but disabled for new sessions in Tcode."
+            "Installed, but turned off in Tcode; new threads don't use it."
         );
 
         let missing = ProviderSnapshot {
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(s.headline, "Needs attention");
         assert_eq!(
             s.detail,
-            "The provider is installed, but the server could not fully verify it."
+            "Installed, but the machine could not fully verify it."
         );
 
         let err = ProviderSnapshot {
@@ -365,7 +365,7 @@ mod tests {
         let s = summarize(Some(&err), true);
         assert_eq!(s.dot, StatusDot::Error);
         assert_eq!(s.headline, "Unavailable");
-        assert_eq!(s.detail, "The provider failed its startup checks.");
+        assert_eq!(s.detail, "Failed its startup checks.");
 
         let s = summarize(Some(&snapshot()), true);
         assert_eq!(s.headline, "Available");
@@ -385,10 +385,10 @@ mod tests {
         };
         let s = summarize(Some(&in_flight), false);
         assert_eq!(s.dot, StatusDot::Loading);
-        assert_eq!(s.headline, "Checking provider status");
+        assert_eq!(s.headline, "Checking Harness status");
         assert_eq!(
             s.detail,
-            "Waiting for the server to report installation and authentication details."
+            "Waiting for the machine to report installation and authentication details."
         );
 
         // A server message always replaces the fallback detail.
@@ -450,7 +450,7 @@ mod tests {
                 crate::LANGUAGE_ENGLISH,
                 [
                     "Codex CLI (`codex`) is not installed or not on PATH.",
-                    "Codex CLI is installed but failed to run.",
+                    "Codex is installed but failed to run.",
                     "Codex CLI is not authenticated. Run `codex login` and try again.",
                     "Could not verify Codex authentication status.",
                 ],
@@ -459,7 +459,7 @@ mod tests {
                 crate::LANGUAGE_SIMPLIFIED_CHINESE,
                 [
                     "未安装 Codex CLI（`codex`），或其不在 PATH 中。",
-                    "Codex CLI 已安装，但运行失败。",
+                    "Codex 已安装，但运行失败。",
                     "Codex CLI 未认证。请运行 `codex login` 后重试。",
                     "无法验证 Codex 的认证状态。",
                 ],

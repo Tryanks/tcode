@@ -356,7 +356,7 @@ impl AcpPanel {
             store,
             view: PanelView::Home,
             search,
-            custom_name: input("My agent", window, cx),
+            custom_name: input(&crate::tr!("providers.acp.name_placeholder"), window, cx),
             custom_command: input("node", window, cx),
             custom_args: input("/path/to/agent.js --acp", window, cx),
             custom_env: input("KEY=value KEY2=value2", window, cx),

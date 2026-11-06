@@ -775,7 +775,7 @@ fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
     assert_eq!(
         thread.header(claude, cx),
         read(
-            "Ran agent",
+            "Ran subagent",
             Some("Explore"),
             Some("Classify chat/markdown tests"),
             None
@@ -786,7 +786,7 @@ fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
         Read {
             chips: vec![Chip::Tag("gpt-6-astra · low".to_owned())],
             ..read(
-                "Ran agent",
+                "Ran subagent",
                 Some("t3_transport"),
                 Some("/root/t3_transport"),
                 None
@@ -796,7 +796,7 @@ fn a_subagent_reads_as_its_agent_and_task(cx: &mut TestAppContext) {
     assert_eq!(
         thread.header(interrupted, cx),
         read(
-            "Ran agent",
+            "Ran subagent",
             Some("clock_limits"),
             Some("/root/sd_timing_finish/clock_limits"),
             None
@@ -846,12 +846,12 @@ fn a_subagent_window_tells_a_running_and_a_failed_agent(cx: &mut TestAppContext)
     let (thread, cx) = StoredThread::open(cx, &log, 1_024.);
     assert_eq!(
         thread.header(running, cx).verb.as_deref(),
-        Some("Running agent")
+        Some("Running subagent")
     );
     assert_eq!(
         thread.header(failed, cx),
         read(
-            "Ran agent",
+            "Ran subagent",
             Some("general"),
             Some("Survey the store"),
             Some("ProviderModelNotFoundError: model not found")
@@ -903,7 +903,7 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
     .join("\n");
     let (thread, cx) = StoredThread::open(cx, &log, 1_024.);
     let verb = |id: &str, cx: &mut VisualTestContext| thread.header(id, cx).verb;
-    assert_eq!(verb(waited, cx).as_deref(), Some("Running agent"));
+    assert_eq!(verb(waited, cx).as_deref(), Some("Running subagent"));
     for id in [agent, command] {
         assert_eq!(
             verb(id, cx).as_deref(),
@@ -911,7 +911,7 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
             "{id}"
         );
     }
-    assert_eq!(verb(ended, cx).as_deref(), Some("Ran agent"));
+    assert_eq!(verb(ended, cx).as_deref(), Some("Ran subagent"));
     thread.shutdown(cx);
 }
 

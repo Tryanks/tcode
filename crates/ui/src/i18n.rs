@@ -96,6 +96,22 @@ pub(crate) fn translate_english(key: &str, english: &str) -> Cow<'static, str> {
         .unwrap_or_else(|| Cow::Owned(english.to_owned()))
 }
 
+/// A provider option's name in the current locale (the descriptor label, never
+/// its id or values), looked up by the English name under `harness_options`.
+pub(crate) fn translate_option_name(english: &str) -> String {
+    let slug: String = english
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    translate_english(&format!("harness_options.{slug}"), english).into_owned()
+}
+
 pub(crate) fn translate_permission_description(key: &str, english: &str) -> String {
     let translated = translate_english(key, english).into_owned();
     if translated != english {
@@ -257,11 +273,11 @@ mod tests {
         for (english, expected) in [
             (
                 "Profile my-team: workspace sandbox, asks on request, reviewed by you.",
-                "配置 my-team：工作区沙箱，按请求询问，由你审批。",
+                "配置档 my-team：工作区沙箱，按请求询问，由你审批。",
             ),
             (
                 "external sandbox, uses granular approval rules, reviewed by auto-review.",
-                "外部沙箱，使用细分审批规则，由自动审查员审批。",
+                "外部沙箱，使用细分审批规则，由自动审查（auto-review）审批。",
             ),
             (
                 "read-only sandbox, asks for untrusted actions, reviewed by you.",
@@ -269,7 +285,7 @@ mod tests {
             ),
             (
                 "full access, never asks for approval, reviewed by auto-review.",
-                "完全访问，从不请求审批，由自动审查员审批。",
+                "完全访问，从不请求审批，由自动审查（auto-review）审批。",
             ),
         ] {
             assert_eq!(

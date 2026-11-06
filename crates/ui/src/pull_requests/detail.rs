@@ -282,6 +282,15 @@ impl PullRequestView {
         }
     }
 
+    /// What the open pull request's host calls a pull request.
+    pub(super) fn noun(&self, cx: &App) -> super::Noun {
+        let store = self.store.read(cx);
+        match &self.current {
+            Some((_, key)) => super::Noun::at(store, &key.host),
+            None => super::Noun::of(&tcode_core::pull_request::GITHUB),
+        }
+    }
+
     /// The open pull request's host as a person reads it.
     pub(super) fn host_name(&self, cx: &App) -> String {
         self.current
@@ -1857,7 +1866,9 @@ impl PullRequestView {
                 .min()
         });
         let tooltip = match (refreshing, loaded) {
-            (true, _) => crate::tr!("pull_requests.detail.refreshing").into_owned(),
+            (true, _) => {
+                crate::tr!("pull_requests.detail.refreshing", pr = self.noun(cx).pr).into_owned()
+            }
             (false, Some(loaded)) => {
                 crate::tr!("pull_requests.detail.refresh", ago = ago(loaded)).into_owned()
             }
@@ -2322,7 +2333,8 @@ impl PullRequestView {
                 Icon::new(IconName::Lock),
                 crate::tr!(
                     "pull_requests.detail.no_credential_title",
-                    host_name = self.host_name(cx)
+                    host_name = self.host_name(cx),
+                    pr = self.noun(cx).pr
                 )
                 .into_owned(),
                 String::new(),
@@ -2335,7 +2347,8 @@ impl PullRequestView {
                     Icon::new(IconName::GitPullRequest),
                     crate::tr!(
                         "pull_requests.detail.unavailable_title",
-                        number = key.number.to_string()
+                        number = key.number.to_string(),
+                        pr = self.noun(cx).title
                     )
                     .into_owned(),
                     crate::tr!("pull_requests.detail.unavailable_desc").into_owned(),

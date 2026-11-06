@@ -149,7 +149,7 @@ fn catalog(listed: &Value) -> Vec<ModelSpec> {
 
 fn signed_out() -> AgentError {
     AgentError::Provider(
-        "Cursor is not signed in. Run `cursor-agent login`, or set CURSOR_API_KEY in Settings → Providers → Cursor, then try again."
+        "Cursor is not signed in. Run `cursor-agent login`, or set CURSOR_API_KEY in Settings → Harnesses → Cursor, then try again."
             .into(),
     )
 }

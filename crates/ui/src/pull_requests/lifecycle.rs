@@ -122,11 +122,14 @@ pub(super) struct Offer {
     pub(super) stack: Option<super::stack::StackOffer>,
     /// A write is in flight, or one went unanswered and GitHub has not been read since.
     pub(super) busy: bool,
+    /// What its host calls a pull request.
+    pub(super) noun: super::Noun,
 }
 
 impl Offer {
     /// `None` until the link or its stack says what state the pull request is in. The host's
     /// action state, read fresh, speaks over the link's snapshot where it has a word.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         key: &PullRequestKey,
         links: &[ThreadPullRequestLink],
@@ -135,6 +138,7 @@ impl Offer {
         chosen: Option<PullRequestMergeMethod>,
         project_default: Option<PullRequestMergeMethod>,
         busy: bool,
+        noun: super::Noun,
     ) -> Option<Self> {
         let link = links.iter().find(|link| link.key == *key && link.visible());
         let snapshot = link.and_then(|link| link.snapshot.as_ref());
@@ -176,6 +180,7 @@ impl Offer {
             method,
             stack: super::stack::StackOffer::new(key, links, operations),
             busy,
+            noun,
         })
     }
 
@@ -270,7 +275,7 @@ impl Offer {
                 .is_none_or(|stack| stack.operation_here().is_none());
         let write = |menu: PopupMenu, label: &str, icon: IconName, kind: Lifecycle| {
             menu.menu_with_icon_and_enable(
-                crate::tr!(label).into_owned(),
+                crate::tr!(label, pr = &self.noun.pr).into_owned(),
                 icon,
                 self.item(kind),
                 free,
@@ -576,6 +581,7 @@ impl Target {
             chosen,
             project_default,
             false,
+            super::Noun::at(workspace, &key.host),
         )?;
         let snapshot = links
             .iter()
@@ -673,19 +679,26 @@ impl Target {
                         .detach();
                 }
             },
-            Lifecycle::Revert => self.confirm(
-                crate::tr!(
-                    "pull_requests.actions.revert_title",
-                    number = number.clone()
-                ),
-                crate::tr!("pull_requests.actions.revert_desc", number = number),
-                crate::tr!("pull_requests.actions.revert_confirm"),
-                ButtonVariant::Primary,
-                PullRequestAction::Revert,
-                kind,
-                window,
-                cx,
-            ),
+            Lifecycle::Revert => {
+                let pr = self.offer.noun.pr.clone();
+                self.confirm(
+                    crate::tr!(
+                        "pull_requests.actions.revert_title",
+                        number = number.clone()
+                    ),
+                    crate::tr!(
+                        "pull_requests.actions.revert_desc",
+                        number = number,
+                        pr = &pr
+                    ),
+                    crate::tr!("pull_requests.actions.revert_confirm", pr = &pr),
+                    ButtonVariant::Primary,
+                    PullRequestAction::Revert,
+                    kind,
+                    window,
+                    cx,
+                )
+            }
             Lifecycle::UpdateRebase => {
                 let Some(head) = self.offer.action.as_ref().map(|a| a.head.clone()) else {
                     return;
@@ -796,10 +809,14 @@ impl Target {
                 host_name = self.host_name.clone()
             ),
         };
+        let confirm = crate::tr!(
+            "pull_requests.actions.close_confirm",
+            pr = &self.offer.noun.pr
+        );
         self.confirm(
             crate::tr!("pull_requests.actions.close_title", number = number),
             description,
-            crate::tr!("pull_requests.actions.close_confirm"),
+            confirm,
             ButtonVariant::Danger,
             PullRequestAction::Close,
             kind,

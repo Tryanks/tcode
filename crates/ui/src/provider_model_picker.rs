@@ -26,7 +26,6 @@ use tcode_core::settings::Settings;
 
 use crate::provider_card::profile_glyph;
 use crate::provider_status::{ProviderSnapshot, redact_email, signed_in_account};
-use crate::settings::provider_label;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 
 /// How long a part drawn here takes to cross-fade to another of its states.
@@ -230,18 +229,7 @@ impl Render for ProviderModelPicker {
                     .w_full();
                 for (tab_index, profile) in profiles.iter().enumerate() {
                     let is_selected = profile.id == current_profile;
-                    let label = if Settings::is_builtin_profile_id(&profile.id) {
-                        provider_label(profile.kind).to_string()
-                    } else {
-                        profile
-                            .settings
-                            .display_name
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or(&profile.id)
-                            .to_string()
-                    };
+                    let label = store.read(cx).provider_profile_display_name(&profile.id);
                     let kind = profile.kind;
                     let profile_id = profile.id.clone();
                     let picker = picker.clone();

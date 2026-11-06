@@ -387,12 +387,12 @@ pub struct StartThreadParams {
     pub cwd: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "local (the checkout) or worktree. worktree is only for a subagent: when its directory is a Git repository root it runs on branch tcode/<thread-id> in a dedicated worktree, and the response names the path and branch or why it fell back to the plain directory. Omitted, a subagent follows Settings → Control child-worktree isolation and any other thread is local."
+        description = "local (the checkout) or worktree. worktree is only for a subagent: when its directory is a Git repository root it runs on branch tcode/<thread-id> in a dedicated worktree, and the response names the path and branch or why it fell back to the plain directory. Omitted, a subagent follows Settings → Control subagent worktree isolation and any other thread is local."
     )]
     pub workspace: Option<Workspace>,
     #[serde(default)]
     #[schemars(
-        description = "Start the thread as this thread's subagent (default false): a child shown in this thread's Agents view, whose report_result reaches you as a message when its turn ends, as do its approval requests and questions. Each message you send it opens a new report it owes you; settle it with update_threads once you accept the result."
+        description = "Start the thread as this thread's subagent (default false): a child shown in this thread's Subagents view, whose report_result reaches you as a message when its turn ends, as do its approval requests and questions. Each message you send it opens a new report it owes you; settle it with update_threads once you accept the result."
     )]
     pub subagent: Option<bool>,
     #[schemars(
@@ -409,7 +409,7 @@ pub struct StartThreadParams {
     pub profile: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Provider option id → value, as list_providers describes them. The permission mode is not settable: the project's default applies, or for a subagent the one Settings → Control child approval chooses."
+        description = "Provider option id → value, as list_providers describes them. The permission mode is not settable: the project's default applies, or for a subagent the one Settings → Control subagent approvals chooses."
     )]
     pub options: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]

@@ -1159,11 +1159,14 @@ impl PullRequestView {
             Some(
                 div()
                     .text_color(muted)
-                    .child(crate::tr!(if description {
-                        "pull_requests.conversation.opened"
-                    } else {
-                        "pull_requests.conversation.commented"
-                    }))
+                    .child(crate::tr!(
+                        if description {
+                            "pull_requests.conversation.opened"
+                        } else {
+                            "pull_requests.conversation.commented"
+                        },
+                        pr = self.noun(cx).pr
+                    ))
                     .into_any_element(),
             )
         });
@@ -1993,7 +1996,11 @@ impl PullRequestView {
                     material::empty_state(
                         Icon::new(IconName::MessageSquare),
                         crate::tr!("pull_requests.conversation.empty_title").into_owned(),
-                        crate::tr!("pull_requests.conversation.empty_desc").into_owned(),
+                        crate::tr!(
+                            "pull_requests.conversation.empty_desc",
+                            pr = self.noun(cx).pr
+                        )
+                        .into_owned(),
                         cx,
                     )
                     .flex_1(),

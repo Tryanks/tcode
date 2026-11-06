@@ -1261,7 +1261,7 @@ fn spawn_server(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Per-provider environment (Settings → Providers): custom variables and the
+    // Per-provider environment (Settings → Harnesses): custom variables and the
     // `CODEX_HOME` override (the account-scoped "shadow home", when set).
     for (key, value) in launch_env.pairs(ProviderKind::Codex) {
         cmd.env(key, value);

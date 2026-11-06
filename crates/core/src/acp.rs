@@ -16,7 +16,7 @@ pub struct InstalledAcpAgent {
     pub launch: AcpLaunch,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Extra environment for this agent's process (Settings → Providers).
+    /// Extra environment for this agent's process (Settings → Harnesses).
     #[serde(default)]
     pub env: Vec<(String, String)>,
     /// Extra CLI arguments appended at launch.

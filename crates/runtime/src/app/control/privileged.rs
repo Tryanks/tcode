@@ -170,7 +170,7 @@ impl AppState {
         }
         if self.settings.subagents.child_approval == ChildApprovalMode::Manual {
             return Err(
-                "refused: Settings → Control child approval is manual, so the user answers \
+                "refused: Settings → Control subagent approvals is manual, so the user answers \
                  your subagents' approvals"
                     .into(),
             );

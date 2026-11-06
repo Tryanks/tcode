@@ -159,7 +159,19 @@ pub(crate) fn composer_state(
         model_pending_restart: status.is_some_and(|status| status.model_pending_restart),
         active_model_spec,
         active_option_descriptors: status
-            .map(|status| status.provider_option_descriptors.clone())
+            .map(|status| {
+                status
+                    .provider_option_descriptors
+                    .iter()
+                    .cloned()
+                    .map(|mut descriptor| {
+                        let (agent::OptionDescriptor::Select { label, .. }
+                        | agent::OptionDescriptor::Boolean { label, .. }) = &mut descriptor;
+                        *label = crate::i18n::translate_option_name(label);
+                        descriptor
+                    })
+                    .collect()
+            })
             .unwrap_or_default(),
         active_option_selections: status
             .map(|status| status.provider_option_selections.clone())

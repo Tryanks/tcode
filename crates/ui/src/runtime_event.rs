@@ -452,7 +452,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         RuntimeToast::CommitMessageGenerated { message } => (
             RuntimeToastDisposition::Push,
             ToastKind::Info,
-            "Generated commit message".to_string(),
+            crate::tr!("git.toast.message_generated").into_owned(),
             Some(message.clone()),
             None,
         ),
@@ -530,7 +530,7 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         _ => (
             RuntimeToastDisposition::Push,
             ToastKind::Warning,
-            "Unknown runtime notification".to_string(),
+            crate::tr!("toast.unknown").into_owned(),
             Some(format!("{toast:?}")),
             None,
         ),
@@ -580,9 +580,9 @@ mod tests {
             assert_eq!(
                 manual.title,
                 if language == crate::LANGUAGE_ENGLISH {
-                    "Updates available for 2 providers"
+                    "Updates available for 2 Harnesses"
                 } else {
-                    "有 2 个 Provider 可更新"
+                    "有 2 个 Harness 可更新"
                 }
             );
             updates[1].automatic = true;
@@ -611,7 +611,7 @@ mod tests {
         });
         let english = crate::tr!("chat.new_thread").into_owned();
 
-        assert_eq!(chinese, "新建对话");
+        assert_eq!(chinese, "新建线程");
         assert_eq!(english, "New thread");
     }
 

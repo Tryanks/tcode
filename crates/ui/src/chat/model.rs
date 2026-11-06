@@ -1078,7 +1078,7 @@ pub(in crate::chat) mod tests {
         );
         assert_eq!(
             displayed_error_text(&provider_start),
-            "Failed to start provider: spawn failed"
+            "Failed to start the Harness: spawn failed"
         );
 
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
@@ -1088,7 +1088,7 @@ pub(in crate::chat) mod tests {
         );
         assert_eq!(
             displayed_error_text(&provider_start),
-            "启动提供商失败：spawn failed"
+            "无法启动 Harness：spawn failed"
         );
         crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
@@ -1583,14 +1583,14 @@ pub(in crate::chat) mod tests {
             (
                 crate::LANGUAGE_ENGLISH,
                 ["1m 20s", "8.0s", "10.5s", "1d 00h 00m"],
-                "AI thinking & response 45.0s · Tool calls 35.0s",
-                "AI thinking & response 8.0s · Tool calls 0.0s",
+                "Model thinking & response 45.0s · Tool calls 35.0s",
+                "Model thinking & response 8.0s · Tool calls 0.0s",
             ),
             (
                 crate::LANGUAGE_SIMPLIFIED_CHINESE,
                 ["1 分 20 秒", "8.0 秒", "10.5 秒", "1 天 00 小时 00 分"],
-                "AI 思考与回答 45.0 秒 · 工具调用 35.0 秒",
-                "AI 思考与回答 8.0 秒 · 工具调用 0.0 秒",
+                "模型思考与回答 45.0 秒 · 工具调用 35.0 秒",
+                "模型思考与回答 8.0 秒 · 工具调用 0.0 秒",
             ),
         ] {
             crate::set_locale(locale);

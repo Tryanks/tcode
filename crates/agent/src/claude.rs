@@ -355,7 +355,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if let Some(file) = &instructions_file {
         cmd.arg("--append-system-prompt-file").arg(&file.0);
     }
-    // Settings → Providers "Launch arguments", appended last so the user can
+    // Settings → Harnesses "Launch arguments", appended last so the user can
     // override anything we set above.
     for arg in &opts.extra_args {
         cmd.arg(arg);
