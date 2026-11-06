@@ -1414,3 +1414,171 @@ fn a_thread_opened_again_on_a_phone_reveals_nothing_it_gained_away(cx: &mut Test
         "a row still moved or revealed once its page landed"
     );
 }
+
+/// The records [`finished_turns`] logs for each turn.
+const TURN_RECORDS: usize = 5;
+
+/// thread-2's log of `turns` finished turns, each asked, answered and
+/// changing a file of its own.
+fn finished_turns(turns: usize) -> Vec<tcode_core::session::StoredEvent> {
+    (0..turns)
+        .flat_map(|turn| {
+            [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: format!("turn-{turn}"),
+                },
+                agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: format!("thread-2-ask-{turn}"),
+                    parent_item_id: None,
+                    content: agent::ItemContent::UserMessage {
+                        text: format!("What is in part {turn} of thread-2?"),
+                        context_len: None,
+                        attachments: vec![],
+                    },
+                }),
+                agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: format!("thread-2-answer-{turn}"),
+                    parent_item_id: None,
+                    content: agent::ItemContent::AssistantMessage {
+                        text: format!("Part {turn} holds a few things.\n\n").repeat(3),
+                        summarized: false,
+                    },
+                }),
+                agent::AgentEvent::TurnChangesUpdated {
+                    turn_id: format!("turn-{turn}"),
+                    changes: agent::file_changes_from_unified_diff(&format!(
+                        "diff --git a/part_{turn}.rs b/part_{turn}.rs\n\
+                         --- a/part_{turn}.rs\n+++ b/part_{turn}.rs\n\
+                         @@ -1 +1 @@\n-fn old() {{}}\n+fn new() {{}}\n",
+                    ))
+                    .expect("one file section"),
+                    completeness: agent::ChangeCompleteness::Exact,
+                },
+                agent::AgentEvent::TurnCompleted {
+                    turn_id: format!("turn-{turn}"),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                },
+            ]
+        })
+        .map(Into::into)
+        .collect()
+}
+
+/// A thread switched to whose log the host sends after the switch, its
+/// latest turns first and the turn before them in the page the thread asks
+/// for once it is drawn, as a thread holding more than its window does:
+/// the page brings only rows above those on screen, so every turn's footer
+/// (its time and its answer's Copy) and its changed files stay as they are
+/// drawn, rather than the footer rising from the turn below's and the
+/// files folding in where the turn below's fold away.
+#[gpui::test]
+fn a_page_landing_on_a_thread_switched_to_leaves_its_footers_at_rest(cx: &mut TestAppContext) {
+    let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    let (shell, host, cx) = mount_panes(cx);
+    switch(&shell, "secondary-2", "thread-2", cx);
+    const TURNS: usize = 4;
+    let records = finished_turns(TURNS);
+    let held_from = TURN_RECORDS;
+    send_events(
+        &host,
+        vec![
+            (
+                Topic::SessionStatus {
+                    session_id: "thread-2".into(),
+                },
+                ServerEvent::SessionStatusReplaced(Box::new(session_status(
+                    "thread-2",
+                    std::path::Path::new(PANES_CWD),
+                ))),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: "thread-2".into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    total: records.len() as u64,
+                    total_turns: TURNS as u64,
+                    truncated: false,
+                    from: held_from as u64,
+                    end: records.len() as u64,
+                    records: records[held_from..].to_vec(),
+                },
+            ),
+        ],
+    );
+    arrive(&shell, cx);
+    // The thread shows, and asks for the turn before its window.
+    let mut page = None;
+    for _ in 0..30 {
+        page = page.or_else(|| history_page_asked(&host));
+        if page.is_some() && fill_of("user-bubble-thread-2-ask-3", cx).is_some_and(|fill| fill > 0.)
+        {
+            break;
+        }
+        display_frame(cx);
+    }
+    let (id, before) = page.expect("thread-2 asks for the page before its window");
+    assert_eq!(before, held_from as u64);
+    let trailers = |cx: &mut VisualTestContext| {
+        (0..TURNS)
+            .map(|turn| {
+                [
+                    format!("copy-assistant:thread-2-answer-{turn}"),
+                    format!("changed-file-chip-file-part_{turn}.rs"),
+                ]
+                .map(|selector| cx.debug_bounds(selector.leak()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let shown = trailers(cx);
+    let from = held_from - TURN_RECORDS;
+    answer_query(
+        &host,
+        id,
+        Ok(tcode_protocol::QueryResponse::SessionHistoryPage {
+            records: records[from..held_from].to_vec(),
+            from: from as u64,
+            end: held_from as u64,
+            truncated: false,
+        }),
+    );
+    arrive(&shell, cx);
+    let mut seen = vec![trailers(cx)];
+    for _ in 0..12 {
+        display_frame(cx);
+        seen.push(trailers(cx));
+    }
+    settle_frames(cx);
+    let rest = trailers(cx);
+    let turns = store_of(&shell, cx).read_with(cx, |store, cx| {
+        store.with_timeline_for(Some("thread-2"), |timeline| timeline.turns.len(), cx)
+    });
+    assert_eq!(turns, Some(TURNS), "the page landed");
+    assert!(
+        rest[1..].iter().flatten().all(Option::is_some),
+        "the window's footers and changed files: {rest:?}"
+    );
+    assert_eq!(shown, rest, "the page brought only rows above the window's");
+    assert!(
+        seen.iter().all(|frame| *frame == rest),
+        "a footer or a changed file moved once the page landed: {seen:#?}, at rest {rest:?}"
+    );
+}
+
+/// The history page the client asked for, by its request id and the
+/// record it asked for the page before.
+fn history_page_asked(host: &MountedShell) -> Option<(u64, u64)> {
+    let mut messages: Vec<_> = host.observed.borrow_mut().drain(..).collect();
+    while let Ok(line) = host.outgoing.try_recv() {
+        messages.push(decode_client_line(&line).expect("client line"));
+    }
+    messages
+        .into_iter()
+        .find_map(|message| match message.payload {
+            ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage { before, .. }) => {
+                Some((message.id, before))
+            }
+            _ => None,
+        })
+}

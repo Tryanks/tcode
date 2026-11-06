@@ -400,6 +400,15 @@ impl TimelineView {
         }
         let mut column = v_flex().w_full().gap(px(SEGMENT_GAP));
         let mut trailing = false;
+        // The trailer keeps its motion under the turn's number in the whole
+        // thread, not its place in the window: a page of history renumbers
+        // the window's turns, and each would take up the motion of the turn
+        // whose place it took.
+        let number = self
+            .workspace_store
+            .read(cx)
+            .absolute_turn_for(self.session_id.as_deref(), index);
+        let motion = self.motion.scope(format!("turn-{number}"));
         // The gap between the row's segment and the trailer.
         let gap_above = (!segments.is_empty()).then(|| px(SEGMENT_GAP) * trailer_gap);
 
@@ -411,10 +420,9 @@ impl TimelineView {
             index,
             cx,
         );
-        let changes_fold = self
-            .motion
+        let changes_fold = motion
             .shown(
-                format!("changed-files-fold-{index}"),
+                "changed-files-fold",
                 (!turn.running && !changes.is_empty()).then_some(()),
                 SHOW,
                 window,
@@ -453,7 +461,7 @@ impl TimelineView {
                         completeness,
                         show_all,
                         handlers,
-                        &self.motion,
+                        &motion,
                         cx,
                     )),
             )
@@ -478,13 +486,12 @@ impl TimelineView {
             trailing = true;
             // The status moves with the trailer when the turn gains a last
             // row, as a steer landing after everything does.
-            let status_key = SharedString::from(format!("turn-status-{index}"));
+            let status_key = SharedString::from(format!("turn-status-{number}"));
             self.shared.arrive(
                 &status_key,
                 &SharedString::from(row.identity.to_string()),
                 cx,
             );
-            let motion = self.motion.clone();
             let indicator_motion = motion.clone();
             let hover = self.hover.clone();
             // The footer is one hover with the message whose actions it
@@ -497,7 +504,7 @@ impl TimelineView {
             let footer = self.shared.element(
                 status_key,
                 motion.cross_fade(
-                    format!("turn-status-{index}"),
+                    "turn-status",
                     turn.running,
                     CHANGE,
                     window,
@@ -508,7 +515,7 @@ impl TimelineView {
                                 .id(("working-status", index))
                                 .debug_selector(move || format!("working-status-{index}"))
                                 .child(components::indicator::turn_working_indicator(
-                                    index,
+                                    number,
                                     turn.start_ts,
                                     served_model.clone(),
                                     &indicator_motion,
@@ -563,8 +570,8 @@ impl TimelineView {
         trailing |= !pending.is_empty();
         let gap = px(SEGMENT_GAP);
         let steers = crate::motion::keyed::keyed_owned(
-            &self.motion.clone(),
-            format!("pending-steers-{index}"),
+            &motion,
+            "pending-steers",
             crate::motion::keyed::Fold::Down,
             pending,
             ROWS,
