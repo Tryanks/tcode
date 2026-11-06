@@ -383,15 +383,18 @@ impl ProviderKind {
                 supports_steering: true,
                 supports_fork: true,
                 // A revert restores the conversation, with or without the
-                // files its steps changed; there is no files-only revert.
+                // files its steps changed; there is no files-only revert. It
+                // stays staged until the next prompt or compaction commits it,
+                // and the files come back from snapshots of the whole
+                // worktree, whatever changed them.
                 rewind: Some(RewindControl {
                     modes: &[RewindMode::FilesAndConversation, RewindMode::Conversation],
                     first_turn_conversation: true,
                     steer_targets: false,
-                    later_history: LaterHistory::Truncated,
+                    later_history: LaterHistory::HiddenUntilNextSend,
                     preview: RewindPreviewKind::None,
-                    running_turn: RunningTurnPolicy::Refuse,
-                    restores_command_edits: false,
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    restores_command_edits: true,
                 }),
                 manual_compaction: true,
                 goals: None,
