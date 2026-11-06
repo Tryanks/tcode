@@ -2113,22 +2113,11 @@ impl WorkspaceStore {
         let Some(ui) = self.conversation_ui.get_mut(&destination) else {
             return;
         };
-        match event {
-            agent::AgentEvent::TurnStarted { .. } => {
-                ui.auto_open_task_suppressed = false;
-            }
-            agent::AgentEvent::PlanUpdated { .. }
-                if self.settings_replica.auto_open_task_panel
-                    && !ui.auto_open_task_suppressed
-                    && !(ui.right_panel_open && ui.right_tab == RightTab::Plan) =>
-            {
-                ui.right_panel_open = true;
-                ui.right_tab = RightTab::Plan;
-            }
-            agent::AgentEvent::TurnCompleted { .. } | agent::AgentEvent::RewindCompleted { .. } => {
-                ui.refresh_diff()
-            }
-            _ => {}
+        if matches!(
+            event,
+            agent::AgentEvent::TurnCompleted { .. } | agent::AgentEvent::RewindCompleted { .. }
+        ) {
+            ui.refresh_diff()
         }
     }
 
@@ -2249,15 +2238,9 @@ impl WorkspaceStore {
 
     /// Close `session_id`'s right panel, whichever tab it shows.
     pub fn close_right_panel_for(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
-        let running = self
-            .thread(session_id)
-            .is_some_and(ThreadReplica::turn_running);
         if let Some(ui) = self.thread_conversation_ui_mut(session_id) {
             ui.pending_diff_focus = None;
             ui.right_panel_open = false;
-            if running {
-                ui.auto_open_task_suppressed = true;
-            }
         }
         cx.notify();
     }
@@ -2308,17 +2291,11 @@ impl WorkspaceStore {
         }
     }
     pub fn close_preview_panel_for(&mut self, session_id: Option<&str>, cx: &mut Context<Self>) {
-        let running = self
-            .thread(session_id)
-            .is_some_and(ThreadReplica::turn_running);
         if let Some(ui) = self
             .thread_conversation_ui_mut(session_id)
             .filter(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview)
         {
             ui.right_panel_open = false;
-            if running {
-                ui.auto_open_task_suppressed = true;
-            }
             cx.notify();
         }
     }

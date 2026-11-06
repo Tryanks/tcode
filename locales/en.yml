@@ -440,9 +440,6 @@ settings:
   scroll_to_latest_on_send:
     title: "Scroll to the latest message when you send"
     description: "When the conversation is scrolled back, go to its end once a message you send gets through."
-  auto_open_task_panel:
-    title: "Auto-open task panel"
-    description: "Open the right-side task panel automatically when steps appear."
   live_command_panel:
     title: "Live command panel"
     description: "Automatically expand the latest command output while the agent is working."

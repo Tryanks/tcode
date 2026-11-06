@@ -21,7 +21,6 @@ pub(crate) struct ConversationUiState {
     pub diff_refresh_generation: u64,
     pub terminal_open: bool,
     pub terminal_height: f32,
-    pub auto_open_task_suppressed: bool,
     /// The agent shown beside this conversation in its chat. Kept for the
     /// session only: a reopened lead shows it again, a restart does not.
     pub side_thread: Option<String>,
@@ -40,7 +39,6 @@ impl ConversationUiState {
             diff_refresh_generation: 0,
             terminal_open,
             terminal_height,
-            auto_open_task_suppressed: false,
             side_thread: None,
         }
     }

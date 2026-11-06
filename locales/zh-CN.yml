@@ -440,9 +440,6 @@ settings:
   scroll_to_latest_on_send:
     title: "发送消息时滚动到最新"
     description: "对话未停在最新处时，你发送的消息送达后自动滚动到最新内容。"
-  auto_open_task_panel:
-    title: "自动打开任务面板"
-    description: "当出现步骤时自动打开右侧的任务面板。"
   live_command_panel:
     title: "实时命令面板"
     description: "智能体工作时自动展开最新命令的输出。"
