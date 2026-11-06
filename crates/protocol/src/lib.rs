@@ -38,15 +38,16 @@ pub use command::{
     TerminalSelection, ThreadExportFormat,
 };
 pub use event::{
-    AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry, ControlStatus,
-    EventEnvelope, ExternalImportState, ExternalImportStatus, ForkAvailability, GitActionRequest,
-    GitStatusStatus, IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions,
-    InjectedServer, InjectedTools, MergeWorktreeFailure, NoticeSeverity, PluginCatalogState,
-    PluginChallenge, PluginChallengeKind, PluginOperationTarget, PluginStaleReason,
-    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
-    ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
-    RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
-    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus, StorageMigration,
+    AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry,
+    ControlStatus, DiskUsage, DiskUsagePart, DiskUsageState, EventEnvelope, ExternalImportState,
+    ExternalImportStatus, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
+    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
+    MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
+    PluginOperationTarget, PluginStaleReason, ProviderDiskUsage, ProviderPluginCatalog,
+    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
+    RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity,
+    SessionEventRecord, SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage,
     TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
     ThreadReferenceStatus, Topic,
 };
@@ -283,7 +284,12 @@ pub use wire::{
 // error. The StorageMigration topic carries the host's move of an older
 // build's threads into its storage (StorageMigrationReplaced with
 // StorageMigration moved, total and waiting_for_space, or null when none
-// runs).
+// runs). The DiskUsage topic carries the host's last disk-usage measurement
+// (DiskUsageReplaced with DiskUsageState last and measuring; DiskUsage
+// measured_at, tcode, providers; TcodeDiskUsage dir, conversations, images,
+// worktrees, other; ProviderDiskUsage provider, bytes, accounts;
+// AccountDiskUsage profile_id, dirs, bytes, parts; DiskUsagePart name,
+// bytes), and the MeasureDiskUsage command measures again.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

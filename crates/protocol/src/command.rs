@@ -210,6 +210,9 @@ pub enum Command {
     /// provider profile (Codex, Claude Code).
     RefreshProviderUsage,
     CheckProviderVersions,
+    /// Measure the host's [`crate::Topic::DiskUsage`] again, unless a
+    /// measurement runs.
+    MeasureDiskUsage,
     UpdateProviders {
         providers: Vec<ProviderKind>,
     },
@@ -776,6 +779,7 @@ impl Command {
                 | Self::RefreshProviderStatus
                 | Self::RefreshProviderUsage
                 | Self::CheckProviderVersions
+                | Self::MeasureDiskUsage
                 | Self::RefreshAcpRegistry
                 | Self::RefreshProviderPlugins { .. }
                 | Self::LoadBranches { .. }

@@ -496,6 +496,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
         },
         // The machine's storage is a full device's to watch.
         Topic::StorageMigration,
+        Topic::DiskUsage,
         Topic::SpaceIndex {
             space_id: "other".into(),
         },

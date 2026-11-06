@@ -29,6 +29,22 @@ use crate::{
 
 use updates::Updates;
 
+/// The directories the Cursor CLI launched with `launch_env` keeps its
+/// configuration and chats in: `CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR`,
+/// each else `~/.cursor`.
+pub fn state_dirs(launch_env: &LaunchEnv) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for key in ["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"] {
+        let dir = launch_env
+            .child_path(ProviderKind::Cursor, key)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".cursor")));
+        if let Some(dir) = dir.filter(|dir| !found.contains(dir)) {
+            found.push(dir);
+        }
+    }
+    found
+}
+
 const ASK_QUESTION: &str = "cursor/ask_question";
 const CREATE_PLAN: &str = "cursor/create_plan";
 const UPDATE_TODOS: &str = "cursor/update_todos";

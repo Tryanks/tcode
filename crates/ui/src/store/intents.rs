@@ -69,6 +69,7 @@ impl WorkspaceStore {
                 | Command::RefreshProviderStatus
                 | Command::RefreshProviderUsage
                 | Command::CheckProviderVersions
+                | Command::MeasureDiskUsage
                 | Command::UpdateProviders { .. }
                 | Command::RefreshAcpRegistry
                 | Command::InstallAcpAgent { .. }

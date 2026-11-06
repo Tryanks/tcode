@@ -2171,7 +2171,7 @@ fn media_stand_in(
                 crate::tr!(
                     "pull_requests.media.too_large",
                     size = crate::thread_export::format_size(
-                        tcode_protocol::MAX_PULL_REQUEST_MEDIA_BYTES
+                        tcode_protocol::MAX_PULL_REQUEST_MEDIA_BYTES as u64
                     )
                 )
                 .into_owned(),

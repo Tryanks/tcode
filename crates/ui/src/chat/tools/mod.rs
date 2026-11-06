@@ -943,7 +943,7 @@ fn elided_control(
                         Elision::Preview(size) => (
                             crate::tr!(
                                 "chat.output_elided",
-                                size = crate::thread_export::format_size(*size)
+                                size = crate::thread_export::format_size(*size as u64)
                             )
                             .into_owned(),
                             true,

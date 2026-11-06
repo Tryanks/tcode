@@ -941,6 +941,17 @@ impl LaunchEnv {
         }
         pairs
     }
+
+    /// The path `key` names in a child of `provider` launched with this
+    /// environment: the last pair that sets it, else this process's own.
+    pub fn child_path(&self, provider: ProviderKind, key: &str) -> Option<PathBuf> {
+        self.pairs(provider)
+            .into_iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| PathBuf::from(value))
+            .or_else(|| std::env::var_os(key).map(PathBuf::from))
+    }
 }
 
 /// Connection details for the tcode preview MCP server (a streamable-HTTP

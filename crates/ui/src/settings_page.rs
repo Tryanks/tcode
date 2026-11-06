@@ -1,6 +1,7 @@
 //! Full-page settings route with section navigation and editable settings.
 
 mod control;
+mod disk_usage;
 pub(crate) mod thread_behavior;
 
 use std::rc::Rc;
@@ -494,8 +495,11 @@ pub struct SettingsPage {
     section: Section,
     /// Whether this page holds the store's archived threads.
     archived_held: bool,
-    /// Whether this page holds the host's storage migration.
-    storage_migration_held: bool,
+    /// Whether this page holds what Maintenance shows of the host: its
+    /// storage migration and disk usage.
+    maintenance_held: bool,
+    /// The providers whose disk usage is unfolded.
+    disk_usage_open: std::collections::HashSet<agent::ProviderKind>,
     capabilities: SettingsCapabilities,
     /// Whether the machine group's **Advanced** subgroup is open, once the user
     /// has said. `None` keeps the capability-derived default.
@@ -750,7 +754,8 @@ impl SettingsPage {
             acp_cards: Vec::new(),
             section,
             archived_held: false,
-            storage_migration_held: false,
+            maintenance_held: false,
+            disk_usage_open: Default::default(),
             capabilities,
             advanced_expanded: None,
             rail_opacity: 1.,
@@ -826,8 +831,9 @@ impl SettingsPage {
                 if this.archived_held {
                     store.release_archived_sessions();
                 }
-                if this.storage_migration_held {
+                if this.maintenance_held {
                     store.release_storage_migration();
+                    store.release_disk_usage();
                 }
             });
         }));
@@ -979,7 +985,8 @@ impl SettingsPage {
     }
 
     /// What a section shows only while it is open: the archived threads,
-    /// which the index leaves out, and the host's storage migration.
+    /// which the index leaves out, and the host's storage migration and
+    /// disk usage.
     fn sync_holds(&mut self, cx: &mut Context<Self>) {
         let archived = self.section == Section::Archived;
         if archived != self.archived_held {
@@ -993,13 +1000,15 @@ impl SettingsPage {
             });
         }
         let maintenance = self.section == Section::Maintenance;
-        if maintenance != self.storage_migration_held {
-            self.storage_migration_held = maintenance;
+        if maintenance != self.maintenance_held {
+            self.maintenance_held = maintenance;
             self.store.update(cx, |store, _| {
                 if maintenance {
                     store.hold_storage_migration();
+                    store.hold_disk_usage();
                 } else {
                     store.release_storage_migration();
+                    store.release_disk_usage();
                 }
             });
         }
@@ -1622,6 +1631,7 @@ impl SettingsPage {
         v_flex()
             .gap(crate::material::section_gap(cx))
             .children(migration)
+            .children(self.disk_usage_groups(window, cx))
             .child(crate::settings_rows::settings_group(
                 crate::tr!("settings.performance_section"),
                 performance,
@@ -3477,6 +3487,154 @@ mod tests {
         assert!(
             follows(&outgoing, false).is_some(),
             "only Maintenance follows it"
+        );
+    }
+
+    /// Maintenance on a client attached to another machine shows that
+    /// machine's disk usage as its host measured it: a compact loading state
+    /// before the first measurement, then Tcode's total and a row for each
+    /// provider the host listed, which stay while the host measures again.
+    #[gpui::test]
+    fn maintenance_shows_the_hosts_disk_usage_and_keeps_it_while_measuring_again(
+        cx: &mut TestAppContext,
+    ) {
+        use agent::ProviderKind;
+        use tcode_protocol::{
+            AccountDiskUsage, ClientPayload, DiskUsage, DiskUsageState, EventEnvelope, HostMessage,
+            ProviderDiskUsage, ServerEvent, Subscription, TcodeDiskUsage, Topic,
+            decode_client_line, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let attachment = WorkspaceAttachment::Remote {
+            host_id: "studio".into(),
+            host_name: "Studio".into(),
+        };
+        let (store, outgoing, incoming, _pump) = scripted_store(attachment, cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        // The spinner of a measurement running rests only with motion reduced.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let send = |request_id, state| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id,
+                        topic: Topic::DiskUsage,
+                        event: ServerEvent::DiskUsageReplaced(state),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+        let shown = |cx: &mut VisualTestContext, selectors: &[&'static str]| {
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw_settled(cx);
+            selectors
+                .iter()
+                .filter(|selector| cx.debug_bounds(selector).is_some())
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        let account = |profile_id: &str, dir: &str, bytes| AccountDiskUsage {
+            profile_id: profile_id.into(),
+            dirs: vec![dir.into()],
+            bytes,
+            parts: Vec::new(),
+        };
+        let usage = DiskUsage {
+            measured_at: 0,
+            tcode: TcodeDiskUsage {
+                dir: "~/.tcode".into(),
+                conversations: 40 << 30,
+                images: 70 << 20,
+                worktrees: 0,
+                other: 5 << 20,
+            },
+            providers: vec![
+                ProviderDiskUsage {
+                    provider: ProviderKind::Codex,
+                    bytes: 30 << 30,
+                    accounts: vec![account("codex", "~/.codex", 30 << 30)],
+                },
+                ProviderDiskUsage {
+                    provider: ProviderKind::ClaudeCode,
+                    bytes: 6 << 30,
+                    accounts: vec![
+                        account("claude", "~/.claude", 6 << 30),
+                        account("work", "~/.tcode/profile-homes/work", 10 << 20),
+                    ],
+                },
+            ],
+        };
+        let selectors = [
+            "disk-usage-measuring",
+            "disk-usage-remeasuring",
+            "disk-usage-tcode",
+            "disk-usage-tcode-conversations",
+            "disk-usage-tcode-worktrees",
+            "disk-usage-provider-codex",
+            "disk-usage-provider-claude",
+            "disk-usage-provider-pi",
+        ];
+
+        page.update(cx, |page, cx| page.select_section(Section::Maintenance, cx));
+        cx.run_until_parked();
+        let request = std::iter::from_fn(|| outgoing.try_recv().ok())
+            .find_map(|line| match decode_client_line(&line).unwrap() {
+                message @ tcode_protocol::ClientMessage {
+                    payload:
+                        ClientPayload::Subscribe(Subscription {
+                            topic: Topic::DiskUsage,
+                            ..
+                        }),
+                    ..
+                } => Some(message.id),
+                _ => None,
+            })
+            .expect("Maintenance follows the disk usage");
+        send(
+            Some(request),
+            DiskUsageState {
+                last: None,
+                measuring: true,
+            },
+        );
+        assert_eq!(shown(cx, &selectors), ["disk-usage-measuring"]);
+
+        send(
+            None,
+            DiskUsageState {
+                last: Some(usage.clone()),
+                measuring: false,
+            },
+        );
+        let rows = [
+            "disk-usage-tcode",
+            "disk-usage-tcode-conversations",
+            "disk-usage-tcode-worktrees",
+            "disk-usage-provider-codex",
+            "disk-usage-provider-claude",
+        ];
+        assert_eq!(shown(cx, &selectors), rows);
+
+        send(
+            None,
+            DiskUsageState {
+                last: Some(usage),
+                measuring: true,
+            },
+        );
+        assert_eq!(
+            shown(cx, &selectors),
+            [&["disk-usage-remeasuring"][..], &rows[..]].concat()
         );
     }
 

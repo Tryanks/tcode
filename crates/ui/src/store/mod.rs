@@ -23,11 +23,11 @@ use tcode_core::{
 };
 use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
-    ArchivedSessions, Command, CommandResponse, EventEnvelope, ExternalImportStatus,
-    ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus, IndexSummary, PathEntry,
-    ProtocolError, ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, Scope,
-    ScopedProviderChoice, ServerEvent, SessionPlan, SessionSearchHit, SessionStatus,
-    StorageMigration, Subscription, Topic,
+    ArchivedSessions, Command, CommandResponse, DiskUsageState, EventEnvelope,
+    ExternalImportStatus, ExternalThread, GitDiffResult, GitDiffScope, GitStatusStatus,
+    IndexSummary, PathEntry, ProtocolError, ProviderVersionStatus, ProvidersStatus, Query,
+    QueryResponse, RecentDir, Scope, ScopedProviderChoice, ServerEvent, SessionPlan,
+    SessionSearchHit, SessionStatus, StorageMigration, Subscription, Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -74,6 +74,7 @@ pub enum TopicKind {
     ExternalImport,
     Hosting,
     StorageMigration,
+    DiskUsage,
 }
 
 impl From<&Topic> for TopicKind {
@@ -97,6 +98,7 @@ impl From<&Topic> for TopicKind {
             Topic::ExternalImport { .. } => Self::ExternalImport,
             Topic::Hosting => Self::Hosting,
             Topic::StorageMigration => Self::StorageMigration,
+            Topic::DiskUsage => Self::DiskUsage,
         }
     }
 }
@@ -201,6 +203,10 @@ pub struct WorkspaceStore {
     /// [`Topic::StorageMigration`] while a view holds it.
     storage_migration: Option<StorageMigration>,
     storage_migration_holds: usize,
+    /// The host's disk usage, replicated from [`Topic::DiskUsage`] while a
+    /// view holds it.
+    disk_usage: DiskUsageState,
+    disk_usage_holds: usize,
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     /// Each thread's place in `index_replica.0`, rebuilt by
@@ -437,6 +443,8 @@ impl WorkspaceStore {
             archived_task: None,
             storage_migration: None,
             storage_migration_holds: 0,
+            disk_usage: DiskUsageState::default(),
+            disk_usage_holds: 0,
             removed_session: None,
             settings_replica: Settings::default(),
             settings_hydrated: false,
@@ -1252,6 +1260,7 @@ impl WorkspaceStore {
                     | Topic::ExternalImport { .. }
                     | Topic::Hosting
                     | Topic::StorageMigration
+                    | Topic::DiskUsage
             )
         {
             return Reach::Store;
@@ -1601,6 +1610,11 @@ impl WorkspaceStore {
                     if self.storage_migration_holds > 0 =>
                 {
                     self.storage_migration.clone_from(migration);
+                }
+                (Topic::DiskUsage, ServerEvent::DiskUsageReplaced(usage))
+                    if self.disk_usage_holds > 0 =>
+                {
+                    self.disk_usage.clone_from(usage);
                 }
                 (
                     Topic::Providers,
@@ -3553,6 +3567,40 @@ impl WorkspaceStore {
     /// The host's move of an older build's threads, while one runs.
     pub(crate) fn storage_migration(&self) -> Option<&StorageMigration> {
         self.storage_migration.as_ref()
+    }
+
+    /// Follow the host's disk usage until a matching release; the host
+    /// measures when it has nothing measured yet.
+    pub(crate) fn hold_disk_usage(&mut self) {
+        self.disk_usage_holds += 1;
+        if self.disk_usage_holds == 1 {
+            let _ = self.host.subscribe(Subscription {
+                known_index: None,
+                topic: Topic::DiskUsage,
+                after: None,
+            });
+        }
+    }
+
+    pub(crate) fn release_disk_usage(&mut self) {
+        self.disk_usage_holds = self.disk_usage_holds.saturating_sub(1);
+        if self.disk_usage_holds == 0 {
+            let _ = self.host.unsubscribe(Subscription {
+                known_index: None,
+                topic: Topic::DiskUsage,
+                after: None,
+            });
+            self.disk_usage = DiskUsageState::default();
+        }
+    }
+
+    pub(crate) fn disk_usage(&self) -> &DiskUsageState {
+        &self.disk_usage
+    }
+
+    /// Ask the host to measure its disk usage again.
+    pub(crate) fn measure_disk_usage(&mut self) {
+        self.dispatch(Command::MeasureDiskUsage);
     }
 
     /// The latest `tcode_control` writes across every thread, newest first.

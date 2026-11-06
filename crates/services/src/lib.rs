@@ -4,6 +4,7 @@ pub mod acp_registry;
 pub mod azure;
 pub mod bitbucket;
 pub mod desktop;
+pub mod disk_usage;
 pub mod export;
 pub mod forge;
 pub mod forgejo;

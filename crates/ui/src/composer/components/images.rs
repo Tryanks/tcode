@@ -211,8 +211,8 @@ impl Composer {
                                 crate::tr!(
                                     "attach.relay_rejected",
                                     name = result_name,
-                                    size = format_size(size as usize),
-                                    limit = format_size(remote_limit as usize)
+                                    size = format_size(size as u64),
+                                    limit = format_size(remote_limit)
                                 )
                                 .into_owned(),
                             ),
@@ -247,7 +247,7 @@ impl Composer {
                                 .description(crate::tr!(
                                     "attach.tunnel_body",
                                     name = result_name,
-                                    size = format_size(size as usize)
+                                    size = format_size(size as u64)
                                 ))
                                 .button_props(
                                     DialogButtons::default()

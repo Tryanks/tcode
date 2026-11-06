@@ -22,6 +22,14 @@ use crate::{
     ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
 };
 
+/// The directory pi launched with `launch_env` keeps its settings, sign-in
+/// and sessions in: `PI_CODING_AGENT_DIR`, else `~/.pi/agent`.
+pub fn agent_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    launch_env
+        .child_path(ProviderKind::Pi, "PI_CODING_AGENT_DIR")
+        .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")))
+}
+
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if opts.fork {
         return Err(AgentError::Protocol(

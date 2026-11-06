@@ -92,6 +92,9 @@ impl AppState {
                 _ => {}
             }
         }
+        if subscription.topic == Topic::DiskUsage {
+            self.disk_usage_subscribed(cx);
+        }
     }
 
     pub(crate) fn unsubscribe(

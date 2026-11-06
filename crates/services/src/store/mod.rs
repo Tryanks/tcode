@@ -211,6 +211,13 @@ impl std::fmt::Debug for SessionStore {
     }
 }
 
+/// Whether the entry `name` directly inside a data dir belongs to the thread
+/// store: its database and the files beside it, an older build's database
+/// while its threads move, and the blobs cut out of stored rows.
+pub fn holds_conversations(name: &std::ffi::OsStr) -> bool {
+    name == blobs::DIR || name.to_str().is_some_and(|name| name.starts_with(DB_FILE))
+}
+
 /// The data dir: `TCODE_DATA_DIR` when it is set — a throwaway profile (its
 /// own sessions, settings and installed ACP agents) for demos and screenshots —
 /// else `~/.tcode` on every platform.
