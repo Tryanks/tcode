@@ -1151,6 +1151,11 @@ time:
   duration_seconds: "%{seconds} 秒"
   duration_hours: "%{hours} 小时 %{minutes} 分 %{seconds} 秒"
   duration_days: "%{days} 天 %{hours} 小时 %{minutes} 分"
+  span_days: "%{days} 天 %{hours} 小时"
+  span_hours: "%{hours} 小时 %{minutes} 分钟"
+  span_minutes: "%{minutes} 分钟"
+list:
+  separator: "、"
 export:
   title: "导出线程"
   ready: "%{name} · %{size}"
@@ -1550,7 +1555,6 @@ spaces:
     project: "分享项目「%{name}」"
     new: "新建共享空间并分享…"
     badge: "已分享到 %{names}"
-    separator: "、"
   shared:
     title: "「%{name}」已就绪"
     description: "把此链接发给协作者，他们将看到「%{project}」及其线程。"

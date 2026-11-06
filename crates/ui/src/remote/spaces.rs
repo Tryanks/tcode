@@ -695,11 +695,8 @@ pub(crate) fn toggle_share(
 
 /// The mark on a project shared in at least one space, naming them.
 pub(crate) fn shared_badge(project_id: &str, names: &[String], cx: &App) -> AnyElement {
-    let tooltip = crate::tr!(
-        "spaces.share.badge",
-        names = names.join(&crate::tr!("spaces.share.separator"))
-    )
-    .into_owned();
+    let tooltip =
+        crate::tr!("spaces.share.badge", names = crate::i18n::join_list(names)).into_owned();
     let selector = format!("project-shared-{project_id}");
     div()
         .id(SharedString::from(selector.clone()))

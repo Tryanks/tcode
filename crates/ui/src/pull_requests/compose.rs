@@ -169,11 +169,7 @@ pub(super) fn rejection_reason(rejection: &PullRequestRejection, host_name: &str
         }
         PullRequestRejection::NoPushAccess { numbers } => crate::tr!(
             "pull_requests.stack.result_no_push",
-            list = numbers
-                .iter()
-                .map(|number| format!("#{number}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            list = crate::i18n::join_list(numbers.iter().map(|number| format!("#{number}")))
         ),
         PullRequestRejection::OperationRunning => crate::tr!("pull_requests.stack.waiting_state"),
         PullRequestRejection::MergeRunning => {
@@ -257,8 +253,8 @@ fn toast(
                     Notification::error(
                         crate::tr!(
                             "pull_requests.result.review_partial_body",
-                            posted = applied.join(", "),
-                            not_posted = unapplied.join(", "),
+                            posted = crate::i18n::join_list(applied),
+                            not_posted = crate::i18n::join_list(unapplied),
                             reason = reason
                         )
                         .into_owned(),
@@ -272,7 +268,7 @@ fn toast(
             Notification::warning(
                 crate::tr!(
                     "pull_requests.result.partial_body",
-                    names = unapplied.join(", "),
+                    names = crate::i18n::join_list(unapplied),
                     reason = reason
                 )
                 .into_owned(),

@@ -1158,6 +1158,11 @@ time:
   duration_seconds: "%{seconds} 秒"
   duration_hours: "%{hours} 時間 %{minutes} 分 %{seconds} 秒"
   duration_days: "%{days} 日 %{hours} 時間 %{minutes} 分"
+  span_days: "%{days} 日 %{hours} 時間"
+  span_hours: "%{hours} 時間 %{minutes} 分"
+  span_minutes: "%{minutes} 分"
+list:
+  separator: "、"
 export:
   title: "スレッドをエクスポート"
   ready: "%{name} · %{size}"
@@ -1557,7 +1562,6 @@ spaces:
     project: "プロジェクト「%{name}」を共有"
     new: "新しい共有スペースを作成して共有…"
     badge: "%{names} で共有中"
-    separator: "、"
   shared:
     title: "「%{name}」の準備ができました"
     description: "このリンクを共同作業者に送ってください。「%{project}」とそのスレッドが表示されます。"

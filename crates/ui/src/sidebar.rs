@@ -3006,7 +3006,7 @@ impl SessionsSidebar {
             crate::tr!(
                 "sidebar.thread_in_pane",
                 title = meta.title.clone(),
-                place = places.join(", ")
+                place = crate::i18n::join_list(places)
             )
         }
         .into_owned();

@@ -253,10 +253,7 @@ impl Named {
 
     /// The threads `ids` name, as they read, joined.
     fn threads(&self, ids: &[&str]) -> String {
-        ids.iter()
-            .map(|id| self.thread(id))
-            .collect::<Vec<_>>()
-            .join(", ")
+        crate::i18n::join_list(ids.iter().map(|id| self.thread(id)))
     }
 }
 
