@@ -1,5 +1,6 @@
 use super::*;
 use tcode_core::{
+    control::SettlementAutomation,
     project::Project,
     settings::{ProjectSettlementSettings, Settings},
 };
@@ -205,6 +206,92 @@ impl SettingsPage {
     /// Auto-settle, its days and merge rules, and the per-project overrides:
     /// a phone lists every project as a link to its rules page; a wide window
     /// adds overrides from a menu and edits them in a dialog.
+    /// How far Tcode settles threads on its own.
+    fn settlement_automation_row(
+        &mut self,
+        settings: &Settings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let automation = settings.settlement_automation;
+        let reset = crate::settings_rows::reset_action(
+            "reset-settlement-automation",
+            !automation.is_default(),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(
+                    |store| store.set_settlement_automation(SettlementAutomation::default()),
+                    cx,
+                )
+            }),
+        );
+        let label = |value: SettlementAutomation| -> SharedString {
+            match value {
+                SettlementAutomation::Off => crate::tr!("control.settings.automation_off"),
+                SettlementAutomation::Suggest => crate::tr!("control.settings.automation_suggest"),
+                SettlementAutomation::ExplicitSignals => {
+                    crate::tr!("control.settings.automation_explicit")
+                }
+            }
+            .into_owned()
+            .into()
+        };
+        let options = [
+            (
+                SettlementAutomation::Off,
+                "settlement-automation-off",
+                "control.settings.automation_off_description",
+            ),
+            (
+                SettlementAutomation::Suggest,
+                "settlement-automation-suggest",
+                "control.settings.automation_suggest_description",
+            ),
+            (
+                SettlementAutomation::ExplicitSignals,
+                "settlement-automation-explicit",
+                "control.settings.automation_explicit_description",
+            ),
+        ]
+        .into_iter()
+        .map(|(value, id, description)| SelectRowOption {
+            value,
+            id: id.into(),
+            label: label(value),
+            description: Some(crate::tr!(description).into_owned().into()),
+            selected: value == automation,
+        })
+        .collect();
+        crate::settings_rows::select_row(
+            "settlement-automation-dropdown",
+            "settlement-automation-popover",
+            "settlement-automation-menu",
+            320.,
+            crate::tr!("control.settings.automation")
+                .into_owned()
+                .into(),
+            Some(
+                crate::tr!("control.settings.automation_description")
+                    .into_owned()
+                    .into(),
+            ),
+            label(automation),
+            options,
+            reset,
+            self.flip_row("settlement-automation-dropdown", cx),
+            {
+                let page = cx.entity();
+                move |value, _, cx| {
+                    page.update(cx, |page, cx| {
+                        page.dispatch_settings(
+                            move |store| store.set_settlement_automation(value),
+                            cx,
+                        )
+                    })
+                }
+            },
+            cx,
+        )
+    }
+
     fn settling_rows(
         &mut self,
         settings: &Settings,
@@ -218,7 +305,8 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_auto_settle_after_days(Some(3.)), cx)
             }),
         );
-        let mut rows = vec![self.toggle_row(
+        let mut rows = vec![self.settlement_automation_row(settings, cx)];
+        rows.push(self.toggle_row(
             "auto-settle-inactive",
             crate::tr!("settings.auto_settle.title"),
             crate::tr!("settings.auto_settle.description"),
@@ -226,7 +314,7 @@ impl SettingsPage {
             reset,
             cx,
             |store, checked| store.set_auto_settle_after_days(checked.then_some(3.)),
-        )];
+        ));
         // The days apply only while auto-settle is on, and fold with it.
         rows.push(
             crate::widgets::Collapsible::new(

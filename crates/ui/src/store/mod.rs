@@ -7589,7 +7589,7 @@ pub(crate) mod tests {
         ))
     }
 
-    fn project_at(id: &str, root: &std::path::Path) -> Project {
+    pub(crate) fn project_at(id: &str, root: &std::path::Path) -> Project {
         Project {
             id: id.into(),
             name: id.into(),
@@ -7601,7 +7601,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn thread(
+    pub(crate) fn thread(
         root: &std::path::Path,
         id: &str,
         project: &str,
