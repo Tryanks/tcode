@@ -23,7 +23,8 @@ pub struct ClaudeAuthStatus {
 /// Map `claude auth status --json` onto the card's auth line.
 ///
 /// Labels are `Claude API Key` or `Claude <plan> Subscription`, with the plan
-/// normalized to Max / Max 5x / Max 20x / Pro / Team / Enterprise / Free.
+/// normalized to Claude's plan names: Free / Pro / Max / Ultra / Team /
+/// Enterprise.
 pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
     let status: ClaudeAuthStatus = serde_json::from_str(json).ok()?;
     if !status.logged_in {
@@ -57,7 +58,9 @@ pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
     })
 }
 
-/// Normalize Claude's `subscriptionType` to its display plan name.
+/// Normalize Claude's `subscriptionType` to its display plan name. Claude
+/// Code reports `max` for both the 5x and the 20x tier, which claude.com now
+/// sells as Max and Ultra; only the 20x tier's own id can name Ultra.
 fn normalize_claude_plan(raw: &str) -> Option<&'static str> {
     match raw
         .trim()
@@ -65,9 +68,8 @@ fn normalize_claude_plan(raw: &str) -> Option<&'static str> {
         .replace(['-', ' '], "_")
         .as_str()
     {
-        "max" => Some("Max"),
-        "max_5x" | "max5x" => Some("Max 5x"),
-        "max_20x" | "max20x" => Some("Max 20x"),
+        "max" | "max_5x" | "max5x" => Some("Max"),
+        "ultra" | "max_20x" | "max20x" => Some("Ultra"),
         "pro" => Some("Pro"),
         "team" => Some("Team"),
         "enterprise" => Some("Enterprise"),
@@ -249,8 +251,8 @@ mod tests {
 
         // Plan normalization.
         for (raw, expected) in [
-            ("max_20x", "Claude Max 20x Subscription"),
-            ("max_5x", "Claude Max 5x Subscription"),
+            ("max_20x", "Claude Ultra Subscription"),
+            ("max_5x", "Claude Max Subscription"),
             ("pro", "Claude Pro Subscription"),
             ("team", "Claude Team Subscription"),
             ("enterprise", "Claude Enterprise Subscription"),
