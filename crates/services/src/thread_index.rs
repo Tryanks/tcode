@@ -78,6 +78,9 @@ impl IndexedLog {
         let mut timeline = Timeline::default();
         let mut positions: Vec<u64> = Vec::new();
         let mut rewinds = Vec::new();
+        // Where each entry a rewind took out was recorded, for an undo that
+        // puts it back.
+        let mut removed = HashMap::new();
         for (record, &row) in log.records.iter().zip(&log.rows) {
             if reorders_entries(&record.event) {
                 let before: Vec<(String, u64)> = timeline
@@ -87,7 +90,7 @@ impl IndexedLog {
                     .zip(positions.iter().copied())
                     .collect();
                 timeline.apply_stored(record);
-                positions = reconcile(before, &timeline.entries, row);
+                positions = reconcile(before, &timeline.entries, row, &mut removed);
                 // The divider ends the log so far and sits in the turn after
                 // the ones the cut kept.
                 if let (AgentEvent::RewindCompleted { .. }, Some(divider)) =
@@ -150,20 +153,33 @@ fn reorders_entries(event: &AgentEvent) -> bool {
     }
 }
 
-fn reconcile(before: Vec<(String, u64)>, entries: &[Arc<TimelineEntry>], row: u64) -> Vec<u64> {
+/// The positions of `entries` after an event that moved or removed some:
+/// each keeps the position it had `before`, or had when it last left the
+/// fold (`removed`, which takes those that leave now); a new one is `row`'s.
+fn reconcile(
+    before: Vec<(String, u64)>,
+    entries: &[Arc<TimelineEntry>],
+    row: u64,
+    removed: &mut HashMap<String, VecDeque<u64>>,
+) -> Vec<u64> {
     let mut known: HashMap<String, VecDeque<u64>> = HashMap::new();
     for (id, position) in before {
         known.entry(id).or_default().push_back(position);
     }
-    entries
+    let positions = entries
         .iter()
         .map(|entry| {
             known
                 .get_mut(&entry.id)
                 .and_then(VecDeque::pop_front)
+                .or_else(|| removed.get_mut(&entry.id).and_then(VecDeque::pop_front))
                 .unwrap_or(row)
         })
-        .collect()
+        .collect();
+    for (id, left) in known {
+        removed.entry(id).or_default().extend(left);
+    }
+    positions
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
