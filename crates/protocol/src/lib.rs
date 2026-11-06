@@ -289,7 +289,8 @@ pub use wire::{
 // measured_at, tcode, providers; TcodeDiskUsage dir, conversations, images,
 // worktrees, other; ProviderDiskUsage provider, bytes, accounts;
 // AccountDiskUsage profile_id, dirs, bytes, parts; DiskUsagePart name,
-// bytes), and the MeasureDiskUsage command measures again.
+// bytes), and the MeasureDiskUsage command measures again. Settings drops
+// auto_open_task_panel with the AutoOpenTaskPanel patch.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

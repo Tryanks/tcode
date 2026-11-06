@@ -19,7 +19,6 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         SettingsPatch::Language(_)
         | SettingsPatch::ThemeMode(_)
         | SettingsPatch::WordWrapDiffs(_)
-        | SettingsPatch::AutoOpenTaskPanel(_)
         | SettingsPatch::LiveCommandPanelDisabled(_)
         | SettingsPatch::SidebarProviderMarks(_)
         | SettingsPatch::InactiveFrameThrottleDisabled(_)

@@ -888,7 +888,6 @@ pub enum SettingsPatch {
     ThemeMode(ThemeMode),
     WordWrapDiffs(bool),
     SkipDeleteConfirmation(bool),
-    AutoOpenTaskPanel(bool),
     LiveCommandPanelDisabled(bool),
     SidebarProviderMarks(bool),
     ProviderUpdateChecksDisabled(bool),
@@ -1124,11 +1123,6 @@ pub struct Settings {
     /// dialog on by default. Surfaced as the "Delete confirmation" toggle.
     #[serde(default)]
     pub skip_delete_confirmation: bool,
-    /// When true, the right-side plan/task panel opens automatically the first
-    /// time steps appear in a turn (unless the user closed it during that turn).
-    /// Absent in legacy files (defaults to off).
-    #[serde(default)]
-    pub auto_open_task_panel: bool,
     /// Whether the live command panel is DISABLED. Stored inverted so absent
     /// legacy settings keep the feature enabled.
     #[serde(default)]
@@ -1295,7 +1289,6 @@ impl Default for Settings {
             sidebar_collapsed: false,
             word_wrap_diffs: false,
             skip_delete_confirmation: false,
-            auto_open_task_panel: false,
             live_command_panel_disabled: false,
             sidebar_provider_marks: false,
             provider_update_checks_disabled: false,
@@ -1369,7 +1362,6 @@ impl Settings {
             SettingsPatch::SkipDeleteConfirmation(value) => {
                 self.skip_delete_confirmation = value;
             }
-            SettingsPatch::AutoOpenTaskPanel(value) => self.auto_open_task_panel = value,
             SettingsPatch::LiveCommandPanelDisabled(value) => {
                 self.live_command_panel_disabled = value;
             }

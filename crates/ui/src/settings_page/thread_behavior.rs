@@ -156,13 +156,6 @@ impl SettingsPage {
     }
 
     fn panel_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let auto_open_task_panel_reset = crate::settings_rows::reset_action(
-            "reset-auto-open-task-panel",
-            settings.auto_open_task_panel,
-            cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(|store| store.set_auto_open_task_panel(false), cx)
-            }),
-        );
         let live_command_panel_reset = crate::settings_rows::reset_action(
             "reset-live-command-panel",
             settings.live_command_panel_disabled,
@@ -178,15 +171,6 @@ impl SettingsPage {
             }),
         );
         vec![
-            self.toggle_row(
-                "auto-open-task-panel",
-                crate::tr!("settings.auto_open_task_panel.title"),
-                crate::tr!("settings.auto_open_task_panel.description"),
-                settings.auto_open_task_panel,
-                auto_open_task_panel_reset,
-                cx,
-                WorkspaceStore::set_auto_open_task_panel,
-            ),
             self.toggle_row(
                 "live-command-panel",
                 crate::tr!("settings.live_command_panel.title"),

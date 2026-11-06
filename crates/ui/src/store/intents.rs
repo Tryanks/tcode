@@ -185,9 +185,6 @@ impl WorkspaceStore {
                 SettingsPatch::WordWrapDiffs(value) => {
                     self.settings_replica.word_wrap_diffs = value
                 }
-                SettingsPatch::AutoOpenTaskPanel(value) => {
-                    self.settings_replica.auto_open_task_panel = value
-                }
                 SettingsPatch::LiveCommandPanelDisabled(value) => {
                     self.settings_replica.live_command_panel_disabled = value
                 }
@@ -238,9 +235,6 @@ impl WorkspaceStore {
     }
     pub fn set_skip_delete_confirmation(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::SkipDeleteConfirmation(value));
-    }
-    pub fn set_auto_open_task_panel(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::AutoOpenTaskPanel(value));
     }
     pub fn set_live_command_panel_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::LiveCommandPanelDisabled(value));
