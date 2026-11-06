@@ -151,8 +151,26 @@ impl AppState {
                     "This project is no longer available.",
                 ));
             }
+            Command::CreateThirdPartyProfile { provider, .. }
+                if !provider
+                    .harness()
+                    .endpoint
+                    .is_some_and(|endpoint| endpoint.profiles) =>
+            {
+                return Err(error(
+                    "no_endpoint_profiles",
+                    "This provider has no endpoint profiles.",
+                ));
+            }
             Command::SetProfileSecret { profile_id, .. }
-            | Command::UpdateProfileSettings { profile_id, .. }
+                if !self.settings.owns_secrets(profile_id) =>
+            {
+                return Err(error(
+                    "unknown_profile",
+                    "This provider profile is no longer available.",
+                ));
+            }
+            Command::UpdateProfileSettings { profile_id, .. }
             | Command::DeleteProfile { profile_id }
             | Command::StartProviderLogin { profile_id }
             | Command::SubmitProviderLoginCode { profile_id, .. }

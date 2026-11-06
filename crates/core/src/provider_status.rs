@@ -1,4 +1,4 @@
-//! Pure provider status data and semantic card-summary derivation.
+//! Pure provider status data: what a probe and a sign-in found.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProviderStatusKind {
@@ -24,6 +24,8 @@ pub enum ProviderProbeDiagnostic {
     /// The CLI keeps one sign-in for every config directory, so this
     /// profile's account login is shared with the other account profiles.
     SharedCredentials,
+    /// An endpoint profile signs in with an API key it has none of.
+    MissingApiKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -45,6 +47,9 @@ pub struct ProviderSnapshot {
     pub checking: bool,
     #[serde(default)]
     pub login: Option<ProviderLogin>,
+    /// The CLI the probe ran, as the host resolved it.
+    #[serde(default)]
+    pub binary: Option<String>,
 }
 
 /// Where a sign-in the host runs through the provider CLI stands.
@@ -57,17 +62,13 @@ pub enum ProviderLogin {
     AwaitingCode {
         url: Option<String>,
     },
+    /// The CLI waits for the user to enter `code` on its sign-in page.
+    AwaitingDevice {
+        url: Option<String>,
+        code: String,
+    },
     Finishing,
     Failed {
         message: String,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusDot {
-    Loading,
-    Success,
-    Warning,
-    Error,
-    Amber,
 }

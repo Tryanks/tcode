@@ -31,6 +31,8 @@ pub enum Destination {
     SettingsThreadRules,
     /// One Git platform, managed on a phone's page pushed over Git Platforms.
     SettingsSourceControlHost,
+    /// One harness's settings, a page on a compact window.
+    SettingsHarness,
     /// The phone's page for pinning, settling and reordering threads by handle.
     ArrangeThreads,
 }
@@ -85,6 +87,7 @@ impl NavigationSnapshot {
                     | Destination::SettingsSection
                     | Destination::SettingsThreadRules
                     | Destination::SettingsSourceControlHost
+                    | Destination::SettingsHarness
                     | Destination::ArrangeThreads
                     | Destination::Pair
                     // A cold start reads the pull request afresh from its thread.
@@ -131,7 +134,8 @@ impl Destination {
             Self::Settings
             | Self::SettingsSection
             | Self::SettingsThreadRules
-            | Self::SettingsSourceControlHost => Route::Settings,
+            | Self::SettingsSourceControlHost
+            | Self::SettingsHarness => Route::Settings,
             Self::Threads
             | Self::Thread
             | Self::Panel
@@ -155,7 +159,8 @@ impl Destination {
             Self::Settings
             | Self::SettingsSection
             | Self::SettingsThreadRules
-            | Self::SettingsSourceControlHost => "settings.title",
+            | Self::SettingsSourceControlHost
+            | Self::SettingsHarness => "settings.title",
         })
         .into_owned()
         .into()

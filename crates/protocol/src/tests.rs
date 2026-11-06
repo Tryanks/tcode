@@ -1677,10 +1677,12 @@ fn profile_creation_commands_use_their_documented_wire_shapes() {
 
     assert_eq!(
         serde_json::from_value::<Command>(json!({"type": "create_third_party_profile", "content": {
-            "name": "Kimi", "base_url": "https://api.kimi.com/coding/", "model": null, "api_key": "sk"
+            "provider": "claude_code", "name": "Kimi", "base_url": "https://api.kimi.com/coding/",
+            "model": null, "api_key": "sk"
         }}))
         .unwrap(),
         Command::CreateThirdPartyProfile {
+            provider: agent::ProviderKind::ClaudeCode,
             name: "Kimi".into(),
             base_url: "https://api.kimi.com/coding/".into(),
             model: None,

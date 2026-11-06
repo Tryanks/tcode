@@ -39,8 +39,9 @@ pub use command::{
 };
 pub use event::{
     AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry,
-    ControlStatus, DiskUsage, DiskUsagePart, DiskUsageState, EventEnvelope, ExternalImportState,
-    ExternalImportStatus, ForkAvailability, GitActionRequest, GitStatusStatus, IndexSnapshot,
+    ControlStatus, DiskUsage, DiskUsagePart, DiskUsageState, EndpointDescription,
+    EndpointPresetDescription, EventEnvelope, ExternalImportState, ExternalImportStatus,
+    ForkAvailability, GitActionRequest, GitStatusStatus, HarnessDescription, IndexSnapshot,
     IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
     MergeWorktreeFailure, NoticeSeverity, PluginCatalogState, PluginChallenge, PluginChallengeKind,
     PluginOperationTarget, PluginStaleReason, ProviderDiskUsage, ProviderPluginCatalog,
@@ -317,6 +318,16 @@ pub use wire::{
 // for the project last asked about, so ProvidersStatus.plugins may name a
 // profile twice, told apart by context_cwd; ProviderPluginEntry adds
 // latest_version and always_on, and PluginInstallation adds other_project.
+// Harness settings: ProvidersStatus carries `harnesses`, one HarnessDescription per
+// native harness and installed ACP agent; ProfileSettingsPatch is adjacently
+// tagged with one variant per field (SetHarnessEnabled, SetDisplayName,
+// SetAccentColor, SetEnv, SetSharedEnv, SetBinaryPath, SetHomePath,
+// SetLaunchArgs, SetToggle, SetCustomModels, SetHiddenModels) instead of
+// ReplaceConfiguration; ProviderSettings' shared_env; CreateThirdPartyProfile
+// names its provider; AddCustomAcpAgent drops env; an installed ACP agent's
+// env is EnvVar rows and AcpAgentPatch has SetLaunchArgs and SetEnv instead
+// of SetLaunchOptions; ProviderLogin's AwaitingDevice and the MissingApiKey
+// probe diagnostic.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

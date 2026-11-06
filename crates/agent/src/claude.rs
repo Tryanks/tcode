@@ -230,7 +230,11 @@ fn copy_entries(from: &Path, to: &Path, wanted: impl Fn(&str) -> bool) -> std::i
 /// Copy what `from` names, following symbolic links: a link copied as a link
 /// would resolve its relative target under the new directory. A directory
 /// that is its own ancestor is skipped.
-fn copy_resolved(from: &Path, to: &Path, ancestors: &mut HashSet<PathBuf>) -> std::io::Result<()> {
+pub(crate) fn copy_resolved(
+    from: &Path,
+    to: &Path,
+    ancestors: &mut HashSet<PathBuf>,
+) -> std::io::Result<()> {
     const MAX_DEPTH: usize = 32;
     let metadata = match std::fs::metadata(from) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),

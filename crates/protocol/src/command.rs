@@ -172,7 +172,10 @@ pub enum Command {
         profile_id: String,
         patch: ProfileSettingsPatch,
     },
+    /// Add an endpoint profile of `provider` from its harness's endpoint
+    /// variables, in its own config directory.
     CreateThirdPartyProfile {
+        provider: ProviderKind,
         name: String,
         base_url: String,
         model: Option<String>,
@@ -240,7 +243,6 @@ pub enum Command {
         name: String,
         command: String,
         args: Vec<String>,
-        env: Vec<(String, String)>,
     },
     UpdateAcpAgent {
         id: String,

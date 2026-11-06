@@ -1436,11 +1436,11 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
         cx,
         1,
         Command::StartProviderLogin {
-            profile_id: "codex".into(),
+            profile_id: "pi".into(),
         },
     );
     cx.run_until_parked();
-    assert_eq!(state.read(|state| snapshot(state, "codex").login), None);
+    assert_eq!(state.read(|state| snapshot(state, "pi").login), None);
 
     let start = || Command::StartProviderLogin {
         profile_id: "claude".into(),
@@ -1631,7 +1631,7 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
         inherit_config: true,
     };
 
-    state.dispatch_command(cx, 1, create(ProviderKind::Codex));
+    state.dispatch_command(cx, 1, create(ProviderKind::Pi));
     let (code, _) = cx.run_until_sent(|message| match message {
         HostMessage::Ack {
             id: 1,
@@ -1715,6 +1715,277 @@ fn another_claude_account_inherits_configuration_but_not_the_account() {
                     home.display()
                 )),
             })
+    });
+}
+
+/// Another Codex account gets its own `CODEX_HOME` with a copy of the user's
+/// configuration, never the default account's sign-in or sessions, and its
+/// sign-in is Codex's device flow run in that home: the page and the code to
+/// enter there.
+#[cfg(unix)]
+#[test]
+fn another_codex_account_signs_in_with_a_device_code_in_its_own_home() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use tcode_core::provider_status::ProviderLogin;
+
+    let test_store = TestStore::new("tcode-codex-account-test");
+    let binary = test_store.root().join("codex");
+    let default = test_store.root().join("codex-default");
+    for (path, contents) in [
+        (default.join("config.toml"), "model = \"gpt-6\"\n"),
+        (default.join("AGENTS.md"), "Answer briefly."),
+        (default.join("auth.json"), r#"{"tokens":{}}"#),
+        (default.join("sessions/rollout.jsonl"), "{}"),
+    ] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    // What codex-cli 0.166.0 prints for `login --device-auth`, colored.
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\n\
+         case \"$*\" in\n\
+         --version) echo 'codex-cli 0.166.0' ;;\n\
+         'login --device-auth')\n\
+           printf '1. Open this link in your browser\\n   \\033[94mhttps://auth.openai.com/codex/device?home=%s\\033[0m\\n\\n2. Enter this one-time code\\n   \\033[94m3JP6-MXLMX\\033[0m\\n' \"$CODEX_HOME\"\n\
+           read code ;;\n\
+         *) exit 2 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = TestClientState::new((*test_store).clone());
+    let codex = host.settings.provider_mut(ProviderKind::Codex);
+    codex.binary_path = Some(binary);
+    codex.home_path = Some(default.clone());
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(host);
+    state.dispatch_command(
+        cx,
+        1,
+        Command::CreateAccountProfile {
+            provider: ProviderKind::Codex,
+            name: "Codex Work".into(),
+            inherit_config: true,
+        },
+    );
+    let (id, _) = cx.run_until_sent(|message| match message {
+        HostMessage::Ack {
+            id: 1,
+            result: Ok(CommandResponse::ProfileId(id)),
+        } => Some(id.clone()),
+        _ => None,
+    });
+    let home = test_store.root().join("profile-homes").join(&id);
+    assert_eq!(
+        state.read(|state| state
+            .settings
+            .resolved_profile(&id)
+            .unwrap()
+            .settings
+            .home_path),
+        Some(home.clone())
+    );
+    for (copied, contents) in [
+        ("config.toml", "model = \"gpt-6\"\n"),
+        ("AGENTS.md", "Answer briefly."),
+    ] {
+        assert_eq!(
+            std::fs::read_to_string(home.join(copied)).unwrap(),
+            contents
+        );
+    }
+    for kept in ["auth.json", "sessions"] {
+        assert!(!home.join(kept).exists(), "{kept} must not be copied");
+    }
+    cx.run_until(|state| {
+        state
+            .providers_status_snapshot()
+            .provider_snapshots
+            .get(&id)
+            .and_then(|snapshot| snapshot.login.clone())
+            == Some(ProviderLogin::AwaitingDevice {
+                url: Some(format!(
+                    "https://auth.openai.com/codex/device?home={}",
+                    home.display()
+                )),
+                code: "3JP6-MXLMX".into(),
+            })
+    });
+}
+
+/// An endpoint profile that has no API key saved says so, rather than
+/// passing on the CLI's advice to sign in, which does not apply to it; the
+/// account beside it is told to sign in.
+#[cfg(unix)]
+#[test]
+fn an_endpoint_profile_without_its_key_is_missing_the_key_not_signed_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use tcode_core::provider_status::ProviderProbeDiagnostic;
+
+    let test_store = TestStore::new("tcode-endpoint-key-test");
+    let binary = test_store.root().join("claude");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\n\
+         case \"$*\" in\n\
+         --version) echo '2.1.318 (Claude Code)' ;;\n\
+         'auth status --json') echo '{\"loggedIn\":false}'; exit 1 ;;\n\
+         *) exit 2 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut host = TestClientState::new((*test_store).clone());
+    host.settings
+        .provider_mut(ProviderKind::ClaudeCode)
+        .binary_path = Some(binary);
+    host.settings.profiles.insert(
+        "kimi".into(),
+        ProviderProfile {
+            kind: ProviderKind::ClaudeCode,
+            settings: ProviderSettings {
+                env: vec![
+                    EnvVar {
+                        name: "ANTHROPIC_BASE_URL".into(),
+                        value: "https://api.kimi.com/coding/".into(),
+                        sensitive: false,
+                    },
+                    EnvVar {
+                        name: "ANTHROPIC_API_KEY".into(),
+                        value: String::new(),
+                        sensitive: true,
+                    },
+                ],
+                ..ProviderSettings::default()
+            },
+        },
+    );
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(host);
+    state.update(cx, |state, cx| state.refresh_provider_status(cx));
+    let diagnostic = |state: &TestClientState, id: &str| {
+        state
+            .providers_status_snapshot()
+            .provider_snapshots
+            .get(id)
+            .filter(|snapshot| !snapshot.checking)
+            .and_then(|snapshot| snapshot.diagnostic)
+    };
+    cx.run_until(|state| {
+        diagnostic(state, "kimi").is_some() && diagnostic(state, "claude").is_some()
+    });
+    state.read(|state| {
+        assert_eq!(
+            diagnostic(state, "kimi"),
+            Some(ProviderProbeDiagnostic::MissingApiKey)
+        );
+        assert_eq!(
+            diagnostic(state, "claude"),
+            Some(ProviderProbeDiagnostic::Unauthenticated)
+        );
+    });
+}
+
+/// Each settings edit writes the one field it names: the harness's own
+/// fields on its built-in profile, where an account without its own follows
+/// them, and never the config directory an account's sign-in lives in.
+#[test]
+fn a_settings_edit_writes_the_field_it_names() {
+    let test_store = TestStore::new("tcode-profile-patch-test");
+    let mut host = TestClientState::new((*test_store).clone());
+    let home = test_store.root().join("profile-homes").join("work");
+    host.settings.profiles.insert(
+        "work".into(),
+        ProviderProfile {
+            kind: ProviderKind::ClaudeCode,
+            settings: ProviderSettings {
+                home_path: Some(home.clone()),
+                ..ProviderSettings::default()
+            },
+        },
+    );
+    let cx = &mut TestAppContext::default();
+    let state = cx.new_entity(host);
+    let var = |name: &str, value: &str| EnvVar {
+        name: name.into(),
+        value: value.into(),
+        sensitive: false,
+    };
+    for (id, (profile, patch)) in [
+        (
+            "claude",
+            ProfileSettingsPatch::SetBinaryPath(Some("/opt/claude".into())),
+        ),
+        (
+            "work",
+            ProfileSettingsPatch::SetHomePath(Some("/elsewhere".into())),
+        ),
+        (
+            "claude",
+            ProfileSettingsPatch::SetHomePath(Some("/home/.claude".into())),
+        ),
+        (
+            "work",
+            ProfileSettingsPatch::SetSharedEnv(vec![var("A", "1")]),
+        ),
+        (
+            "claude",
+            ProfileSettingsPatch::SetSharedEnv(vec![var(" A ", "1"), var("", "x")]),
+        ),
+        (
+            "work",
+            ProfileSettingsPatch::SetDisplayName(Some("  Office ".into())),
+        ),
+        (
+            "pi",
+            ProfileSettingsPatch::SetToggle {
+                id: "trust_project_extensions".into(),
+                enabled: true,
+            },
+        ),
+        (
+            "claude",
+            ProfileSettingsPatch::SetHarnessEnabled { enabled: false },
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        state.dispatch_command(
+            cx,
+            id as u64 + 1,
+            Command::UpdateProfileSettings {
+                profile_id: profile.into(),
+                patch,
+            },
+        );
+    }
+    cx.run_until_parked();
+    state.read(|state| {
+        let claude = state.settings.provider(ProviderKind::ClaudeCode);
+        let work = state.settings.resolved_profile("work").unwrap();
+        assert_eq!(claude.binary_path, Some(PathBuf::from("/opt/claude")));
+        assert_eq!(
+            work.settings.binary_path,
+            Some(PathBuf::from("/opt/claude"))
+        );
+        assert_eq!(state.settings.profiles["work"].settings.binary_path, None);
+        assert_eq!(work.settings.home_path, Some(home.clone()));
+        assert_eq!(claude.home_path, Some(PathBuf::from("/home/.claude")));
+        assert_eq!(claude.shared_env, vec![var("A", "1")]);
+        assert_eq!(work.shared_env, vec![var("A", "1")]);
+        assert!(work.settings.shared_env.is_empty());
+        assert_eq!(work.settings.display_name.as_deref(), Some("Office"));
+        assert!(
+            state
+                .settings
+                .provider(ProviderKind::Pi)
+                .pi
+                .trust_project_extensions
+        );
+        assert!(!claude.enabled && !work.settings.enabled);
+        assert!(state.settings.provider(ProviderKind::Codex).enabled);
     });
 }
 
@@ -2636,6 +2907,7 @@ fn a_new_profile_never_takes_over_a_directory_left_in_profile_homes() {
         cx,
         1,
         Command::CreateThirdPartyProfile {
+            provider: ProviderKind::ClaudeCode,
             name: "Work".into(),
             base_url: "https://proxy.test".into(),
             model: None,
@@ -3311,6 +3583,25 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
             sensitive: true,
         },
     ];
+    // Every account of the harness gets its shared variables first; an
+    // account's own value of the same name wins.
+    settings.provider_mut(ProviderKind::ClaudeCode).shared_env = vec![
+        EnvVar {
+            name: "SHARED".into(),
+            value: "all".into(),
+            sensitive: false,
+        },
+        EnvVar {
+            name: "SHARED_KEY".into(),
+            value: String::new(),
+            sensitive: true,
+        },
+        EnvVar {
+            name: "ANTHROPIC_MODEL".into(),
+            value: "shared-model".into(),
+            sensitive: false,
+        },
+    ];
     // A user "Klaude Kode" profile pointing at Kimi's Anthropic-compatible
     // endpoint, with its own binary and (sensitive) key.
     settings.profiles.insert(
@@ -3354,19 +3645,40 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
         .settings_store
         .set_profile_secret("klaude-kode", "ANTHROPIC_API_KEY", Some("sk-kimi"))
         .unwrap();
+    let harness = Settings::harness_secret_id(ProviderKind::ClaudeCode);
+    state
+        .settings_store
+        .set_profile_secret(&harness, "SHARED_KEY", Some("sk-shared"))
+        .unwrap();
+    let shared = [
+        ("SHARED".to_string(), "all".to_string()),
+        ("SHARED_KEY".to_string(), "sk-shared".to_string()),
+        ("ANTHROPIC_MODEL".to_string(), "shared-model".to_string()),
+    ];
 
-    // The profile's launch env carries the Kimi endpoint + its own key.
+    // The profile's launch env carries the shared variables, then the Kimi
+    // endpoint + its own key, whose model wins over the shared one.
     let env = launch_env_for_profile(
         &state.settings,
         "klaude-kode",
+        state.settings_store.profile_secrets(&harness),
         state.settings_store.profile_secrets("klaude-kode"),
     )
     .env;
+    assert_eq!(env[..3], shared[..]);
     assert!(env.contains(&(
         "ANTHROPIC_BASE_URL".to_string(),
         "https://api.kimi.com/coding/".to_string()
     )));
-    assert!(env.contains(&("ANTHROPIC_MODEL".to_string(), "k3[1m]".to_string())));
+    // The child takes the last value a name is given.
+    assert_eq!(
+        LaunchEnv {
+            env: env.clone(),
+            home: None
+        }
+        .child_path(ProviderKind::ClaudeCode, "ANTHROPIC_MODEL"),
+        Some(PathBuf::from("k3[1m]"))
+    );
     assert!(env.contains(&("ANTHROPIC_API_KEY".to_string(), "sk-kimi".to_string())));
 
     // The built-in profile is untouched: official key, no third-party URL.
@@ -3374,15 +3686,20 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
     let builtin = launch_env_for_profile(
         &state.settings,
         builtin_profile_id,
+        state.settings_store.profile_secrets(&harness),
         state.settings_store.profile_secrets(builtin_profile_id),
     )
     .env;
     assert_eq!(
         builtin,
-        vec![
-            ("PLAIN".to_string(), "visible".to_string()),
-            ("ANTHROPIC_API_KEY".to_string(), "sk-official".to_string()),
-        ]
+        shared
+            .iter()
+            .cloned()
+            .chain([
+                ("PLAIN".to_string(), "visible".to_string()),
+                ("ANTHROPIC_API_KEY".to_string(), "sk-official".to_string()),
+            ])
+            .collect::<Vec<_>>()
     );
     let cx = TestAppContext::default().host_cx();
     let builtin_meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);

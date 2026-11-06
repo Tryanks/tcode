@@ -1,5 +1,5 @@
-//! Claude Code's own account sign-in and sign-out (`claude auth login` /
-//! `claude auth logout`), run for one profile's config directory.
+//! A harness CLI's own account sign-in and sign-out (`claude auth login`,
+//! `codex login --device-auth`, …), run for one profile's config directory.
 
 use std::path::Path;
 use std::process::ExitStatus;
@@ -11,11 +11,14 @@ use smol::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
 
 use crate::provider_probe::provider_command;
 
-/// What a running `claude auth login` has reached.
+/// What a running sign-in has reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginEvent {
     /// The sign-in page the CLI printed; reported once.
     Url(String),
+    /// The one-time code the CLI printed for the user to enter on the
+    /// sign-in page; reported once.
+    DeviceCode(String),
     /// The CLI prompts for the code the sign-in page shows.
     AwaitingCode,
     /// The CLI exited; an error carries its last words or exit status.
@@ -53,14 +56,15 @@ pub struct LoginRun {
     finished: bool,
 }
 
-/// Spawn `<binary> auth login` with the profile's environment.
+/// Spawn the harness's sign-in with the profile's environment.
 pub fn start_login(
+    provider: ProviderKind,
     binary: &Path,
     launch_env: &LaunchEnv,
 ) -> std::io::Result<(LoginHandle, LoginRun)> {
-    let env = launch_env.pairs(ProviderKind::ClaudeCode);
+    let env = launch_env.pairs(provider);
     let mut child = provider_command(&binary.to_string_lossy(), &env)
-        .args(["auth", "login"])
+        .args(provider.harness().login_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -214,29 +218,40 @@ async fn read_chunk(stream: &mut Option<impl futures_lite::AsyncRead + Unpin>) -
 /// output rather than per line.
 const CODE_PROMPT: &str = "Paste code";
 
-/// `claude auth login`'s stdout, read as it arrives.
+/// The sign-in's stdout, read as it arrives.
 #[derive(Default)]
 struct LoginOutput {
     text: Vec<u8>,
     url_seen: bool,
+    code_seen: bool,
     prompts: usize,
 }
 
 impl LoginOutput {
     fn feed(&mut self, chunk: &[u8]) -> Vec<LoginEvent> {
         self.text.extend_from_slice(chunk);
-        let text = String::from_utf8_lossy(&self.text);
+        // Codex colors its output even into a pipe.
+        let text = strip_ansi(&String::from_utf8_lossy(&self.text));
         let mut events = Vec::new();
-        if !self.url_seen {
-            let complete = text.rfind('\n').map_or("", |end| &text[..end]);
-            if let Some(url) = complete
+        let complete = text.rfind('\n').map_or("", |end| &text[..end]);
+        if !self.url_seen
+            && let Some(url) = complete
                 .lines()
                 .find_map(|line| line.find("https://").map(|start| &line[start..]))
                 .and_then(|url| url.split_whitespace().next())
-            {
-                self.url_seen = true;
-                events.push(LoginEvent::Url(url.to_string()));
-            }
+        {
+            self.url_seen = true;
+            events.push(LoginEvent::Url(url.to_string()));
+        }
+        if self.url_seen
+            && !self.code_seen
+            && let Some(code) = complete
+                .lines()
+                .map(str::trim)
+                .find(|line| is_device_code(line))
+        {
+            self.code_seen = true;
+            events.push(LoginEvent::DeviceCode(code.to_string()));
         }
         let prompts = text.matches(CODE_PROMPT).count();
         if prompts > self.prompts {
@@ -247,10 +262,43 @@ impl LoginOutput {
     }
 }
 
+/// Text without its terminal escape sequences (`ESC [ … letter`).
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// A device-authorization code on a line of its own: groups of uppercase
+/// letters and digits joined by hyphens, as `3JP6-MXLMX`.
+fn is_device_code(line: &str) -> bool {
+    let groups: Vec<&str> = line.split('-').collect();
+    groups.len() >= 2
+        && groups.iter().all(|group| {
+            (3..=8).contains(&group.len())
+                && group
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        })
+}
+
 /// The last non-empty line, without the code prompt that precedes it on the
 /// same line.
 fn last_line(output: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(output);
+    let text = strip_ansi(&String::from_utf8_lossy(output));
     text.lines()
         .map(|line| match line.find(CODE_PROMPT) {
             Some(start) => line[start..].split_once('>').map_or("", |(_, rest)| rest),
@@ -261,11 +309,15 @@ fn last_line(output: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Run `<binary> auth logout` with the profile's environment.
-pub async fn logout(binary: &Path, launch_env: &LaunchEnv) -> Result<(), String> {
-    let env = launch_env.pairs(ProviderKind::ClaudeCode);
+/// Sign the profile out through the harness's CLI.
+pub async fn logout(
+    provider: ProviderKind,
+    binary: &Path,
+    launch_env: &LaunchEnv,
+) -> Result<(), String> {
+    let env = launch_env.pairs(provider);
     let output = provider_command(&binary.to_string_lossy(), &env)
-        .args(["auth", "logout"])
+        .args(provider.harness().logout_args)
         .output()
         .await
         .map_err(|error| error.to_string())?;
@@ -311,6 +363,32 @@ mod tests {
         }
     }
 
+    /// What codex-cli 0.166.0 prints on stdout for `codex login --device-auth`
+    /// into a pipe, colors included.
+    const CODEX_OUTPUT: &str = "\nWelcome to Codex [v\u{1b}[90m0.166.0\u{1b}[0m]\n\u{1b}[90mOpenAI's command-line coding agent\u{1b}[0m\n\nFollow these steps to sign in with ChatGPT using device code authorization:\n\n1. Open this link in your browser and sign in to your account\n   \u{1b}[94mhttps://auth.openai.com/codex/device\u{1b}[0m\n\n2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)\u{1b}[0m\n   \u{1b}[94m3JP6-MXLMX\u{1b}[0m\n\n\u{1b}[90mContinue only if you started this login in Codex. If a website or another person gave you this code, cancel.\u{1b}[0m\n";
+
+    #[test]
+    fn device_login_output_yields_the_page_and_the_code_to_enter_there() {
+        let bytes = CODEX_OUTPUT.as_bytes();
+        let code = CODEX_OUTPUT.find("3JP6").unwrap();
+        for splits in [vec![], vec![code + 2], vec![40, code + 6]] {
+            let mut output = LoginOutput::default();
+            let mut events = Vec::new();
+            let mut start = 0;
+            for end in splits.into_iter().chain([bytes.len()]) {
+                events.extend(output.feed(&bytes[start..end]));
+                start = end;
+            }
+            assert_eq!(
+                events,
+                vec![
+                    LoginEvent::Url("https://auth.openai.com/codex/device".into()),
+                    LoginEvent::DeviceCode("3JP6-MXLMX".into()),
+                ]
+            );
+        }
+    }
+
     /// A browser the CLI launched keeps its stdout open; the sign-in still
     /// finishes when the CLI exits.
     #[cfg(unix)]
@@ -330,7 +408,8 @@ mod tests {
 
         let started = std::time::Instant::now();
         let finished = smol::block_on(async {
-            let (handle, mut run) = start_login(&binary, &LaunchEnv::default()).unwrap();
+            let (handle, mut run) =
+                start_login(ProviderKind::ClaudeCode, &binary, &LaunchEnv::default()).unwrap();
             handle.submit_code("code".into());
             let mut finished = None;
             while let Some(event) = run.next().await {

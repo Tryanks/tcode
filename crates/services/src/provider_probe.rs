@@ -12,20 +12,6 @@ use crate::provider_auth::{
     parse_opencode_auth,
 };
 
-/// The bare command name for a provider (fallback when no path resolves).
-pub fn default_program(provider: ProviderKind) -> String {
-    match provider {
-        ProviderKind::Codex => "codex".into(),
-        ProviderKind::ClaudeCode => "claude".into(),
-        ProviderKind::Pi => "pi".into(),
-        ProviderKind::OpenCode => "opencode".into(),
-        ProviderKind::Cursor => "cursor-agent".into(),
-        ProviderKind::Grok => "grok".into(),
-        // ACP agents carry their own registry launch recipe.
-        ProviderKind::Acp => String::new(),
-    }
-}
-
 /// Return trimmed stdout on success, falling back to stderr when stdout is empty.
 pub async fn run_capture(program: &str, args: &[&str]) -> Option<String> {
     run_capture_env(program, args, &[]).await
@@ -53,6 +39,31 @@ pub async fn run_capture_env(
     // exit with empty stdout is still a successful run.
     let text = String::from_utf8_lossy(&output.stderr).trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+/// `<program> --version`'s answer, or what it printed when it failed: its
+/// exit status and the last lines of its error output, as the CLI wrote them.
+async fn run_version(program: &str, env: &[(String, String)]) -> Result<String, Option<String>> {
+    let output = provider_command(program, env)
+        .arg("--version")
+        .output()
+        .await
+        .map_err(|error| Some(error.to_string()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        // Some CLIs (pi among them) print `--version` output to stderr.
+        let text = if stdout.is_empty() { stderr } else { stdout };
+        return if text.is_empty() { Err(None) } else { Ok(text) };
+    }
+    let printed = if stderr.is_empty() { stdout } else { stderr };
+    let tail: Vec<&str> = printed.lines().rev().take(8).collect();
+    let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    Err(Some(if tail.is_empty() {
+        output.status.to_string()
+    } else {
+        format!("{}: {tail}", output.status)
+    }))
 }
 
 /// Trimmed stdout whatever the exit status, for a CLI whose exit status only
@@ -100,16 +111,19 @@ pub async fn probe_provider(
     let program = binary.to_string_lossy().into_owned();
     let env = launch_env.pairs(provider);
 
-    let Some(raw_version) = run_capture_env(&program, &["--version"], &env).await else {
-        let diagnostic = Some(ProviderProbeDiagnostic::FailedCli);
-        return ProviderSnapshot {
-            checked_at,
-            installed: true,
-            status: Some(ProviderStatusKind::Error),
-            diagnostic,
-            message: None,
-            ..ProviderSnapshot::default()
-        };
+    let raw_version = match run_version(&program, &env).await {
+        Ok(raw_version) => raw_version,
+        Err(output) => {
+            return ProviderSnapshot {
+                checked_at,
+                installed: true,
+                status: Some(ProviderStatusKind::Error),
+                diagnostic: Some(ProviderProbeDiagnostic::FailedCli),
+                message: output,
+                binary: Some(program),
+                ..ProviderSnapshot::default()
+            };
+        }
     };
     let version = crate::version_check::provider_updates::parse_version(&raw_version)
         .map(|(a, b, c)| format!("{a}.{b}.{c}"))
@@ -156,7 +170,10 @@ pub async fn probe_provider(
         ProviderKind::Acp => None,
     };
 
-    finalize_probe(checked_at, version, auth)
+    ProviderSnapshot {
+        binary: Some(program),
+        ..finalize_probe(checked_at, version, auth)
+    }
 }
 
 /// `cursor-agent status --format json` reports only the stored login: it says
@@ -243,6 +260,7 @@ fn finalize_probe(
         message: None,
         checking: false,
         login: None,
+        binary: None,
     }
 }
 

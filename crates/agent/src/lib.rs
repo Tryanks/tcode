@@ -29,6 +29,8 @@ pub mod claude {
 }
 #[cfg(feature = "process")]
 mod cmd_shim;
+pub mod harness;
+pub use harness::{Endpoint, EndpointPreset, HarnessFacts};
 #[cfg(feature = "process")]
 pub mod codex;
 #[cfg(feature = "process")]
@@ -266,7 +268,7 @@ impl ProviderKind {
                     unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::DeveloperContext,
-                account_login: false,
+                account_login: true,
                 session_transfer: false,
             },
             ProviderKind::Acp => Caps {

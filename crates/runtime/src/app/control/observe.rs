@@ -1207,7 +1207,7 @@ impl AppState {
                         .profiles_for_kind(kind)
                         .into_iter()
                         .map(|profile| ProfileRow {
-                            display_name: self.settings.profile_display_name(&profile.id),
+                            display_name: self.profile_display_name(&profile.id),
                             enabled: profile.settings.enabled,
                             status: status.provider_snapshots.get(&profile.id).cloned(),
                             usage: status.provider_usage.get(&profile.id).cloned(),

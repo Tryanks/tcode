@@ -1370,6 +1370,7 @@ mod tests {
                 value: Some("fixture-private-token".into()),
             },
             Command::CreateThirdPartyProfile {
+                provider: serde_json::from_str("\"claude_code\"").unwrap(),
                 name: "sample".into(),
                 base_url: "https://example.com".into(),
                 model: None,

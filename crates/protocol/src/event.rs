@@ -376,6 +376,136 @@ pub struct ProvidersStatus {
     /// project last asked about.
     #[serde(default)]
     pub plugins: Vec<ProviderPluginCatalog>,
+    /// What each harness is, as clients present it: every native one, then
+    /// every installed ACP agent.
+    #[serde(default)]
+    pub harnesses: Vec<HarnessDescription>,
+}
+
+/// One harness as its host describes it to clients: which sections and
+/// fields its settings have, and the native names behind them. A client
+/// presents a harness from this alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessDescription {
+    pub provider: ProviderKind,
+    /// The installed ACP agent this is, for an ACP harness.
+    #[serde(default)]
+    pub acp_agent_id: Option<String>,
+    /// The command looked up on `PATH`, for a harness with a binary setting.
+    #[serde(default)]
+    pub binary_name: Option<String>,
+    /// How an ACP agent is started.
+    #[serde(default)]
+    pub launch_summary: Option<String>,
+    #[serde(default)]
+    pub install_command: Option<String>,
+    #[serde(default)]
+    pub doctor_command: Option<String>,
+    /// What to run in a terminal to sign in, where Tcode does not sign in.
+    #[serde(default)]
+    pub sign_in_command: Option<String>,
+    /// The variable naming each account's config directory, when the
+    /// harness has one.
+    #[serde(default)]
+    pub config_dir_env: Option<String>,
+    #[serde(default)]
+    pub default_config_dir: Option<String>,
+    #[serde(default)]
+    pub endpoint: Option<EndpointDescription>,
+    /// The ids of the harness's native switches.
+    #[serde(default)]
+    pub toggles: Vec<String>,
+    /// Tcode runs the harness's account sign-in, so accounts can be added.
+    #[serde(default)]
+    pub account_login: bool,
+    #[serde(default)]
+    pub launch_args: bool,
+    /// Its plugins are managed in Settings → Plugins.
+    #[serde(default)]
+    pub plugins: bool,
+    #[serde(default)]
+    pub mcp_servers: bool,
+    #[serde(default)]
+    pub native_computer_use: bool,
+    /// A newer version of an ACP agent in the registry.
+    #[serde(default)]
+    pub registry_update: Option<String>,
+}
+
+/// The variables a harness reads to reach a model API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointDescription {
+    pub base_url_env: String,
+    pub key_env: String,
+    #[serde(default)]
+    pub model_env: Option<String>,
+    /// Endpoint profiles can be added for it.
+    #[serde(default)]
+    pub profiles: bool,
+    #[serde(default)]
+    pub presets: Vec<EndpointPresetDescription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointPresetDescription {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl HarnessDescription {
+    /// A native harness as its adapter's facts and capabilities describe it.
+    pub fn native(provider: ProviderKind) -> Self {
+        let facts = provider.harness();
+        let caps = provider.caps();
+        let text = |value: Option<&str>| value.map(str::to_owned);
+        Self {
+            provider,
+            acp_agent_id: None,
+            binary_name: Some(facts.binary_name.to_owned()).filter(|name| !name.is_empty()),
+            launch_summary: None,
+            install_command: text(facts.install_command),
+            doctor_command: text(facts.doctor_command),
+            sign_in_command: text(facts.sign_in_command),
+            config_dir_env: text(facts.config_dir_env).filter(|_| caps.home_path),
+            default_config_dir: text(facts.default_config_dir),
+            endpoint: facts.endpoint.map(|endpoint| EndpointDescription {
+                base_url_env: endpoint.base_url_env.to_owned(),
+                key_env: endpoint
+                    .key_envs
+                    .first()
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned(),
+                model_env: text(endpoint.model_env),
+                profiles: endpoint.profiles,
+                presets: endpoint
+                    .presets
+                    .iter()
+                    .map(|preset| EndpointPresetDescription {
+                        name: preset.name.to_owned(),
+                        base_url: preset.base_url.to_owned(),
+                        model: text(preset.model),
+                    })
+                    .collect(),
+            }),
+            toggles: facts.toggles.iter().map(|id| (*id).to_owned()).collect(),
+            account_login: caps.account_login,
+            launch_args: caps.launch_args,
+            plugins: caps.plugin_management.manages(),
+            mcp_servers: caps.mcp_servers,
+            native_computer_use: caps.native_computer_use,
+            registry_update: None,
+        }
+    }
+
+    /// Whether endpoint profiles can be added to this harness.
+    pub fn offers_endpoint_profiles(&self) -> bool {
+        self.endpoint
+            .as_ref()
+            .is_some_and(|endpoint| endpoint.profiles)
+    }
 }
 
 /// One provider profile's native plugin catalog. The native CLI's own files

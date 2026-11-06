@@ -1,38 +1,27 @@
-//! First-class ACP provider cards and the modal agent marketplace.
+//! The Add Harness dialog: the ACP agent registry and a custom ACP agent.
 
 use crate::overlay::{DialogActions, OverlayExt as _};
-use crate::settings_rows::ToggleRow;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
-use crate::widgets::Collapsible;
 use crate::widgets::button::{Button, ButtonVariant, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::scrollbar::Scrollbar;
-use crate::widgets::switch::Switch;
-use crate::widgets::tabs::{TabBar, TabItem};
 use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, ListAlignment, ListState, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
-    prelude::FluentBuilder as _, px,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Render, Styled as _, Subscription,
+    Window, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_base::motion::transition;
 use gpui_base::{h_flex, v_flex};
-use std::f32::consts::PI;
 use std::rc::Rc;
 
-use tcode_core::acp::InstalledAcpAgent;
-use tcode_protocol::{AcpMarketplaceItem, CommandResponse};
+use tcode_protocol::AcpMarketplaceItem;
 
 use crate::material;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
-
-/// How long a value drawn here takes to glide to a new one.
-const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -40,272 +29,13 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// One installed ACP agent, rendered with the same anatomy as a native provider card.
-pub struct AcpAgentCard {
-    store: Entity<WorkspaceStore>,
-    agent_id: String,
-    expanded: bool,
-    args: Entity<InputState>,
-    env: Entity<InputState>,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl AcpAgentCard {
-    pub fn new(
-        store: Entity<WorkspaceStore>,
-        agent: &InstalledAcpAgent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let args = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
-            input.set_value(agent.launch_args.clone().unwrap_or_default(), window, cx);
-            input
-        });
-        let env = cx.new(|cx| {
-            let mut input = InputState::new(window, cx);
-            input.set_value(format_env(&agent.env), window, cx);
-            input
-        });
-        let subscriptions = vec![observe_store_topics(&store, &[TopicKind::Settings], cx)];
-        Self {
-            store,
-            agent_id: agent.id.clone(),
-            expanded: false,
-            args,
-            env,
-            _subscriptions: subscriptions,
-        }
-    }
-
-    fn render_header(
-        &self,
-        agent: &InstalledAcpAgent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = agent.id.clone();
-        let toggle_id = id.clone();
-        let name = agent.name.clone();
-        let settle = || gpui_base::motion::Transition::new(GLIDE);
-        let dot_color = transition(
-            "acp-status-dot",
-            if agent.enabled {
-                cx.theme().success
-            } else {
-                cx.theme().warning
-            },
-            settle(),
-            window,
-            cx,
-        );
-        let turn = transition(
-            "acp-details-chevron",
-            if self.expanded { 1. } else { 0. },
-            settle(),
-            window,
-            cx,
-        );
-        let glyph = div()
-            .relative()
-            .flex_none()
-            .text_body(false, cx)
-            .child(
-                Icon::empty()
-                    .path("icons/box.svg")
-                    .text_color(cx.theme().foreground),
-            )
-            // A status dot pinned over the glyph's corner, smaller than any
-            // icon or token size.
-            .child(
-                div()
-                    .absolute()
-                    .left(px(-3.))
-                    .top(px(-3.))
-                    .size(px(7.))
-                    .rounded_full()
-                    .bg(dot_color),
-            );
-        let title = h_flex()
-            .gap_2()
-            .items_center()
-            .child(div().text_title(cx).child(agent.name.clone()))
-            .when(!agent.version.is_empty(), |row| {
-                row.child(
-                    div()
-                        .text_meta_mono(false, cx)
-                        .child(format!("v{}", agent.version.trim_start_matches('v'))),
-                )
-            });
-
-        h_flex()
-            .w_full()
-            .gap_3()
-            .items_center()
-            .child(glyph)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(title)
-                    .child(div().text_secondary(false, cx).child(launch_summary(agent))),
-            )
-            .child(
-                Button::new(gpui::SharedString::from(format!("acp-details-{id}")))
-                    .ghost()
-                    .xsmall()
-                    .icon(Icon::new(IconName::ChevronDown).rotate(gpui::radians(PI * turn)))
-                    .tooltip(crate::tr!("providers.toggle_details", name = name.clone()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.expanded = !this.expanded;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Switch::new(gpui::SharedString::from(format!("acp-enable-{id}")))
-                    .checked(agent.enabled)
-                    .tooltip(crate::tr!("providers.enable", name = name))
-                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                        let (id, checked) = (toggle_id.clone(), *checked);
-                        this.store.update(cx, |store, _cx| {
-                            store.update_acp_agent(
-                                id,
-                                tcode_core::acp::AcpAgentPatch::SetEnabled { enabled: checked },
-                            );
-                        });
-                    })),
-            )
-            .into_any_element()
-    }
-
-    fn field_block(&self, label: String, control: AnyElement, cx: &Context<Self>) -> AnyElement {
-        v_flex()
-            .w_full()
-            .gap_1p5()
-            .child(div().text_caption(cx).child(label))
-            .child(control)
-            .into_any_element()
-    }
-
-    fn render_details(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (args, env) = (self.args.clone(), self.env.clone());
-        let save_id = self.agent_id.clone();
-        let remove_id = self.agent_id.clone();
-        v_flex()
-            .w_full()
-            .gap_3()
-            .child(
-                self.field_block(
-                    crate::tr!("providers.acp.args").into_owned(),
-                    Input::new(&self.args)
-                        .placeholder(crate::tr!("providers.acp.args_hint"))
-                        .into_any_element(),
-                    cx,
-                ),
-            )
-            .child(
-                self.field_block(
-                    crate::tr!("providers.acp.env").into_owned(),
-                    v_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            Input::new(&self.env).placeholder(crate::tr!("providers.acp.env_hint")),
-                        )
-                        .child(
-                            h_flex().w_full().justify_end().child(
-                                Button::new(gpui::SharedString::from(format!(
-                                    "acp-save-{save_id}"
-                                )))
-                                .outline()
-                                .xsmall()
-                                .label(crate::tr!("providers.acp.save").into_owned())
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        let launch_args = args.read(cx).value().trim().to_string();
-                                        let parsed_env = parse_env(&env.read(cx).value());
-                                        let id = save_id.clone();
-                                        this.store.update(cx, |store, _cx| {
-                                            store.update_acp_agent(
-                                                id,
-                                                tcode_core::acp::AcpAgentPatch::SetLaunchOptions {
-                                                    launch_args: (!launch_args.is_empty())
-                                                        .then_some(launch_args),
-                                                    env: parsed_env,
-                                                },
-                                            );
-                                        });
-                                    },
-                                )),
-                            ),
-                        )
-                        .into_any_element(),
-                    cx,
-                ),
-            )
-            .child(
-                h_flex().w_full().justify_end().child(
-                    Button::new(gpui::SharedString::from(format!("acp-remove-{remove_id}")))
-                        .outline()
-                        .danger()
-                        .small()
-                        .label(crate::tr!("providers.acp.remove").into_owned())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let id = remove_id.clone();
-                            this.store.update(cx, |store, _cx| {
-                                store.remove_acp_agent(id);
-                            });
-                        })),
-                ),
-            )
-            .into_any_element()
-    }
-}
-
-impl Render for AcpAgentCard {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let agent = self.store.read(cx).installed_acp_agent(&self.agent_id);
-        // The details carry the card's gap above them, so it folds with them.
-        let gap = cx.theme().tokens.spacing.sm;
-        material::card_secondary(cx)
-            .w_full()
-            .gap_0()
-            .when_some(agent, |card, agent| {
-                card.child(self.render_header(&agent, window, cx)).child(
-                    Collapsible::new("acp-details", self.expanded)
-                        .w_full()
-                        .content(div().w_full().pt(gap).child(self.render_details(cx))),
-                )
-            })
-    }
-}
-
-/// Kimi's Anthropic-compatible coding endpoint (the built-in third-party preset).
-const KIMI_BASE_URL: &str = "https://api.kimi.com/coding/";
-const KIMI_MODEL: &str = "k3[1m]";
-const KIMI_NAME: &str = "Kimi";
-
-/// Which screen the Add-agent dialog is showing.
+/// Which screen the Add Harness dialog is showing.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PanelView {
-    /// Third-party endpoint entries + the ACP agent marketplace.
+    /// The ACP agent marketplace.
     Home,
-    /// The third-party Claude Code endpoint form (Kimi preset or custom).
-    ThirdParty,
-    /// The form that adds and signs in to another Claude account.
-    Account,
     /// The custom ACP agent form.
     CustomAcp,
-}
-
-/// Which third-party preset the endpoint form is seeded from.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TpPreset {
-    /// Bundled Kimi preset: base URL + model pre-filled, only the key needed.
-    Kimi,
-    /// A blank Anthropic-compatible endpoint the user fills in fully.
-    Custom,
 }
 
 /// Long-lived state for the Add agent dialog.
@@ -316,19 +46,6 @@ pub struct AcpPanel {
     custom_name: Entity<InputState>,
     custom_command: Entity<InputState>,
     custom_args: Entity<InputState>,
-    custom_env: Entity<InputState>,
-    /// Third-party Claude Code endpoint form.
-    tp_preset: TpPreset,
-    tp_name: Entity<InputState>,
-    tp_base_url: Entity<InputState>,
-    tp_model: Entity<InputState>,
-    tp_key: Entity<InputState>,
-    tp_inherit_config: bool,
-    /// Another-account form.
-    account_name: Entity<InputState>,
-    account_inherit_config: bool,
-    account_pending: bool,
-    account_error: Option<String>,
     /// Measured rows stay valid while the filtered agents keep their ids. The
     /// registry is small enough to measure whole, so the scrollbar and the
     /// touch edge bounce see its full extent.
@@ -359,17 +76,6 @@ impl AcpPanel {
             custom_name: input(&crate::tr!("providers.acp.name_placeholder"), window, cx),
             custom_command: input("node", window, cx),
             custom_args: input("/path/to/agent.js --acp", window, cx),
-            custom_env: input("KEY=value KEY2=value2", window, cx),
-            tp_preset: TpPreset::Kimi,
-            tp_name: input(KIMI_NAME, window, cx),
-            tp_base_url: input(KIMI_BASE_URL, window, cx),
-            tp_model: input(KIMI_MODEL, window, cx),
-            tp_key: cx.new(|cx| InputState::new(window, cx)),
-            tp_inherit_config: false,
-            account_name: cx.new(|cx| InputState::new(window, cx)),
-            account_inherit_config: true,
-            account_pending: false,
-            account_error: None,
             market_list: ListState::new(0, ListAlignment::Top, px(120.)).measure_all(),
             market_rows: crate::motion::list_rows::ListRows::over(crate::motion::KEYSTROKE),
             market_flip: Default::default(),
@@ -386,87 +92,6 @@ impl AcpPanel {
     pub fn prepare_to_open(&mut self, cx: &mut Context<Self>) {
         self.view = PanelView::Home;
         cx.notify();
-    }
-
-    /// Seed the third-party form's inputs from a preset and switch to it.
-    fn open_third_party(&mut self, preset: TpPreset, window: &mut Window, cx: &mut Context<Self>) {
-        self.tp_preset = preset;
-        let (name, base_url, model) = match preset {
-            TpPreset::Kimi => (KIMI_NAME, KIMI_BASE_URL, KIMI_MODEL),
-            TpPreset::Custom => ("", "", ""),
-        };
-        self.tp_name
-            .update(cx, |i, cx| i.set_value(name, window, cx));
-        self.tp_base_url
-            .update(cx, |i, cx| i.set_value(base_url, window, cx));
-        self.tp_model
-            .update(cx, |i, cx| i.set_value(model, window, cx));
-        self.tp_key.update(cx, |i, cx| i.set_value("", window, cx));
-        self.tp_inherit_config = false;
-        self.navigate(PanelView::ThirdParty, window, cx);
-    }
-
-    fn open_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.account_name
-            .update(cx, |i, cx| i.set_value("", window, cx));
-        self.account_inherit_config = true;
-        self.account_error = None;
-        self.navigate(PanelView::Account, window, cx);
-    }
-
-    /// Add the account on the host, which starts its sign-in, then show that
-    /// sign-in in place of this dialog.
-    fn sign_in_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.account_name.read(cx).value().to_string();
-        if self.account_pending || name.trim().is_empty() {
-            return;
-        }
-        let provider = agent::ProviderKind::ClaudeCode;
-        let inherit_config = self.account_inherit_config;
-        let create = self.store.update(cx, |store, cx| {
-            store.create_account_profile(provider, name, inherit_config, cx)
-        });
-        self.account_pending = true;
-        self.account_error = None;
-        cx.notify();
-        cx.spawn_in(window, async move |this, cx| {
-            let response = create.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.account_pending = false;
-                match response {
-                    Ok(CommandResponse::ProfileId(profile_id)) => {
-                        this.view = PanelView::Home;
-                        window.close_dialog(cx);
-                        crate::provider_login_dialog::show(
-                            this.store.clone(),
-                            provider,
-                            profile_id,
-                            window,
-                            cx,
-                        );
-                    }
-                    Ok(other) => {
-                        log::error!("unexpected create-account response: {other:?}");
-                        this.account_error =
-                            Some(crate::tr!("providers.account.create_failed").into_owned());
-                    }
-                    Err(error) => {
-                        this.account_error = Some(match error.code.as_str() {
-                            "profile_exists" => {
-                                crate::tr!("providers.account.profile_exists").into_owned()
-                            }
-                            _ => crate::tr!(
-                                "providers.account.create_failed_reason",
-                                reason = error.message
-                            )
-                            .into_owned(),
-                        });
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     /// Shows `view`. The page being left stays drawn while it fades, so focus
@@ -758,296 +383,11 @@ impl AcpPanel {
             .into_any_element()
     }
 
-    /// The provider entries shown above the ACP marketplace: Claude Code (opens
-    /// the third-party endpoint form) and another Claude account.
-    fn render_provider_entries(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        type Open = fn(&mut AcpPanel, &mut Window, &mut Context<AcpPanel>);
-        let entry = |id: &'static str,
-                     glyph: Icon,
-                     title: String,
-                     subtitle: String,
-                     open: Open,
-                     window: &mut Window,
-                     cx: &mut Context<Self>|
-         -> AnyElement {
-            let muted = cx.theme().muted_foreground;
-            let (fill, on_hover) = crate::motion::hover_fill(
-                crate::motion::Clock::Element,
-                id,
-                cx.theme().list_hover.opacity(0.),
-                cx.theme().list_hover,
-                &crate::material::HOVER.into(),
-                window,
-                cx,
-            );
-            let row = material::card(cx)
-                .flex_row()
-                .w_full()
-                .items_center()
-                .text_body(false, cx)
-                // Under the content, over the card's own fill.
-                .relative()
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(material::radius_card(cx))
-                        .bg(fill),
-                )
-                .child(glyph.text_color(cx.theme().foreground))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_0p5()
-                        .child(div().text_color(cx.theme().foreground).child(title.clone()))
-                        .child(div().text_secondary(false, cx).truncate().child(subtitle)),
-                );
-            material::accessible_clickable(row, id, gpui::Role::Button, title, cx)
-                .cursor_pointer()
-                .on_hover(on_hover)
-                .child(Icon::new(IconName::ChevronRight).text_color(muted))
-                .on_click(cx.listener(move |this, _, window, cx| open(this, window, cx)))
-                .into_any_element()
-        };
-
-        v_flex()
-            .w_full()
-            .gap_2()
-            .child(
-                div()
-                    .text_caption(cx)
-                    .child(crate::tr!("providers.third_party.section").into_owned()),
-            )
-            .child(entry(
-                "provider-entry-claude",
-                crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode),
-                crate::tr!("providers.third_party.claude_title").into_owned(),
-                crate::tr!("providers.third_party.claude_subtitle").into_owned(),
-                |this, window, cx| this.open_third_party(TpPreset::Kimi, window, cx),
-                window,
-                cx,
-            ))
-            .when(
-                agent::ProviderKind::ClaudeCode.caps().account_login,
-                |entries| {
-                    entries.child(entry(
-                        "provider-entry-claude-account",
-                        crate::provider_card::provider_glyph(agent::ProviderKind::ClaudeCode),
-                        crate::tr!("providers.account.title").into_owned(),
-                        crate::tr!("providers.account.subtitle").into_owned(),
-                        Self::open_account,
-                        window,
-                        cx,
-                    ))
-                },
-            )
-            .into_any_element()
-    }
-
-    /// The third-party Claude Code endpoint form (Kimi preset or fully custom).
-    fn render_third_party(&self, cx: &mut Context<Self>) -> AnyElement {
-        let panel = cx.entity().downgrade();
-        let preset_tab = |id: &'static str, label: String, preset: TpPreset| -> TabItem {
-            let panel = panel.clone();
-            TabItem::new(id, label)
-                .selected(self.tp_preset == preset)
-                .on_click(move |_, window, cx| {
-                    _ = panel.update(cx, |this, cx| this.open_third_party(preset, window, cx));
-                })
-        };
-        let field = |label: String, control: AnyElement| -> AnyElement {
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(div().text_caption(cx).child(label))
-                .child(control)
-                .into_any_element()
-        };
-        let is_kimi = self.tp_preset == TpPreset::Kimi;
-
-        v_flex()
-            .w_full()
-            .gap_3()
-            .child(
-                Button::new("tp-back")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::ArrowLeft)
-                    .label(crate::tr!("settings.back").into_owned())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.navigate(PanelView::Home, window, cx);
-                    })),
-            )
-            .child(
-                TabBar::new("tp-preset")
-                    .segmented()
-                    .item(preset_tab(
-                        "tp-preset-kimi",
-                        KIMI_NAME.to_string(),
-                        TpPreset::Kimi,
-                    ))
-                    .item(preset_tab(
-                        "tp-preset-custom",
-                        crate::tr!("providers.acp.custom").into_owned(),
-                        TpPreset::Custom,
-                    )),
-            )
-            .child(div().text_secondary(false, cx).child(if is_kimi {
-                crate::tr!("providers.third_party.kimi_help").into_owned()
-            } else {
-                crate::tr!("providers.third_party.custom_help").into_owned()
-            }))
-            .child(field(
-                crate::tr!("providers.third_party.name").into_owned(),
-                Input::new(&self.tp_name).into_any_element(),
-            ))
-            .child(field(
-                crate::tr!("providers.third_party.base_url").into_owned(),
-                Input::new(&self.tp_base_url).into_any_element(),
-            ))
-            .child(field(
-                crate::tr!("providers.third_party.model").into_owned(),
-                Input::new(&self.tp_model).into_any_element(),
-            ))
-            .child(field(
-                crate::tr!("providers.third_party.key").into_owned(),
-                Input::new(&self.tp_key)
-                    .placeholder(crate::tr!("providers.third_party.key_hint"))
-                    .into_any_element(),
-            ))
-            .child(material::group(cx).child(ToggleRow::new(
-                "tp-inherit-config",
-                crate::tr!("providers.inherit_config"),
-                self.tp_inherit_config,
-                false,
-                cx.listener(|this, checked: &bool, _, cx| {
-                    this.tp_inherit_config = *checked;
-                    cx.notify();
-                }),
-            )))
-            .child(
-                DialogActions::new()
-                    .w_full()
-                    .child(
-                        Button::new("tp-cancel")
-                            .ghost()
-                            .xsmall()
-                            .label(crate::tr!("settings.cancel").into_owned())
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("tp-add")
-                            .with_variant(ButtonVariant::Primary)
-                            .xsmall()
-                            .label(crate::tr!("providers.third_party.connect").into_owned())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let name = this.tp_name.read(cx).value().to_string();
-                                let base_url = this.tp_base_url.read(cx).value().to_string();
-                                let model = this.tp_model.read(cx).value().to_string();
-                                let key = this.tp_key.read(cx).value().to_string();
-                                // Endpoint + key are required; the rest can default.
-                                if base_url.trim().is_empty() || key.trim().is_empty() {
-                                    return;
-                                }
-                                let inherit_config = this.tp_inherit_config;
-                                this.store.update(cx, |store, _cx| {
-                                    store.create_third_party_profile(
-                                        name,
-                                        base_url,
-                                        Some(model),
-                                        key,
-                                        inherit_config,
-                                    );
-                                });
-                                window.close_dialog(cx);
-                            })),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_account(&self, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .w_full()
-            .gap_3()
-            .child(
-                Button::new("account-back")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::ArrowLeft)
-                    .label(crate::tr!("settings.back").into_owned())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.navigate(PanelView::Home, window, cx);
-                    })),
-            )
-            .child(
-                div()
-                    .text_secondary(false, cx)
-                    .child(crate::tr!("providers.account.subtitle").into_owned()),
-            )
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_caption(cx)
-                            .child(crate::tr!("providers.third_party.name").into_owned()),
-                    )
-                    .child(
-                        Input::new(&self.account_name)
-                            .placeholder(crate::tr!("providers.account.name_hint")),
-                    ),
-            )
-            .child(material::group(cx).child(ToggleRow::new(
-                "account-inherit-config",
-                crate::tr!("providers.inherit_config"),
-                self.account_inherit_config,
-                false,
-                cx.listener(|this, checked: &bool, _, cx| {
-                    this.account_inherit_config = *checked;
-                    cx.notify();
-                }),
-            )))
-            .when_some(self.account_error.clone(), |form, error| {
-                form.child(
-                    div()
-                        .text_secondary(false, cx)
-                        .text_color(cx.theme().danger_foreground)
-                        .child(error),
-                )
-            })
-            .child(
-                DialogActions::new()
-                    .w_full()
-                    .child(
-                        Button::new("account-cancel")
-                            .ghost()
-                            .xsmall()
-                            .label(crate::tr!("settings.cancel").into_owned())
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        Button::new("account-sign-in")
-                            .with_variant(ButtonVariant::Primary)
-                            .xsmall()
-                            .loading(self.account_pending)
-                            .label(crate::tr!("providers.login.sign_in").into_owned())
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.sign_in_account(window, cx)),
-                            ),
-                    ),
-            )
-            .into_any_element()
-    }
-
     fn render_custom(&self, cx: &mut Context<Self>) -> AnyElement {
-        let (name, command, args, env) = (
+        let (name, command, args) = (
             self.custom_name.clone(),
             self.custom_command.clone(),
             self.custom_args.clone(),
-            self.custom_env.clone(),
         );
         v_flex()
             .w_full()
@@ -1075,7 +415,6 @@ impl AcpPanel {
             .child(Input::new(&self.custom_name))
             .child(Input::new(&self.custom_command))
             .child(Input::new(&self.custom_args))
-            .child(Input::new(&self.custom_env))
             .child(
                 DialogActions::new()
                     .w_full()
@@ -1103,9 +442,8 @@ impl AcpPanel {
                                     .split_whitespace()
                                     .map(str::to_string)
                                     .collect();
-                                let env = parse_env(&env.read(cx).value());
                                 this.store.update(cx, |store, _cx| {
-                                    store.add_custom_acp_agent(name, command, args, env);
+                                    store.add_custom_acp_agent(name, command, args);
                                 });
                                 window.close_dialog(cx);
                             })),
@@ -1117,12 +455,7 @@ impl AcpPanel {
 
 impl Render for AcpPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        const PAGES: [PanelView; 4] = [
-            PanelView::Home,
-            PanelView::ThirdParty,
-            PanelView::Account,
-            PanelView::CustomAcp,
-        ];
+        const PAGES: [PanelView; 2] = [PanelView::Home, PanelView::CustomAcp];
         let current = PAGES.iter().position(|page| *page == self.view);
         let pages = crate::motion::CrossFade::new(
             "acp-panel-page",
@@ -1144,12 +477,8 @@ impl Render for AcpPanel {
                     PanelView::Home => v_flex()
                         .size_full()
                         .min_h_0()
-                        .gap_3()
-                        .child(self.render_provider_entries(window, cx))
                         .child(self.render_marketplace(window, cx))
                         .into_any_element(),
-                    PanelView::ThirdParty => self.render_third_party(cx),
-                    PanelView::Account => self.render_account(cx),
                     PanelView::CustomAcp => self.render_custom(cx),
                 },
             ));
@@ -1160,37 +489,6 @@ impl Render for AcpPanel {
             .track_focus(&self.focus_handle)
             .child(pages.render(layers).size_full())
     }
-}
-
-fn launch_summary(agent: &InstalledAcpAgent) -> String {
-    match &agent.launch {
-        agent::AcpLaunch::Npx { package, args, .. } => format!("npx {package} {}", args.join(" "))
-            .trim_end()
-            .to_string(),
-        agent::AcpLaunch::Binary { command, args, .. } => {
-            format!("{} {}", command.display(), args.join(" "))
-                .trim_end()
-                .to_string()
-        }
-        agent::AcpLaunch::Custom { command, args, .. } => format!("{command} {}", args.join(" "))
-            .trim_end()
-            .to_string(),
-    }
-}
-
-fn parse_env(raw: &str) -> Vec<(String, String)> {
-    raw.split_whitespace()
-        .filter_map(|pair| pair.split_once('='))
-        .filter(|(key, _)| !key.trim().is_empty())
-        .map(|(key, value)| (key.trim().to_string(), value.to_string()))
-        .collect()
-}
-
-fn format_env(env: &[(String, String)]) -> String {
-    env.iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[cfg(test)]
@@ -1276,33 +574,14 @@ mod tests {
         assert!(cx.debug_bounds("acp-market-row-agent-0").is_none());
     }
 
-    #[test]
-    fn env_shorthand_preserves_values_and_ignores_entries_without_keys() {
-        let pairs = parse_env("  API_KEY=abc=def  BASE_URL=https://x/y  EMPTY= =ignored bogus ");
-        assert_eq!(
-            pairs,
-            vec![
-                ("API_KEY".to_string(), "abc=def".to_string()),
-                ("BASE_URL".to_string(), "https://x/y".to_string()),
-                ("EMPTY".to_string(), String::new()),
-            ]
-        );
-        assert_eq!(
-            format_env(&pairs),
-            "API_KEY=abc=def BASE_URL=https://x/y EMPTY="
-        );
-    }
-
     /// A store holding one installed agent, built while Simplified Chinese is
     /// current.
-    fn store_with_agent(
-        cx: &mut TestAppContext,
-    ) -> (Entity<WorkspaceStore>, InstalledAcpAgent, gpui::Task<()>) {
+    fn store_with_agent(cx: &mut TestAppContext) -> (Entity<WorkspaceStore>, gpui::Task<()>) {
         use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
 
         crate::settings::apply_locale(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE));
         cx.update(crate::theme::init);
-        let agent = InstalledAcpAgent {
+        let agent = tcode_core::acp::InstalledAcpAgent {
             id: "agent".into(),
             name: "Agent".into(),
             version: "1.0.0".into(),
@@ -1317,7 +596,7 @@ mod tests {
             launch_args: None,
         };
         let mut settings = crate::settings::Settings::default();
-        settings.acp_agents.insert(agent.id.clone(), agent.clone());
+        settings.acp_agents.insert(agent.id.clone(), agent);
         let (to_host, _outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
@@ -1352,44 +631,23 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        (store, agent, pump)
-    }
-
-    fn placeholder(input: &Entity<InputState>, cx: &gpui::App) -> String {
-        input.read(cx).presentation().placeholder().to_string()
+        (store, pump)
     }
 
     #[gpui::test]
-    fn switching_language_relocalizes_the_search_and_key_placeholders(cx: &mut TestAppContext) {
+    fn switching_language_relocalizes_the_search_placeholder(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (store, _, _pump) = store_with_agent(cx);
+        let (store, _pump) = store_with_agent(cx);
         let (panel, cx) = cx.add_window_view(|window, cx| AcpPanel::new(store, window, cx));
         crate::settings::assert_follows_language_switch(cx, "providers.acp.search", |cx| {
-            panel.read_with(cx, |panel, cx| placeholder(&panel.search, cx))
-        });
-
-        panel.update(cx, |panel, cx| {
-            panel.view = PanelView::ThirdParty;
-            cx.notify();
-        });
-        crate::settings::assert_follows_language_switch(
-            cx,
-            "providers.third_party.key_hint",
-            |cx| panel.read_with(cx, |panel, cx| placeholder(&panel.tp_key, cx)),
-        );
-    }
-
-    #[gpui::test]
-    fn switching_language_relocalizes_the_agent_arguments_placeholder(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (store, agent, _pump) = store_with_agent(cx);
-        let (card, cx) = cx.add_window_view(|window, cx| {
-            let mut card = AcpAgentCard::new(store, &agent, window, cx);
-            card.expanded = true;
-            card
-        });
-        crate::settings::assert_follows_language_switch(cx, "providers.acp.args_hint", |cx| {
-            card.read_with(cx, |card, cx| placeholder(&card.args, cx))
+            panel.read_with(cx, |panel, cx| {
+                panel
+                    .search
+                    .read(cx)
+                    .presentation()
+                    .placeholder()
+                    .to_string()
+            })
         });
     }
 }

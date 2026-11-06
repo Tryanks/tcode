@@ -630,16 +630,20 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.update_profile_settings(&profile_id, patch, cx)
         }
         Command::CreateThirdPartyProfile {
+            provider,
             name,
             base_url,
             model,
             api_key,
             inherit_config,
         } => app.create_third_party_profile(
-            &name,
-            &base_url,
-            model.as_deref(),
-            &api_key,
+            provider,
+            crate::app::NewEndpointProfile {
+                name: &name,
+                base_url: &base_url,
+                model: model.as_deref(),
+                api_key: &api_key,
+            },
             inherit_config,
             cx,
         ),
@@ -682,8 +686,7 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             name,
             command,
             args,
-            env,
-        } => app.add_custom_acp_agent(name, command, args, env, cx),
+        } => app.add_custom_acp_agent(name, command, args, cx),
         Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
         Command::SetActiveAcpAgent { session_id, id } => {
             app.set_active_acp_agent(&session_id, &id, cx)
