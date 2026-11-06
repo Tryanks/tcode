@@ -300,6 +300,11 @@ pub use wire::{
 // logs. Orchestrate goes: the protocol drops the OrchestrateTurn command and
 // the OrchestrateDecisionModels and OrchestrateChildModels patches, and
 // Settings' orchestrate carries only child_approval and child_worktrees.
+// Code platforms: a source-control host's status carries login, the account
+// its token signs in as, and its problem may be rejected (status, at); the
+// protocol adds the VerifyHostToken command, which saves a token only when
+// the host takes it, and its TokenCheck response (accepted with an optional
+// account, rejected, missing_scopes, unreachable, unconfirmed).
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

@@ -102,6 +102,34 @@ pub enum HostProblem {
     /// The token in use is a saved one the host has not yet answered a request with, so
     /// nothing has shown that it works.
     Unverified,
+    /// The host refused the token in use, saved or from the environment, with `status` at
+    /// `at` (seconds since the Unix epoch). It stays refused until the token changes.
+    Rejected { status: u16, at: u64 },
+}
+
+/// The account a token signs in as. Only names cross to clients, never the token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostAccount {
+    pub login: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// What a host answered when asked whose a token is, before the token is saved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TokenCheck {
+    /// The host took the token; `account` is whose it is, when the host says.
+    Accepted { account: Option<HostAccount> },
+    /// The host refused the token (401 or 403).
+    Rejected { status: u16 },
+    /// The token works but lacks these scopes, as the host names them.
+    MissingScopes { scopes: Vec<String> },
+    /// The host could not be asked: no answer (`status` none), or an answer about something
+    /// other than the token.
+    Unreachable { status: Option<u16> },
+    /// The host never says whose a token of this kind is, so nothing can confirm it before use.
+    Unconfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +153,9 @@ pub struct HostStatus {
     pub access_token_url: Option<String>,
     /// The scopes a token needs, as the host's token page names them.
     pub token_scopes: Vec<String>,
+    /// The account the token in use signs in as, once the host has said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -72,6 +72,39 @@ fn verification_key(kind: HostKind, host: &str) -> String {
     format!("{}:{host}", token_secrets(kind))
 }
 
+/// What a host last answered a credential with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub(crate) enum Verdict {
+    /// It answered a request; `login` once it has said whose the credential is.
+    Accepted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        login: Option<String>,
+    },
+    /// It refused the credential with `status` at `at`, seconds since the Unix epoch.
+    Rejected { status: u16, at: u64 },
+}
+
+#[derive(Serialize, serde::Deserialize)]
+struct Check {
+    fingerprint: String,
+    #[serde(flatten)]
+    verdict: Verdict,
+}
+
+impl Check {
+    /// Builds before checks carried a verdict stored the bare fingerprint of an accepted one.
+    fn read(value: &str) -> Option<Self> {
+        if !value.starts_with('{') {
+            return Some(Self {
+                fingerprint: value.to_owned(),
+                verdict: Verdict::Accepted { login: None },
+            });
+        }
+        serde_json::from_str(value).ok()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
     path: PathBuf,
@@ -175,50 +208,70 @@ impl SettingsStore {
         saved_credential(&self.read_secrets().ok()?, kind, host)
     }
 
-    pub(crate) fn credential_verified(
+    /// What the host last answered the credential with `fingerprint`; nothing once the
+    /// credential in use is another.
+    pub(crate) fn credential_check(
         &self,
         kind: HostKind,
         host: &str,
         fingerprint: &str,
-    ) -> bool {
-        self.read_secrets()
-            .ok()
-            .and_then(|all| {
-                all.get(VERIFIED_SECRETS)?
-                    .get(&verification_key(kind, host))
-                    .cloned()
-            })
-            .as_deref()
-            == Some(fingerprint)
+    ) -> Option<Verdict> {
+        let all = self.read_secrets().ok()?;
+        let check = Check::read(
+            all.get(VERIFIED_SECRETS)?
+                .get(&verification_key(kind, host))?,
+        )?;
+        (check.fingerprint == fingerprint).then_some(check.verdict)
     }
 
-    /// A response may arrive after a replacement was saved; it only changes the credential
-    /// it was sent with. The same lock protects token and provider-secret writes.
-    pub(crate) fn record_verification(
+    /// Records what the host answered the credential with `fingerprint`, saved or from the
+    /// environment. A response may arrive after a replacement was saved; it only changes the
+    /// credential it was sent with. An answer that names no account keeps the one known. The
+    /// same lock protects token and provider-secret writes.
+    pub(crate) fn record_check(
         &self,
         kind: HostKind,
         host: &str,
         fingerprint: &str,
-        verified: bool,
+        verdict: Verdict,
     ) -> std::io::Result<()> {
         let _write = self.secrets_write.lock().unwrap();
         let mut all = self.read_secrets()?;
-        if saved_fingerprint(&all, kind, host).as_deref() != Some(fingerprint) {
+        if saved_fingerprint(&all, kind, host).is_some_and(|saved| saved != fingerprint) {
             return Ok(());
         }
         let key = verification_key(kind, host);
         let entries = all.entry(VERIFIED_SECRETS.to_owned()).or_default();
-        if verified {
-            if entries.get(&key).map(String::as_str) == Some(fingerprint) {
-                return Ok(());
+        let known = entries
+            .get(&key)
+            .and_then(|value| Check::read(value))
+            .filter(|check| check.fingerprint == fingerprint);
+        let verdict = match (verdict, known.as_ref().map(|check| &check.verdict)) {
+            (Verdict::Accepted { login: None }, Some(Verdict::Accepted { login })) => {
+                Verdict::Accepted {
+                    login: login.clone(),
+                }
             }
-            entries.insert(key, fingerprint.to_owned());
-        } else if entries.remove(&key).is_none() {
+            (verdict, _) => verdict,
+        };
+        // A refusal keeps the time it was first seen, so the problem says when it began.
+        if let (Verdict::Rejected { status, .. }, Some(Verdict::Rejected { status: was, .. })) =
+            (&verdict, known.as_ref().map(|check| &check.verdict))
+            && status == was
+        {
             return Ok(());
         }
-        if entries.is_empty() {
-            all.remove(VERIFIED_SECRETS);
+        if known.as_ref().is_some_and(|check| check.verdict == verdict) {
+            return Ok(());
         }
+        entries.insert(
+            key,
+            serde_json::to_string(&Check {
+                fingerprint: fingerprint.to_owned(),
+                verdict,
+            })
+            .map_err(std::io::Error::other)?,
+        );
         self.write_secrets(&all)
     }
 
@@ -295,6 +348,30 @@ impl SettingsStore {
             }
         }
         self.write_secrets(&all)
+    }
+
+    /// Saves a token the host took, signed in as `login` when it said.
+    pub fn set_accepted_credential(
+        &self,
+        kind: HostKind,
+        host: &str,
+        token: &str,
+        email: Option<&str>,
+        login: Option<&str>,
+    ) -> std::io::Result<()> {
+        self.set_credential(kind, host, Some(token), email)?;
+        let host = kind
+            .authority(host)
+            .map_err(|refusal| std::io::Error::other(format!("{refusal:?}")))?;
+        let email = email.map(str::trim).filter(|email| !email.is_empty());
+        self.record_check(
+            kind,
+            &host,
+            &credential_fingerprint(token.trim(), email),
+            Verdict::Accepted {
+                login: login.map(str::to_owned),
+            },
+        )
     }
 
     /// Store (`Some`) or clear (`None`) one profile secret, by profile id.

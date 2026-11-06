@@ -357,6 +357,7 @@ impl AppState {
                 | Command::ReportPreviewInput { .. }
                 | Command::ReloadProvider
                 | Command::SetHostToken { .. }
+                | Command::VerifyHostToken { .. }
                 | Command::RefreshHostCredentials
                 | Command::SetProfileSecret { .. }
                 | Command::UpdateProfileSettings { .. }
