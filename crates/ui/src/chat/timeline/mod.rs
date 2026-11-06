@@ -107,6 +107,10 @@ pub(crate) struct TimelineView {
     /// message is the entry at its index in the timeline. It goes when the
     /// focus leaves the whole chat.
     pub(in crate::chat) selection: Entity<SelectionDocument>,
+    /// The first and last entries, by id and index, as of the last sync:
+    /// where they stand now says how far a page of history (or the pages
+    /// dropped above the tail) moved every entry, and so the selection.
+    entry_ends: Option<[(String, usize); 2]>,
     /// While a selection's gesture lasts, the list holds still; this is
     /// whether it was following its tail when the gesture began.
     selection_hold: Option<bool>,
@@ -239,6 +243,7 @@ impl TimelineView {
             deciding_plan: None,
             md_states: HashMap::new(),
             selection,
+            entry_ends: None,
             selection_hold: None,
             pending_md_builds: HashMap::new(),
             next_md_build_generation: 0,
@@ -909,7 +914,7 @@ impl TimelineView {
         self.timeline_folds = folds;
         // A collapsed Work Log's rows fold away from what they showed.
         let old_rows = (seen && regrouped).then(|| self.rows.clone());
-        let (list_sync, activity_snapshot_keys) = self
+        let (list_sync, activity_snapshot_keys, entries_moved) = self
             .workspace_store
             .read(cx)
             .with_timeline_for(
@@ -924,7 +929,8 @@ impl TimelineView {
                     );
                     let activity_snapshot_keys = awaiting_activity_snapshot
                         .then(|| auto_activity_snapshot_keys(&timeline.entries));
-                    (list_sync, activity_snapshot_keys)
+                    let entries_moved = entries_moved(&mut self.entry_ends, &timeline.entries);
+                    (list_sync, activity_snapshot_keys, entries_moved)
                 },
                 cx,
             )
@@ -936,8 +942,21 @@ impl TimelineView {
                     &self.expanded,
                     continuity,
                 );
-                (list_sync, None)
+                (list_sync, None, entries_moved(&mut self.entry_ends, &[]))
             });
+        // The selection numbers entries by their place in the window, so it
+        // moves with them; another thread's goes below.
+        if !session_changed {
+            match entries_moved {
+                Some(0) => {}
+                Some(by) => self
+                    .selection
+                    .update(cx, |selection, cx| selection.move_entries(by, cx)),
+                None => self
+                    .selection
+                    .update(cx, |selection, cx| selection.clear(cx)),
+            }
+        }
 
         if let Some(session_key) = session_key.as_deref()
             && let Some(keys) = activity_snapshot_keys
@@ -1326,6 +1345,31 @@ pub(super) fn timeline_bottom_inset(cx: &App) -> gpui::Pixels {
 
 /// Desktop timeline inset below the list, in pixels.
 pub(super) const TIMELINE_BOTTOM_INSET: f32 = 8.;
+
+/// How many places every entry moved since `ends` were taken (a page of
+/// history landing above them, or the pages above the tail dropped), and
+/// `ends` taken anew; none when neither of them is still there.
+fn entries_moved(
+    ends: &mut Option<[(String, usize); 2]>,
+    entries: &[Arc<TimelineEntry>],
+) -> Option<i64> {
+    let moved = ends.as_ref().map_or(Some(0), |ends| {
+        // The last first: a record streamed in leaves it where it was.
+        ends.iter().rev().find_map(|(id, at)| {
+            let now = if entries.get(*at).is_some_and(|entry| entry.id == *id) {
+                *at
+            } else {
+                entries.iter().position(|entry| entry.id == *id)?
+            };
+            Some(now as i64 - *at as i64)
+        })
+    });
+    *ends = entries
+        .first()
+        .zip(entries.last())
+        .map(|(first, last)| [(first.id.clone(), 0), (last.id.clone(), entries.len() - 1)]);
+    moved
+}
 
 /// Padding inside the list on its first and last row, in pixels. Unlike
 /// `TIMELINE_BOTTOM_INSET` it scrolls with the content: the header and composer still
@@ -3684,5 +3728,135 @@ mod tests {
                 "question {turn} moved from {top:?} to {moved:?}"
             );
         }
+    }
+
+    /// What the reader opened or selected in a turn stays with that turn
+    /// when a page of history lands above it and renumbers the window's
+    /// turns: its expanded Work Log stays expanded, its changed files stay
+    /// shown in full, and the text selected in its answer stays selected.
+    #[gpui::test]
+    fn a_page_of_history_leaves_what_the_reader_opened_with_its_turn(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
+
+        let command = |id: String| {
+            agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: id.clone(),
+                parent_item_id: None,
+                content: agent::ItemContent::CommandExecution {
+                    command: format!("cargo test {id}"),
+                    output: "ok\n".into(),
+                    exit_code: Some(0),
+                    status: ItemStatus::Completed,
+                },
+            })
+        };
+        // The last turn changes four files, which its card shows three of.
+        let changed = |turn: usize| {
+            let files = if turn == 3 { 4 } else { 1 };
+            (0..files)
+                .map(|file| {
+                    let path = format!("t{turn}_f{file}.rs");
+                    format!(
+                        "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n\
+                         @@ -1 +1 @@\n-fn old() {{}}\n+fn new() {{}}\n"
+                    )
+                })
+                .collect::<String>()
+        };
+        let turn = |turn: usize| {
+            [
+                agent::AgentEvent::TurnStarted {
+                    turn_id: turn.to_string(),
+                },
+                user_event(&format!("user-{turn}"), &format!("Question {turn}")),
+                command(format!("cmd-{turn}-a")),
+                command(format!("cmd-{turn}-b")),
+                answer_event(
+                    &format!("answer-{turn}"),
+                    &format!("Answer {turn} reads the whole build and every test it runs."),
+                ),
+                agent::AgentEvent::TurnChangesUpdated {
+                    turn_id: turn.to_string(),
+                    changes: agent::file_changes_from_unified_diff(&changed(turn))
+                        .expect("file sections"),
+                    completeness: agent::ChangeCompleteness::Exact,
+                },
+                agent::AgentEvent::TurnCompleted {
+                    turn_id: turn.to_string(),
+                    status: agent::TurnStatus::Completed,
+                    usage: None,
+                },
+            ]
+        };
+        let events: Vec<_> = (0..4).flat_map(turn).collect();
+        // The window holds turns 1 to 3; turn 0 is the page.
+        let mut thread = ScriptedThread::new(cx, events, 7, false);
+        let (view, cx) = thread.open(cx);
+        thread.deliver(cx);
+        draw_settled(cx);
+        let click = |selector: &'static str, cx: &mut VisualTestContext| {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector}"));
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            draw_settled(cx);
+        };
+        click("worklog-header-2-cmd-3-a", cx);
+        // The control that shows the rest follows the third file's chip.
+        let third = cx
+            .debug_bounds("changed-file-chip-file-t3_f2.rs")
+            .expect("turn 3's third file");
+        cx.simulate_click(
+            point(third.right() + px(16.), third.center().y),
+            Modifiers::default(),
+        );
+        draw_settled(cx);
+        let answer = cx
+            .debug_bounds("markdown-block-0")
+            .expect("the last answer, the last message painted");
+        let (start, end) = (
+            point(answer.left() + px(2.), answer.center().y),
+            point(answer.left() + px(120.), answer.center().y),
+        );
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        draw_settled(cx);
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        draw_settled(cx);
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        draw_settled(cx);
+        let timeline = view.read_with(cx, |chat, _| chat.timeline());
+        let opened = |cx: &mut VisualTestContext| {
+            let selected = timeline.read_with(cx, |timeline, cx| {
+                timeline.selection.read(cx).selected_text(cx)
+            });
+            (
+                cx.debug_bounds("activity-row-cmd-3-a").is_some(),
+                cx.debug_bounds("changed-file-chip-file-t3_f3.rs").is_some(),
+                selected,
+            )
+        };
+        let before = opened(cx);
+        assert!(before.0 && before.1, "turn 3's Work Log and its files open");
+        assert!(
+            before.2.starts_with("Answer 3"),
+            "the drag selected turn 3's answer: {:?}",
+            before.2
+        );
+
+        assert_eq!(
+            thread.answer_page(7),
+            Some(7),
+            "the window asked for the page"
+        );
+        thread.deliver(cx);
+        draw_settled(cx);
+        assert_eq!(
+            thread.store.read_with(cx, |store, cx| {
+                store.with_timeline_for(Some(THREAD), |timeline| timeline.turns.len(), cx)
+            }),
+            Some(4),
+            "the page landed"
+        );
+        assert_eq!(opened(cx), before, "what turn 3 had open went elsewhere");
     }
 }

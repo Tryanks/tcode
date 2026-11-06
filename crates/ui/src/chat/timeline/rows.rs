@@ -287,7 +287,6 @@ fn index_rows_from(
                 segmented.flow.get(segment),
                 segment_range.clone(),
                 expanded,
-                index,
                 live && running,
             );
             let last_part = parts.len() - 1;
@@ -396,14 +395,13 @@ fn segment_parts(
     segment: Option<&Segment<'_>>,
     range: Range<usize>,
     expanded: &HashSet<String>,
-    turn: usize,
     live_window: bool,
 ) -> Vec<(RowPart, Range<usize>)> {
     let whole = || vec![(RowPart::Segment, range.clone())];
     let Some(Segment::ActivityRun(activities)) = segment else {
         return whole();
     };
-    if !expanded.contains(&work_log_key(turn, &activities[0].id)) {
+    if !expanded.contains(&work_log_key(&activities[0].id)) {
         return whole();
     }
     let (folded, visible) = partition_activity_run(activities, live_window);
@@ -1184,7 +1182,7 @@ mod tests {
                     ..Default::default()
                 }],
                 entries,
-                &HashSet::from([work_log_key(0, "cargo check")]),
+                &HashSet::from([work_log_key("cargo check")]),
                 TimelineContinuity::Complete,
             );
             let ids = |part: fn(&RowPart) -> bool| {
@@ -1213,7 +1211,7 @@ mod tests {
         }];
         let mut entries = vec![entry("user", user_item("go"))];
         entries.extend((0..8).map(|step| command(&format!("cmd-{step}"))));
-        let expanded = HashSet::from([work_log_key(0, "cmd-0")]);
+        let expanded = HashSet::from([work_log_key("cmd-0")]);
         let mut cache = TurnIndexCache::default();
         let mut rows = Vec::new();
         let mut sync = |turns: &[TurnMeta], entries: &[Arc<TimelineEntry>], expanded| {

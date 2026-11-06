@@ -211,6 +211,37 @@ impl SelectionDocument {
         self.changed(cx);
     }
 
+    /// The document's entries moved `by` places (entries came or went
+    /// before them): the selection moves with its text, and goes when the
+    /// entry an end is in went.
+    pub(crate) fn move_entries(&mut self, by: i64, cx: &mut Context<Self>) {
+        if by == 0 || (self.anchor.is_none() && self.gesture.is_none() && self.unit.is_none()) {
+            return;
+        }
+        let mut gone = false;
+        let mut shift = |point: &mut DocPoint| match point.entry.checked_add_signed(by) {
+            Some(entry) => point.entry = entry,
+            None => gone = true,
+        };
+        let unit = self
+            .unit
+            .as_mut()
+            .into_iter()
+            .flat_map(|(_, start, end)| [start, end]);
+        for point in [&mut self.anchor, &mut self.focus, &mut self.gesture]
+            .into_iter()
+            .flatten()
+            .chain(unit)
+        {
+            shift(point);
+        }
+        if gone {
+            self.clear(cx);
+        } else {
+            self.changed(cx);
+        }
+    }
+
     /// Select everything entry `entry` holds.
     pub(crate) fn select_entry(&mut self, entry: u64, cx: &mut Context<Self>) {
         let Some((start, end)) = (self.entries)(entry..=entry, cx)
