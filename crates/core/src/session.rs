@@ -17,10 +17,12 @@ use crate::git::merge_file_changes_by_path;
 use crate::relay::{one_line, truncate_chars};
 
 mod boundaries;
+mod streams;
 mod superseded;
 
 pub use boundaries::{TurnBoundaries, TurnBoundaryChange};
 
+pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
