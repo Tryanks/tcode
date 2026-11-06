@@ -894,6 +894,7 @@ fn measure_content_width(
 ) -> gpui::Pixels {
     let font = gpui::Font {
         family: cx.theme().mono_font_family.clone(),
+        fallbacks: crate::i18n::cjk_font_fallbacks(),
         ..Default::default()
     };
     let width = candidates

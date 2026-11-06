@@ -3050,12 +3050,18 @@ fn selection_drag_started(dx: f32, dy: f32) -> bool {
 pub(crate) fn terminal_font() -> gpui::Font {
     let mut terminal_font = font(TERMINAL_FONT_FAMILY);
     terminal_font.features = FontFeatures::disable_ligatures();
-    #[cfg(target_family = "wasm")]
-    {
-        terminal_font.fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
-            "Tcode Terminal Symbols".into(),
-        ]));
-    }
+    let symbols: &[&str] = if cfg!(target_family = "wasm") {
+        &["Tcode Terminal Symbols"]
+    } else {
+        &[]
+    };
+    let fallbacks: Vec<String> = symbols
+        .iter()
+        .chain(crate::i18n::cjk_fallback_families())
+        .map(|&family| family.into())
+        .collect();
+    terminal_font.fallbacks =
+        (!fallbacks.is_empty()).then(|| gpui::FontFallbacks::from_fonts(fallbacks));
     terminal_font
 }
 

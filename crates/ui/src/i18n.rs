@@ -57,6 +57,74 @@ fn system_locale() -> Option<String> {
         .or_else(sys_locale::get_locale)
 }
 
+/// The system families that draw Han characters in the forms the current
+/// language reads, tried before the platform's own fallback.
+///
+/// A platform's own fallback picks Han glyph forms by the *system* language
+/// (CoreText's cascade, DirectWrite's user locale, cosmic-text's locale), and
+/// would draw a Japanese UI's kanji in Chinese forms on a Chinese or English
+/// system; the UI language decides instead. English names nothing and leaves
+/// CJK text to the system language, the best guess at what the user writes,
+/// except on Android, whose fallback has no script preferences and would
+/// otherwise reach for arbitrary serif faces. gpui-base has no locale-aware
+/// font selection; this is it until it does.
+pub(crate) fn cjk_fallback_families() -> &'static [&'static str] {
+    let locale = rust_i18n::locale();
+    if &*locale == LANGUAGE_JAPANESE {
+        cjk_families::JAPANESE
+    } else if &*locale == LANGUAGE_SIMPLIFIED_CHINESE || cfg!(target_os = "android") {
+        cjk_families::CHINESE
+    } else {
+        &[]
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod cjk_families {
+    pub(super) const JAPANESE: &[&str] = &["Hiragino Sans"];
+    pub(super) const CHINESE: &[&str] = &["PingFang SC"];
+}
+
+#[cfg(target_os = "windows")]
+mod cjk_families {
+    pub(super) const JAPANESE: &[&str] = &["Yu Gothic UI", "Meiryo UI"];
+    pub(super) const CHINESE: &[&str] = &["Microsoft YaHei UI"];
+}
+
+/// The browser draws only glyphs the bundled fonts lack (Noto Sans SC covers
+/// Han and kana), taking these as a CSS font-family list.
+#[cfg(target_family = "wasm")]
+mod cjk_families {
+    pub(super) const JAPANESE: &[&str] = &[
+        "Hiragino Sans",
+        "Yu Gothic UI",
+        "Meiryo UI",
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+    ];
+    pub(super) const CHINESE: &[&str] = &[];
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_family = "wasm"
+)))]
+mod cjk_families {
+    pub(super) const JAPANESE: &[&str] =
+        &["Noto Sans CJK JP", "Noto Sans JP", "Source Han Sans JP"];
+    pub(super) const CHINESE: &[&str] = &["Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC"];
+}
+
+/// [`cjk_fallback_families`] as the fallbacks of a font.
+pub(crate) fn cjk_font_fallbacks() -> Option<gpui::FontFallbacks> {
+    let families = cjk_fallback_families();
+    (!families.is_empty()).then(|| {
+        gpui::FontFallbacks::from_fonts(families.iter().map(|&family| family.into()).collect())
+    })
+}
+
 /// Set the process-global translation locale.
 pub fn set_locale(locale: &str) {
     rust_i18n::set_locale(locale);
