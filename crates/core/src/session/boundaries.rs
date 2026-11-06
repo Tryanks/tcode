@@ -13,6 +13,9 @@ pub struct TurnBoundaries {
     /// Steer restore points, by checkpoint id: the steer's request id.
     #[serde(default)]
     steer_checkpoints: HashMap<String, String>,
+    /// The next message's [`User::seq`].
+    #[serde(default)]
+    next_seq: u64,
     /// What the latest rewind removed while the harness can still undo it.
     #[serde(default)]
     undo: Option<Box<UndoState>>,
@@ -38,6 +41,10 @@ struct Boundary {
 struct User {
     turn: usize,
     pending: bool,
+    /// When the message joined the fold, which orders a turn's messages:
+    /// a cut at a steer removes it and the messages after it.
+    #[serde(default)]
+    seq: u64,
 }
 
 /// Decisions the timeline consumes while applying the same event's payload.
@@ -188,7 +195,10 @@ impl TurnBoundaries {
                     };
                     let kept = match &cut.steer {
                         Some(steer) => {
-                            self.users.remove(steer);
+                            if let Some(cut_seq) = self.users.get(steer).map(|user| user.seq) {
+                                self.users
+                                    .retain(|_, user| user.turn != cut.turn || user.seq < cut_seq);
+                            }
                             if let Some(turn) = self.turns.get_mut(cut.turn) {
                                 turn.closed = true;
                                 turn.running = false;
@@ -231,10 +241,13 @@ impl TurnBoundaries {
                     // A message sent after a rewind makes it final.
                     self.undo = None;
                     if let Some(turn) = self.current() {
-                        self.users.entry(item.id.clone()).or_insert(User {
+                        let seq = self.next_seq;
+                        self.users.entry(item.id.clone()).or_insert_with(|| User {
                             turn,
                             pending: false,
+                            seq,
                         });
+                        self.next_seq += 1;
                     }
                 } else if let Some(user) = self.users.get_mut(&item.id) {
                     user.pending = false;
@@ -244,10 +257,15 @@ impl TurnBoundaries {
             AgentEvent::SteerRequested { request_id, .. } => {
                 self.undo = None;
                 if let Some(turn) = self.current() {
-                    self.users.entry(request_id.clone()).or_insert(User {
-                        turn,
-                        pending: true,
-                    });
+                    let seq = self.next_seq;
+                    self.users
+                        .entry(request_id.clone())
+                        .or_insert_with(|| User {
+                            turn,
+                            pending: true,
+                            seq,
+                        });
+                    self.next_seq += 1;
                 }
             }
             AgentEvent::SteerAccepted { request_id } => {

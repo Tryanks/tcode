@@ -26,7 +26,7 @@ pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
-pub const TURN_INDEX_FOLD_VERSION: u32 = 5;
+pub const TURN_INDEX_FOLD_VERSION: u32 = 6;
 
 fn synthetic_entry_id(
     prefix: &str,
@@ -575,6 +575,9 @@ pub struct Rewound {
     pub undo_token: Option<String>,
     /// The turns' metadata the cut removed, restored with the entries by an undo.
     removed_meta: Vec<TurnMeta>,
+    /// A steer cut's turn and the steer restore points it had, which an
+    /// undo gives back.
+    cut_steers: Option<(usize, Vec<(String, String)>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1176,6 +1179,7 @@ impl Timeline {
                     incomplete: incomplete.clone(),
                     undo_token: None,
                     removed_meta: Vec::new(),
+                    cut_steers: None,
                 };
                 if let Some(cut) = &boundary.rewind {
                     self.close_undo();
@@ -1621,10 +1625,13 @@ impl Timeline {
         let kept = cut.turn + usize::from(cut.steer.is_some());
         rewound.removed_meta = self.turns.split_off(kept.min(self.turns.len()));
         rewound.removed_turns = rewound.removed_meta.len();
-        if let Some(steer) = &cut.steer
+        if cut.steer.is_some()
             && let Some(turn) = self.turns.get_mut(cut.turn)
         {
-            turn.steer_checkpoints.retain(|(id, _)| id != steer);
+            rewound.cut_steers = Some((cut.turn, turn.steer_checkpoints.clone()));
+            let removed = &rewound.removed;
+            turn.steer_checkpoints
+                .retain(|(id, _)| !removed.iter().any(|entry| entry.id == *id));
             turn.running = false;
         }
         self.tool_clock = ToolClock::default();
@@ -1661,6 +1668,11 @@ impl Timeline {
             .extract_if(.., |entry| entry.turn >= divider_turn)
             .collect();
         self.turns.truncate(divider_turn);
+        if let Some((turn, steers)) = rewound.cut_steers
+            && let Some(turn) = self.turns.get_mut(turn)
+        {
+            turn.steer_checkpoints = steers;
+        }
         self.turns.extend(rewound.removed_meta);
         self.entries.extend(rewound.removed);
         let last = self.turns.len().saturating_sub(1);
@@ -2726,39 +2738,47 @@ mod tests {
 
     #[test]
     fn a_rewind_to_a_steer_keeps_the_turn_before_it() {
+        let steer = |id: &str, checkpoint: &str| {
+            [
+                AgentEvent::SteerRequested {
+                    request_id: id.into(),
+                    text: format!("also {id}"),
+                    attachments: Vec::new(),
+                },
+                AgentEvent::SteerAccepted {
+                    request_id: id.into(),
+                },
+                AgentEvent::SteerCheckpoint {
+                    request_id: id.into(),
+                    checkpoint_id: checkpoint.into(),
+                },
+            ]
+        };
         let mut events = checkpointed_turns(1);
         events.truncate(3);
-        events.extend([
-            AgentEvent::SteerRequested {
-                request_id: "steer-1".into(),
-                text: "also this".into(),
-                attachments: Vec::new(),
-            },
-            AgentEvent::SteerAccepted {
-                request_id: "steer-1".into(),
-            },
-            AgentEvent::SteerCheckpoint {
-                request_id: "steer-1".into(),
-                checkpoint_id: "steer-checkpoint".into(),
-            },
-            assistant("reply", "done"),
-            AgentEvent::TurnCompleted {
-                turn_id: "turn-1".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-        ]);
-        let mut rewind = undoable_rewind("steer-checkpoint");
-        if let AgentEvent::RewindCompleted {
-            mode, undo_token, ..
-        } = &mut rewind
-        {
-            *mode = RewindMode::Conversation;
-            *undo_token = None;
-        }
-        events.push(rewind);
+        events.extend(steer("steer-1", "steer-checkpoint"));
+        events.push(assistant("reply", "done"));
+        events.extend(steer("steer-2", "later-steer-checkpoint"));
+        events.push(AgentEvent::TurnCompleted {
+            turn_id: "turn-1".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        });
+        let before = Timeline::fold_events(events.clone());
+        let rewind = |undo_token: Option<&str>| AgentEvent::RewindCompleted {
+            checkpoint_id: "steer-checkpoint".into(),
+            mode: RewindMode::Conversation,
+            prefill: None,
+            prefill_attachments: Vec::new(),
+            later_history: agent::LaterHistory::HiddenUntilNextSend,
+            files: None,
+            incomplete: None,
+            undo_token: undo_token.map(str::to_owned),
+        };
 
-        let timeline = Timeline::fold_events(events);
+        let mut cut = events.clone();
+        cut.push(rewind(None));
+        let mut timeline = Timeline::fold_events(cut);
         assert!(matches!(
             &timeline.entries[0].content,
             EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "prompt 1"
@@ -2766,9 +2786,37 @@ mod tests {
         assert_eq!(timeline.entries[0].turn, 0);
         let rewound = divider(&timeline);
         assert_eq!(rewound.removed_turns, 0);
-        assert_eq!(rewound.removed.len(), 2, "the steer and the reply after it");
-        assert!(timeline.turns[0].steer_checkpoints.is_empty());
+        assert_eq!(
+            rewound.removed.len(),
+            3,
+            "the steer, the reply and the steer after it"
+        );
+        assert!(
+            timeline.turns[0].steer_checkpoints.is_empty(),
+            "no restore point is left for a steer the cut removed"
+        );
         assert_eq!(timeline.turns.len(), 2);
+        // A client that still showed the later steer cannot cut there again.
+        let mut stale = rewind(None);
+        if let AgentEvent::RewindCompleted { checkpoint_id, .. } = &mut stale {
+            *checkpoint_id = "later-steer-checkpoint".into();
+        }
+        timeline.apply_at(None, &stale);
+        assert_eq!(timeline.turns.len(), 2);
+
+        // An undo gives the turn back its steers' restore points.
+        events.push(rewind(Some("revert")));
+        let mut timeline = Timeline::fold_events(events);
+        timeline.apply_at(
+            None,
+            &AgentEvent::RewindUndone {
+                checkpoint_id: "steer-checkpoint".into(),
+            },
+        );
+        assert_eq!(
+            (&timeline.entries, &timeline.turns),
+            (&before.entries, &before.turns)
+        );
     }
 
     #[test]
