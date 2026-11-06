@@ -1,22 +1,22 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::icon::{Icon, IconName};
+use crate::icon::IconName;
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::menu::{ContextMenuExt as _, PopupMenu};
-use agent::RewindMode;
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Entity, InteractiveElement as _, IntoElement as _,
-    ObjectFit, ParentElement as _, Role, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, Entity, InteractiveElement as _, IntoElement as _, ObjectFit,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Window, div, img, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use std::rc::Rc;
 
 use tcode_core::session::SteeringStatus;
 
-use super::super::RewindTurn;
+use super::super::OpenRewind;
 use super::assistant;
 use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 use crate::widgets::copy::{action_button, copy_button};
@@ -28,7 +28,6 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
-pub(crate) type SharedClickHandler = Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 pub(crate) type UserMessageArgs<'a> = (
     usize,
     &'a str,
@@ -63,26 +62,22 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) motion: crate::motion::owned::Owned,
 }
 
+/// The rewind a message offers: where it goes, and why it cannot start now.
 #[derive(Clone, PartialEq)]
 pub(crate) struct RewindMenu {
+    /// The message's entry id.
+    pub(crate) key: String,
     pub(crate) turn: usize,
-    pub(crate) disabled: bool,
-    /// The modes the harness restores this turn in, in its order.
-    pub(crate) modes: Vec<RewindMode>,
+    pub(crate) steer: Option<String>,
+    /// Why no rewind can start now, which the disabled action says.
+    pub(crate) blocked: Option<String>,
+    /// The rewind to this message is being made.
+    pub(crate) in_progress: bool,
 }
 
-fn rewind_label(mode: RewindMode) -> String {
-    match mode {
-        RewindMode::FilesAndConversation => crate::tr!("chat.rewind_all"),
-        RewindMode::Conversation => crate::tr!("chat.rewind_conversation"),
-        RewindMode::Files => crate::tr!("chat.rewind_files"),
-    }
-    .into_owned()
-}
-
-/// The bubble's context-menu items: copy the message, then the rewind modes
-/// the popover button offers. Shared by the Markdown inside the bubble and
-/// the bubble's own margin.
+/// The bubble's context-menu items: copy the message, then the rewind,
+/// which opens the panel the bubble's rewind action opens. Shared by the
+/// Markdown inside the bubble and the bubble's own margin.
 fn bubble_menu_items(copy_text: Arc<str>, rewind: Option<RewindMenu>) -> MenuExtension {
     Rc::new(move |menu: PopupMenu, window: &mut Window, cx: &mut App| {
         let menu = if copy_text.trim().is_empty() {
@@ -90,21 +85,18 @@ fn bubble_menu_items(copy_text: Arc<str>, rewind: Option<RewindMenu>) -> MenuExt
         } else {
             assistant::copy_message_items(copy_text.clone())(menu, window, cx)
         };
-        let Some(RewindMenu {
-            turn,
-            disabled,
-            modes,
-        }) = &rewind
-        else {
+        let Some(rewind) = &rewind else {
             return menu;
         };
-        modes.iter().fold(menu.separator(), |menu, &mode| {
-            menu.menu_with_enable(
-                rewind_label(mode),
-                Box::new(RewindTurn { turn: *turn, mode }),
-                !disabled,
-            )
-        })
+        menu.separator().menu_with_enable(
+            crate::tr!("rewind.action_menu").into_owned(),
+            Box::new(OpenRewind {
+                key: rewind.key.clone(),
+                turn: rewind.turn,
+                steer: rewind.steer.clone(),
+            }),
+            rewind.blocked.is_none() && !rewind.in_progress,
+        )
     })
 }
 
@@ -113,82 +105,41 @@ pub(crate) struct BubbleHandlers {
     pub(crate) images: Vec<ClickHandler>,
 }
 
-/// The rewind popover for a turn: one item per mode in `menu`, each running
-/// its handler.
-pub(crate) fn native_rewind_button(
-    menu: RewindMenu,
+/// The message's rewind action, which opens the panel.
+pub(crate) fn rewind_button(
+    menu: &RewindMenu,
     compact: bool,
-    handlers: Vec<SharedClickHandler>,
     motion: &crate::motion::owned::Owned,
     cx: &App,
-) -> AnyElement {
-    let RewindMenu {
-        turn,
-        disabled,
-        modes,
-    } = menu;
-
-    let trigger = action_button(
-        SharedString::from(format!("rewind-{turn}")),
+) -> crate::widgets::Button {
+    let key = menu.key.clone();
+    action_button(
+        SharedString::from(format!("rewind-{key}")),
         IconName::Undo,
-        if disabled {
-            crate::tr!("chat.rewind_blocked").into_owned()
-        } else {
-            crate::tr!("chat.rewind").into_owned()
-        },
+        menu.blocked
+            .clone()
+            .unwrap_or_else(|| crate::tr!("rewind.action").into_owned()),
         cx,
     )
-    .disabled(disabled)
+    .disabled(menu.blocked.is_some())
     .touch(compact)
     .motion(motion)
-    .debug_selector(move || format!("rewind-{turn}"));
-    crate::material::overlay_popover(("rewind-menu", turn), cx)
-        .anchor(Anchor::TopRight)
-        .when(compact, |popover| {
-            popover.bottom_sheet(crate::tr!("chat.rewind"))
-        })
-        .trigger(trigger)
-        .content(move |_state, _window, cx| {
-            let muted = cx.theme().muted_foreground;
-            let popover = cx.entity();
-            let mut menu = v_flex()
-                .w(px(240.))
-                .p_1()
-                .gap_0p5()
-                .id(("rewind-options", turn))
-                .role(Role::Menu)
-                .aria_label(crate::tr!("chat.rewind"));
-            for (index, (&mode, on_select)) in modes.iter().zip(&handlers).enumerate() {
-                let label = rewind_label(mode);
-                let on_select = on_select.clone();
-                let popover = popover.clone();
-                menu = menu.child(
-                    crate::material::accessible_clickable(
-                        crate::material::menu_item_frame(
-                            compact,
-                            crate::material::ItemFill::Hover,
-                            cx,
-                        ),
-                        ("rewind-option", index),
-                        Role::MenuItem,
-                        label.clone(),
-                        cx,
-                    )
-                    .debug_selector(move || format!("rewind-option-{mode:?}"))
-                    .w_full()
-                    .items_center()
-                    .cursor_pointer()
-                    .text_body(compact, cx)
-                    .child(Icon::new(IconName::Undo).text_color(muted))
-                    .child(label)
-                    .on_click(move |event, window, cx| {
-                        popover.update(cx, |state, cx| state.dismiss(window, cx));
-                        on_select(event, window, cx);
-                    }),
-                );
-            }
-            menu.into_any_element()
-        })
+    .debug_selector(move || format!("rewind-{key}"))
+}
+
+/// What the action row shows while the rewind to this message is made.
+pub(crate) fn rewind_in_progress(key: &str, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let selector = format!("rewind-in-progress-{key}");
+    h_flex()
+        .gap_1()
+        .px_1()
+        .items_center()
+        .debug_selector(move || selector)
+        .text_token(&cx.theme().tokens.typography.xs)
+        .text_color(muted)
+        .child(crate::widgets::Spinner::new().xsmall().color(muted))
+        .child(crate::tr!("rewind.in_progress").into_owned())
         .into_any_element()
 }
 
@@ -257,13 +208,7 @@ pub(crate) fn user_bubble(
                 .map(|shown| {
                     let button = match rewind.take() {
                         Some(button) if !shown.leaving() => button,
-                        _ => native_rewind_button(
-                            shown.value.clone(),
-                            compact,
-                            Vec::new(),
-                            &motion,
-                            cx,
-                        ),
+                        _ => rewind_button(&shown.value, compact, &motion, cx).into_any_element(),
                     };
                     shown.fold_across_gap(gap, button)
                 });

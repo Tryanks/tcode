@@ -33,6 +33,8 @@ pub struct ComposerQueue {
     pub messages: Vec<QueuedMessageStatus>,
     pub can_steer: bool,
     pub agent: &'static str,
+    /// Held after a rewind until the user sends the next message.
+    pub held: bool,
 }
 
 /// The complete replica-derived state consumed by composer views in one frame.
@@ -187,6 +189,7 @@ pub(crate) fn composer_state(
             messages: status.queued_messages.clone(),
             can_steer: status.steering_supported,
             agent: status.provider.display_name(),
+            held: status.queue_held,
         }),
         steering_supported: status.is_some_and(|status| status.steering_supported),
         preparing_worktree: status.is_some_and(|status| status.preparing_worktree),

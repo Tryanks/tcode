@@ -248,7 +248,7 @@ pub struct WorkspaceStore {
     pending_chat_turn: Option<(String, usize)>,
     /// The host resolving an anchor link's position to the turn it opens at.
     anchor_turn_task: Option<Task<()>>,
-    native_rewind_prefills: HashMap<String, String>,
+    native_rewind_prefills: HashMap<String, RewindPrefill>,
     /// The parent of each thread that left the index, for the pane left
     /// without it.
     left_parents: HashMap<String, String>,
@@ -292,12 +292,33 @@ struct SnapshotWindow {
 /// long.
 const KEPT_THREADS: usize = 4;
 
-/// What a turn's rewind offers: the harness's modes for it, and whether a
-/// rewind is blocked right now (a turn running, a rewind pending).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeRewindState {
+/// A message the thread can be rewound to, as the rewind panel presents it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RewindTarget {
+    pub checkpoint_id: String,
+    /// The scopes the Harness restores this message in, in its order.
     pub modes: Vec<agent::RewindMode>,
-    pub blocked: bool,
+    pub rewind: tcode_protocol::RewindStatus,
+    /// This rewind is being made now.
+    pub in_progress: bool,
+    /// Turns the cut takes out of the conversation, this one included; for a
+    /// steer, the turns after its own.
+    pub later_turns: usize,
+    /// Delegated threads started from this thread after the message.
+    pub delegated_after: usize,
+    pub queued: usize,
+    pub turn_running: bool,
+    /// The thread works in a worktree of its own, which files are restored in.
+    pub worktree: bool,
+    /// The product name of the thread's Harness.
+    pub harness: String,
+}
+
+/// A prompt a rewind gave back for this client's composer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindPrefill {
+    pub text: String,
+    pub attachments: Vec<String>,
 }
 
 /// A rendered thread export as it arrives from the host: complete bytes, a file
@@ -1682,11 +1703,16 @@ impl WorkspaceStore {
                         session_id: event_session,
                         client_id,
                         text,
-                        ..
+                        attachments,
                     },
-                ) if session_id == event_session && *client_id == self.preview.client_id() => {
-                    self.native_rewind_prefills
-                        .insert(session_id.clone(), text.clone());
+                ) if session_id == event_session && *client_id == self.client_id() => {
+                    self.native_rewind_prefills.insert(
+                        session_id.clone(),
+                        RewindPrefill {
+                            text: text.clone(),
+                            attachments: attachments.clone(),
+                        },
+                    );
                 }
                 _ => {}
             }
@@ -3773,12 +3799,12 @@ impl WorkspaceStore {
         self.composer_appends.remove(&session_id)
     }
 
-    /// Consume the thread's prefill delivered by `NativeRewindPrefill`.
+    /// Consume the prompt a rewind this client asked for gave back.
     pub fn take_native_rewind_prefill_for(
         &mut self,
         session_id: Option<&str>,
         cx: &App,
-    ) -> Option<String> {
+    ) -> Option<RewindPrefill> {
         let session_id = self.thread_status(session_id, cx)?.session_id.clone();
         self.native_rewind_prefills.remove(&session_id)
     }
@@ -3961,39 +3987,129 @@ impl WorkspaceStore {
         .unwrap_or((Vec::new(), agent::ChangeCompleteness::Partial))
     }
 
-    /// The rewind modes the thread's harness restores `turn` in; `None` when
-    /// it has none for that turn (no checkpoint, or no native rewind).
-    pub fn chat_native_rewind_state_for(
+    /// The rewind the thread's Harness offers to before the prompt that
+    /// opened `turn` (local to the held window), or the steer `steer` in it;
+    /// `None` when that message is no target.
+    pub fn chat_rewind_target_for(
         &self,
         session_id: Option<&str>,
         turn: usize,
+        steer: Option<&str>,
         cx: &App,
-    ) -> Option<NativeRewindState> {
+    ) -> Option<RewindTarget> {
         let status = self.thread_status(session_id, cx)?;
-        let rewind = status.rewind.as_ref()?;
-        let has_checkpoint = self
-            .with_timeline_for(
-                session_id,
-                |timeline| {
-                    timeline
-                        .turns
-                        .get(turn)
-                        .and_then(|turn| turn.provider_checkpoint_id.as_ref())
-                        .is_some()
-                },
-                cx,
-            )
-            .unwrap_or(false);
+        let rewind = status.rewind.clone()?;
         let absolute = self.absolute_turn_for(session_id, turn);
+        let (checkpoint_id, later_turns, started) = self.with_timeline_for(
+            session_id,
+            |timeline| {
+                let meta = timeline.turns.get(turn)?;
+                let checkpoint = match steer {
+                    None => meta.provider_checkpoint_id.clone(),
+                    Some(steer) => meta
+                        .steer_checkpoints
+                        .iter()
+                        .find(|(id, _)| id == steer)
+                        .map(|(_, checkpoint)| checkpoint.clone()),
+                }?;
+                let opened: HashSet<usize> = timeline
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.turn >= turn
+                            && matches!(
+                                entry.content,
+                                tcode_core::session::EntryContent::Item(
+                                    agent::ItemContent::UserMessage { .. }
+                                )
+                            )
+                    })
+                    .map(|entry| entry.turn)
+                    .collect();
+                let later = opened.len() - usize::from(steer.is_some() && opened.contains(&turn));
+                Some((checkpoint, later, meta.start_ts))
+            },
+            cx,
+        )??;
         let modes: Vec<agent::RewindMode> = rewind
             .modes
             .iter()
             .copied()
-            .filter(|&mode| rewind.offers(mode, absolute, false))
+            .filter(|&mode| rewind.offers(mode, absolute, steer.is_some()))
             .collect();
-        (has_checkpoint && !modes.is_empty()).then_some(NativeRewindState {
+        if modes.is_empty() {
+            return None;
+        }
+        let since = started.map(|ms| ms / 1000);
+        let delegated_after = self
+            .index_replica
+            .0
+            .iter()
+            .filter(|meta| {
+                meta.parent_session_id.as_deref() == Some(status.session_id.as_str())
+                    && since.is_some_and(|since| meta.created_at >= since)
+            })
+            .count();
+        let harness = self.harness_name_for(session_id, cx);
+        Some(RewindTarget {
+            in_progress: rewind
+                .pending
+                .as_ref()
+                .is_some_and(|pending| !pending.undo && pending.checkpoint_id == checkpoint_id),
+            checkpoint_id,
             modes,
-            blocked: rewind.blocked.is_some(),
+            later_turns,
+            delegated_after,
+            queued: status.queued_messages.len(),
+            turn_running: status.activity.turn_running,
+            worktree: status.worktree.is_some(),
+            harness,
+            rewind,
+        })
+    }
+
+    /// How this client names itself to the host.
+    pub(crate) fn client_id(&self) -> &str {
+        self.preview.client_id()
+    }
+
+    /// The product name the thread's Harness goes by: an ACP agent's own
+    /// name, else the native Harness's.
+    pub fn harness_name_for(&self, session_id: Option<&str>, cx: &App) -> String {
+        let Some(status) = self.thread_status(session_id, cx) else {
+            return "Harness".to_owned();
+        };
+        status
+            .acp_agent_id
+            .as_deref()
+            .and_then(|id| self.installed_acp_agent(id))
+            .map(|agent| agent.name)
+            .unwrap_or_else(|| crate::settings::provider_label(status.provider).to_owned())
+    }
+
+    /// What a rewind to the target would restore, as its Harness tells
+    /// before restoring anything.
+    pub fn preview_rewind_for(
+        &self,
+        session_id: String,
+        turn: usize,
+        steer: Option<String>,
+        mode: agent::RewindMode,
+        cx: &mut App,
+    ) -> Task<Result<agent::RewindPreviewResult, String>> {
+        let command = self.command(
+            Command::PreviewRewind {
+                turn: self.absolute_turn_for(Some(&session_id), turn),
+                session_id,
+                steer,
+                mode,
+            },
+            cx,
+        );
+        cx.spawn(async move |_| match command.await {
+            Ok(CommandResponse::RewindPreview(result)) => Ok(result),
+            Ok(other) => Err(format!("unexpected answer {other:?}")),
+            Err(error) => Err(error.message),
         })
     }
 
@@ -5770,6 +5886,7 @@ pub(crate) mod tests {
             store.rewind_turn_for(
                 store.sole_thread().unwrap_or_default(),
                 2,
+                None,
                 agent::RewindMode::Conversation,
             );
             let command =
@@ -8799,7 +8916,10 @@ pub(crate) mod tests {
         assert_eq!(
             workspace.update(cx, |store, cx| store
                 .take_native_rewind_prefill_for(store.sole_thread().as_deref(), cx)),
-            Some("first parked prefill".into())
+            Some(crate::store::RewindPrefill {
+                text: "first parked prefill".into(),
+                attachments: Vec::new(),
+            })
         );
         workspace.update(cx, |store, cx| store.show_alone(second.id.clone(), cx));
         driver.wait_until(cx, &workspace, "second selected session", |cx| {
@@ -8812,7 +8932,10 @@ pub(crate) mod tests {
         assert_eq!(
             workspace.update(cx, |store, cx| store
                 .take_native_rewind_prefill_for(store.sole_thread().as_deref(), cx)),
-            Some("second parked prefill".into())
+            Some(crate::store::RewindPrefill {
+                text: "second parked prefill".into(),
+                attachments: Vec::new(),
+            })
         );
 
         driver.shutdown(cx, &workspace, &host);

@@ -885,14 +885,26 @@ impl WorkspaceStore {
             answers,
         });
     }
-    pub fn rewind_turn_for(&mut self, session_id: String, turn: usize, mode: RewindMode) {
-        let client_id = Some(self.preview.client_id().to_owned());
+    pub fn rewind_turn_for(
+        &mut self,
+        session_id: String,
+        turn: usize,
+        steer: Option<String>,
+        mode: RewindMode,
+    ) {
+        let client_id = Some(self.client_id().to_owned());
         self.dispatch(Command::RewindTurn {
-            steer: None,
+            steer,
             client_id,
             turn: self.absolute_turn_for(Some(&session_id), turn),
             session_id,
             mode,
+        });
+    }
+    pub fn undo_rewind_for(&mut self, session_id: String, checkpoint_id: String) {
+        self.dispatch(Command::UndoRewind {
+            session_id,
+            checkpoint_id,
         });
     }
     pub fn add_review_comment_for(&mut self, session_id: String, comment: ReviewComment) {
