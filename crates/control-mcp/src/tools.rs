@@ -334,7 +334,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Apply one settings patch (privileged: settings_write). Only display preferences can be changed: language, theme, diff word wrap, the live command panel, sidebar provider marks, inactive frame throttling and the fallback review advisor. Everything else (approvals, computer use, the browser, plugins, orchestration, settlement rules and tiers, models, tcode_control, hosting, credentials, sidebar and window state) is refused whatever the grant."
+        description = "Apply one settings patch (privileged: settings_write). Only display preferences can be changed: language, theme, diff word wrap, the live command panel, sidebar provider marks and inactive frame throttling. Everything else (approvals, computer use, the browser, plugins, orchestration, settlement rules and tiers, models, tcode_control, hosting, credentials, sidebar and window state) is refused whatever the grant."
     )]
     async fn patch_settings(
         &self,

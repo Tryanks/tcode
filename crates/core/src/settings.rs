@@ -728,32 +728,6 @@ impl TitleGenerationSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FallbackReviewSettings {
-    #[serde(default = "default_title_provider")]
-    pub provider: ProviderKind,
-    #[serde(default = "default_title_model")]
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-}
-
-impl Default for FallbackReviewSettings {
-    fn default() -> Self {
-        Self {
-            provider: default_title_provider(),
-            model: default_title_model(),
-            profile_id: None,
-        }
-    }
-}
-
-impl FallbackReviewSettings {
-    fn is_default(&self) -> bool {
-        self == &Self::default()
-    }
-}
-
 /// When a computer-use observation carries a screenshot alongside the folded
 /// accessibility outline. Mirrors `computer_use_mcp::config::ImageMode`; kept in
 /// core so settings stay GPUI/backend-free and the app maps one to the other.
@@ -893,9 +867,7 @@ pub enum SettingsPatch {
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
     ScrollToLatestOnSend(bool),
-    AbortOnModelFallback(bool),
     ResumeOnLimitReset(bool),
-    FallbackReviewAdvisor(bool),
     AutoSettleAfterDays(Option<f64>),
     AutoSettleOnMerge(bool),
     ProjectSettlement {
@@ -934,9 +906,6 @@ pub enum SettingsPatch {
     TitleGenerationProvider(ProviderKind),
     TitleGenerationModel(String),
     TitleGenerationProfileId(Option<String>),
-    FallbackReviewProvider(ProviderKind),
-    FallbackReviewModel(String),
-    FallbackReviewProfileId(Option<String>),
     SidebarLayout(SidebarLayout),
     RemoteHostingEnabled(bool),
     Traverse(TraverseSetting),
@@ -1144,11 +1113,7 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub scroll_to_latest_on_send: bool,
     #[serde(default = "default_true")]
-    pub abort_on_model_fallback: bool,
-    #[serde(default = "default_true")]
     pub resume_on_limit_reset: bool,
-    #[serde(default)]
-    pub fallback_review_advisor: bool,
     #[serde(default = "default_auto_settle_after_days")]
     pub auto_settle_after_days: Option<f64>,
     #[serde(default)]
@@ -1189,8 +1154,6 @@ pub struct Settings {
     /// Provider/model used to generate a concise title for new threads.
     #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
     pub title_generation: TitleGenerationSettings,
-    #[serde(default, skip_serializing_if = "FallbackReviewSettings::is_default")]
-    pub fallback_review: FallbackReviewSettings,
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
@@ -1294,9 +1257,7 @@ impl Default for Settings {
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
             scroll_to_latest_on_send: true,
-            abort_on_model_fallback: true,
             resume_on_limit_reset: true,
-            fallback_review_advisor: false,
             auto_settle_after_days: default_auto_settle_after_days(),
             auto_settle_on_merge: false,
             project_settlement_overrides: BTreeMap::new(),
@@ -1309,7 +1270,6 @@ impl Default for Settings {
             control: crate::control::ControlSettings::default(),
             settlement_automation: crate::control::SettlementAutomation::default(),
             title_generation: TitleGenerationSettings::default(),
-            fallback_review: FallbackReviewSettings::default(),
             collapsed_projects: Vec::new(),
             favorite_models: Vec::new(),
             project_sort: ProjectSort::default(),
@@ -1377,14 +1337,8 @@ impl Settings {
             SettingsPatch::ScrollToLatestOnSend(value) => {
                 self.scroll_to_latest_on_send = value;
             }
-            SettingsPatch::AbortOnModelFallback(value) => {
-                self.abort_on_model_fallback = value;
-            }
             SettingsPatch::ResumeOnLimitReset(value) => {
                 self.resume_on_limit_reset = value;
-            }
-            SettingsPatch::FallbackReviewAdvisor(value) => {
-                self.fallback_review_advisor = value;
             }
             SettingsPatch::AutoSettleAfterDays(value) => {
                 self.auto_settle_after_days = auto_settle_days(value)?;
@@ -1455,13 +1409,6 @@ impl Settings {
             SettingsPatch::TitleGenerationModel(value) => self.title_generation.model = value,
             SettingsPatch::TitleGenerationProfileId(value) => {
                 self.title_generation.profile_id = value;
-            }
-            SettingsPatch::FallbackReviewProvider(value) => {
-                self.fallback_review.provider = value;
-            }
-            SettingsPatch::FallbackReviewModel(value) => self.fallback_review.model = value,
-            SettingsPatch::FallbackReviewProfileId(value) => {
-                self.fallback_review.profile_id = value;
             }
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
             SettingsPatch::RemoteHostingEnabled(value) => self.remote_hosting_enabled = value,

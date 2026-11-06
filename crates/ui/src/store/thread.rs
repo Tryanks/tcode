@@ -44,7 +44,7 @@ pub(super) enum Part {
     /// status or place.
     Entries,
     /// Status, plan and Git, and what the thread's status topic carries
-    /// besides (a rewind's prefill, a classifier stop).
+    /// besides (a rewind's prefill).
     Status,
     /// The screens of its commands' outputs.
     Outputs,

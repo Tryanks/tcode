@@ -193,52 +193,6 @@ impl SettingsPage {
     }
 
     fn model_limit_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let abort_on_fallback_reset = crate::settings_rows::reset_action(
-            "reset-abort-on-model-fallback",
-            !settings.abort_on_model_fallback,
-            cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(|store| store.set_abort_on_model_fallback(true), cx)
-            }),
-        );
-        let mut rows = vec![self.toggle_row(
-            "abort-on-model-fallback",
-            crate::tr!("settings.abort_on_model_fallback.title"),
-            crate::tr!("settings.abort_on_model_fallback.description"),
-            settings.abort_on_model_fallback,
-            abort_on_fallback_reset,
-            cx,
-            WorkspaceStore::set_abort_on_model_fallback,
-        )];
-        // The review rows apply only while a fallback aborts, and fold with it.
-        {
-            let advisor_reset = crate::settings_rows::reset_action(
-                "reset-fallback-review-advisor",
-                settings.fallback_review_advisor,
-                cx.listener(|this, _, _, cx| {
-                    this.dispatch_settings(|store| store.set_fallback_review_advisor(false), cx)
-                }),
-            );
-            let advisor = self.toggle_row(
-                "fallback-review-advisor",
-                crate::tr!("settings.fallback_review_advisor.title"),
-                crate::tr!("settings.fallback_review_advisor.description"),
-                settings.fallback_review_advisor,
-                advisor_reset,
-                cx,
-                WorkspaceStore::set_fallback_review_advisor,
-            );
-            let model = self.fallback_review_model_row(cx);
-            rows.push(
-                crate::widgets::Collapsible::new(
-                    "fallback-review-fold",
-                    settings.abort_on_model_fallback,
-                )
-                .motion(&self.motion)
-                .w_full()
-                .content(v_flex().w_full().child(advisor).child(model))
-                .into_any_element(),
-            );
-        }
         let resume_on_limit_reset_reset = crate::settings_rows::reset_action(
             "reset-resume-on-limit-reset",
             !settings.resume_on_limit_reset,
@@ -246,7 +200,7 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx)
             }),
         );
-        rows.push(self.toggle_row(
+        vec![self.toggle_row(
             "resume-on-limit-reset",
             crate::tr!("settings.resume_on_limit_reset.title"),
             crate::tr!("settings.resume_on_limit_reset.description"),
@@ -254,8 +208,7 @@ impl SettingsPage {
             resume_on_limit_reset_reset,
             cx,
             WorkspaceStore::set_resume_on_limit_reset,
-        ));
-        rows
+        )]
     }
 
     /// Auto-settle, its days and merge rules, and the per-project overrides:

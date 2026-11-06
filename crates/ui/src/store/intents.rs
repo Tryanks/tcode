@@ -251,14 +251,8 @@ impl WorkspaceStore {
     pub fn set_scroll_to_latest_on_send(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ScrollToLatestOnSend(value));
     }
-    pub fn set_abort_on_model_fallback(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::AbortOnModelFallback(value));
-    }
     pub fn set_resume_on_limit_reset(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ResumeOnLimitReset(value));
-    }
-    pub fn set_fallback_review_advisor(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::FallbackReviewAdvisor(value));
     }
     pub fn set_orchestrate_decision_models(&mut self, value: Vec<OrchestrateChildModel>) {
         self.patch_settings(SettingsPatch::OrchestrateDecisionModels(value));
@@ -304,15 +298,6 @@ impl WorkspaceStore {
     }
     pub fn set_title_generation_profile_id(&mut self, value: Option<String>) {
         self.patch_settings(SettingsPatch::TitleGenerationProfileId(value));
-    }
-    pub fn set_fallback_review_provider(&mut self, value: ProviderKind) {
-        self.patch_settings(SettingsPatch::FallbackReviewProvider(value));
-    }
-    pub fn set_fallback_review_model(&mut self, value: String) {
-        self.patch_settings(SettingsPatch::FallbackReviewModel(value));
-    }
-    pub fn set_fallback_review_profile_id(&mut self, value: Option<String>) {
-        self.patch_settings(SettingsPatch::FallbackReviewProfileId(value));
     }
     pub fn set_sidebar_layout(&mut self, value: SidebarLayout) {
         self.patch_settings(SettingsPatch::SidebarLayout(value));

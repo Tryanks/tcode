@@ -470,18 +470,9 @@ settings:
   inactive_frame_throttle:
     title: "后台帧率限制"
     description: "窗口失焦时降低刷新率以节省能耗。重启后生效。"
-  abort_on_model_fallback:
-    title: "模型更改时中止"
-    description: "开启后，若 Claude Code 使用了不同的模型，或安全分类器标记了本轮，Tcode 会中止当前轮次。忽略 [1m] 等上下文窗口后缀差异。子代理不受影响。"
   resume_on_limit_reset:
     title: "额度重置后继续任务"
     description: "当 Claude Code 因 5 小时用量窗口耗尽而停止本轮时，Tcode 会在窗口重置的时刻自动继续任务。关闭后，错误卡片上会提供一个按钮供手动安排。"
-  fallback_review_advisor:
-    title: "回退审查顾问"
-    description: "使用独立模型审查被 Claude Code 回退防护中断的请求。"
-  fallback_review_model:
-    title: "回退审查模型"
-    description: "选择用于回退审查的提供商和模型。"
   title_generation:
     title: "对话命名模型"
     description: "选择用于生成和重新生成对话标题的提供商和模型。命名请求始终使用 low 推理强度。"
@@ -1152,22 +1143,6 @@ userinput:
   dismiss: "隐藏"
   answer: "回答"
   collapse: "收起"
-fallback:
-  model_changed_title: "本轮因模型更改而中止"
-  reason_model_changed: "实际响应的模型与所选模型 %{model} 不同，Tcode 已中止本轮。"
-  title: "本轮已被安全分类器中止"
-  reason_cyber: "Claude Code 的安全分类器认为本轮可能涉及网络安全内容。Tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
-  reason_bio: "Claude Code 的安全分类器认为本轮可能涉及生物学内容。Tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
-  reason_generic: "Claude Code 的安全分类器标记了本轮对话。Tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
-  blocked: "%{model} 拒绝了该请求。"
-  rerouted: "Claude 已改用 %{model}，Tcode 中断了本轮。"
-  retry_on: "换用 %{model} 重试"
-  edit_retry: "修改后重试"
-  dismiss: "关闭"
-  review_title: "另一个模型复核了本次标记"
-  review_hint: "以下是建议的澄清说明——发送前请自行审阅并修改，这些内容由你本人提出。"
-  review_placeholder: "你的澄清说明"
-  review_send: "发送澄清说明"
 terminal:
   title: "终端"
   tabs: "终端标签页"

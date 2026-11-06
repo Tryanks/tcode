@@ -170,11 +170,6 @@ pub struct Composer {
     /// Keeping it separate from the turn composer makes the pending question
     /// and the destination of typed text unambiguous.
     user_input_custom: Entity<TextareaState>,
-    /// The editable clarification draft suggested by the fallback reviewer, plus
-    /// the draft last seeded into it — the field is only re-seeded when the
-    /// suggestion itself changes, so the user's edits survive re-renders.
-    fallback_review_input: Entity<TextareaState>,
-    fallback_review_seeded: Option<String>,
     /// Unsent text is isolated by persisted thread or project New thread page.
     input_destination: Option<ComposerDestination>,
     input_cache: std::collections::HashMap<ComposerDestination, Entity<TextareaState>>,
@@ -427,7 +422,6 @@ impl Composer {
                 .rows(1)
                 .submit_on_enter(true)
         });
-        let fallback_review_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6));
 
         let input_subscription = cx.subscribe_in(&input, window, Self::on_input_event);
         let input_observation = cx.observe(&input, Self::on_input_notified);
@@ -451,11 +445,6 @@ impl Composer {
                     _ => {}
                 },
             ),
-            cx.subscribe(&fallback_review_input, |_, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            }),
             cx.subscribe(&model_search, |_, _, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -484,8 +473,6 @@ impl Composer {
             draft_has_text,
             field,
             user_input_custom,
-            fallback_review_input,
-            fallback_review_seeded: None,
             input_destination: None,
             input_cache: Default::default(),
             input_subscription,
@@ -1565,7 +1552,6 @@ impl Composer {
             self.sync_native_rewind_prefill(window, cx);
             self.sync_composer_append(window, cx);
         }
-        self.sync_fallback_review_draft(window, cx);
         let composer_state = self.composer_state(cx);
         let subagent = composer_state.conversation_read_only;
         self.sync_keyboard(subagent, window, cx);
@@ -1861,16 +1847,6 @@ impl Composer {
         };
 
         let user_input = self.pending_user_input(cx);
-        let fallback_block = self
-            .workspace_store
-            .read(cx)
-            .fallback_block_for(self.session_id.as_deref(), cx)
-            .cloned();
-        let fallback_review = self
-            .workspace_store
-            .read(cx)
-            .fallback_review_for(self.session_id.as_deref(), cx)
-            .cloned();
 
         let composer = cx.entity();
         let chip_rows = self.render_chip_rows(window, cx);
@@ -2057,26 +2033,6 @@ impl Composer {
                 .shown(self.motion_key("user-input"), user_input, SHOW, window, cx)
         {
             let panel = self.render_user_input_panel(&shown.value, window, cx);
-            panels.push(column_fold(&shown, panel));
-        }
-        if let Some(shown) = self.motion.shown(
-            self.motion_key("fallback"),
-            fallback_block,
-            SHOW,
-            window,
-            cx,
-        ) {
-            let panel = self.render_fallback_panel(&shown.value, window, cx);
-            panels.push(column_fold(&shown, panel));
-        }
-        if let Some(shown) = self.motion.shown(
-            self.motion_key("fallback-review"),
-            fallback_review,
-            SHOW,
-            window,
-            cx,
-        ) {
-            let panel = self.render_fallback_review_panel(&shown.value, cx);
             panels.push(column_fold(&shown, panel));
         }
         if let Some(shown) = self.motion.shown(

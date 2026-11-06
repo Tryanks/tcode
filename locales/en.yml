@@ -470,18 +470,9 @@ settings:
   inactive_frame_throttle:
     title: "Background frame throttle"
     description: "Lower the frame rate while the window is unfocused to save energy. Takes effect after restart."
-  abort_on_model_fallback:
-    title: "Abort on model change"
-    description: "When on, Tcode stops the turn if Claude Code serves a different model or the safety classifier flags it. Context-window suffix differences such as [1m] are ignored. Subagents are unaffected."
   resume_on_limit_reset:
     title: "Resume when the usage limit resets"
     description: "When Claude Code stops a turn because the 5-hour usage window is exhausted, Tcode schedules a resume for the moment the window resets. Off: the error card offers a button to schedule it by hand."
-  fallback_review_advisor:
-    title: "Fallback review advisor"
-    description: "Use a separate model to review requests interrupted by Claude Code's fallback guard."
-  fallback_review_model:
-    title: "Fallback review model"
-    description: "Choose the provider and model used for fallback reviews."
   title_generation:
     title: "Thread title model"
     description: "Choose the provider and model used to generate and regenerate thread titles. Title requests always use low reasoning effort."
@@ -1159,22 +1150,6 @@ userinput:
   dismiss: "Hide"
   answer: "Answer"
   collapse: "Collapse"
-fallback:
-  model_changed_title: "Turn stopped after a model change"
-  reason_model_changed: "The responding model differs from the selected model, %{model}. Tcode stopped the turn."
-  title: "Turn stopped by the safety classifier"
-  reason_cyber: "Claude Code's safety classifier flagged this turn as potentially cyber-related. Tcode stopped it instead of letting Claude silently switch models."
-  reason_bio: "Claude Code's safety classifier flagged this turn as potentially biology-related. Tcode stopped it instead of letting Claude silently switch models."
-  reason_generic: "Claude Code's safety classifier flagged this turn. Tcode stopped it instead of letting Claude silently switch models."
-  blocked: "%{model} refused the request."
-  rerouted: "Claude rerouted to %{model}; Tcode interrupted the turn."
-  retry_on: "Retry on %{model}"
-  edit_retry: "Edit & retry"
-  dismiss: "Dismiss"
-  review_title: "A second model reviewed the flag"
-  review_hint: "Suggested clarification — review and edit it before sending; you are the one asserting this."
-  review_placeholder: "Your clarification"
-  review_send: "Send clarification"
 terminal:
   title: "Terminal"
   tabs: "Terminal tabs"

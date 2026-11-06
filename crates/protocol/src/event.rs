@@ -151,7 +151,7 @@ pub enum ServerEvent {
     GitStatusReplaced(GitStatusStatus),
     /// An unarchived thread was added or changed. Archiving a thread removes
     /// it with [`ServerEvent::IndexRemoveSession`].
-    IndexUpsertSession(SessionMeta),
+    IndexUpsertSession(Box<SessionMeta>),
     IndexUpsertProject(Project),
     IndexSummaryReplaced(IndexSummary),
     IndexActivitiesChanged {
@@ -179,30 +179,6 @@ pub enum ServerEvent {
     NativeRewindPrefill {
         session_id: String,
         text: String,
-    },
-    /// A turn was stopped because Claude Code's safety classifier fired: the request
-    /// was blocked (fallback prevented) or the model silently fell back and tcode
-    /// interrupted it. Drives the recovery card. Transient; never persisted.
-    ModelFallbackBlocked {
-        session_id: String,
-        category: Option<agent::ClassifierCategory>,
-        /// The selected model that refused / was expected.
-        model: Option<String>,
-        /// The model Claude rerouted to, when a silent fallback actually occurred
-        /// (tcode interrupted it). None when the request was blocked outright.
-        fallback_model: Option<String>,
-        /// Claude's own explanation text when available (empty otherwise).
-        detail: String,
-    },
-    /// A secondary model's review of a classifier-blocked turn: a user-facing
-    /// assessment plus a DRAFT clarification the user reviews and sends. Advisory
-    /// only; never auto-sent. Transient.
-    FallbackReviewReady {
-        session_id: String,
-        assessment: String,
-        /// Suggested first-person clarification, prefilled but editable. Empty when
-        /// the reviewer judged the flag not a false positive.
-        draft: String,
     },
     /// Records standing for the log cursors `from..end`. A cursor is the
     /// position of a stored row of the log, and a row without a readable

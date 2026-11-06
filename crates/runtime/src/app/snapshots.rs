@@ -360,7 +360,7 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
     let new_sessions: HashSet<_> = new.sessions.iter().map(|m| m.id.as_str()).collect();
     for meta in &new.sessions {
         if old_sessions.get(meta.id.as_str()) != Some(&meta) {
-            events.push(ServerEvent::IndexUpsertSession(meta.clone()));
+            events.push(ServerEvent::IndexUpsertSession(Box::new(meta.clone())));
         }
     }
     for meta in &old.sessions {
