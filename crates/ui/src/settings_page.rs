@@ -3845,6 +3845,118 @@ mod tests {
     /// defaults as the host's configuration, must adopt the host's values the
     /// moment they arrive, and must never overwrite what the user has since
     /// typed — no matter how many snapshots follow.
+    /// Settings → Control gathers the grant requests of every thread, so
+    /// one waiting in a thread the user has not opened can be answered here:
+    /// approving one widens that thread's own grant on the host and leaves
+    /// the other waiting; a thread's own grant is listed and revoked here.
+    #[gpui::test]
+    fn control_page_answers_every_threads_requests_and_revokes_grants(cx: &mut TestAppContext) {
+        use tcode_core::control::{
+            ControlCategory, ControlGrant, ControlGrantRequest, ControlScope, ControlTier,
+        };
+        cx.update(crate::theme::init);
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let root = crate::store::tests::scratch_root("control-page");
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        for project in ["infra", "web"] {
+            disk.upsert_project(&crate::store::tests::project_at(project, &root))
+                .unwrap();
+        }
+        let request = |id: &str, grant: ControlGrant| ControlGrantRequest {
+            id: id.into(),
+            grant,
+            reason: "compare CI failures".into(),
+            requested_at: 1,
+        };
+        let host_observe = ControlGrant {
+            scope: ControlScope::Host,
+            tiers: [ControlTier::Observe].into_iter().collect(),
+            categories: Default::default(),
+        };
+        let terminal = ControlGrant {
+            categories: [ControlCategory::Terminal].into_iter().collect(),
+            ..ControlGrant::none()
+        };
+        let mut asking = crate::store::tests::thread(&root, "asking", "infra", None);
+        asking.control_grant_requests = vec![request("wide", host_observe)];
+        let mut other = crate::store::tests::thread(&root, "other", "web", None);
+        other.control_grant_requests = vec![request("shell", terminal)];
+        let mut granted = crate::store::tests::thread(&root, "granted", "web", None);
+        granted.control_grant = Some(ControlGrant {
+            scope: ControlScope::Host,
+            ..ControlGrant::default_grant()
+        });
+        for meta in [&asking, &other, &granted] {
+            disk.upsert_meta(meta).unwrap();
+        }
+        let host = spawn_host(disk, HostServices::default()).expect("spawn control test host");
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "workspace baseline", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (page, vcx) = cx.add_window_view(|window, cx| {
+            SettingsPage::new(store.clone(), window_state.clone(), window, cx)
+        });
+        vcx.simulate_resize(size(px(1000.), px(4000.)));
+        page.update(vcx, |page, cx| page.select_section(Section::Control, cx));
+        crate::test_frames::draw_settled(vcx);
+        for selector in [
+            "control-pending-asking-wide",
+            "control-pending-other-shell",
+            "control-thread-granted",
+        ] {
+            assert!(vcx.debug_bounds(selector).is_some(), "{selector}");
+        }
+
+        let approve = vcx.debug_bounds("control-pending-approve-wide").unwrap();
+        vcx.simulate_click(approve.center(), gpui::Modifiers::default());
+        let meta = |cx: &TestAppContext, id: &str| {
+            store.read_with(cx, |store, _| store.thread_meta(id).cloned().unwrap())
+        };
+        driver.wait_until(vcx, &store, "the approval reaches the host", |cx| {
+            meta(cx, "asking").control_grant_requests.is_empty()
+        });
+        assert_eq!(
+            meta(vcx, "asking").control_grant,
+            Some(ControlGrant {
+                scope: ControlScope::Host,
+                ..ControlGrant::default_grant()
+            }),
+            "approving widens the default the thread held by what it asked"
+        );
+        assert_eq!(meta(vcx, "other").control_grant_requests.len(), 1);
+        crate::test_frames::draw_settled(vcx);
+        assert!(vcx.debug_bounds("control-pending-asking-wide").is_none());
+        assert!(vcx.debug_bounds("control-pending-other-shell").is_some());
+        assert!(
+            vcx.debug_bounds("control-thread-asking").is_some(),
+            "the approved thread now holds a grant of its own"
+        );
+
+        let revoke = vcx.debug_bounds("revoke-thread-grant-granted").unwrap();
+        vcx.simulate_click(revoke.center(), gpui::Modifiers::default());
+        driver.wait_until(vcx, &store, "the revocation reaches the host", |cx| {
+            meta(cx, "granted").control_grant.is_none()
+        });
+        crate::test_frames::draw_settled(vcx);
+        assert!(vcx.debug_bounds("control-thread-granted").is_none());
+
+        crate::store::tests::shutdown_test_host(vcx, &store, &host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[gpui::test]
     fn editable_settings_wait_for_the_host_and_then_keep_the_user_edit(cx: &mut TestAppContext) {
         let root = crate::store::tests::scratch_root("settings-hydration");

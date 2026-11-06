@@ -14,6 +14,7 @@ pub mod kbd;
 pub mod menu;
 mod popover;
 pub mod progress;
+pub mod radio;
 pub(crate) mod ring;
 pub(crate) mod scrollbar;
 pub mod slider;

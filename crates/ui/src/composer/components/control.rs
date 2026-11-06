@@ -67,11 +67,33 @@ impl Composer {
                 });
             })
         };
-        let summary = crate::tr!(
-            "control.request.summary",
-            summary = crate::control::grant_summary(&request.grant)
+        let (projects, own_project, current) = {
+            let store = self.workspace_store.read(cx);
+            let projects = store.projects();
+            let meta = store.thread_meta(&session_id).cloned();
+            let own_project = meta
+                .as_ref()
+                .and_then(|meta| meta.project_id.as_deref())
+                .and_then(|id| projects.iter().find(|project| project.id == id))
+                .map(|project| project.name.clone());
+            let current = self.control_status(cx).map(|(_, status)| status.grant);
+            (projects, own_project, current)
+        };
+        let wants = crate::tr!(
+            "control.request.wants",
+            what = crate::control::grant_phrase(&request.grant, own_project.as_deref(), &projects)
+                .unwrap_or_default()
         )
         .into_owned();
+        let mut context = current
+            .map(|grant| {
+                crate::control::current_grant_sentence(&grant, own_project.as_deref(), &projects)
+            })
+            .unwrap_or_default();
+        if !context.is_empty() {
+            context.push(' ');
+        }
+        context.push_str(&crate::tr!("control.request.applies"));
         // The caption and the count sit on the title's first line however
         // many lines the title wraps to.
         let title_line = cx.theme().tokens.typography.md.line_height;
@@ -89,7 +111,7 @@ impl Composer {
                             .line_height(title_line)
                             .child(crate::tr!("control.request.caption")),
                     )
-                    .child(div().flex_1().min_w_0().text_title(cx).child(summary))
+                    .child(div().flex_1().min_w_0().text_title(cx).child(wants))
                     .when(count > 1, |row| {
                         row.child(
                             div()
@@ -99,10 +121,11 @@ impl Composer {
                         )
                     }),
             )
+            .child(div().text_secondary(self.compact, cx).child(context))
             .when(!request.reason.trim().is_empty(), |card| {
-                card.child(div().text_body(self.compact, cx).child(crate::tr!(
+                card.child(div().text_body(self.compact, cx).italic().child(crate::tr!(
                     "control.request.reason",
-                    reason = request.reason.as_str()
+                    reason = request.reason.trim()
                 )))
             })
             .child(
