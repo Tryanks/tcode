@@ -20,13 +20,13 @@ mod boundaries;
 mod streams;
 mod superseded;
 
-pub use boundaries::{RewindCut, TurnBoundaries, TurnBoundaryChange};
+pub use boundaries::{RewindCut, TurnBoundaries, TurnBoundaryChange, TurnStarts};
 
 pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
-pub const TURN_INDEX_FOLD_VERSION: u32 = 6;
+pub const TURN_INDEX_FOLD_VERSION: u32 = 7;
 
 fn synthetic_entry_id(
     prefix: &str,

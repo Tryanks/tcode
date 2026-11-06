@@ -560,3 +560,106 @@ fn a_rewind_answered_without_the_prompt_refills_the_one_tcode_stored() {
         .collect();
     assert_eq!(prefills, [("phone".into(), "the second prompt".into())]);
 }
+
+/// A client folds only the window of the log it was sent. When that window
+/// began after a rewind's target but before the rewind, the client's fold
+/// could not find where to cut and showed the removed turns as the
+/// conversation, with turn numbers that no longer matched the host's.
+#[test]
+fn a_history_window_never_begins_inside_turns_a_rewind_took_out() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-rewind-window");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (sender, _commands) = smol::channel::unbounded();
+    let user = |id: &str| {
+        AgentEvent::ItemCompleted(agent::ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content: agent::ItemContent::UserMessage {
+                text: id.into(),
+                context_len: None,
+                attachments: Vec::new(),
+            },
+        })
+    };
+    state.update(cx, |state, cx| {
+        install(state, ProviderKind::ClaudeCode, cwd, Runtime::Live(sender));
+        for index in 1..=3 {
+            let turn_id = format!("turn-{index}");
+            state.record_event("rewound-thread", &user(&format!("prompt-{index}")), cx);
+            for event in [
+                AgentEvent::TurnStarted {
+                    turn_id: turn_id.clone(),
+                },
+                AgentEvent::TurnCheckpoint {
+                    turn_id: turn_id.clone(),
+                    checkpoint_id: format!("checkpoint-{index}"),
+                },
+            ] {
+                state.record_event("rewound-thread", &event, cx);
+            }
+            // The last turn is long: the baseline window reaches back into
+            // it, past the turn the rewind goes to.
+            if index == 3 {
+                for line in 0..500 {
+                    state.record_event(
+                        "rewound-thread",
+                        &AgentEvent::Warning {
+                            message: format!("line {line}"),
+                        },
+                        cx,
+                    );
+                }
+            }
+            state.record_event(
+                "rewound-thread",
+                &AgentEvent::TurnCompleted {
+                    turn_id,
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+        }
+        let mut rewind = completed("prompt-2");
+        if let AgentEvent::RewindCompleted { checkpoint_id, .. } = &mut rewind {
+            *checkpoint_id = "checkpoint-2".into();
+        }
+        state.record_event("rewound-thread", &rewind, cx);
+    });
+    cx.run_until_parked();
+    cx.drain_outgoing();
+    state.deliver(
+        cx,
+        7,
+        ClientPayload::Subscribe(Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "rewound-thread".into(),
+            },
+            after: None,
+            known_index: None,
+        }),
+    );
+    let records = cx.run_until_sent(|message| match message {
+        HostMessage::Event(EventEnvelope {
+            request_id: Some(7),
+            event: ServerEvent::SessionSnapshot { records, .. },
+            ..
+        }) => Some(records.clone()),
+        _ => None,
+    });
+    let window = tcode_core::session::Timeline::fold_stored(&records.0);
+    let live: Vec<&str> = window
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .filter(|id| id.starts_with("prompt-"))
+        .collect();
+    assert_eq!(
+        live,
+        ["prompt-1"],
+        "the removed prompts are not the conversation"
+    );
+}

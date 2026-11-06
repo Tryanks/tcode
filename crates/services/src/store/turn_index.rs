@@ -1,7 +1,9 @@
 use std::{collections::HashMap, io};
 
 use serde::{Deserialize, Serialize};
-use tcode_core::session::{StoredEvent, TURN_INDEX_FOLD_VERSION, TurnBoundaries, TurnSnapshots};
+use tcode_core::session::{
+    StoredEvent, TURN_INDEX_FOLD_VERSION, TurnBoundaries, TurnSnapshots, TurnStarts,
+};
 use turso::Connection;
 
 use super::codec::{Encoder, Mode};
@@ -20,8 +22,8 @@ pub(super) fn create_tables(db: &Db, connection: &Connection) -> io::Result<()> 
     Ok(())
 }
 
-/// Turn count after replay, and every physical row that opened a turn.
-/// Rewinds remove turns but retain the starts of their ended lifetimes.
+/// Turn count after replay, and the rows that opened the turns it holds
+/// ([`TurnStarts`]): a rewind drops the starts of the turns it removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnIndex {
     pub turns: u64,
@@ -32,6 +34,8 @@ pub struct TurnIndex {
 struct State {
     boundaries: TurnBoundaries,
     snapshots: TurnSnapshots<u64>,
+    #[serde(default)]
+    starts: TurnStarts,
     undecodable: bool,
 }
 
@@ -137,8 +141,9 @@ impl Pending {
             &record.event,
             position,
         );
-        if change.opened {
-            self.index.starts.push(position);
+        if change.opened || change.rewind.is_some() || change.undone {
+            self.state.starts.apply(&change, position);
+            self.index.starts = self.state.starts.rows().to_vec();
         }
         self.index.turns = self.state.boundaries.len() as u64;
         self.dirty |= change.changed;

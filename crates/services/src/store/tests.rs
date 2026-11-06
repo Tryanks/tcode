@@ -1361,12 +1361,11 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     let dir = DataDir::new();
     let mut store = dir.store();
     let mut fold = Timeline::default();
-    let mut starts = Vec::new();
+    let mut starts = tcode_core::session::TurnStarts::default();
     for (row, line) in LOG.lines().enumerate() {
         let record = parse_stored_line(line).unwrap().stored;
-        if fold.apply_stored(&record).opened {
-            starts.push(row as u64);
-        }
+        starts.apply(&fold.apply_stored(&record), row as u64);
+        let starts = starts.rows().to_vec();
         store
             .append_event("thread", row as u64, &record.event)
             .unwrap();
@@ -1385,11 +1384,11 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     }
     let expected = TurnIndex {
         turns: 2,
-        // A conversation rewind's row opens the turn its divider stands in,
-        // which what follows joins.
-        starts: vec![
-            2, 8, 12, 15, 20, 25, 28, 31, 37, 41, 44, 47, 50, 53, 56, 60, 66, 70,
-        ],
+        // The turns the fold holds: the divider's of the rewind at row 60
+        // (to before the first turn) and of the one at row 70; a rewind's
+        // row opens the turn its divider stands in, and the turns it took
+        // out leave their starts behind.
+        starts: vec![60, 70],
     };
     assert_eq!(store.turn_index("thread").unwrap(), Some(expected.clone()));
     store
