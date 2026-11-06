@@ -1031,15 +1031,6 @@ impl DiffPanel {
             )
             .child(
                 material::toolbar_icon_button(
-                    "diff-layout",
-                    IconName::PanelRight,
-                    crate::tr!("diff.layout_soon"),
-                    false,
-                )
-                .flex_none(),
-            )
-            .child(
-                material::toolbar_icon_button(
                     "diff-close",
                     IconName::Close,
                     crate::tr!("diff.close"),

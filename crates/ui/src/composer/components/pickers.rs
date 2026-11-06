@@ -785,6 +785,7 @@ fn render_model_pane(
             PickerRail::Acp(id.clone()),
         ));
     }
+    let show_source = rail == PickerRail::Favorites;
     let rail = div()
         .id("model-provider-rail")
         .flex_none()
@@ -823,6 +824,7 @@ fn render_model_pane(
                         &all_rows[index],
                         index,
                         &selected,
+                        show_source,
                         compact,
                         &store_entity,
                         session_id.clone(),
@@ -842,6 +844,7 @@ fn render_model_pane(
                         &rows[index],
                         index,
                         &selected,
+                        show_source,
                         compact,
                         &store_entity,
                         session_id.clone(),
@@ -1129,11 +1132,14 @@ fn render_compact_model_footer(
         .into_any_element()
 }
 
+/// `show_source` names each row's profile under it: only Favorites spans
+/// profiles, so every other rail's rows are its own profile's.
 #[allow(clippy::too_many_arguments)]
 fn render_model_row(
     row: &ModelRow,
     index: usize,
     selected: &Option<SelectedModel>,
+    show_source: bool,
     compact: bool,
     store_entity: &Entity<WorkspaceStore>,
     session_id: Option<String>,
@@ -1202,7 +1208,7 @@ fn render_model_row(
                             this.child(Icon::new(IconName::Check).text_color(cx.theme().primary))
                         }),
                 )
-                .child({
+                .when(show_source, |this| {
                     // A third-party profile's row is attributed to that profile
                     // (its accent + display name), not the built-in provider.
                     let store = store_entity.read(cx);
@@ -1211,18 +1217,13 @@ fn render_model_row(
                         Some(id) => store.provider_profile_display_name(id).into(),
                         None => gpui::SharedString::from(provider_label(row.provider)),
                     };
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .text_secondary(compact, cx)
-                        .child(glyph)
-                        .child(label)
-                })
-                .when(!row.provider.caps().mcp_servers, |this| {
                     this.child(
-                        div()
+                        h_flex()
+                            .gap_1()
+                            .items_center()
                             .text_secondary(compact, cx)
-                            .child(crate::tr!("providers.mcp_unavailable")),
+                            .child(glyph)
+                            .child(label),
                     )
                 }),
         )

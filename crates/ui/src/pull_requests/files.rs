@@ -1338,7 +1338,7 @@ impl PullRequestView {
             return material::empty_state(
                 Icon::new(IconName::File),
                 crate::tr!("pull_requests.files.empty_title").into_owned(),
-                crate::tr!("pull_requests.files.empty_desc", pr = self.noun(cx).pr).into_owned(),
+                String::new(),
                 cx,
             )
             .into_any_element();

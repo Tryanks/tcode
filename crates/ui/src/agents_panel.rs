@@ -97,10 +97,13 @@ struct AgentRow {
 }
 
 impl AgentRow {
-    /// "provider · model · effort".
+    /// "provider · model · effort"; a native row leaves the provider to the
+    /// caption its list sits under.
     fn detail(&self) -> String {
         [
-            self.provider.map(|provider| provider.display_name()),
+            self.provider
+                .filter(|_| self.managed_by.is_none())
+                .map(|provider| provider.display_name()),
             self.model.as_deref(),
             self.effort.as_deref(),
         ]
@@ -965,14 +968,12 @@ impl AgentsPanel {
                 "agents.delivery_awaiting".into(),
                 (BadgeStyle::Warning, false),
             )),
-            Some(AgentDelivery::Settled) => {
-                badges.push(("agents.delivery_settled".into(), (BadgeStyle::Plain, true)))
-            }
             Some(AgentDelivery::NotDelivered) => badges.push((
                 "agents.delivery_not_delivered".into(),
                 (BadgeStyle::Plain, false),
             )),
-            Some(AgentDelivery::Running) | None => {}
+            // A settled row is listed under Settled, which says it.
+            Some(AgentDelivery::Running | AgentDelivery::Settled) | None => {}
         }
         match row.report {
             AgentReport::Reported => {
@@ -997,7 +998,7 @@ impl AgentsPanel {
         material::empty_state(
             Icon::new(IconName::Users),
             crate::tr!("agents.empty_title"),
-            crate::tr!("agents.empty_desc"),
+            String::new(),
             cx,
         )
         .into_any_element()
@@ -1097,11 +1098,11 @@ impl Entries {
                 cx,
             )
             .into_any_element(),
-            Entry::ReadOnly(provider) => div()
+            Entry::ReadOnly => div()
                 .px(inset)
                 .py_1()
                 .text_secondary(compact, cx)
-                .child(crate::tr!("agents.readonly", provider = *provider))
+                .child(crate::tr!("agents.readonly"))
                 .into_any_element(),
             Entry::SettledHeader { count, expanded } => {
                 let label: SharedString = crate::tr!("agents.settled_count", count = *count)
@@ -1360,13 +1361,8 @@ impl Entries {
             .children(preview);
         let label = SharedString::from(title);
         let open = row.open.clone();
-        let readonly = row.managed_by.map(|provider| {
-            let note = crate::tr!("agents.readonly", provider = provider).into_owned();
-            match &row.agent_type {
-                Some(agent_type) => format!("{agent_type}\n{note}"),
-                None => note,
-            }
-        });
+        // The list says once, under the native rows, that they are read-only.
+        let readonly = row.managed_by.and(row.agent_type.clone());
         let base = material::panel_row(
             SharedString::from(format!("agent-{}", row.key)),
             label,
@@ -1490,7 +1486,7 @@ enum Entry {
     Row(Box<AgentRow>),
     /// Names the provider that runs the native subagents listed under it.
     NativeCaption(Option<&'static str>),
-    ReadOnly(&'static str),
+    ReadOnly,
     SettledHeader {
         count: usize,
         expanded: bool,
@@ -1536,8 +1532,8 @@ impl AgentsPanel {
             let provider = agents.native.first().and_then(|row| row.managed_by);
             entries.push(("native-caption".into(), Entry::NativeCaption(provider)));
             entries.extend(agents.native.iter().map(row));
-            if let Some(provider) = agents.native.first().and_then(|row| row.managed_by) {
-                entries.push(("native-readonly".into(), Entry::ReadOnly(provider)));
+            if provider.is_some() {
+                entries.push(("native-readonly".into(), Entry::ReadOnly));
             }
         }
         if !agents.settled.is_empty() {

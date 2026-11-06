@@ -1996,11 +1996,7 @@ impl PullRequestView {
                     material::empty_state(
                         Icon::new(IconName::MessageSquare),
                         crate::tr!("pull_requests.conversation.empty_title").into_owned(),
-                        crate::tr!(
-                            "pull_requests.conversation.empty_desc",
-                            pr = self.noun(cx).pr
-                        )
-                        .into_owned(),
+                        String::new(),
                         cx,
                     )
                     .flex_1(),

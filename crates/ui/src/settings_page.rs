@@ -2351,7 +2351,7 @@ impl SettingsPage {
                             crate::material::empty_state(
                                 Icon::new(Section::Archived.icon()),
                                 crate::tr!("settings.archived_empty"),
-                                crate::tr!("settings.archived_empty_desc"),
+                                String::new(),
                                 cx,
                             )
                         })
@@ -2822,9 +2822,11 @@ impl SettingsPage {
             crate::tr!("computer_use.image_mode.title")
                 .into_owned()
                 .into(),
-            crate::tr!("computer_use.image_mode.description")
-                .into_owned()
-                .into(),
+            Some(
+                crate::tr!("computer_use.image_mode.description")
+                    .into_owned()
+                    .into(),
+            ),
             label.into_owned().into(),
             vec![
                 option(
@@ -2965,7 +2967,7 @@ impl SettingsPage {
             "theme-options-menu",
             160.,
             crate::tr!("settings.theme.title").into_owned().into(),
-            crate::tr!("settings.theme.description").into_owned().into(),
+            None,
             label.into_owned().into(),
             vec![
                 option(
@@ -3030,9 +3032,7 @@ impl SettingsPage {
             "language-options-menu",
             160.,
             crate::tr!("settings.language.title").into_owned().into(),
-            crate::tr!("settings.language.description")
-                .into_owned()
-                .into(),
+            None,
             label.into_owned().into(),
             vec![
                 option(None, "settings.language.system"),

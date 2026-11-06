@@ -160,9 +160,11 @@ impl SettingsPage {
                 crate::tr!("control.settings.automation")
                     .into_owned()
                     .into(),
-                crate::tr!("control.settings.automation_description")
-                    .into_owned()
-                    .into(),
+                Some(
+                    crate::tr!("control.settings.automation_description")
+                        .into_owned()
+                        .into(),
+                ),
                 automation_label(automation),
                 automation_options,
                 automation_reset,
@@ -334,9 +336,11 @@ impl SettingsPage {
                 crate::tr!("control.subagents.child_approval.title")
                     .into_owned()
                     .into(),
-                crate::tr!("control.subagents.child_approval.description")
-                    .into_owned()
-                    .into(),
+                Some(
+                    crate::tr!("control.subagents.child_approval.description")
+                        .into_owned()
+                        .into(),
+                ),
                 approval_label(subagents.child_approval),
                 approval_options,
                 approval_reset,
@@ -572,9 +576,11 @@ impl SettingsPage {
             "project-grant-menu",
             240.,
             crate::tr!("control.settings.overrides").into_owned().into(),
-            crate::tr!("control.settings.overrides_description")
-                .into_owned()
-                .into(),
+            Some(
+                crate::tr!("control.settings.overrides_description")
+                    .into_owned()
+                    .into(),
+            ),
             crate::tr!("control.settings.add_override")
                 .into_owned()
                 .into(),

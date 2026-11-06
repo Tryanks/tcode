@@ -103,16 +103,13 @@ impl Composer {
                 // Provider-native skills (Claude `skills` / Codex `skills/list`),
                 // fuzzily filtered by the `$` query with no item cap.
                 let composer = self.composer_state(cx);
-                let harness = harness_name(&composer);
                 let commands = &composer.provider_commands;
                 let rows =
                     filter_provider_commands(commands, ProviderCommandKind::Skill, &trigger.query)
                         .into_iter()
                         .map(|c| MenuRow {
                             primary: format!("${}", c.name),
-                            secondary: c.description.clone().unwrap_or_else(|| {
-                                crate::tr!("composer.run_skill", provider = harness).into_owned()
-                            }),
+                            secondary: c.description.clone().unwrap_or_default(),
                             icon: MenuIcon::Skill,
                             accept: MenuAccept::InsertSkill(c.name.clone()),
                             group: Some("composer.group_skills"),
@@ -171,10 +168,7 @@ impl Composer {
                     .filter(|c| !(goal_offered && c.name == "goal"))
                     .map(|c| MenuRow {
                         primary: format!("/{}", c.name),
-                        secondary: c.description.clone().unwrap_or_else(|| {
-                            crate::tr!("composer.run_provider_command", provider = harness)
-                                .into_owned()
-                        }),
+                        secondary: c.description.clone().unwrap_or_default(),
                         icon: MenuIcon::Command,
                         accept: MenuAccept::InsertCommand(c.name.clone()),
                         group: Some("composer.group_provider"),
@@ -224,7 +218,7 @@ impl Composer {
                     .as_deref()
                     .and_then(|id| store.project(id))
                     .map(|project| project.name.clone())
-                    .unwrap_or_else(|| crate::tr!("control.reference.secondary").into_owned()),
+                    .unwrap_or_default(),
                 primary: meta.title,
                 icon: MenuIcon::Thread,
                 accept: MenuAccept::ReferenceThread(meta.id),
