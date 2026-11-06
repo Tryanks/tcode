@@ -79,7 +79,7 @@ impl LogRead {
     pub fn read_item(&self, item_id: &str) -> io::Result<Option<EventLog>> {
         let quoted_id = serde_json::to_vec(item_id).map_err(invalid_data)?;
         let id = memchr::memmem::Finder::new(&quoted_id);
-        let rewind = memchr::memmem::Finder::new(br#""rewind_completed""#);
+        let rewind = memchr::memmem::Finder::new(br#""rewind_"#);
         self.store.run("locate item", |st| {
             let guard = self.connection.lock().unwrap();
             let connection = guard
@@ -116,7 +116,10 @@ impl LogRead {
                         return Ok(true);
                     };
                     let address = envelope.event.as_deref().unwrap_or(&envelope);
-                    if address.event_type == "rewind_completed" {
+                    if matches!(
+                        address.event_type.as_str(),
+                        "rewind_completed" | "rewind_undone"
+                    ) {
                         last_rewind = Some(position);
                     }
                     if address.id.as_deref() == Some(item_id)

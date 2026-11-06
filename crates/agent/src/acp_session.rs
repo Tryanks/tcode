@@ -9,6 +9,7 @@
 //! services, MCP and option mapping, the standard `session/update` mapping and
 //! cancellation. What an agent family does differently is its [`Dialect`].
 
+use crate::{RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::future::Future;
@@ -1221,17 +1222,15 @@ async fn handle_command<D: Dialect>(
                 })
                 .await;
         }
-        SessionCommand::Rewind {
-            checkpoint_id,
-            mode,
-        } => {
-            let _ = events
-                .send(AgentEvent::RewindFailed {
-                    checkpoint_id,
-                    mode,
-                    error: "this ACP agent does not advertise a native rewind operation".into(),
-                })
-                .await;
+        command @ (SessionCommand::Rewind { .. }
+        | SessionCommand::PreviewRewind { .. }
+        | SessionCommand::UndoRewind { .. }) => {
+            if let Some(event) = command.rewind_refusal(RewindFailure::new(
+                RewindFailureReason::Unsupported,
+                "this ACP agent does not advertise a native rewind operation".to_owned(),
+            )) {
+                let _ = events.send(event).await;
+            }
         }
         SessionCommand::Compact => {
             let _ = events

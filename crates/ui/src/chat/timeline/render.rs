@@ -136,6 +136,9 @@ impl TimelineView {
                         &entry.id, action, cx,
                     ));
                 }
+                Segment::Rewind(entry) => {
+                    column = column.child(components::dividers::rewind_divider(entry, cx));
+                }
                 Segment::ActivityRun(activities) => {
                     column = column.child(self.compose_work_log(
                         (index, &row.part, turn, cwd, activities, row.live_activity),

@@ -152,6 +152,9 @@ pub struct ActiveSession {
     /// previews a different provider. Consumed only by a confirmed send.
     pub(super) pending_relay: Option<PendingRelay>,
     pub(super) runtime: Runtime,
+    /// A rewind holds the queue until the user next sends a message, which
+    /// goes ahead of it.
+    pub(super) queue_held: bool,
     /// The model the live provider process was actually started with. When the
     /// user picks a different model we compare against this to decide whether a
     /// restart is needed before the next turn.
@@ -255,6 +258,7 @@ impl ActiveSession {
             draft_device_id: None,
             pending_relay: None,
             runtime: Runtime::Idle,
+            queue_held: false,
             live_model: None,
             live_cwd,
             live_profile_id,
@@ -367,7 +371,7 @@ impl ActiveSession {
     pub(super) fn fully_idle(&self) -> bool {
         !self.turn_in_flight
             && self.delivery_in_flight.is_none()
-            && self.queue.is_empty()
+            && (self.queue.is_empty() || self.queue_held)
             && self.background_task_count == 0
     }
 
@@ -419,7 +423,8 @@ impl ActiveSession {
 
     /// The queued message the next dispatch would send, if one could go now.
     fn next_dispatchable(&self) -> Option<&QueuedMessage> {
-        if self.turn_in_flight
+        if self.queue_held
+            || self.turn_in_flight
             || self.delivery_in_flight.is_some()
             || self.settings_restart_deferred()
             || !matches!(self.runtime, Runtime::Live(_))

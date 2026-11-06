@@ -1364,9 +1364,7 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     let mut starts = Vec::new();
     for (row, line) in LOG.lines().enumerate() {
         let record = parse_stored_line(line).unwrap().stored;
-        let turns = fold.turns.len();
-        fold.apply_stored(&record);
-        if fold.turns.len() > turns {
+        if fold.apply_stored(&record).opened {
             starts.push(row as u64);
         }
         store
@@ -1387,8 +1385,10 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
     }
     let expected = TurnIndex {
         turns: 2,
+        // A conversation rewind's row opens the turn its divider stands in,
+        // which what follows joins.
         starts: vec![
-            2, 8, 15, 21, 26, 29, 31, 37, 42, 45, 48, 51, 54, 57, 61, 66, 71,
+            2, 8, 12, 15, 20, 25, 28, 31, 37, 41, 44, 47, 50, 53, 56, 60, 66, 70,
         ],
     };
     assert_eq!(store.turn_index("thread").unwrap(), Some(expected.clone()));

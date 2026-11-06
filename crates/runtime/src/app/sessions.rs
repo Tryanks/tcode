@@ -1608,6 +1608,9 @@ impl AppState {
                 .unwrap_or_else(|_| Err("session store writer stopped".into()));
             host_cx.enqueue(move |state, cx| match result {
                 Ok(()) => {
+                    // The fork's harness session is a new one: the parent's
+                    // restore points do not address it.
+                    state.record_event(&fork.id, &AgentEvent::CheckpointsCleared, cx);
                     state.select_session(&fork.id, cx);
                     state.reply_to_subscription(
                         None,
@@ -2307,10 +2310,12 @@ impl AppState {
                 && matches!(parked.runtime, Runtime::Idle)
                 && !parked.turn_in_flight
                 && parked.delivery_in_flight.is_none()
-                && parked.queue.is_empty()
+                && (parked.queue.is_empty() || parked.queue_held)
                 && parked.background_task_count == 0
-                && !self.pending_native_rewinds.contains_key(session_id);
-            let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
+                && !self.rewind_requests.contains_key(session_id);
+            let needs_restart = matches!(parked.runtime, Runtime::Idle)
+                && !parked.queue.is_empty()
+                && !parked.queue_held;
             if parked.draft && self.archived_sharing_affected(&parked.meta) {
                 self.archived_revision += 1;
             }

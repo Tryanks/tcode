@@ -1,6 +1,7 @@
 //! Codex provider: a small client for the newline-delimited JSON protocol used
 //! by `codex app-server`.
 
+use crate::{RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
 #[cfg(test)]
@@ -1106,19 +1107,14 @@ impl SessionActor for Actor {
                     PendingRequest::Steer { request_id, text },
                 )
             }
-            SessionCommand::Rewind {
-                checkpoint_id,
-                mode,
-            } => {
-                self.events
-                    .emit(AgentEvent::RewindFailed {
-                        checkpoint_id,
-                        mode,
-                        error:
-                            "Codex app-server has no stable native file-and-conversation rewind API"
-                                .into(),
-                    })
-                    .await;
+            command @ (SessionCommand::Rewind { .. }
+            | SessionCommand::PreviewRewind { .. }
+            | SessionCommand::UndoRewind { .. }) => {
+                if let Some(event) = command
+                    .rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
+                {
+                    self.events.emit(event).await;
+                }
                 Ok(())
             }
             // Progress arrives as the `contextCompaction` item, mid-turn or on its own.

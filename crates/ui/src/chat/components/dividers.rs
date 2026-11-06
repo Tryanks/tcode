@@ -199,3 +199,79 @@ pub(crate) fn context_window_changed_divider(id: &str, window: u64, cx: &App) ->
         cx,
     )
 }
+
+/// Why a harness did not rewind, in the user's words.
+pub(crate) fn rewind_reason(reason: agent::RewindFailureReason) -> String {
+    use agent::RewindFailureReason as Reason;
+    match reason {
+        Reason::TurnRunning => crate::tr!("rewind.reason.turn_running"),
+        Reason::Busy => crate::tr!("rewind.reason.busy"),
+        Reason::TargetNotFound => crate::tr!("rewind.reason.target_not_found"),
+        Reason::ConversationChanged => crate::tr!("rewind.reason.conversation_changed"),
+        Reason::CannotCutHere => crate::tr!("rewind.reason.cannot_cut_here"),
+        Reason::NothingToRestore => crate::tr!("rewind.reason.nothing_to_restore"),
+        Reason::Conflicts => crate::tr!("rewind.reason.conflicts"),
+        Reason::UsageLimited => crate::tr!("rewind.reason.usage_limited"),
+        Reason::Expired => crate::tr!("rewind.reason.expired"),
+        Reason::SaveFailed => crate::tr!("rewind.reason.save_failed"),
+        Reason::Unsupported => crate::tr!("rewind.reason.unsupported"),
+        Reason::ProcessGone => crate::tr!("rewind.reason.process_gone"),
+        Reason::Other => crate::tr!("rewind.reason.other"),
+    }
+    .into_owned()
+}
+
+/// What a rewind did, as one line: how much of the conversation it took
+/// back, or that it restored files alone, and the part that failed.
+pub(crate) fn rewound_label(rewound: &tcode_core::session::Rewound) -> String {
+    let mut label = if !rewound.mode.includes_conversation() {
+        crate::tr!("rewind.divider.files").into_owned()
+    } else if rewound.later_history == agent::LaterHistory::Branch {
+        crate::tr!("rewind.divider.branch").into_owned()
+    } else if rewound.removed.is_empty() {
+        crate::tr!("rewind.divider.conversation").into_owned()
+    } else if rewound.removed_turns == 1 {
+        crate::tr!("rewind.divider.turns_one").into_owned()
+    } else {
+        crate::tr!("rewind.divider.turns", count = rewound.removed_turns.max(1)).into_owned()
+    };
+    if let Some(incomplete) = &rewound.incomplete {
+        let reason = rewind_reason(incomplete.failure.reason);
+        label = if rewound.mode.includes_conversation() {
+            crate::tr!("rewind.incomplete.files", reason = reason)
+        } else {
+            crate::tr!("rewind.incomplete.conversation", reason = reason)
+        }
+        .into_owned();
+    }
+    label
+}
+
+pub(crate) fn rewind_divider(entry: &tcode_core::session::TimelineEntry, cx: &App) -> AnyElement {
+    let (label, tint) = match &entry.content {
+        tcode_core::session::EntryContent::Rewound(rewound) => (
+            rewound_label(rewound),
+            if rewound.incomplete.is_some() {
+                cx.theme().warning
+            } else {
+                cx.theme().muted_foreground
+            },
+        ),
+        tcode_core::session::EntryContent::RewindFailed { mode, failure } => (
+            if mode.is_some() {
+                crate::tr!("rewind.failed", reason = rewind_reason(failure.reason))
+            } else {
+                crate::tr!("rewind.undo_failed", reason = rewind_reason(failure.reason))
+            }
+            .into_owned(),
+            cx.theme().warning,
+        ),
+        _ => unreachable!("a rewind segment holds a rewind entry"),
+    };
+    divider(
+        SharedString::from(format!("rewind-{}", entry.id)),
+        label,
+        tint,
+        cx,
+    )
+}

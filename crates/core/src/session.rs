@@ -20,13 +20,13 @@ mod boundaries;
 mod streams;
 mod superseded;
 
-pub use boundaries::{TurnBoundaries, TurnBoundaryChange};
+pub use boundaries::{RewindCut, TurnBoundaries, TurnBoundaryChange};
 
 pub use streams::{ItemStreams, SupersededStream};
 pub use superseded::{TurnSnapshots, drop_turn_diffs};
 
 /// Bump when the persisted turn-boundary policy changes.
-pub const TURN_INDEX_FOLD_VERSION: u32 = 3;
+pub const TURN_INDEX_FOLD_VERSION: u32 = 4;
 
 fn synthetic_entry_id(
     prefix: &str,
@@ -258,6 +258,8 @@ pub struct TurnMeta {
     /// Opaque provider-owned restore point for the user message that opened
     /// this turn. Present only when the provider exposes a native rewind API.
     pub provider_checkpoint_id: Option<String>,
+    /// Restore points for the steers in this turn: (steer entry id, checkpoint id).
+    pub steer_checkpoints: Vec<(String, String)>,
     /// When the turn began (TurnStarted, or the opening user message).
     pub start_ts: Option<u64>,
     /// When the turn finished (TurnCompleted).
@@ -545,6 +547,34 @@ pub enum EntryContent {
     /// Another thread's model acted on this thread through `tcode_control`
     /// (a system row naming the actor and the action).
     ControlAction(agent::ControlAction),
+    /// A rewind the harness made: a divider where it cut the conversation, or
+    /// a note where it restored files alone.
+    Rewound(Box<Rewound>),
+    /// A rewind, or the undo of one, the harness did not make.
+    RewindFailed {
+        mode: Option<agent::RewindMode>,
+        failure: agent::RewindFailure,
+    },
+}
+
+/// What a rewind did, as its divider shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rewound {
+    pub checkpoint_id: String,
+    /// What the harness restored.
+    pub mode: agent::RewindMode,
+    pub later_history: agent::LaterHistory,
+    /// What the cut took out of the conversation, kept to be read: the entries,
+    /// and how many turns they began. Empty for a files-only restore.
+    pub removed: Vec<Arc<TimelineEntry>>,
+    pub removed_turns: usize,
+    pub files: Option<agent::RewindFiles>,
+    pub incomplete: Option<agent::RewindIncomplete>,
+    /// Present until a message is sent after the rewind, while the harness
+    /// can undo it.
+    pub undo_token: Option<String>,
+    /// The turns' metadata the cut removed, restored with the entries by an undo.
+    removed_meta: Vec<TurnMeta>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -747,6 +777,10 @@ pub struct Timeline {
     /// Latest model reported by the serving provider. Seeded from `model`.
     last_served_model: Option<String>,
     pub last_turn_status: Option<TurnStatus>,
+    /// Why this thread's harness session cannot be rewound, when it cannot.
+    pub rewind_unavailable: Option<agent::RewindFailureReason>,
+    /// A divider in `entries` still carries an undo token.
+    undo_open: bool,
     boundaries: TurnBoundaries,
     /// Monotonic counter for synthetic entry ids.
     next_synthetic_id: u64,
@@ -856,13 +890,13 @@ impl Timeline {
     }
 
     /// Fold one record, remembering whether it carried a shortened output.
-    pub fn apply_stored(&mut self, stored: &StoredEvent) {
+    pub fn apply_stored(&mut self, stored: &StoredEvent) -> TurnBoundaryChange {
         if let Some(bytes) = stored.elided
             && let Some(item_id) = stored.item_id()
         {
             self.elided_outputs.insert(item_id.to_owned(), bytes);
         }
-        self.apply_at(stored.ts, &stored.event);
+        self.apply_at(stored.ts, &stored.event)
     }
 
     /// What the running turn last started, or `None` between turns. Items
@@ -958,8 +992,9 @@ impl Timeline {
         })
     }
 
-    /// Apply one event recorded at `ts` (unix ms). Mutates in place.
-    pub fn apply_at(&mut self, ts: Option<u64>, event: &AgentEvent) {
+    /// Apply one event recorded at `ts` (unix ms). Mutates in place, and
+    /// returns what the event did to the turns.
+    pub fn apply_at(&mut self, ts: Option<u64>, event: &AgentEvent) -> TurnBoundaryChange {
         // Every timestamped event inside the open turn raises the turn's
         // watermark, not just tool lifecycle ones: a completion stamped before
         // any of them means the wall clock regressed, and the breakdown is
@@ -969,9 +1004,19 @@ impl Timeline {
             self.tool_clock.observe(ts);
         }
         let boundary = self.boundaries.apply(event);
-        if boundary.opened {
+        if boundary.opened && boundary.rewind.is_none() {
             self.push_turn(ts);
         }
+        self.apply_payload(ts, event, &boundary);
+        boundary
+    }
+
+    fn apply_payload(
+        &mut self,
+        ts: Option<u64>,
+        event: &AgentEvent,
+        boundary: &TurnBoundaryChange,
+    ) {
         match event {
             AgentEvent::TurnRetry { retry } => {
                 self.turn_retry = retry.clone();
@@ -1093,22 +1138,83 @@ impl Timeline {
                 self.turns[turn].provider_turn_id = Some(turn_id.clone());
                 self.turns[turn].provider_checkpoint_id = Some(checkpoint_id.clone());
             }
+            AgentEvent::SteerCheckpoint {
+                request_id,
+                checkpoint_id,
+            } => {
+                if let Some(turn) = boundary.target.and_then(|turn| self.turns.get_mut(turn)) {
+                    turn.steer_checkpoints
+                        .push((request_id.clone(), checkpoint_id.clone()));
+                }
+            }
+            AgentEvent::CheckpointsCleared => {
+                for turn in &mut self.turns {
+                    turn.provider_checkpoint_id = None;
+                    turn.steer_checkpoints.clear();
+                }
+                self.close_undo();
+            }
+            AgentEvent::RewindAvailability { unavailable } => {
+                self.rewind_unavailable = *unavailable;
+            }
             AgentEvent::RewindCompleted {
                 checkpoint_id,
                 mode,
+                later_history,
+                files,
+                incomplete,
+                undo_token,
                 ..
             } => {
-                if mode.includes_conversation() {
-                    if let Some(target) = boundary.rewind {
-                        self.rewind_conversation(target);
-                    } else {
-                        log::warn!(
-                            "provider rewind target is absent from the local timeline: {checkpoint_id}"
-                        );
-                    }
+                let mut rewound = Rewound {
+                    checkpoint_id: checkpoint_id.clone(),
+                    mode: *mode,
+                    later_history: *later_history,
+                    removed: Vec::new(),
+                    removed_turns: 0,
+                    files: files.clone(),
+                    incomplete: incomplete.clone(),
+                    undo_token: None,
+                    removed_meta: Vec::new(),
+                };
+                if let Some(cut) = &boundary.rewind {
+                    self.close_undo();
+                    self.rewind_conversation(cut, &mut rewound);
+                    rewound.undo_token = undo_token.clone();
+                    self.undo_open = undo_token.is_some();
+                    self.push_turn(ts);
+                } else if mode.includes_conversation() {
+                    log::warn!(
+                        "provider rewind target is absent from the local timeline: {checkpoint_id}"
+                    );
+                }
+                // A window of the log may begin after every turn the rewind
+                // touched.
+                let Some(turn) = self.boundaries.current() else {
+                    return;
+                };
+                let id = self.synthetic_id("rewound", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::Rewound(Box::new(rewound)),
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::RewindUndone { checkpoint_id } => {
+                if boundary.undone {
+                    self.undo_rewind(checkpoint_id);
                 }
             }
-            AgentEvent::RewindFailed { .. } => {}
+            AgentEvent::RewindFailed { mode, failure, .. } => {
+                self.push_rewind_failure(ts, Some(*mode), failure)
+            }
+            AgentEvent::RewindUndoFailed { failure, .. } => {
+                self.push_rewind_failure(ts, None, failure)
+            }
+            AgentEvent::RewindPreviewed { .. } => {}
             AgentEvent::TurnCompleted { status, usage, .. } => {
                 let newly_completed = self
                     .boundaries
@@ -1478,6 +1584,7 @@ impl Timeline {
         self.turns.push(TurnMeta {
             provider_turn_id: None,
             provider_checkpoint_id: None,
+            steer_checkpoints: Vec::new(),
             start_ts,
             end_ts: None,
             status: None,
@@ -1492,11 +1599,34 @@ impl Timeline {
 
     /// Apply a provider-confirmed conversation rewind. The event log remains
     /// append-only; replaying this marker produces the provider's authoritative
-    /// active history without tcode rewriting either transcript file.
-    fn rewind_conversation(&mut self, target_turn: usize) {
-        self.entries.retain(|entry| entry.turn < target_turn);
+    /// active history without tcode rewriting either transcript file. What the
+    /// cut takes out moves into `rewound`, to be read and, by an undo, put back.
+    fn rewind_conversation(&mut self, cut: &RewindCut, rewound: &mut Rewound) {
+        let from = match &cut.steer {
+            Some(steer) => self
+                .entries
+                .iter()
+                .position(|entry| entry.id == *steer && entry.turn == cut.turn),
+            None => None,
+        }
+        .unwrap_or_else(|| {
+            let turn = cut.turn + usize::from(cut.steer.is_some());
+            self.entries
+                .iter()
+                .position(|entry| entry.turn >= turn)
+                .unwrap_or(self.entries.len())
+        });
+        rewound.removed = self.entries.split_off(from);
         self.reindex_entries();
-        self.turns.truncate(target_turn);
+        let kept = cut.turn + usize::from(cut.steer.is_some());
+        rewound.removed_meta = self.turns.split_off(kept.min(self.turns.len()));
+        rewound.removed_turns = rewound.removed_meta.len();
+        if let Some(steer) = &cut.steer
+            && let Some(turn) = self.turns.get_mut(cut.turn)
+        {
+            turn.steer_checkpoints.retain(|(id, _)| id != steer);
+            turn.running = false;
+        }
         self.tool_clock = ToolClock::default();
         self.turn_running = false;
         self.pending_approvals.clear();
@@ -1507,6 +1637,76 @@ impl Timeline {
         self.last_turn_status = self.turns.last().and_then(|turn| turn.status);
         self.committed_file_change_items
             .retain(|item_id| self.entries.iter().any(|entry| entry.id == *item_id));
+    }
+
+    /// Put back what the latest rewind removed. The divider's turn holds
+    /// nothing of the user's: no message was sent after it, or the harness
+    /// would no longer undo it.
+    fn undo_rewind(&mut self, checkpoint_id: &str) {
+        let Some(position) = self.entries.iter().rposition(|entry| {
+            matches!(&entry.content, EntryContent::Rewound(rewound)
+                if rewound.checkpoint_id == checkpoint_id && rewound.undo_token.is_some())
+        }) else {
+            return;
+        };
+        let divider = self.entries.remove(position);
+        let EntryContent::Rewound(rewound) = &divider.content else {
+            unreachable!("the position holds a rewind divider");
+        };
+        let rewound = (**rewound).clone();
+        self.undo_open = false;
+        let divider_turn = divider.turn;
+        let notes: Vec<_> = self
+            .entries
+            .extract_if(.., |entry| entry.turn >= divider_turn)
+            .collect();
+        self.turns.truncate(divider_turn);
+        self.turns.extend(rewound.removed_meta);
+        self.entries.extend(rewound.removed);
+        let last = self.turns.len().saturating_sub(1);
+        self.entries.extend(notes.into_iter().map(|mut entry| {
+            Arc::make_mut(&mut entry).turn = last;
+            entry
+        }));
+        self.reindex_entries();
+        self.tool_clock = ToolClock::default();
+        self.last_turn_status = self.turns.last().and_then(|turn| turn.status);
+    }
+
+    /// A message sent after a rewind makes it final.
+    fn close_undo(&mut self) {
+        if !std::mem::take(&mut self.undo_open) {
+            return;
+        }
+        if let Some(entry) = self.entries.iter_mut().rev().find(|entry| {
+            matches!(&entry.content, EntryContent::Rewound(rewound) if rewound.undo_token.is_some())
+        }) && let EntryContent::Rewound(rewound) = &mut Arc::make_mut(entry).content
+        {
+            rewound.undo_token = None;
+        }
+    }
+
+    fn push_rewind_failure(
+        &mut self,
+        ts: Option<u64>,
+        mode: Option<agent::RewindMode>,
+        failure: &agent::RewindFailure,
+    ) {
+        let Some(turn) = self.boundaries.current() else {
+            return;
+        };
+        let id = self.synthetic_id("rewind-failed", ts);
+        self.entries.push(Arc::new(TimelineEntry {
+            id,
+            content: EntryContent::RewindFailed {
+                mode,
+                failure: failure.clone(),
+            },
+            ts,
+            finished_ts: None,
+            background: false,
+            turn,
+        }));
     }
 
     fn ensure_turn(&self) -> usize {
@@ -1580,6 +1780,7 @@ impl Timeline {
                 incoming,
                 EntryContent::Item(ItemContent::UserMessage { .. })
             ) {
+                self.close_undo();
                 let turn = self.begin_user_turn();
                 if self.entries.iter().any(|entry| {
                     entry.turn == turn
@@ -1631,6 +1832,7 @@ impl Timeline {
         if self.first_entry(request_id).is_some() {
             return;
         }
+        self.close_undo();
         let turn = self.ensure_turn();
         self.entries.push(Arc::new(TimelineEntry {
             id: request_id.to_owned(),
@@ -2364,10 +2566,9 @@ mod tests {
         assert!(timeline.pending_user_input.is_none());
     }
 
-    #[test]
-    fn provider_conversation_rewind_is_an_append_only_timeline_marker() {
+    fn checkpointed_turns(count: usize) -> Vec<AgentEvent> {
         let mut events = Vec::new();
-        for index in 1..=3 {
+        for index in 1..=count {
             events.extend([
                 user_msg(&format!("user-{index}"), &format!("prompt {index}")),
                 AgentEvent::TurnStarted {
@@ -2384,15 +2585,34 @@ mod tests {
                 },
             ]);
         }
-        events.push(AgentEvent::RewindCompleted {
-            checkpoint_id: "checkpoint-2".into(),
-            mode: RewindMode::Conversation,
-            prefill: Some("prompt 2".into()),
-        });
+        events
+    }
+
+    fn divider(timeline: &Timeline) -> &Rewound {
+        timeline
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.content {
+                EntryContent::Rewound(rewound) => Some(&**rewound),
+                _ => None,
+            })
+            .expect("the rewind left a divider")
+    }
+
+    #[test]
+    fn provider_conversation_rewind_is_an_append_only_timeline_marker() {
+        let mut events = checkpointed_turns(3);
+        // A rewind as logs before rewind dividers recorded it.
+        events.push(
+            serde_json::from_str(
+                r#"{"type":"rewind_completed","checkpoint_id":"checkpoint-2","mode":"conversation","prefill":"prompt 2"}"#,
+            )
+            .unwrap(),
+        );
 
         let mut timeline = Timeline::fold_events(events);
-        assert_eq!(timeline.turns.len(), 1);
-        assert_eq!(timeline.entries.len(), 1);
+        assert_eq!(timeline.turns.len(), 2, "the kept turn and the divider's");
         assert!(matches!(
             &timeline.entries[0].content,
             EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "prompt 1"
@@ -2401,15 +2621,117 @@ mod tests {
             timeline.turns[0].provider_checkpoint_id.as_deref(),
             Some("checkpoint-1")
         );
+        let rewound = divider(&timeline);
+        assert_eq!(rewound.removed_turns, 2);
+        assert!(rewound.undo_token.is_none());
+        assert!(matches!(
+            &rewound.removed[0].content,
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "prompt 2"
+        ));
 
-        // New work after the marker opens a fresh turn; removed history does
-        // not reappear even though the underlying JSONL remains append-only.
+        // New work after the divider joins its turn; removed history does not
+        // reappear even though the underlying log remains append-only.
         timeline.apply_at(None, &user_msg("user-4", "replacement prompt"));
         assert_eq!(timeline.turns.len(), 2);
         assert!(matches!(
-            &timeline.entries[1].content,
+            &timeline.entries[2].content,
             EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "replacement prompt"
         ));
+    }
+
+    fn undoable_rewind(checkpoint: &str) -> AgentEvent {
+        AgentEvent::RewindCompleted {
+            checkpoint_id: checkpoint.into(),
+            mode: RewindMode::FilesAndConversation,
+            prefill: None,
+            prefill_attachments: Vec::new(),
+            later_history: agent::LaterHistory::HiddenUntilNextSend,
+            files: None,
+            incomplete: None,
+            undo_token: Some("revert".into()),
+        }
+    }
+
+    #[test]
+    fn an_undoable_rewind_is_undone_until_a_message_is_sent() {
+        let mut events = checkpointed_turns(3);
+        events.push(undoable_rewind("checkpoint-2"));
+        let mut timeline = Timeline::fold_events(events.clone());
+        let mut boundaries = TurnBoundaries::default();
+        for event in &events {
+            boundaries.apply(event);
+        }
+        assert_eq!(divider(&timeline).undo_token.as_deref(), Some("revert"));
+
+        let undone = AgentEvent::RewindUndone {
+            checkpoint_id: "checkpoint-2".into(),
+        };
+        timeline.apply_at(None, &undone);
+        boundaries.apply(&undone);
+        let before = Timeline::fold_events(checkpointed_turns(3));
+        assert_eq!(
+            (&timeline.entries, &timeline.turns),
+            (&before.entries, &before.turns),
+            "the undo puts back exactly what the rewind removed"
+        );
+        assert_eq!(boundaries.len(), 3);
+
+        events.push(user_msg("user-4", "replacement prompt"));
+        let mut timeline = Timeline::fold_events(events);
+        assert!(divider(&timeline).undo_token.is_none());
+        timeline.apply_at(None, &undone);
+        assert_eq!(
+            timeline.turns.len(),
+            2,
+            "a sent message made the rewind final"
+        );
+    }
+
+    #[test]
+    fn a_rewind_to_a_steer_keeps_the_turn_before_it() {
+        let mut events = checkpointed_turns(1);
+        events.truncate(3);
+        events.extend([
+            AgentEvent::SteerRequested {
+                request_id: "steer-1".into(),
+                text: "also this".into(),
+                attachments: Vec::new(),
+            },
+            AgentEvent::SteerAccepted {
+                request_id: "steer-1".into(),
+            },
+            AgentEvent::SteerCheckpoint {
+                request_id: "steer-1".into(),
+                checkpoint_id: "steer-checkpoint".into(),
+            },
+            assistant("reply", "done"),
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ]);
+        let mut rewind = undoable_rewind("steer-checkpoint");
+        if let AgentEvent::RewindCompleted {
+            mode, undo_token, ..
+        } = &mut rewind
+        {
+            *mode = RewindMode::Conversation;
+            *undo_token = None;
+        }
+        events.push(rewind);
+
+        let timeline = Timeline::fold_events(events);
+        assert!(matches!(
+            &timeline.entries[0].content,
+            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "prompt 1"
+        ));
+        assert_eq!(timeline.entries[0].turn, 0);
+        let rewound = divider(&timeline);
+        assert_eq!(rewound.removed_turns, 0);
+        assert_eq!(rewound.removed.len(), 2, "the steer and the reply after it");
+        assert!(timeline.turns[0].steer_checkpoints.is_empty());
+        assert_eq!(timeline.turns.len(), 2);
     }
 
     #[test]

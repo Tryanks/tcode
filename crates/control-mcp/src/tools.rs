@@ -327,7 +327,7 @@ impl ControlTools {
     }
 
     #[tool(
-        description = "Rewind a thread to an earlier turn through its provider (privileged: history_edit). files restores the files the provider tracked; conversation cuts what came after the turn from the conversation the provider sees, while the stored log keeps it appended. Only where the provider supports rewind, and never while the thread is busy."
+        description = "Rewind a thread to an earlier turn through its provider (privileged: history_edit). files restores the files the provider tracked; conversation cuts what came after the turn from the conversation the provider sees, while the stored log keeps it appended. Only the scopes the provider offers for that turn, and only when its rewind can start. Answers once the provider has: completed, partial (what failed) or failed, with the provider's reason."
     )]
     async fn rewind(&self, Parameters(p): Parameters<RewindParams>) -> CallToolResult {
         self.run(ControlOp::Rewind(p)).await

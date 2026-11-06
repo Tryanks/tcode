@@ -22,6 +22,7 @@
 //! task owns the child: it reads stdout lines, receives [`SessionCommand`]s, and
 //! writes stream-json lines to stdin. Multiple turns run over one process.
 
+use crate::{LaterHistory, RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -1243,6 +1244,14 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::SetOption { .. } => ControlFlow::Continue(()),
+        command @ (SessionCommand::PreviewRewind { .. } | SessionCommand::UndoRewind { .. }) => {
+            if let Some(event) =
+                command.rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
+            {
+                let _ = event_tx.send(event).await;
+            }
+            ControlFlow::Continue(())
+        }
         SessionCommand::Rewind {
             checkpoint_id,
             mode,
@@ -1254,7 +1263,10 @@ async fn handle_command(
                         .send(AgentEvent::RewindFailed {
                             checkpoint_id,
                             mode,
-                            error: "failed to write rewind request to provider stdin".into(),
+                            failure: RewindFailure::new(
+                                RewindFailureReason::ProcessGone,
+                                "failed to write rewind request to provider stdin".to_owned(),
+                            ),
                         })
                         .await;
                 }
@@ -1263,7 +1275,7 @@ async fn handle_command(
                         .send(AgentEvent::RewindFailed {
                             checkpoint_id,
                             mode,
-                            error,
+                            failure: RewindFailure::new(RewindFailureReason::Unsupported, error),
                         })
                         .await;
                 }
@@ -3057,7 +3069,7 @@ impl Mapper {
             return vec![AgentEvent::RewindFailed {
                 checkpoint_id,
                 mode,
-                error,
+                failure: RewindFailure::new(RewindFailureReason::Other, error),
             }];
         }
         let result = response.get("response").unwrap_or(&Value::Null);
@@ -3066,11 +3078,14 @@ impl Mapper {
                 return vec![AgentEvent::RewindFailed {
                     checkpoint_id,
                     mode,
-                    error: result
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Claude Code could not restore files")
-                        .to_owned(),
+                    failure: RewindFailure::new(
+                        RewindFailureReason::Other,
+                        result
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Claude Code could not restore files")
+                            .to_owned(),
+                    ),
                 }];
             }
             if mode == RewindMode::FilesAndConversation {
@@ -3082,17 +3097,25 @@ impl Mapper {
                 checkpoint_id,
                 mode,
                 prefill: None,
+                prefill_attachments: Vec::new(),
+                later_history: LaterHistory::Truncated,
+                files: None,
+                incomplete: None,
+                undo_token: None,
             }];
         }
         if result.get("rewound").and_then(Value::as_bool) != Some(true) {
             vec![AgentEvent::RewindFailed {
                 checkpoint_id,
                 mode,
-                error: result
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Claude Code could not restore the conversation")
-                    .to_owned(),
+                failure: RewindFailure::new(
+                    RewindFailureReason::Other,
+                    result
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Claude Code could not restore the conversation")
+                        .to_owned(),
+                ),
             }]
         } else {
             vec![AgentEvent::RewindCompleted {
@@ -3102,6 +3125,11 @@ impl Mapper {
                     .get("prefillText")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                prefill_attachments: Vec::new(),
+                later_history: LaterHistory::Truncated,
+                files: None,
+                incomplete: None,
+                undo_token: None,
             }]
         }
     }
@@ -4722,6 +4750,7 @@ mod tests {
                 checkpoint_id,
                 mode: RewindMode::FilesAndConversation,
                 prefill: Some(prefill),
+                ..
             }] if checkpoint_id == "checkpoint-2" && prefill == "original prompt"
         ));
     }

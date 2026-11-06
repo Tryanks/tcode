@@ -3,36 +3,6 @@ use tcode_core::settings::SettingsPatch;
 use tcode_core::thread_sort::ThreadSection;
 
 impl AppState {
-    pub(super) fn native_rewind_blocked(&self, active: &ActiveSession) -> bool {
-        active.meta.provider.caps().native_rewind.is_none()
-            || active.turn_in_flight
-            || active.delivery_in_flight.is_some()
-            || active.background_task_count > 0
-            || active.timeline.turn_running
-            || !active.queue.is_empty()
-            || self.pending_native_rewinds.contains_key(&active.meta.id)
-    }
-
-    /// Whether the harness can restore `turn` in `mode` from its own
-    /// checkpoint for that turn.
-    pub(super) fn native_rewind_offered(
-        active: &ActiveSession,
-        turn: usize,
-        mode: RewindMode,
-    ) -> bool {
-        active
-            .meta
-            .provider
-            .caps()
-            .native_rewind
-            .is_some_and(|rewind| rewind.offers(mode, turn))
-            && active
-                .timeline
-                .turns
-                .get(turn)
-                .is_some_and(|turn| turn.provider_checkpoint_id.is_some())
-    }
-
     pub(super) fn checkout_blocked(active: &ActiveSession) -> bool {
         // A provider that dies without closing its timeline turn must not block
         // checkout forever: the promise is no foreground turn.
@@ -368,13 +338,26 @@ impl AppState {
                     "There is no terminal available to split.",
                 ));
             }
-            Command::RewindTurn { turn, mode, .. }
-                if self.native_rewind_blocked(active)
-                    || !Self::native_rewind_offered(active, *turn, *mode) =>
+            Command::RewindTurn {
+                turn, steer, mode, ..
+            }
+            | Command::PreviewRewind {
+                turn, steer, mode, ..
+            } if self
+                .rewind_checkpoint(active, *turn, steer.as_deref(), *mode)
+                .is_none() =>
             {
                 return Err(error(
                     "rewind_unavailable",
-                    "This turn cannot be rewound now.",
+                    "This message cannot be rewound to now.",
+                ));
+            }
+            Command::UndoRewind { checkpoint_id, .. }
+                if self.rewind_undo_token(active, checkpoint_id).is_none() =>
+            {
+                return Err(error(
+                    "rewind_unavailable",
+                    "This rewind cannot be undone now.",
                 ));
             }
             Command::ActivateTerminal { terminal_id, .. }

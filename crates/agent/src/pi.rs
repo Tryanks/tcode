@@ -2,6 +2,7 @@
 //!
 //! RPC records are framed by LF only. Extension confirmation UI is transported generically.
 
+use crate::{RewindFailure, RewindFailureReason};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -456,12 +457,14 @@ impl SessionActor for PiActor {
                 send_json(&mut self.stdin, &response).map_err(|err| err.to_string())?;
                 Ok(())
             }
-            SessionCommand::Rewind { .. } => {
-                self.events
-                    .emit(AgentEvent::Warning {
-                        message: "pi rewind is not exposed by Tcode's native adapter".into(),
-                    })
-                    .await;
+            command @ (SessionCommand::Rewind { .. }
+            | SessionCommand::PreviewRewind { .. }
+            | SessionCommand::UndoRewind { .. }) => {
+                if let Some(event) = command
+                    .rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
+                {
+                    self.events.emit(event).await;
+                }
                 Ok(())
             }
             // Progress arrives as `compaction_start` / `compaction_end`.

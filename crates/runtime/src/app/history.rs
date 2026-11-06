@@ -554,15 +554,14 @@ impl SessionLog {
     }
 
     fn push_at(&mut self, record: SessionEventRecord, row: u64) -> Option<SupersededStream<u64>> {
-        let turns = self.fold.turns.len();
         let index = self.records.len();
-        let superseded = self
-            .snapshots
-            .apply_at(&mut self.fold, record.ts, &record.event, index);
+        let (change, superseded) =
+            self.snapshots
+                .apply_at(&mut self.fold, record.ts, &record.event, index);
         let stream = self
             .streams
             .follow(&mut self.fold, record.ts, &record.event, row);
-        if self.fold.turns.len() > turns {
+        if change.opened {
             self.turn_starts.push(row);
         }
         self.retained_bytes += wire_len(&record) + 1;

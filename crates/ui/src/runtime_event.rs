@@ -1,4 +1,4 @@
-use agent::{ProviderKind, RewindMode};
+use agent::ProviderKind;
 use tcode_core::git::GitAction;
 use tcode_protocol::{
     GitActionRequest, MergeWorktreeFailure, NoticeSeverity, PluginOperationTarget, RuntimeEffect,
@@ -63,7 +63,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::DeleteProject { error } => {
                     crate::tr!("errors.delete_project", error = error).into_owned()
                 }
-                RuntimeError::NativeRewindBlocked => crate::tr!("chat.rewind_blocked").into_owned(),
                 RuntimeError::PersistEvent { error } => {
                     crate::tr!("errors.persist_event", error = error).into_owned()
                 }
@@ -123,15 +122,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeNotice::TcodeUpdateAvailable { version } => {
                     crate::tr!("notice.tcode_update_available", version = version).into_owned()
                 }
-                RuntimeNotice::NativeRewindCompleted { mode } => match mode {
-                    RewindMode::Files => crate::tr!("chat.rewind_files_done").into_owned(),
-                    RewindMode::Conversation => {
-                        crate::tr!("chat.rewind_conversation_done").into_owned()
-                    }
-                    RewindMode::FilesAndConversation => {
-                        crate::tr!("chat.rewind_all_done").into_owned()
-                    }
-                },
                 RuntimeNotice::SwitchedBranch { branch } => {
                     crate::tr!("notice.switched_branch", branch = branch).into_owned()
                 }

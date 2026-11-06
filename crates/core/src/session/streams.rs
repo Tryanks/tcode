@@ -144,7 +144,9 @@ impl<K> ItemStreams<K> {
                         );
                         stream.creator = Some(key);
                     }
-                    _ => stream.without.apply_at(ts, event),
+                    _ => {
+                        stream.without.apply_at(ts, event);
+                    }
                 }
                 self.items
                     .insert(item.clone(), Stream::Following(Box::new(stream)));

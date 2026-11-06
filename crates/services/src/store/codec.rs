@@ -81,6 +81,11 @@ const TYPES: &[&str] = &[
     "error",
     "usage_limit_reached",
     "session_closed",
+    "steer_checkpoint",
+    "checkpoints_cleared",
+    "rewind_availability",
+    "rewind_undone",
+    "rewind_undo_failed",
 ];
 
 /// The type byte rows of event type `name` carry.

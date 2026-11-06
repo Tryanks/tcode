@@ -182,6 +182,11 @@ fn original_entries_are_read_by_anchor_after_compaction_rewind_retry_and_fork() 
         checkpoint_id: "cp-2".into(),
         mode: RewindMode::Conversation,
         prefill: None,
+        prefill_attachments: Vec::new(),
+        later_history: agent::LaterHistory::Truncated,
+        files: None,
+        incomplete: None,
+        undo_token: None,
     });
     let (_, retried) = target.turn(3, "Try a channel", "Working on it.");
     target.record(AgentEvent::TurnRetry {

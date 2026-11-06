@@ -47,6 +47,8 @@ fn is_provider_work(content: &EntryContent) -> bool {
         | EntryContent::ContextCompacted(_)
         | EntryContent::ContextWindowChanged { .. }
         | EntryContent::ControlAction(_)
+        | EntryContent::Rewound(_)
+        | EntryContent::RewindFailed { .. }
         | EntryContent::ModelChanged { .. } => false,
     }
 }
@@ -314,7 +316,10 @@ fn render_turn(number: usize, entries: &[&TimelineEntry]) -> String {
                 "provider",
                 &format!("window set to {}", agent::context_window::format(*window)),
             ),
-            EntryContent::ModelChanged { .. } => {}
+            // The removed turns are no longer the harness's conversation.
+            EntryContent::ModelChanged { .. }
+            | EntryContent::Rewound(_)
+            | EntryContent::RewindFailed { .. } => {}
             EntryContent::ControlAction(action) => activity(
                 &mut body,
                 "control",

@@ -1296,7 +1296,8 @@ impl AppState {
                 .then(|| session.timeline.turn_retry.clone())
                 .flatten(),
             goal: session.timeline.goal.clone(),
-            native_rewind_blocked: self.native_rewind_blocked(session),
+            rewind: self.rewind_status(session),
+            queue_held: session.queue_held && !session.queue.is_empty(),
             checkout_blocked: Self::checkout_blocked(session),
             conversation_read_only: Self::conversation_read_only(meta),
             terminal_limit_reached: self.terminal_limit_reached(session),
@@ -1324,11 +1325,6 @@ impl AppState {
             worktree: meta.worktree.clone(),
             preparing_worktree: session.preparing_worktree,
             relay_confirmation,
-            native_rewind_pending: self.pending_native_rewinds.contains_key(session_id),
-            // The one-shot value is transferred to the client as a dedicated
-            // serialized event; availability is client-replica state after
-            // that point, not a host-side consuming read.
-            native_rewind_prefill_available: false,
             model_pending_restart: session.model_changed_while_live(),
             options_pending_restart: session.options_changed_while_live(),
             injected_tools: self.injected_tools(session),

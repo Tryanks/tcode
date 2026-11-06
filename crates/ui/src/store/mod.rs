@@ -1609,10 +1609,8 @@ impl WorkspaceStore {
                     ServerEvent::SessionStatusReplaced(status),
                 ) if status.session_id == *session_id => {
                     let loaded = self.baseline_topics.insert(envelope_topic.clone());
-                    let prefill_available = self.native_rewind_prefills.contains_key(session_id);
                     if let Some(thread) = self.threads.get_mut(session_id) {
-                        let mut status = status.as_ref().clone();
-                        status.native_rewind_prefill_available = prefill_available;
+                        let status = status.as_ref().clone();
                         let drawer = (status.terminal_open, status.terminal_height);
                         thread.status = Some(status);
                         if thread.open {
@@ -1680,20 +1678,15 @@ impl WorkspaceStore {
                 }
                 (
                     Topic::SessionStatus { session_id },
-                    ServerEvent::NativeRewindPrefill {
+                    ServerEvent::RewindPrefill {
                         session_id: event_session,
+                        client_id,
                         text,
+                        ..
                     },
-                ) if session_id == event_session => {
+                ) if session_id == event_session && *client_id == self.preview.client_id() => {
                     self.native_rewind_prefills
                         .insert(session_id.clone(), text.clone());
-                    if let Some(status) = self
-                        .threads
-                        .get_mut(session_id)
-                        .and_then(|thread| thread.status.as_mut())
-                    {
-                        status.native_rewind_prefill_available = true;
-                    }
                 }
                 _ => {}
             }
@@ -3787,15 +3780,7 @@ impl WorkspaceStore {
         cx: &App,
     ) -> Option<String> {
         let session_id = self.thread_status(session_id, cx)?.session_id.clone();
-        let prefill = self.native_rewind_prefills.remove(&session_id)?;
-        if let Some(status) = self
-            .threads
-            .get_mut(&session_id)
-            .and_then(|thread| thread.status.as_mut())
-        {
-            status.native_rewind_prefill_available = false;
-        }
-        Some(prefill)
+        self.native_rewind_prefills.remove(&session_id)
     }
 
     /// Build renderer handles from replicated layout. Local affordances keep
@@ -3985,7 +3970,7 @@ impl WorkspaceStore {
         cx: &App,
     ) -> Option<NativeRewindState> {
         let status = self.thread_status(session_id, cx)?;
-        let rewind = status.provider.caps().native_rewind?;
+        let rewind = status.rewind.as_ref()?;
         let has_checkpoint = self
             .with_timeline_for(
                 session_id,
@@ -4004,11 +3989,11 @@ impl WorkspaceStore {
             .modes
             .iter()
             .copied()
-            .filter(|&mode| rewind.offers(mode, absolute))
+            .filter(|&mode| rewind.offers(mode, absolute, false))
             .collect();
         (has_checkpoint && !modes.is_empty()).then_some(NativeRewindState {
             modes,
-            blocked: status.native_rewind_blocked,
+            blocked: rewind.blocked.is_some(),
         })
     }
 
@@ -8740,7 +8725,9 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn native_rewind_prefill_events_remain_keyed_to_parked_sessions(cx: &mut TestAppContext) {
+    fn rewind_prefills_reach_only_their_client_and_stay_keyed_to_parked_sessions(
+        cx: &mut TestAppContext,
+    ) {
         let root = scratch_root("tcode-native-rewind-replica-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let first = SessionMeta::new(ProviderKind::ClaudeCode, root.join("first"), None);
@@ -8776,9 +8763,19 @@ pub(crate) mod tests {
                 after: None,
             })
             .unwrap();
-        for (session_id, text) in [
-            (first.id.clone(), "first parked prefill".to_string()),
-            (second.id.clone(), "second parked prefill".to_string()),
+        let own = workspace.read_with(cx, |store, _| store.preview.client_id().to_owned());
+        for (session_id, client_id, text) in [
+            (
+                first.id.clone(),
+                own.clone(),
+                "first parked prefill".to_string(),
+            ),
+            (second.id.clone(), own, "second parked prefill".to_string()),
+            (
+                first.id.clone(),
+                "another-client".to_string(),
+                "asked elsewhere".to_string(),
+            ),
         ] {
             update_host!(&host, move |_state, cx| {
                 cx.emit(HostEvent::Domain(EventEnvelope {
@@ -8786,7 +8783,12 @@ pub(crate) mod tests {
                     topic: Topic::SessionStatus {
                         session_id: session_id.clone(),
                     },
-                    event: ServerEvent::NativeRewindPrefill { session_id, text },
+                    event: ServerEvent::RewindPrefill {
+                        session_id,
+                        client_id,
+                        text,
+                        attachments: Vec::new(),
+                    },
                 }));
             });
         }
