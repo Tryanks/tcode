@@ -1499,12 +1499,25 @@ fn provider_login_follows_the_cli_through_sign_in_and_sign_out() {
 
 /// A finished turn refreshes the account usage of the profile it ran on and
 /// of no other, and asks the thread's own running harness for it instead of
-/// starting another.
+/// starting another. Claude Code reports `max` for the Ultra plan too, so the
+/// plan is the one its account file names.
 #[test]
 fn a_turn_refreshes_only_its_profiles_usage_from_its_running_harness() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-turn-usage");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let account = std::env::temp_dir().join(format!("tcode-turn-usage-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(
+        account.join(".claude.json"),
+        r#"{"oauthAccount":{"organizationType":"claude_max","planDisplayName":"Ultra"}}"#,
+    )
+    .unwrap();
+    let mut client = TestClientState::new((*test_store).clone());
+    client
+        .settings
+        .provider_mut(ProviderKind::ClaudeCode)
+        .home_path = Some(account.clone());
+    let state = cx.new_entity(client);
     let (commands, received) = smol::channel::unbounded();
     let session = live_session(ProviderKind::ClaudeCode, commands);
     let id = session.meta.id.clone();
@@ -1541,8 +1554,9 @@ fn a_turn_refreshes_only_its_profiles_usage_from_its_running_harness() {
     cx.run_until(|state| state.providers.usage_checking.is_empty());
     let usage = state.read(|state| state.providers.provider_usage.clone());
     assert_eq!(usage.keys().collect::<Vec<_>>(), ["claude"]);
-    assert_eq!(usage["claude"].plan.as_deref(), Some("max"));
+    assert_eq!(usage["claude"].plan.as_deref(), Some("Ultra"));
     assert_eq!(usage["claude"].windows.len(), 1);
+    std::fs::remove_dir_all(account).unwrap();
 }
 
 /// Another Claude account starts from a copy of the user's own configuration,
