@@ -909,16 +909,6 @@ impl TimelineView {
         self.timeline_folds = folds;
         // A collapsed Work Log's rows fold away from what they showed.
         let old_rows = (seen && regrouped).then(|| self.rows.clone());
-        // A reader away from the tail is held by the row at the top of the
-        // view, and the rows below it stand in for it if it goes.
-        let reading = (!session_changed && !self.list_state.is_following_tail()).then(|| {
-            let anchor = self.list_state.logical_scroll_top();
-            let rows = self.rows.get(anchor.item_ix..).unwrap_or_default();
-            (
-                anchor,
-                rows.iter().map(|row| row.identity).collect::<Vec<_>>(),
-            )
-        });
         let (list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
@@ -981,27 +971,6 @@ impl TimelineView {
         }
         match list_sync {
             ListSync::None => {}
-            ListSync::Prepend { count, remeasure } => {
-                let anchor = self.list_state.logical_scroll_top();
-                let following = self.list_state.is_following_tail();
-                self.list_state.splice(0..0, count);
-                // A page requested before a capture began still lands during
-                // it; the capture's anchor names the same turn as before.
-                if let Some(capture) = &mut self.capture {
-                    capture.anchor.item_ix += count;
-                    capture.origin.item_ix += count;
-                }
-                // The edge padding and the reservation move to the new first
-                // turn. Remove them from the former first turn without moving
-                // its content.
-                self.list_state.remeasure_items(count..count + 1);
-                if anchor.item_ix == 0 && !following {
-                    self.keep_reading(anchor, count);
-                }
-                for index in remeasure {
-                    self.list_state.remeasure_items(index..index + 1);
-                }
-            }
             ListSync::Reset { count } => {
                 self.reservation_scroll_back = None;
                 self.list_state.reset(count);
@@ -1009,33 +978,6 @@ impl TimelineView {
                     // Reset also clears stale item focus handles. A newly opened
                     // session always starts actively following its tail.
                     self.list_state.set_follow_mode(FollowMode::Tail);
-                } else if let Some((anchor, below)) = reading {
-                    // `ListState::reset` drops the anchor, and this list is
-                    // bottom-aligned: without one it lays out at its end and
-                    // follows the tail again. Rows re-indexed under a reader
-                    // (a page bringing the start of an item a later turn
-                    // updated moves it there) keep the row read.
-                    let rows: HashMap<u64, usize> = self
-                        .rows
-                        .iter()
-                        .enumerate()
-                        .map(|(index, row)| (row.identity, index))
-                        .collect();
-                    if let Some((skipped, &row)) = below
-                        .iter()
-                        .enumerate()
-                        .find_map(|(skipped, identity)| Some((skipped, rows.get(identity)?)))
-                    {
-                        let anchor = if skipped == 0 {
-                            anchor
-                        } else {
-                            ListOffset {
-                                item_ix: anchor.item_ix + skipped,
-                                offset_in_item: px(0.),
-                            }
-                        };
-                        self.keep_reading(anchor, row);
-                    }
                 }
             }
             ListSync::Incremental {
@@ -1044,9 +986,16 @@ impl TimelineView {
                 carried,
             } => {
                 let anchor = self.list_state.logical_scroll_top();
-                let carried_offset = (!self.list_state.is_following_tail()
+                let following = self.list_state.is_following_tail();
+                let carried_offset = (!following
                     && carried.iter().any(|range| range.contains(&anchor.item_ix)))
                 .then_some(anchor.offset_in_item);
+                // Rows above every row: an earlier history page, or the
+                // records that complete the partial first turn.
+                let prepended = splices
+                    .first()
+                    .filter(|(range, _)| old_len > 0 && *range == (0..0))
+                    .map(|(_, count)| *count);
                 let arrived = if seen {
                     crate::motion::list_rows::arrived_rows(&splices, &carried, old_len)
                 } else {
@@ -1055,7 +1004,7 @@ impl TimelineView {
                 let left = old_rows
                     .map(|old| self.rows_leaving(&old, cx))
                     .unwrap_or_default();
-                for (range, count) in splices.into_iter().rev() {
+                for (range, count) in splices.iter().rev() {
                     // The row above a splice changes its padding (the former
                     // last row hands its edge padding to the new one); its
                     // cached height must not keep it.
@@ -1063,7 +1012,28 @@ impl TimelineView {
                         self.list_state
                             .remeasure_items(range.start - 1..range.start);
                     }
-                    self.list_state.splice(range, count);
+                    self.list_state.splice(range.clone(), *count);
+                    // A page requested before a capture began still lands
+                    // during it; the capture's anchors name the same rows as
+                    // before.
+                    if let Some(capture) = &mut self.capture {
+                        for offset in [&mut capture.anchor, &mut capture.origin] {
+                            if range.end <= offset.item_ix {
+                                offset.item_ix = offset.item_ix - range.len() + count;
+                            } else if range.contains(&offset.item_ix) {
+                                offset.item_ix = range.start;
+                            }
+                        }
+                    }
+                }
+                if let Some(count) = prepended {
+                    // The edge padding and the reservation move to the new
+                    // first turn. Remove them from the former first turn
+                    // without moving its content.
+                    self.list_state.remeasure_items(count..count + 1);
+                    if anchor.item_ix == 0 && !following {
+                        self.keep_reading(anchor, count);
+                    }
                 }
                 for index in remeasure {
                     self.list_state.remeasure_items(index..index + 1);
@@ -3541,7 +3511,8 @@ mod tests {
     /// A reader flicking up a long thread is not sent back to its end when a
     /// page of history lands mid-fling, even one that re-indexes the rows: a
     /// background agent that a later turn reported on moves back to the turn
-    /// that started it once the page holds that turn.
+    /// that started it once the page holds that turn. The rest of the thread
+    /// keeps its measured extent, so the scrollbar does not jump either.
     #[gpui::test]
     fn a_page_that_moves_a_background_agent_back_keeps_the_reader_in_place(
         cx: &mut TestAppContext,
@@ -3560,7 +3531,7 @@ mod tests {
                 effort: None,
             },
         };
-        let events: Vec<_> = (0..60)
+        let events: Vec<_> = (0..80)
             .flat_map(|turn| {
                 let mut events = vec![
                     agent::AgentEvent::TurnStarted {
@@ -3647,7 +3618,7 @@ mod tests {
         }
         assert!(!list.is_following_tail());
         let on_screen = |cx: &mut VisualTestContext| {
-            (40..60)
+            (40..80)
                 .filter_map(|turn| {
                     let bounds = cx.debug_bounds(format!("user-bubble-user-{turn}").leak())?;
                     bounds
@@ -3659,6 +3630,33 @@ mod tests {
         let reading = on_screen(cx);
         assert!(!reading.is_empty(), "a question is on screen");
         let rows = list.item_count();
+        // Below the reader lie more rows than a layout measures around them,
+        // the agent's among them.
+        let to_end = || list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y;
+        let before = to_end();
+        let timeline = view.read_with(cx, |chat, _| chat.timeline());
+        let agent_row = timeline.read_with(cx, |timeline, cx| {
+            store
+                .read(cx)
+                .with_timeline_for(
+                    Some(THREAD),
+                    |thread| {
+                        timeline.rows.iter().position(|row| {
+                            thread.entries[row.entry_range.clone()]
+                                .iter()
+                                .any(|entry| entry.id == "agent-0")
+                        })
+                    },
+                    cx,
+                )
+                .flatten()
+                .expect("the agent has a row")
+        });
+        let agent_height = list
+            .bounds_for_item(agent_row)
+            .expect("the agent's row lies below the reader, measured")
+            .size
+            .height;
 
         // The page holds every earlier turn, the agent's start among them.
         assert!(thread.answer_page(held_from).is_some());
@@ -3669,6 +3667,11 @@ mod tests {
         assert!(
             !list.is_following_tail(),
             "the page sent the reader back to the end"
+        );
+        let after = to_end();
+        assert!(
+            (before - agent_height - after).abs() < px(1.),
+            "the scrollbar jumped: {before:?} to the end, then {after:?} less the agent's {agent_height:?}"
         );
         let now = on_screen(cx);
         for (turn, top) in &reading {

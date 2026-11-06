@@ -574,18 +574,13 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ListSync {
     None,
-    /// Rows arrived above every existing row: an earlier history page, or
-    /// the records that complete the partial first turn.
-    Prepend {
-        count: usize,
-        remeasure: Vec<usize>,
-    },
     Reset {
         count: usize,
     },
-    /// Rows inserted or replaced in place. `splices` are ranges of the old
-    /// rows and the number of new rows standing in for each, ascending, so
-    /// they apply back to front; `remeasure` indexes the new rows.
+    /// Rows inserted, removed or replaced in place. `splices` are ranges of
+    /// the old rows and the number of new rows standing in for each,
+    /// ascending, so they apply back to front; `remeasure` indexes the new
+    /// rows.
     /// `carried` are the spliced old ranges whose content continues, in
     /// order, in the rows standing in for them: an expanded Work Log's live
     /// window folding activities out into rows of their own. A reader resting
@@ -599,13 +594,17 @@ pub(crate) enum ListSync {
 
 /// Align the old rows with the new ones by identity, in order.
 ///
-/// Rows keep their measured height wherever their identity survives; a row
-/// whose content changed is remeasured in place. Rows that appear are
-/// spliced in where they stand, which is how the list keeps the reader's
-/// anchor across a steer landing mid-turn or a page arriving above. Rows
-/// that vanish or trade places reset the list, except inside the partial
-/// first turn, whose entries a page may merge or shift, and above every row
-/// that survives: dropping the pages read above the tail removes rows there.
+/// Rows keep their measured height wherever their identity survives in
+/// order; a row whose content changed is remeasured in place. Rows that
+/// appear are spliced in where they stand and rows that vanish are spliced
+/// out, which is how the list keeps the reader's anchor across a steer
+/// landing mid-turn, a page arriving above or the pages read above the tail
+/// being dropped. A row that survives out of order with the rows around it
+/// moved: it leaves where it stood and arrives where it stands, as a page
+/// that brings the start of an item a later turn reported on moves the
+/// item's row back to that start. The list resets only for another session,
+/// for rows it cannot tell apart, and when none of its rows survives and not
+/// all of them can be replaced.
 fn list_sync_with<'a>(
     old: &[TimelineRow],
     new_len: usize,
@@ -628,6 +627,26 @@ fn list_sync_with<'a>(
             return ListSync::Reset { count: new_len };
         }
     }
+    // An empty turn's row goes when the turn gains entries; the partial
+    // first turn's rows may merge as their records arrive; an expanded Work
+    // Log's rows go when it collapses or its live window settles.
+    let replaceable = |row: &TimelineRow| {
+        row.entry_count == 0 || partial_first_turn && row.turn == 0 || row.part != RowPart::Segment
+    };
+    let survivors: Vec<(u64, usize)> = old
+        .iter()
+        .filter_map(|row| Some((row.identity, *new_pos.get(&row.identity)?)))
+        .collect();
+    // Splicing out every row would leave no row to hold a reader's place;
+    // a reset at least lays the bottom-aligned list out at its end.
+    if survivors.is_empty() && !old.iter().all(replaceable) {
+        return ListSync::Reset { count: new_len };
+    }
+    let moved = moved_rows(&survivors);
+    let survives =
+        |row: &TimelineRow| new_pos.contains_key(&row.identity) && !moved.contains(&row.identity);
+    let existed =
+        |row: &TimelineRow| old_pos.contains_key(&row.identity) && !moved.contains(&row.identity);
     // The partial first turn's row keeps its place when a page completes
     // it: its newest entry is still its newest entry.
     let completes = |old_row: &TimelineRow, new_row: &TimelineRow| {
@@ -641,13 +660,11 @@ fn list_sync_with<'a>(
     let mut splices: Vec<(Range<usize>, usize)> = Vec::new();
     let mut remeasure = Vec::new();
     let mut carried = Vec::new();
-    let mut aligned = false;
     let (mut i, mut j) = (0, 0);
     while i < old.len() || j < new_len {
         if i < old.len() && j < new_len {
             let (old_row, new_row) = (&old[i], new_at(j));
             if old_row.identity == new_row.identity {
-                aligned = true;
                 if old_row.content != new_row.content || old_row.entry_count != new_row.entry_count
                 {
                     remeasure.push(j);
@@ -657,8 +674,8 @@ fn list_sync_with<'a>(
                 continue;
             }
         }
-        let old_survives = i < old.len() && new_pos.contains_key(&old[i].identity);
-        let new_existed = j < new_len && old_pos.contains_key(&new_at(j).identity);
+        let old_survives = i < old.len() && survives(&old[i]);
+        let new_existed = j < new_len && existed(new_at(j));
         if i < old.len() && !old_survives {
             // The completed first-turn row may sit below rows the page
             // added above it.
@@ -671,24 +688,9 @@ fn list_sync_with<'a>(
                 j = k + 1;
                 continue;
             }
-            // An empty turn's row goes when the turn gains entries; the
-            // partial first turn's rows may merge as their records arrive;
-            // an expanded Work Log's rows go when it collapses or its live
-            // window settles.
-            let replaceable = |row: &TimelineRow| {
-                row.entry_count == 0
-                    || partial_first_turn && row.turn == 0
-                    || row.part != RowPart::Segment
-            };
             if !replaceable(&old[i]) {
-                let below_survives = old[i..]
-                    .iter()
-                    .any(|row| new_pos.contains_key(&row.identity));
-                if aligned || j > 0 || !below_survives {
-                    return ListSync::Reset { count: new_len };
-                }
                 let start = i;
-                while !new_pos.contains_key(&old[i].identity) {
+                while i < old.len() && !survives(&old[i]) {
                     i += 1;
                 }
                 match splices.last_mut() {
@@ -698,11 +700,11 @@ fn list_sync_with<'a>(
                 continue;
             }
             let start = i;
-            while i < old.len() && !new_pos.contains_key(&old[i].identity) && replaceable(&old[i]) {
+            while i < old.len() && !survives(&old[i]) && replaceable(&old[i]) {
                 i += 1;
             }
             let inserted = j;
-            while j < new_len && !old_pos.contains_key(&new_at(j).identity) {
+            while j < new_len && !existed(new_at(j)) {
                 j += 1;
             }
             splices.push((start..i, j - inserted));
@@ -713,7 +715,7 @@ fn list_sync_with<'a>(
             }
         } else if j < new_len && !new_existed {
             let inserted = j;
-            while j < new_len && !old_pos.contains_key(&new_at(j).identity) {
+            while j < new_len && !existed(new_at(j)) {
                 j += 1;
             }
             // Activities folded out of a live window arrive right above it.
@@ -730,23 +732,55 @@ fn list_sync_with<'a>(
                 splices.push((i..i, j - inserted));
             }
         } else {
-            // Both rows live on elsewhere: an order change.
+            // Rows that survive in order pair up one to one; the splices
+            // cannot state anything else.
             return ListSync::Reset { count: new_len };
         }
     }
 
     match splices.as_slice() {
         [] if remeasure.is_empty() => ListSync::None,
-        [(range, count)] if range == &(0..0) && !old.is_empty() => ListSync::Prepend {
-            count: *count,
-            remeasure,
-        },
         _ => ListSync::Incremental {
             splices,
             remeasure,
             carried,
         },
     }
+}
+
+/// The identities of the `survivors` (each old row's identity and new index,
+/// in old order) that moved: the longest run of them whose new indexes
+/// ascend keeps its place, and every other one left it.
+fn moved_rows(survivors: &[(u64, usize)]) -> HashSet<u64> {
+    if survivors.is_sorted_by_key(|&(_, at)| at) {
+        return HashSet::new();
+    }
+    // `tails[n]` ends the ascending run of length `n + 1` found so far whose
+    // last new index is least; `previous` links each survivor to the one
+    // before it in its run.
+    let mut tails: Vec<usize> = Vec::new();
+    let mut previous = vec![None; survivors.len()];
+    for (index, &(_, at)) in survivors.iter().enumerate() {
+        let length = tails.partition_point(|&tail| survivors[tail].1 < at);
+        previous[index] = length.checked_sub(1).map(|before| tails[before]);
+        if length == tails.len() {
+            tails.push(index);
+        } else {
+            tails[length] = index;
+        }
+    }
+    let mut kept = vec![false; survivors.len()];
+    let mut next = tails.last().copied();
+    while let Some(index) = next {
+        kept[index] = true;
+        next = previous[index];
+    }
+    survivors
+        .iter()
+        .zip(kept)
+        .filter(|(_, kept)| !kept)
+        .map(|(&(identity, _), _)| identity)
+        .collect()
 }
 
 #[cfg(test)]
