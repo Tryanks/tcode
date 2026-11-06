@@ -190,8 +190,8 @@ Cargo's `package` alias or machete's `renamed` metadata so unused imports remain
 detectable. An `ignored` entry requires an explanation of the generated or
 implicit use it cannot detect.
 
-New user-facing strings must be added to **both** `locales/en.yml` and
-`locales/zh-CN.yml` — a parity test enforces it.
+New user-facing strings must be added to **every** locale file — `locales/en.yml`,
+`locales/zh-CN.yml` and `locales/ja.yml` — a parity test enforces it.
 
 If you changed something visual, launch the surface and look at it in both
 themes and at a wide and a narrow width; compile and unit checks alone do not

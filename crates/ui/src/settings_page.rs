@@ -25,7 +25,9 @@ use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::plugins_settings::PluginsSettingsPanel;
 use crate::provider_card::{ManagePlugins, ProviderCard};
 use crate::provider_model_picker::ProviderModelPicker;
-use crate::settings::{ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode};
+use crate::settings::{
+    ImageMode, LANGUAGE_ENGLISH, LANGUAGE_JAPANESE, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode,
+};
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
 use crate::time::{humanize_ago, now_secs};
@@ -3017,6 +3019,7 @@ impl SettingsPage {
         let label = match language {
             Some(LANGUAGE_ENGLISH) => crate::tr!("settings.language.english"),
             Some(LANGUAGE_SIMPLIFIED_CHINESE) => crate::tr!("settings.language.chinese"),
+            Some(LANGUAGE_JAPANESE) => crate::tr!("settings.language.japanese"),
             _ => crate::tr!("settings.language.system"),
         };
         let option = |value, key: &'static str| SelectRowOption {
@@ -3041,6 +3044,7 @@ impl SettingsPage {
                     Some(LANGUAGE_SIMPLIFIED_CHINESE),
                     "settings.language.chinese",
                 ),
+                option(Some(LANGUAGE_JAPANESE), "settings.language.japanese"),
             ],
             reset,
             self.flip_row("language-dropdown", cx),
