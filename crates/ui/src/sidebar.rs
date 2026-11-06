@@ -7062,7 +7062,7 @@ mod tests {
             assert!(
                 cx.debug_bounds(if index == 0 {
                     if quick_chat {
-                        "compact-project-Quick chat"
+                        "compact-project-Quick thread"
                     } else {
                         "compact-project-project-0"
                     }
@@ -7110,7 +7110,7 @@ mod tests {
                     .iter()
                     .any(|g| g.project.quick_chat)
             }));
-            assert!(cx.debug_bounds("compact-group-Quick chats").is_some());
+            assert!(cx.debug_bounds("compact-group-Quick threads").is_some());
         }
         if projects > 1 {
             for collapsed in [true, false] {
@@ -8343,7 +8343,7 @@ mod tests {
             };
             assert!(
                 cx.debug_bounds(if compact {
-                    "compact-group-Quick chats"
+                    "compact-group-Quick threads"
                 } else {
                     "quick-chats-header"
                 })
