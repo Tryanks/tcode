@@ -413,6 +413,7 @@ settings:
     system: "System"
     english: "English"
     chinese: "简体中文"
+    japanese: "日本語"
   theme:
     title: "Theme"
     system: "System default"

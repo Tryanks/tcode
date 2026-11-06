@@ -11,9 +11,11 @@ rust_i18n::i18n!("../../locales", fallback = "en");
 // translation table used by the application.
 const _: &str = include_str!("../../../locales/en.yml");
 const _: &str = include_str!("../../../locales/zh-CN.yml");
+const _: &str = include_str!("../../../locales/ja.yml");
 
 pub const LANGUAGE_ENGLISH: &str = "en";
 pub const LANGUAGE_SIMPLIFIED_CHINESE: &str = "zh-CN";
+pub const LANGUAGE_JAPANESE: &str = "ja";
 
 thread_local! {
     /// Mobile supplies the user's first configured language through its native
@@ -26,10 +28,12 @@ pub fn resolve_locale(override_locale: Option<&str>, system_locale: Option<&str>
     match override_locale {
         Some(LANGUAGE_ENGLISH) => LANGUAGE_ENGLISH,
         Some(LANGUAGE_SIMPLIFIED_CHINESE) => LANGUAGE_SIMPLIFIED_CHINESE,
-        _ if system_locale.is_some_and(|locale| locale.to_ascii_lowercase().starts_with("zh")) => {
-            LANGUAGE_SIMPLIFIED_CHINESE
-        }
-        _ => LANGUAGE_ENGLISH,
+        Some(LANGUAGE_JAPANESE) => LANGUAGE_JAPANESE,
+        _ => match system_locale.map(str::to_ascii_lowercase) {
+            Some(locale) if locale.starts_with("zh") => LANGUAGE_SIMPLIFIED_CHINESE,
+            Some(locale) if locale.starts_with("ja") => LANGUAGE_JAPANESE,
+            _ => LANGUAGE_ENGLISH,
+        },
     }
 }
 
@@ -221,7 +225,9 @@ mod tests {
     fn locale_keys_match() {
         let en = keys(include_str!("../../../locales/en.yml"));
         let zh = keys(include_str!("../../../locales/zh-CN.yml"));
+        let ja = keys(include_str!("../../../locales/ja.yml"));
         assert_eq!(en, zh, "English and zh-CN locale keys differ");
+        assert_eq!(en, ja, "English and ja locale keys differ");
     }
 
     #[test]
@@ -310,6 +316,9 @@ mod tests {
                 LANGUAGE_SIMPLIFIED_CHINESE,
             ),
             ("zh-Hans-CN", None, LANGUAGE_SIMPLIFIED_CHINESE),
+            ("ja-JP", None, LANGUAGE_JAPANESE),
+            ("ja-JP", Some(LANGUAGE_ENGLISH), LANGUAGE_ENGLISH),
+            ("en-US", Some(LANGUAGE_JAPANESE), LANGUAGE_JAPANESE),
             ("en-US", Some("unsupported"), LANGUAGE_ENGLISH),
         ] {
             set_platform_system_locale(Some(platform));

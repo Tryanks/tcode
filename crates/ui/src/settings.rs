@@ -1,6 +1,6 @@
 //! Persisted application settings presentation with core-owned semantics.
 
-pub use crate::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale};
+pub use crate::{LANGUAGE_ENGLISH, LANGUAGE_JAPANESE, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale};
 
 #[cfg(test)]
 static TEST_LOCALE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());

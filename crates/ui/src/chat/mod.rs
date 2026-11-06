@@ -1330,7 +1330,11 @@ pub(crate) mod tests {
                 cx,
             )
         });
-        for locale in ["en", "zh-CN"] {
+        for locale in [
+            crate::LANGUAGE_ENGLISH,
+            crate::LANGUAGE_SIMPLIFIED_CHINESE,
+            crate::LANGUAGE_JAPANESE,
+        ] {
             crate::set_locale(locale);
             view.update(cx, |_, cx| cx.notify());
             for (width, height) in [(360., 780.), (393., 852.)] {

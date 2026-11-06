@@ -29,8 +29,11 @@ struct Insertion {
 }
 
 fn speech_locale() -> &'static str {
-    if rust_i18n::locale().starts_with("zh") {
+    let locale = rust_i18n::locale();
+    if locale.starts_with("zh") {
         "zh-CN"
+    } else if locale.starts_with("ja") {
+        "ja-JP"
     } else {
         "en-US"
     }
