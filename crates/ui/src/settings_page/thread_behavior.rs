@@ -99,6 +99,13 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_scroll_to_latest_on_send(true), cx)
             }),
         );
+        let resume_on_limit_reset_reset = crate::settings_rows::reset_action(
+            "reset-resume-on-limit-reset",
+            !settings.resume_on_limit_reset,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx)
+            }),
+        );
         let threads = vec![
             self.title_generation_row(cx),
             self.toggle_row(
@@ -119,10 +126,18 @@ impl SettingsPage {
                 cx,
                 WorkspaceStore::set_scroll_to_latest_on_send,
             ),
+            self.toggle_row(
+                "resume-on-limit-reset",
+                crate::tr!("settings.resume_on_limit_reset.title"),
+                crate::tr!("settings.resume_on_limit_reset.description"),
+                settings.resume_on_limit_reset,
+                resume_on_limit_reset_reset,
+                cx,
+                WorkspaceStore::set_resume_on_limit_reset,
+            ),
         ];
         let settling = self.settling_rows(&settings, window, cx);
         let panels = self.panel_rows(&settings, cx);
-        let model_limits = self.model_limit_rows(&settings, cx);
         let compact = self.window_state.read(cx).compact;
         v_flex()
             .gap(crate::material::section_gap(cx))
@@ -146,11 +161,6 @@ impl SettingsPage {
             .child(crate::settings_rows::settings_group(
                 crate::tr!("settings.panels_section"),
                 panels,
-                cx,
-            ))
-            .child(crate::settings_rows::settings_group(
-                crate::tr!("settings.model_limits_section"),
-                model_limits,
                 cx,
             ))
     }
@@ -190,25 +200,6 @@ impl SettingsPage {
                 WorkspaceStore::set_word_wrap_diffs,
             ),
         ]
-    }
-
-    fn model_limit_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let resume_on_limit_reset_reset = crate::settings_rows::reset_action(
-            "reset-resume-on-limit-reset",
-            !settings.resume_on_limit_reset,
-            cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx)
-            }),
-        );
-        vec![self.toggle_row(
-            "resume-on-limit-reset",
-            crate::tr!("settings.resume_on_limit_reset.title"),
-            crate::tr!("settings.resume_on_limit_reset.description"),
-            settings.resume_on_limit_reset,
-            resume_on_limit_reset_reset,
-            cx,
-            WorkspaceStore::set_resume_on_limit_reset,
-        )]
     }
 
     /// Auto-settle, its days and merge rules, and the per-project overrides:
