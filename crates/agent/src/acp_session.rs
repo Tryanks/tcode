@@ -187,6 +187,23 @@ pub(crate) trait Dialect: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// Answer [`SessionCommand::Rewind`], [`SessionCommand::PreviewRewind`]
+    /// or [`SessionCommand::UndoRewind`] with the agent's own rewind. It runs
+    /// as its own task, so it may wait for an interrupted turn to end. ACP has
+    /// no rewind of its own: by default the command is refused.
+    fn rewind(
+        self: Arc<Self>,
+        _session: Session,
+        command: SessionCommand,
+    ) -> impl Future<Output = Option<AgentEvent>> + Send {
+        async move {
+            command.rewind_refusal(RewindFailure::new(
+                RewindFailureReason::Unsupported,
+                "this ACP agent does not advertise a native rewind operation".to_owned(),
+            ))
+        }
+    }
+
     /// Whether `initialize` offers the client's `fs/*` and `terminal/*`
     /// services. An agent offered them runs its file and shell tools through
     /// tcode instead of its own implementation.
@@ -330,6 +347,22 @@ impl Session {
 
     pub(crate) fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         f(&mut self.state.lock_recover())
+    }
+
+    /// Cancel the open turn as [`SessionCommand::Interrupt`] does. The turn
+    /// ends when the agent answers its `session/prompt`.
+    pub(crate) async fn interrupt(&self, session_id: &acp::SessionId) {
+        // The open turn may be one the agent started itself.
+        if self.state.lock_recover().turn.is_none() {
+            return;
+        }
+        // Every in-flight permission request must be answered with
+        // `cancelled` first: the protocol requires it, and the agent will
+        // not settle the turn otherwise.
+        cancel_pending(&self.state, &self.events).await;
+        let _ = self
+            .connection
+            .send_notification(acp::CancelNotification::new(session_id.clone()));
     }
 
     /// Ask for a decision and wait for [`SessionCommand::RespondApproval`]; an
@@ -761,7 +794,7 @@ async fn run_actor<D: Dialect>(
                     &executor,
                     provider,
                     connection,
-                    dialect.as_ref(),
+                    &dialect,
                     &launch,
                     &opts,
                     &commands,
@@ -825,7 +858,7 @@ async fn connected_actor<D: Dialect>(
     executor: &Rc<smol::LocalExecutor<'static>>,
     provider: ProviderKind,
     connection: Connection,
-    dialect: &D,
+    dialect: &Arc<D>,
     launch: &Launch,
     opts: &SessionOptions,
     commands: &Receiver<SessionCommand>,
@@ -1009,7 +1042,7 @@ struct TurnOutcome {
 /// whether the agent can close sessions.
 async fn handshake<D: Dialect>(
     connection: &Connection,
-    dialect: &D,
+    dialect: &Arc<D>,
     launch: &Launch,
     opts: &SessionOptions,
     state: &Arc<Mutex<State>>,
@@ -1088,7 +1121,7 @@ async fn initialize(
 #[allow(clippy::too_many_arguments)]
 async fn handle_command<D: Dialect>(
     command: SessionCommand,
-    dialect: &D,
+    dialect: &Arc<D>,
     executor: &Rc<smol::LocalExecutor<'static>>,
     session: &Session,
     session_id: &acp::SessionId,
@@ -1142,19 +1175,9 @@ async fn handle_command<D: Dialect>(
                 })
                 .detach();
         }
-        SessionCommand::Interrupt => {
-            // The open turn may be one the agent started itself.
-            if state.lock_recover().turn.is_none() {
-                return;
-            }
-            // Every in-flight permission request must be answered with
-            // `cancelled` first: the protocol requires it, and the agent will
-            // not settle the turn otherwise.
-            cancel_pending(state, events).await;
-            let _ = connection.send_notification(acp::CancelNotification::new(session_id.clone()));
-            // The agent still owes us the `session/prompt` response carrying
-            // `stopReason: cancelled`; the turn completes when it lands.
-        }
+        // The agent still owes us the `session/prompt` response carrying
+        // `stopReason: cancelled`; the turn completes when it lands.
+        SessionCommand::Interrupt => session.interrupt(session_id).await,
         SessionCommand::RespondApproval {
             request_id,
             decision,
@@ -1225,12 +1248,15 @@ async fn handle_command<D: Dialect>(
         command @ (SessionCommand::Rewind { .. }
         | SessionCommand::PreviewRewind { .. }
         | SessionCommand::UndoRewind { .. }) => {
-            if let Some(event) = command.rewind_refusal(RewindFailure::new(
-                RewindFailureReason::Unsupported,
-                "this ACP agent does not advertise a native rewind operation".to_owned(),
-            )) {
-                let _ = events.send(event).await;
-            }
+            let rewind = dialect.clone().rewind(session.clone(), command);
+            let events = events.clone();
+            executor
+                .spawn(async move {
+                    if let Some(event) = rewind.await {
+                        let _ = events.send(event).await;
+                    }
+                })
+                .detach();
         }
         SessionCommand::Compact => {
             let _ = events
@@ -1282,7 +1308,7 @@ async fn cancel_pending(state: &Arc<Mutex<State>>, events: &Sender<AgentEvent>) 
 /// Complete a sent turn with its `session/prompt` result, unless the dialect
 /// already completed it from the agent's own signal ([`State::end_turn`]).
 async fn finish_turn<D: Dialect>(
-    dialect: &D,
+    dialect: &Arc<D>,
     state: &Arc<Mutex<State>>,
     events: &Sender<AgentEvent>,
     outcome: TurnOutcome,
