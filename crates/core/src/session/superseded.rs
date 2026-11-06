@@ -208,7 +208,8 @@ mod tests {
             at(3, message("m1", "one")),
             at(4, completed("x")),
             at(5, started("x")),
-            // Lands on the first turn named x, superseding record 1 there.
+            // A new process numbers its turns afresh: lands on the latest
+            // turn named x, leaving record 1 to the first; superseded by 6.
             at(6, changes("x", "b")),
             // Names no turn, so lands on the current one; superseded by record 8.
             at(7, changes("", "c")),
@@ -265,9 +266,9 @@ mod tests {
         ];
         let cases = [
             (
-                "a reused turn id lands on its first turn",
+                "a reused turn id lands on its latest turn",
                 reused_id,
-                vec![1, 6],
+                vec![5, 6],
             ),
             ("a snapshot that opened its turn", opens_turn, vec![0]),
             ("a snapshot that named its turn", names_turn, vec![1]),
