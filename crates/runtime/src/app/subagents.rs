@@ -33,6 +33,14 @@ impl AppState {
             }
             return true;
         }
+        if let AgentEvent::Delta { item_id, .. } = event {
+            let key = (parent_session_id.to_string(), item_id.clone());
+            let Some(mirror_id) = self.native_subagent_streams.get(&key).cloned() else {
+                return false;
+            };
+            self.record_event(&mirror_id, event, cx);
+            return true;
+        }
         let Some(item) = lifecycle_item(event) else {
             return false;
         };
@@ -60,6 +68,12 @@ impl AppState {
                 self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
             }
             self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
+            let key = (parent_session_id.to_string(), item.id.clone());
+            if matches!(event, AgentEvent::ItemCompleted(_)) {
+                self.native_subagent_streams.remove(&key);
+            } else {
+                self.native_subagent_streams.insert(key, mirror_id.clone());
+            }
             if matches!(item.content, ItemContent::Subagent { .. }) {
                 self.nested_subagent_spawns.insert(
                     (parent_session_id.to_string(), item.id.clone()),
@@ -343,6 +357,8 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         self.nested_subagent_spawns
+            .retain(|(session_id, _), _| session_id != parent_session_id);
+        self.native_subagent_streams
             .retain(|(session_id, _), _| session_id != parent_session_id);
         // Mirrors belong to this provider. An execution child has its own
         // provider and remains independent when this one is intentionally detached.
