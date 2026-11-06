@@ -334,7 +334,6 @@ settings:
   threads_section: "对话"
   settling_section: "收尾"
   panels_section: "面板"
-  model_limits_section: "模型变更与额度"
   threads: "对话"
   auto_settle:
     title: "自动收尾不活跃的对话"

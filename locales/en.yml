@@ -334,7 +334,6 @@ settings:
   threads_section: "THREADS"
   settling_section: "SETTLING"
   panels_section: "PANELS"
-  model_limits_section: "MODEL CHANGES AND LIMITS"
   threads: "Threads"
   auto_settle:
     title: "Auto-settle inactive threads"
