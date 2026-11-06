@@ -22,7 +22,10 @@
 //! task owns the child: it reads stdout lines, receives [`SessionCommand`]s, and
 //! writes stream-json lines to stdin. Multiple turns run over one process.
 
-use crate::{LaterHistory, RewindFailure, RewindFailureReason};
+use crate::{
+    LaterHistory, RewindFailure, RewindFailureReason, RewindFile, RewindFiles, RewindIncomplete,
+    RewindPreview, RewindPreviewResult,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -1244,11 +1247,47 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::SetOption { .. } => ControlFlow::Continue(()),
-        command @ (SessionCommand::PreviewRewind { .. } | SessionCommand::UndoRewind { .. }) => {
+        // Claude Code keeps no rewind undoable.
+        command @ SessionCommand::UndoRewind { .. } => {
             if let Some(event) =
                 command.rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
             {
                 let _ = event_tx.send(event).await;
+            }
+            ControlFlow::Continue(())
+        }
+        SessionCommand::PreviewRewind {
+            checkpoint_id,
+            mode,
+        } => {
+            let failure = if !mapper.native_rewind {
+                Some(RewindFailure::new(RewindFailureReason::Unsupported, None))
+            } else {
+                match mapper.begin_preview(checkpoint_id.clone(), mode) {
+                    Some(request) => write_line(stdin, &request).await.err().map(|error| {
+                        RewindFailure::new(RewindFailureReason::ProcessGone, error.to_string())
+                    }),
+                    // Restoring the conversation alone changes no file.
+                    None => {
+                        let _ = event_tx
+                            .send(AgentEvent::RewindPreviewed {
+                                checkpoint_id: checkpoint_id.clone(),
+                                mode,
+                                result: RewindPreviewResult::Ready(RewindPreview::default()),
+                            })
+                            .await;
+                        None
+                    }
+                }
+            };
+            if let Some(failure) = failure {
+                let _ = event_tx
+                    .send(AgentEvent::RewindPreviewed {
+                        checkpoint_id,
+                        mode,
+                        result: RewindPreviewResult::Refused(failure),
+                    })
+                    .await;
             }
             ControlFlow::Continue(())
         }
@@ -1297,8 +1336,20 @@ async fn handle_command(
             // residual race: a steer written microseconds before that status
             // may actually miss the request, but the CLI protocol exposes no
             // stronger acknowledgement, so we accept it at that checkpoint.
-            let msg = user_message(&text, &attachments);
-            write_steering_message(stdin, &msg, request_id, mapper, event_tx).await;
+            let mut msg = user_message(&text, &attachments);
+            // A steer sent under its own uuid comes back in the replayed
+            // echo under it, which makes it a conversation restore point.
+            let uuid = mapper
+                .native_rewind
+                .then(|| uuid::Uuid::new_v4().to_string());
+            if let Some(uuid) = &uuid {
+                msg["uuid"] = json!(uuid);
+            }
+            if write_steering_message(stdin, &msg, request_id.clone(), mapper, event_tx).await
+                && let Some(uuid) = uuid
+            {
+                mapper.steer_uuids.insert(uuid, request_id);
+            }
             ControlFlow::Continue(())
         }
         SessionCommand::RetryTurn { .. } => ControlFlow::Continue(()),
@@ -1384,7 +1435,7 @@ async fn write_steering_message<W: AsyncWrite + Unpin>(
     request_id: String,
     mapper: &mut Mapper,
     event_tx: &smol::channel::Sender<AgentEvent>,
-) {
+) -> bool {
     if write_line(stdin, message).await.is_err() {
         let _ = event_tx
             .send(AgentEvent::Error {
@@ -1392,8 +1443,65 @@ async fn write_steering_message<W: AsyncWrite + Unpin>(
                 fatal: true,
             })
             .await;
+        false
     } else {
         mapper.pending_steers.push_back(request_id);
+        true
+    }
+}
+
+/// The files a `rewind_files` answer names (`filesChanged` is withheld from
+/// some clients; the line totals are across all files).
+fn rewind_files(result: &Value) -> RewindFiles {
+    RewindFiles {
+        files: result
+            .get("filesChanged")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(RewindFile::path)
+            .collect(),
+        insertions: result.get("insertions").and_then(Value::as_u64),
+        deletions: result.get("deletions").and_then(Value::as_u64),
+        skipped_links: result
+            .get("skippedLinks")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    }
+}
+
+/// Why `rewind_files` could not restore, from the words Claude Code answers
+/// with: it gives no reason code for files.
+fn files_failure(error: Option<String>) -> RewindFailure {
+    let reason = match error.as_deref() {
+        Some(error) if error.contains("No file checkpoint") => {
+            RewindFailureReason::NothingToRestore
+        }
+        Some(error) if error.contains("not enabled") => RewindFailureReason::Unsupported,
+        _ => RewindFailureReason::Other,
+    };
+    RewindFailure::new(reason, error)
+}
+
+/// `rewind_conversation`'s refusal `reason`, in the canonical terms.
+fn conversation_refusal(reason: Option<&str>) -> RewindFailureReason {
+    match reason {
+        Some("commands_queued" | "prompt_pending") => RewindFailureReason::Busy,
+        Some("turn_running") => RewindFailureReason::TurnRunning,
+        Some("target_not_found") => RewindFailureReason::TargetNotFound,
+        Some("stale_target" | "unseen_later_turn" | "state_changed") => {
+            RewindFailureReason::ConversationChanged
+        }
+        Some(
+            "poll_tool_result_target"
+            | "target_splits_tool_call"
+            | "delivered_poll_events_in_range",
+        ) => RewindFailureReason::CannotCutHere,
+        Some("persist_failed") => RewindFailureReason::SaveFailed,
+        Some("usage_limited") => RewindFailureReason::UsageLimited,
+        Some("expired") => RewindFailureReason::Expired,
+        _ => RewindFailureReason::Other,
     }
 }
 
@@ -1630,10 +1738,27 @@ enum ChildItemStage {
     Completed,
 }
 
+/// A rewind, or a preview of one, made of the control requests Claude Code's
+/// own rewind menu makes, one at a time.
 struct PendingRewind {
     checkpoint_id: String,
     mode: RewindMode,
-    conversation: bool,
+    step: RewindStep,
+    /// What the files step restored, once it has.
+    files: Option<RewindFiles>,
+    /// Why the files step failed; the conversation is still rewound after it,
+    /// as the native menu does.
+    files_failure: Option<RewindFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RewindStep {
+    /// `rewind_files` has no `interrupt_if_running`: a running turn is
+    /// stopped first so the restore does not race the agent's own edits.
+    Interrupt,
+    Files,
+    Conversation,
+    Preview,
 }
 
 #[derive(Default)]
@@ -1707,6 +1832,12 @@ pub(crate) struct Mapper {
     background_tasks: HashSet<String>,
     /// Native rewind control requests awaiting Claude's correlated response.
     pending_rewinds: HashMap<String, PendingRewind>,
+    /// What the latest dry run of each restore point found: Claude answers a
+    /// real `rewind_files` with skipped links alone.
+    rewind_previews: HashMap<String, RewindFiles>,
+    /// The uuids steers were sent under, to the steer's request id. Their
+    /// replayed echo makes them conversation restore points.
+    steer_uuids: HashMap<String, String>,
     native_rewind: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
@@ -1757,6 +1888,8 @@ impl Mapper {
             saw_requesting: false,
             background_tasks: HashSet::new(),
             pending_rewinds: HashMap::new(),
+            rewind_previews: HashMap::new(),
+            steer_uuids: HashMap::new(),
             native_rewind,
             last_served_model: None,
             stop_reason: None,
@@ -1800,37 +1933,68 @@ impl Mapper {
         if !self.native_rewind {
             return Err("this Claude Code version does not expose native rewind controls".into());
         }
-        Ok(self.rewind_request(checkpoint_id, mode, !mode.includes_files()))
+        let step = if !mode.includes_files() {
+            RewindStep::Conversation
+        } else if self.current_turn_id.is_some() {
+            RewindStep::Interrupt
+        } else {
+            RewindStep::Files
+        };
+        Ok(self.rewind_request(PendingRewind {
+            checkpoint_id,
+            mode,
+            step,
+            files: None,
+            files_failure: None,
+        }))
     }
 
-    fn rewind_request(
-        &mut self,
-        checkpoint_id: String,
-        mode: RewindMode,
-        conversation: bool,
-    ) -> Value {
-        let request = if conversation {
-            json!({
+    /// A dry run of the files a rewind would restore; `None` when `mode`
+    /// restores none, which needs no preview.
+    fn begin_preview(&mut self, checkpoint_id: String, mode: RewindMode) -> Option<Value> {
+        mode.includes_files().then(|| {
+            self.rewind_request(PendingRewind {
+                checkpoint_id,
+                mode,
+                step: RewindStep::Preview,
+                files: None,
+                files_failure: None,
+            })
+        })
+    }
+
+    fn rewind_request(&mut self, pending: PendingRewind) -> Value {
+        let checkpoint_id = pending.checkpoint_id.as_str();
+        let request = match pending.step {
+            RewindStep::Interrupt => {
+                if self.current_turn_id.is_some() {
+                    self.interrupt_pending = true;
+                }
+                json!({ "subtype": "interrupt" })
+            }
+            RewindStep::Files => {
+                json!({ "subtype": "rewind_files", "user_message_id": checkpoint_id })
+            }
+            RewindStep::Preview => json!({
+                "subtype": "rewind_files",
+                "user_message_id": checkpoint_id,
+                "dry_run": true,
+            }),
+            // A target before a compaction boundary resolves to the summary
+            // that replaced it, as the native menu allows.
+            RewindStep::Conversation => json!({
                 "subtype": "rewind_conversation",
                 "target_message_uuid": checkpoint_id,
-                "interrupt_if_running": false,
-            })
-        } else {
-            json!({ "subtype": "rewind_files", "user_message_id": checkpoint_id })
+                "interrupt_if_running": true,
+                "allow_summarized_target": true,
+            }),
         };
         let message = self.control_request(request);
         let request_id = message["request_id"]
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        self.pending_rewinds.insert(
-            request_id,
-            PendingRewind {
-                checkpoint_id,
-                mode,
-                conversation,
-            },
-        );
+        self.pending_rewinds.insert(request_id, pending);
         message
     }
 
@@ -2167,6 +2331,10 @@ impl Mapper {
                 model,
             },
             self.permission_options(),
+            // A CLI older than the rewind controls has none for this session.
+            AgentEvent::RewindAvailability {
+                unavailable: (!self.native_rewind).then_some(RewindFailureReason::Unsupported),
+            },
         ];
         // The `slash_commands` (Command) and `skills` (Skill) arrays feed the
         // composer's `/` and `$` menus. Both are arrays of names (no descriptions).
@@ -2868,7 +3036,14 @@ impl Mapper {
                 .iter()
                 .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         });
-        if self.awaiting_turn_checkpoint
+        if let Some(uuid) = msg.get("uuid").and_then(Value::as_str)
+            && let Some(request_id) = self.steer_uuids.remove(uuid)
+        {
+            out.push(AgentEvent::SteerCheckpoint {
+                request_id,
+                checkpoint_id: uuid.to_owned(),
+            });
+        } else if self.awaiting_turn_checkpoint
             && !has_tool_result
             && let (Some(turn_id), Some(checkpoint_id)) = (
                 self.current_turn_id.clone(),
@@ -3058,79 +3233,147 @@ impl Mapper {
         let Some(pending) = self.pending_rewinds.remove(request_id) else {
             return Vec::new();
         };
-        let checkpoint_id = pending.checkpoint_id.clone();
-        let mode = pending.mode;
-        if response.get("subtype").and_then(Value::as_str) != Some("success") {
-            let error = response
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("Claude Code rejected the rewind request")
-                .to_owned();
-            return vec![AgentEvent::RewindFailed {
-                checkpoint_id,
-                mode,
-                failure: RewindFailure::new(RewindFailureReason::Other, error),
-            }];
-        }
+        self.on_rewind_response(pending, response)
+    }
+
+    /// One step of a rewind answered: send the next, or report the outcome.
+    fn on_rewind_response(
+        &mut self,
+        mut pending: PendingRewind,
+        response: &Value,
+    ) -> Vec<AgentEvent> {
+        let succeeded = response.get("subtype").and_then(Value::as_str) == Some("success");
         let result = response.get("response").unwrap_or(&Value::Null);
-        if !pending.conversation {
-            if result.get("canRewind").and_then(Value::as_bool) == Some(false) {
-                return vec![AgentEvent::RewindFailed {
-                    checkpoint_id,
-                    mode,
-                    failure: RewindFailure::new(
-                        RewindFailureReason::Other,
-                        result
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Claude Code could not restore files")
-                            .to_owned(),
-                    ),
-                }];
-            }
-            if mode == RewindMode::FilesAndConversation {
-                let request = self.rewind_request(checkpoint_id, mode, true);
+        let error = || {
+            response
+                .get("error")
+                .or_else(|| result.get("error"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        match pending.step {
+            RewindStep::Interrupt => {
+                pending.step = RewindStep::Files;
+                let request = self.rewind_request(pending);
                 self.outgoing.push(request);
-                return Vec::new();
+                Vec::new()
             }
-            return vec![AgentEvent::RewindCompleted {
-                checkpoint_id,
-                mode,
-                prefill: None,
-                prefill_attachments: Vec::new(),
-                later_history: LaterHistory::Truncated,
-                files: None,
-                incomplete: None,
-                undo_token: None,
-            }];
-        }
-        if result.get("rewound").and_then(Value::as_bool) != Some(true) {
-            vec![AgentEvent::RewindFailed {
-                checkpoint_id,
-                mode,
-                failure: RewindFailure::new(
-                    RewindFailureReason::Other,
-                    result
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Claude Code could not restore the conversation")
-                        .to_owned(),
-                ),
-            }]
-        } else {
-            vec![AgentEvent::RewindCompleted {
-                checkpoint_id,
-                mode,
-                prefill: result
-                    .get("prefillText")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                prefill_attachments: Vec::new(),
-                later_history: LaterHistory::Truncated,
-                files: None,
-                incomplete: None,
-                undo_token: None,
-            }]
+            RewindStep::Preview => {
+                let result = if succeeded
+                    && result.get("canRewind").and_then(Value::as_bool) == Some(true)
+                {
+                    let files = rewind_files(result);
+                    self.rewind_previews
+                        .insert(pending.checkpoint_id.clone(), files.clone());
+                    RewindPreviewResult::Ready(RewindPreview {
+                        files,
+                        conflicts: Vec::new(),
+                    })
+                } else {
+                    RewindPreviewResult::Refused(files_failure(error()))
+                };
+                vec![AgentEvent::RewindPreviewed {
+                    checkpoint_id: pending.checkpoint_id,
+                    mode: pending.mode,
+                    result,
+                }]
+            }
+            RewindStep::Files => {
+                if succeeded && result.get("canRewind").and_then(Value::as_bool) != Some(false) {
+                    let mut files = self
+                        .rewind_previews
+                        .remove(&pending.checkpoint_id)
+                        .unwrap_or_default();
+                    files.skipped_links = result
+                        .get("skippedLinks")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    pending.files = Some(files);
+                } else {
+                    pending.files_failure = Some(files_failure(error()));
+                }
+                if pending.mode.includes_conversation() {
+                    pending.step = RewindStep::Conversation;
+                    let request = self.rewind_request(pending);
+                    self.outgoing.push(request);
+                    return Vec::new();
+                }
+                vec![match pending.files_failure {
+                    Some(failure) => AgentEvent::RewindFailed {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: pending.mode,
+                        failure,
+                    },
+                    None => AgentEvent::RewindCompleted {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: pending.mode,
+                        prefill: None,
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Truncated,
+                        files: pending.files,
+                        incomplete: None,
+                        undo_token: None,
+                    },
+                }]
+            }
+            RewindStep::Conversation => {
+                let rewound =
+                    succeeded && result.get("rewound").and_then(Value::as_bool) == Some(true);
+                if rewound {
+                    let restored = if pending.files_failure.is_some() {
+                        RewindMode::Conversation
+                    } else {
+                        pending.mode
+                    };
+                    return vec![AgentEvent::RewindCompleted {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: restored,
+                        prefill: result
+                            .get("prefillText")
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.is_empty())
+                            .map(str::to_owned),
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Truncated,
+                        files: pending.files,
+                        incomplete: pending.files_failure.map(|failure| RewindIncomplete {
+                            requested: pending.mode,
+                            failure,
+                        }),
+                        undo_token: None,
+                    }];
+                }
+                let failure = RewindFailure::new(
+                    if succeeded {
+                        conversation_refusal(result.get("reason").and_then(Value::as_str))
+                    } else {
+                        RewindFailureReason::Other
+                    },
+                    error(),
+                );
+                if pending.mode.includes_files() && pending.files_failure.is_none() {
+                    // The files were restored before the conversation refused.
+                    vec![AgentEvent::RewindCompleted {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: RewindMode::Files,
+                        prefill: None,
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Truncated,
+                        files: pending.files,
+                        incomplete: Some(RewindIncomplete {
+                            requested: pending.mode,
+                            failure,
+                        }),
+                        undo_token: None,
+                    }]
+                } else {
+                    vec![AgentEvent::RewindFailed {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: pending.mode,
+                        failure,
+                    }]
+                }
+            }
         }
     }
 
@@ -4698,61 +4941,263 @@ mod tests {
         .is_empty());
     }
 
+    fn rewind_response(mapper: &mut Mapper, request: &Value, response: Value) -> Vec<AgentEvent> {
+        feed(
+            mapper,
+            &json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request["request_id"],
+                    "response": response,
+                }
+            })
+            .to_string(),
+        )
+    }
+
+    /// Restoring files and conversation during a running turn: the turn is
+    /// stopped first, files are restored, and when the files fail the
+    /// conversation is still rewound, as Claude Code's own menu does.
     #[test]
-    fn combined_native_rewind_sequences_files_then_conversation() {
+    fn a_running_turn_is_stopped_before_files_and_a_files_failure_still_rewinds_the_conversation() {
         let mut mapper = Mapper::new();
         mapper.native_rewind = true;
-        let files = mapper
+        mapper.start_turn();
+        let interrupt = mapper
             .begin_rewind("checkpoint-2".into(), RewindMode::FilesAndConversation)
             .unwrap();
-        assert_eq!(files["request"]["subtype"], "rewind_files");
-        let files_id = files["request_id"].as_str().unwrap();
+        assert_eq!(interrupt["request"], json!({ "subtype": "interrupt" }));
+        assert!(rewind_response(&mut mapper, &interrupt, json!({})).is_empty());
+        let files = mapper.take_outgoing().remove(0);
+        assert_eq!(
+            files["request"],
+            json!({ "subtype": "rewind_files", "user_message_id": "checkpoint-2" })
+        );
+        let error = "Failed to rewind: No file checkpoint found for this message.";
         let events = feed(
             &mut mapper,
             &json!({
                 "type": "control_response",
                 "response": {
-                    "subtype": "success",
-                    "request_id": files_id,
-                    "response": { "canRewind": true }
+                    "subtype": "error",
+                    "request_id": files["request_id"],
+                    "error": error,
                 }
             })
             .to_string(),
         );
         assert!(events.is_empty());
-        let outgoing = mapper.take_outgoing();
-        assert_eq!(outgoing.len(), 1);
-        assert_eq!(outgoing[0]["request"]["subtype"], "rewind_conversation");
+        let conversation = mapper.take_outgoing().remove(0);
         assert_eq!(
-            outgoing[0]["request"]["target_message_uuid"],
-            "checkpoint-2"
-        );
-
-        let conversation_id = outgoing[0]["request_id"].as_str().unwrap();
-        let events = feed(
-            &mut mapper,
-            &json!({
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": conversation_id,
-                    "response": {
-                        "rewound": true,
-                        "prefillText": "original prompt"
-                    }
-                }
+            conversation["request"],
+            json!({
+                "subtype": "rewind_conversation",
+                "target_message_uuid": "checkpoint-2",
+                "interrupt_if_running": true,
+                "allow_summarized_target": true,
             })
-            .to_string(),
         );
-        assert!(matches!(
-            events.as_slice(),
-            [AgentEvent::RewindCompleted {
+        let events = rewind_response(
+            &mut mapper,
+            &conversation,
+            json!({ "rewound": true, "prefillText": "original prompt" }),
+        );
+        assert_eq!(
+            serde_json::to_value(&events).unwrap(),
+            json!([{
+                "type": "rewind_completed",
+                "checkpoint_id": "checkpoint-2",
+                "mode": "conversation",
+                "prefill": "original prompt",
+                "later_history": "truncated",
+                "incomplete": {
+                    "requested": "files_and_conversation",
+                    "failure": { "reason": "nothing_to_restore", "detail": error },
+                },
+            }])
+        );
+    }
+
+    /// A stand-in Claude Code 2.1.318 that answers the rewind controls the way
+    /// the CLI does, echoes a user message under the uuid it was sent with,
+    /// and records every line it reads in `directory/requests`.
+    #[cfg(unix)]
+    fn rewinding_claude(directory: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::create_dir_all(directory).unwrap();
+        let binary = directory.join("claude");
+        let answer = |response: &str| {
+            format!(
+                "id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p'); \
+                 printf '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{response}}}}}\\n' \"$id\";;"
+            )
+        };
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.318\\n'; exit 0; fi\n\
+                 printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"default\"}}'\n\
+                 while IFS= read -r line; do printf '%s\\n' \"$line\" >> requests; case \"$line\" in\n\
+                 *'\"dry_run\":true'*) {}\n\
+                 *'\"subtype\":\"rewind_files\"'*) {}\n\
+                 *'\"subtype\":\"rewind_conversation\"'*) {}\n\
+                 *'\"type\":\"user\"'*) uuid=$(printf '%s' \"$line\" | sed -n 's/.*\"uuid\":\"\\([^\"]*\\)\".*/\\1/p'); \
+                 printf '{{\"type\":\"user\",\"uuid\":\"%s\",\"isReplay\":true,\"session_id\":\"native\",\"parent_tool_use_id\":null,\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"also this\"}}]}}}}\\n' \"$uuid\";;\n\
+                 esac; done\n",
+                answer(r#"{\"canRewind\":true,\"filesChanged\":[\"src/lib.rs\"],\"insertions\":3,\"deletions\":1}"#),
+                answer(r#"{\"canRewind\":true,\"skippedLinks\":0}"#),
+                answer(
+                    r#"{\"rewound\":false,\"reason\":\"stale_target\",\"error\":\"The conversation changed since this message was chosen.\",\"precedingAssistantUuid\":null}"#
+                ),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        binary
+    }
+
+    /// Through a running session: a steer is sent under its own uuid and its
+    /// replayed echo makes it a restore point; a preview is Claude's dry run;
+    /// a combined rewind whose conversation half is refused reports the files
+    /// it restored and why the conversation was not rewound.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_previews_rewinds_and_reports_the_part_claude_refused() {
+        smol::block_on(async {
+            let directory =
+                std::env::temp_dir().join(format!("agent-claude-rewind-{}", uuid::Uuid::new_v4()));
+            let binary = rewinding_claude(&directory);
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: false,
+                binary_path: Some(binary),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            let next = async |matches: fn(&AgentEvent) -> bool| loop {
+                let event = handle.events.recv().await.unwrap();
+                if matches(&event) {
+                    break event;
+                }
+            };
+            assert!(matches!(
+                next(|event| matches!(event, AgentEvent::RewindAvailability { .. })).await,
+                AgentEvent::RewindAvailability { unavailable: None }
+            ));
+
+            handle
+                .commands
+                .send(SessionCommand::Steer {
+                    request_id: "steer-1".into(),
+                    text: "also this".into(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let AgentEvent::SteerCheckpoint {
+                request_id,
                 checkpoint_id,
-                mode: RewindMode::FilesAndConversation,
-                prefill: Some(prefill),
-                ..
-            }] if checkpoint_id == "checkpoint-2" && prefill == "original prompt"
-        ));
+            } = next(|event| matches!(event, AgentEvent::SteerCheckpoint { .. })).await
+            else {
+                unreachable!()
+            };
+            assert_eq!(request_id, "steer-1");
+
+            for mode in [RewindMode::FilesAndConversation, RewindMode::Conversation] {
+                handle
+                    .commands
+                    .send(SessionCommand::PreviewRewind {
+                        checkpoint_id: "checkpoint-2".into(),
+                        mode,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let previews = [
+                next(|event| matches!(event, AgentEvent::RewindPreviewed { .. })).await,
+                next(|event| matches!(event, AgentEvent::RewindPreviewed { .. })).await,
+            ];
+            let files = RewindFiles {
+                files: vec![RewindFile::path("src/lib.rs")],
+                insertions: Some(3),
+                deletions: Some(1),
+                skipped_links: 0,
+            };
+            for (mode, expected) in [
+                (
+                    RewindMode::FilesAndConversation,
+                    RewindPreview {
+                        files: files.clone(),
+                        conflicts: Vec::new(),
+                    },
+                ),
+                (RewindMode::Conversation, RewindPreview::default()),
+            ] {
+                assert!(
+                    previews.contains(&AgentEvent::RewindPreviewed {
+                        checkpoint_id: "checkpoint-2".into(),
+                        mode,
+                        result: RewindPreviewResult::Ready(expected),
+                    }),
+                    "{previews:?}"
+                );
+            }
+
+            handle
+                .commands
+                .send(SessionCommand::Rewind {
+                    checkpoint_id: "checkpoint-2".into(),
+                    mode: RewindMode::FilesAndConversation,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                next(|event| matches!(event, AgentEvent::RewindCompleted { .. })).await,
+                AgentEvent::RewindCompleted {
+                    checkpoint_id: "checkpoint-2".into(),
+                    mode: RewindMode::Files,
+                    prefill: None,
+                    prefill_attachments: Vec::new(),
+                    later_history: LaterHistory::Truncated,
+                    files: Some(files),
+                    incomplete: Some(RewindIncomplete {
+                        requested: RewindMode::FilesAndConversation,
+                        failure: RewindFailure::new(
+                            RewindFailureReason::ConversationChanged,
+                            "The conversation changed since this message was chosen.".to_owned(),
+                        ),
+                    }),
+                    undo_token: None,
+                }
+            );
+            shut_down(handle).await;
+
+            let requests: Vec<Value> = std::fs::read_to_string(directory.join("requests"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                requests.iter().any(|request| request["type"] == "user"
+                    && request["uuid"] == checkpoint_id.as_str())
+            );
+            assert!(requests.iter().any(|request| request["request"]
+                == json!({
+                    "subtype": "rewind_files",
+                    "user_message_id": "checkpoint-2",
+                    "dry_run": true,
+                })));
+            let _ = std::fs::remove_dir_all(directory);
+        });
     }
 
     fn select(id: &str, value: Value) -> OptionSelection {

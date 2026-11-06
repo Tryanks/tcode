@@ -253,13 +253,18 @@ impl ProviderKind {
                         RewindMode::Conversation,
                         RewindMode::Files,
                     ],
-                    // Claude Code 2.1.214 cannot persist a conversation rewind
-                    // before the first assistant anchor.
-                    first_turn_conversation: false,
-                    steer_targets: false,
+                    // A cut before the first prompt persists as a leaf-less
+                    // `last-prompt` entry, which a resume reads as an empty
+                    // conversation (2.1.318).
+                    first_turn_conversation: true,
+                    // A steer has no file checkpoint ("No code restore").
+                    steer_targets: true,
                     later_history: LaterHistory::Truncated,
-                    preview: RewindPreviewKind::None,
-                    running_turn: RunningTurnPolicy::Refuse,
+                    // `rewind_files` with `dry_run`.
+                    preview: RewindPreviewKind::Files,
+                    // `rewind_conversation`'s `interrupt_if_running`.
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    // File history tracks the edit tools' writes only.
                     restores_command_edits: false,
                 }),
                 manual_compaction: true,

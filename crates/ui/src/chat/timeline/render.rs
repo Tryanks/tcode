@@ -2931,9 +2931,9 @@ This begins after the hard break."#;
     }
 
     /// The rewind panel a message opens offers exactly the scopes its
-    /// Harness restores that message in: Claude Code restores only files of
-    /// the first turn and all three scopes of a later one; OpenCode restores
-    /// the conversation, with or without files, of any turn, never files alone.
+    /// Harness restores that message in: Claude Code all three of any turn
+    /// (while its preview is still out); OpenCode the conversation, with or
+    /// without files, of any turn, never files alone.
     #[gpui::test]
     fn the_rewind_panel_offers_exactly_the_harness_rewind_modes(cx: &mut TestAppContext) {
         use agent::{ProviderKind, RewindMode};
@@ -2945,7 +2945,7 @@ This begins after the hard break."#;
             RewindMode::Files,
         ];
         for (provider, turn, offered) in [
-            (ProviderKind::ClaudeCode, 0, &[RewindMode::Files][..]),
+            (ProviderKind::ClaudeCode, 0, &ALL[..]),
             (ProviderKind::ClaudeCode, 1, &ALL[..]),
             (
                 ProviderKind::OpenCode,
@@ -2971,12 +2971,15 @@ This begins after the hard break."#;
                 at_turn(entry("user-1", user_item("second")), 1),
                 at_turn(entry("assistant-1", assistant("Two.")), 1),
             ]);
-            let (workspace_store, window_state, session_id, _driver) =
-                seed_chat_with_history_on(cx, timeline, false, Some(provider));
+            // A preview the panel asks for starts a scripted provider.
+            let (workspace_store, window_state, session_id, _driver, _scripted) =
+                seed_chat_scripted(cx, timeline, false, Some(provider), true);
             let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
             });
             let window: &mut VisualTestContext = window;
+            // The preview's spinner turns while the Harness is asked.
+            window.update(|_, cx| cx.set_reduce_motion(true));
             window.simulate_resize(size(px(1_024.), px(700.)));
             draw_settled(window);
             // The bubble's actions show while the pointer is over it.
@@ -3006,6 +3009,118 @@ This begins after the hard break."#;
                 })
                 .collect();
             assert_eq!(shown, offered, "{provider:?} turn {turn}");
+        }
+    }
+
+    /// The panel asks the Harness what each file scope would restore, and
+    /// offers those scopes only when it names files: a message after which
+    /// nothing changed can only have its conversation rewound, as Claude
+    /// Code's own menu hides "Restore code" there.
+    #[gpui::test]
+    fn the_rewind_panel_drops_file_scopes_the_preview_finds_nothing_for(cx: &mut TestAppContext) {
+        use agent::{
+            AgentEvent, ProviderKind, RewindFile, RewindFiles, RewindMode, RewindPreview,
+            RewindPreviewResult, SessionCommand,
+        };
+        use gpui::{Modifiers, VisualTestContext, px, size};
+
+        for (files, offered) in [
+            (Vec::new(), vec![RewindMode::Conversation]),
+            (
+                vec![RewindFile::path("src/main.rs")],
+                vec![
+                    RewindMode::FilesAndConversation,
+                    RewindMode::Conversation,
+                    RewindMode::Files,
+                ],
+            ),
+        ] {
+            let mut timeline = Timeline::default();
+            timeline.turns = vec![TurnMeta {
+                provider_checkpoint_id: Some("checkpoint-0".into()),
+                ..TurnMeta::default()
+            }];
+            timeline.entries.extend([
+                at_turn(entry("user-0", user_item("first")), 0),
+                at_turn(entry("assistant-0", assistant("One.")), 0),
+            ]);
+            let (store, window_state, session_id, mut driver, scripted) =
+                seed_chat_scripted(cx, timeline, false, Some(ProviderKind::ClaudeCode), true);
+            let (commands, events) = scripted.unwrap();
+            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+                ChatView::new(store.clone(), window_state, Some(session_id), window, cx)
+            });
+            let window: &mut VisualTestContext = window;
+            // The preview's spinner turns while the Harness is asked.
+            window.update(|_, cx| cx.set_reduce_motion(true));
+            window.simulate_resize(size(px(1_024.), px(700.)));
+            draw_settled(window);
+            let bubble = window.debug_bounds("user-bubble-user-0").unwrap();
+            window.simulate_mouse_move(bubble.center(), None, Modifiers::default());
+            draw_settled(window);
+            let trigger = window.debug_bounds("rewind-user-0").unwrap();
+            window.simulate_click(trigger.center(), Modifiers::default());
+            draw_settled(window);
+            assert!(window.debug_bounds("rewind-preview-checking").is_some());
+
+            let mut asked = Vec::new();
+            driver.wait_until(window, &store, "the previews reach the Harness", |_| {
+                while let Ok(command) = commands.try_recv() {
+                    if let SessionCommand::PreviewRewind {
+                        checkpoint_id,
+                        mode,
+                    } = command
+                    {
+                        asked.push((checkpoint_id, mode));
+                    }
+                }
+                asked.len() == 2
+            });
+            for (checkpoint_id, mode) in asked {
+                assert_eq!(checkpoint_id, "checkpoint-0");
+                events
+                    .try_send(AgentEvent::RewindPreviewed {
+                        checkpoint_id,
+                        mode,
+                        result: RewindPreviewResult::Ready(RewindPreview {
+                            files: RewindFiles {
+                                files: files.clone(),
+                                insertions: Some(3),
+                                deletions: Some(1),
+                                skipped_links: 0,
+                            },
+                            conflicts: Vec::new(),
+                        }),
+                    })
+                    .unwrap();
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while window.debug_bounds("rewind-preview-checking").is_some() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the previews are answered"
+                );
+                driver.wait_until(window, &store, "the host's answers", |_| true);
+                draw_settled(window);
+            }
+            let shown: Vec<RewindMode> = [
+                RewindMode::FilesAndConversation,
+                RewindMode::Conversation,
+                RewindMode::Files,
+            ]
+            .into_iter()
+            .filter(|mode| {
+                window
+                    .debug_bounds(format!("rewind-option-{mode:?}").leak())
+                    .is_some()
+            })
+            .collect();
+            assert_eq!(shown, offered, "{files:?}");
+            assert_eq!(
+                window.debug_bounds("rewind-preview-files").is_some(),
+                !files.is_empty(),
+                "the files the default scope restores"
+            );
         }
     }
 

@@ -1940,7 +1940,43 @@ pub(crate) mod tests {
         String,
         crate::store::tests::LocalHostDriver,
     ) {
+        let (store, window_state, session_id, driver, _) =
+            seed_chat_scripted(cx, timeline, paged, provider, false);
+        (store, window_state, session_id, driver)
+    }
+
+    /// The commands a scripted provider receives and the events it sends.
+    pub(in crate::chat) type ScriptedHandles = (
+        smol::channel::Receiver<agent::SessionCommand>,
+        smol::channel::Sender<agent::AgentEvent>,
+    );
+
+    /// [`seed_chat_with_history_on`], whose provider, when `script`, is a
+    /// scripted one the test drives: a provider the host starts (for a
+    /// rewind preview, say) is never the real CLI.
+    pub(in crate::chat) fn seed_chat_scripted(
+        cx: &mut TestAppContext,
+        timeline: Timeline,
+        paged: bool,
+        provider: Option<agent::ProviderKind>,
+        script: bool,
+    ) -> (
+        Entity<WorkspaceStore>,
+        Entity<WindowState>,
+        String,
+        crate::store::tests::LocalHostDriver,
+        Option<ScriptedHandles>,
+    ) {
         let (host, session_id, timeline) = seeded_chat_host_on(cx, timeline, paged, provider);
+        let scripted = provider.filter(|_| script).map(|provider| {
+            let scripted = tcode_runtime::app::scripted_provider(provider);
+            let handles = (scripted.commands.clone(), scripted.events.clone());
+            smol::block_on(host.update_state_for_test(move |state, _| {
+                state.set_provider_launcher_for_test(scripted.launcher)
+            }))
+            .expect("script the provider");
+            handles
+        });
         let mut driver = crate::store::tests::LocalHostDriver::new(&host);
         let workspace_store = cx.new(|cx| {
             WorkspaceStore::new_attached(
@@ -2005,7 +2041,7 @@ pub(crate) mod tests {
                 .recv_blocking()
                 .expect("chat test host stopped");
         });
-        (workspace_store, window_state, session_id, driver)
+        (workspace_store, window_state, session_id, driver, scripted)
     }
 
     use gpui::VisualTestContext;

@@ -372,3 +372,61 @@ fn a_control_rewind_answers_with_the_harness_outcome() {
     assert_eq!(outcome["status"], "failed");
     assert_eq!(outcome["reason"], "turn_running");
 }
+
+/// Where the harness stops a running turn for a rewind, a rewind can be
+/// asked for while one runs; the message queued behind that turn is not sent
+/// when the turn stops, and waits for the user's next message.
+#[test]
+fn a_rewind_during_a_running_turn_keeps_the_queued_message_waiting() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-rewind-running-turn");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (sender, commands) = smol::channel::unbounded();
+    state.update(cx, |state, cx| {
+        install(state, ProviderKind::ClaudeCode, cwd, Runtime::Live(sender));
+        checkpoint_two_turns(state, cx);
+        state.on_event(
+            "rewound-thread",
+            AgentEvent::TurnStarted {
+                turn_id: "turn-3".into(),
+            },
+            cx,
+        );
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::SendTurn {
+            session_id: "rewound-thread".into(),
+            text: "queued behind the turn".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    state.dispatch_command(cx, 2, rewind_command("desktop"));
+    cx.run_until_parked();
+    assert!(matches!(
+        next_command(&commands),
+        Ok(SessionCommand::Rewind { checkpoint_id, .. }) if checkpoint_id == "checkpoint-2"
+    ));
+
+    // Claude stops the turn, then rewinds.
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "rewound-thread",
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-3".into(),
+                status: TurnStatus::Interrupted,
+                usage: None,
+            },
+            cx,
+        );
+        state.on_event("rewound-thread", completed("the second prompt"), cx);
+    });
+    cx.run_until_parked();
+    assert!(next_command(&commands).is_err(), "the queued message waits");
+    let status = state.read(|state| state.session_status_snapshot("rewound-thread").unwrap());
+    assert!(status.queue_held);
+    assert_eq!(status.queued_messages.len(), 1);
+}
