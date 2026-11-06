@@ -112,8 +112,9 @@ impl<K> ItemStreams<K> {
             Some(Stream::Settled) => return None,
             Some(Stream::Following(stream)) => stream,
             None => {
-                // A completion lands on the id's first entry anywhere in the
-                // log, so only an entry that is that first one is followed.
+                // Only an id's first entry is followed: where a reused id's
+                // records land depends on the earlier entry with that id, which
+                // the folds of the item's own records never see.
                 let creates = created
                     && fold.first_entry(item) == Some(fold.entries.len() - 1)
                     && !matches!(event, AgentEvent::ItemCompleted(_));

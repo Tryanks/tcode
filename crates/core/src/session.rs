@@ -762,15 +762,16 @@ pub struct Timeline {
     entry_index: EntryIndex,
 }
 
-/// Where each entry id first appears in [`Timeline::entries`], so the fold
-/// finds an item's entry without a linear search per event, which made
-/// folding a long log quadratic. It is derived from `entries`: it covers the
+/// Where each entry id first and last appears in [`Timeline::entries`], so
+/// the fold finds an item's entry without a linear search per event, which
+/// made folding a long log quadratic. It is derived from `entries`: it covers the
 /// prefix it has seen, takes no part in equality, is reset by the fold's own
 /// edits other than appends, and every hit is checked against `entries`,
 /// which code outside the fold may also edit.
 #[derive(Debug, Clone, Default)]
 struct EntryIndex {
     first: HashMap<String, usize>,
+    last: HashMap<String, usize>,
     covered: usize,
 }
 
@@ -783,20 +784,49 @@ impl PartialEq for EntryIndex {
 impl Timeline {
     /// The position of the first entry with `id`.
     fn first_entry(&mut self, id: &str) -> Option<usize> {
+        self.indexed_entry(id, |index| &index.first)
+    }
+
+    fn last_entry(&mut self, id: &str) -> Option<usize> {
+        self.indexed_entry(id, |index| &index.last)
+    }
+
+    fn indexed_entry(
+        &mut self,
+        id: &str,
+        map: fn(&EntryIndex) -> &HashMap<String, usize>,
+    ) -> Option<usize> {
         let index = &mut self.entry_index;
         if index.covered > self.entries.len() {
             *index = EntryIndex::default();
         }
         for (position, entry) in self.entries.iter().enumerate().skip(index.covered) {
             index.first.entry(entry.id.clone()).or_insert(position);
+            index.last.insert(entry.id.clone(), position);
         }
         index.covered = self.entries.len();
-        let position = *index.first.get(id)?;
+        let position = *map(index).get(id)?;
         if self.entries[position].id == id {
             return Some(position);
         }
         self.entry_index = EntryIndex::default();
-        self.first_entry(id)
+        self.indexed_entry(id, map)
+    }
+
+    /// The entry an item's lifecycle event belongs to: the latest with its id,
+    /// unless that one finished in an earlier turn than the open one and was
+    /// not backgrounded. Providers reuse ids — the ACP session numbers its
+    /// blocks from zero in every process — so such an event starts a new item.
+    fn item_entry(&mut self, id: &str) -> Option<usize> {
+        let position = self.last_entry(id)?;
+        let entry = &self.entries[position];
+        let ended_earlier = entry.finished_ts.is_some()
+            && !entry.background
+            && self
+                .boundaries
+                .current()
+                .is_some_and(|turn| entry.turn < turn);
+        (!ended_earlier).then_some(position)
     }
 
     /// Edits to `entries` other than appends move the positions the index
@@ -1145,7 +1175,7 @@ impl Timeline {
             } => {
                 // A child's item is its mirror's, as in `upsert_item`.
                 if parent_item_id.is_none()
-                    && let Some(position) = self.first_entry(item_id)
+                    && let Some(position) = self.item_entry(item_id)
                 {
                     Arc::make_mut(&mut self.entries[position]).background = true;
                     // The turn no longer waits on it.
@@ -1155,11 +1185,11 @@ impl Timeline {
                 }
             }
             AgentEvent::ItemCompleted(item) => {
-                let observed = self.first_entry(&item.id).is_some();
+                let observed = self.item_entry(&item.id).is_some();
                 self.upsert_item(ts, item);
                 if observed
                     && item.parent_item_id.is_none()
-                    && let Some(position) = self.first_entry(&item.id)
+                    && let Some(position) = self.item_entry(&item.id)
                 {
                     Arc::make_mut(&mut self.entries[position]).finished_ts = ts;
                 }
@@ -1435,7 +1465,7 @@ impl Timeline {
         };
         if self.turn_is_open() {
             let waited_on = !self
-                .first_entry(&item.id)
+                .item_entry(&item.id)
                 .is_some_and(|position| self.entries[position].background);
             self.tool_clock
                 .mark(ts, &item.id, waited_on && tool_is_active(lifecycle, state));
@@ -1529,7 +1559,7 @@ impl Timeline {
     }
 
     fn item_turn(&mut self, item_id: &str) -> Option<usize> {
-        self.first_entry(item_id)
+        self.last_entry(item_id)
             .map(|position| self.entries[position].turn)
     }
 
@@ -1540,7 +1570,7 @@ impl Timeline {
             return;
         }
         let mut incoming = EntryContent::Item(item.content.clone());
-        if let Some(position) = self.first_entry(&item.id) {
+        if let Some(position) = self.item_entry(&item.id) {
             let entry = Arc::make_mut(&mut self.entries[position]);
             entry.content = merge_content(
                 std::mem::replace(&mut entry.content, incoming.clone()),
@@ -3877,6 +3907,81 @@ mod tests {
             entries(&suffix, 0),
             entries(&full, full.entries.len() - suffix.entries.len()),
             "a page boundary at a turn start folds the same turns as the full log"
+        );
+    }
+
+    /// The ACP session (`acp_session.rs`, shared by ACP agents, Cursor and
+    /// Grok) names text blocks `thought-N` / `msg-N` from a counter that
+    /// starts at zero in every provider process, so the first turn after a
+    /// restart (app relaunch, or the one-hour idle reap) streams and completes
+    /// the same ids the thread's first process used. The recorded Grok
+    /// `resumed_turn.jsonl` shows a resumed process's first turn as
+    /// `thought-1`, `msg-2`. Each turn must keep its own reply.
+    #[test]
+    fn a_restarted_provider_reusing_an_earlier_turns_item_ids_keeps_both_turns_replies() {
+        let reasoning = |id: &str, text: &str| {
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content: ItemContent::Reasoning { text: text.into() },
+            })
+        };
+        let process_turn = |n: u64, answer: &str| -> Vec<StoredEvent> {
+            [
+                user_msg(&format!("user-{n}"), "go"),
+                // `turn_seq` restarts with the process too.
+                AgentEvent::TurnStarted {
+                    turn_id: "turn-1".into(),
+                },
+                AgentEvent::Delta {
+                    item_id: "thought-1".into(),
+                    kind: DeltaKind::ReasoningText,
+                    text: format!("thinking {n}"),
+                },
+                reasoning("thought-1", &format!("thinking {n}")),
+                assistant_delta("msg-2", answer),
+                assistant("msg-2", answer),
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, event)| at(n * 100 + i as u64, event))
+            .collect()
+        };
+        let log = [
+            process_turn(1, "first answer"),
+            process_turn(2, "second answer"),
+        ]
+        .concat();
+        let timeline = Timeline::fold_events(log.iter().cloned());
+        let rendered = |timeline: &Timeline| {
+            timeline
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.content {
+                    EntryContent::Item(ItemContent::AssistantMessage { text, .. })
+                    | EntryContent::Item(ItemContent::Reasoning { text }) => Some((
+                        entry.turn,
+                        entry.id.clone(),
+                        text.clone(),
+                        entry.finished_ts.is_some(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rendered(&timeline),
+            [
+                (0, "thought-1".into(), "thinking 1".into(), true),
+                (0, "msg-2".into(), "first answer".into(), true),
+                (1, "thought-1".into(), "thinking 2".into(), true),
+                (1, "msg-2".into(), "second answer".into(), true),
+            ]
         );
     }
 
