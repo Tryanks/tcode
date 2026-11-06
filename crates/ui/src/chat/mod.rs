@@ -52,7 +52,7 @@ use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
-use agent::{ItemContent, RewindMode};
+use agent::ItemContent;
 use gpui::{
     Action, Anchor, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
     FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
@@ -83,13 +83,15 @@ pub use self::timeline::CaptureScroll;
 use self::timeline::TimelineLayout;
 pub(crate) use self::timeline::TimelineView;
 
-/// A message's context-menu rewind, which the chat applies as the bubble's
-/// rewind popover does.
+/// A message's context-menu rewind, which opens the panel the bubble's
+/// rewind action opens.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_chat, no_json)]
-pub(crate) struct RewindTurn {
+pub(crate) struct OpenRewind {
+    /// The message's entry id.
+    pub(crate) key: String,
     pub(crate) turn: usize,
-    pub(crate) mode: RewindMode,
+    pub(crate) steer: Option<String>,
 }
 
 gpui::actions!(tcode_chat, [OpenMoveThreadDialog, RevokeSelfSettle]);
@@ -1118,7 +1120,7 @@ impl ChatView {
             }))
             .on_action(cx.listener(|this, action, window, cx| {
                 this.timeline.update(cx, |timeline, cx| {
-                    timeline.on_rewind_turn(action, window, cx)
+                    timeline.on_open_rewind(action, window, cx)
                 })
             }))
             .on_action(cx.listener(|this, action, window, cx| {

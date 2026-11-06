@@ -9,6 +9,7 @@ mod glide;
 mod list;
 mod render;
 mod residency;
+mod rewind;
 pub(super) mod rows;
 
 use crate::motion::list_rows::{Arrival, Glide, RowGlide};
@@ -125,6 +126,8 @@ pub(crate) struct TimelineView {
     pub(in crate::chat) painted_tail_start: Option<usize>,
     /// Open/closed keys for collapsibles other than activity details.
     pub(in crate::chat) expanded: HashSet<String>,
+    /// The rewind panel a message opened, while it is open.
+    pub(in crate::chat) rewind_panel: Option<rewind::RewindPanelState>,
     pub(in crate::chat) auto_activity_expansions: AutoActivityExpansions,
     pub(in crate::chat) command_panels: RefCell<CommandPanelCache>,
     pub(in crate::chat) inline_diffs: InlineDiffCache,
@@ -252,6 +255,7 @@ impl TimelineView {
             painted_rows: Rc::default(),
             painted_tail_start: None,
             expanded: HashSet::new(),
+            rewind_panel: None,
             auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
             inline_diffs: InlineDiffCache::new(),

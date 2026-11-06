@@ -598,9 +598,9 @@ impl Composer {
         self.recompute_trigger(cx);
     }
 
-    /// Claude's native conversation rewind returns the selected user prompt.
-    /// Put that provider-owned prefill into the ordinary composer so the user
-    /// can edit or resend it; no inline transcript editor is involved.
+    /// The prompt a rewind this client asked for gave back goes into the
+    /// ordinary composer to edit or resend: first, with what the user had
+    /// typed after it, never in its place; its images join the strip.
     fn sync_native_rewind_prefill(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let prefill = self.workspace_store.update(cx, |store, cx| {
             store.take_native_rewind_prefill_for(self.session_id.as_deref(), cx)
@@ -608,7 +608,23 @@ impl Composer {
         let Some(prefill) = prefill else {
             return;
         };
-        self.set_input_text(prefill, window, cx);
+        self.sync_images_session();
+        for path in prefill.attachments {
+            let path = PathBuf::from(path);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.pending_images
+                .push(components::images::PendingImage { path, name });
+        }
+        let typed = self.input.read(cx).value().trim().to_owned();
+        let text = if typed.is_empty() {
+            prefill.text
+        } else {
+            format!("{}\n\n{typed}", prefill.text.trim_end())
+        };
+        self.set_input_text(text, window, cx);
     }
 
     /// Text another surface put here goes after what the user typed, which it never replaces.
@@ -2276,6 +2292,56 @@ mod replica_tests {
                 .unwrap(),
             )
             .unwrap();
+    }
+
+    /// The prompt a rewind gives back goes into the composer of the client
+    /// that asked for the rewind, ahead of what the user had typed, which it
+    /// never replaces; another client's rewind leaves this composer alone.
+    #[gpui::test]
+    fn a_rewound_prompt_goes_before_the_draft_of_the_client_that_asked(cx: &mut TestAppContext) {
+        let (store, incoming, _outgoing, status) = attach(cx);
+        let session_id = status.session_id.clone();
+        let topic = Topic::SessionStatus {
+            session_id: session_id.clone(),
+        };
+        replace(
+            &incoming,
+            topic.clone(),
+            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let own = store.read_with(cx, |store, _| store.client_id().to_owned());
+        let (composer, cx) = cx.add_window_view(|window, cx| {
+            Composer::new(store.clone(), Some(session_id.clone()), window, cx)
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            composer.update(cx, |composer, cx| composer.focus(window, cx));
+        });
+        cx.simulate_input("and also this");
+        for (client_id, text) in [
+            ("another-client", "asked elsewhere"),
+            (own.as_str(), "the restored prompt"),
+        ] {
+            replace(
+                &incoming,
+                topic.clone(),
+                ServerEvent::RewindPrefill {
+                    session_id: session_id.clone(),
+                    client_id: client_id.to_owned(),
+                    text: text.to_owned(),
+                    attachments: Vec::new(),
+                },
+            );
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "the restored prompt\n\nand also this"
+        );
     }
 
     #[gpui::test]

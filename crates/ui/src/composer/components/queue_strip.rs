@@ -216,9 +216,9 @@ impl Composer {
         if self.queue_drag.is_some() && !cx.has_active_drag() {
             self.queue_drag = None;
         }
-        let (can_steer, agent, mut queued) = match self.queued_rows(cx) {
-            Some((queue, queued)) => (queue.can_steer, queue.agent, queued),
-            None => (false, "", Vec::new()),
+        let (can_steer, agent, held, mut queued) = match self.queued_rows(cx) {
+            Some((queue, queued)) => (queue.can_steer, queue.agent, queue.held, queued),
+            None => (false, "", false, Vec::new()),
         };
         let shown = self.motion.shown(
             self.motion_key("queue-strip"),
@@ -257,6 +257,16 @@ impl Composer {
             },
         )
         .render(v_flex().w_full());
+        let held = held.then(|| {
+            div()
+                .w_full()
+                .px_2()
+                .pb_1()
+                .text_token(&cx.theme().tokens.typography.xs)
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::tr!("rewind.queue_held").into_owned())
+        });
+        let strip = v_flex().w_full().children(held).child(strip);
         Some(super::super::column_fold(
             &shown,
             div()

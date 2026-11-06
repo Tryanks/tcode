@@ -137,7 +137,7 @@ impl TimelineView {
                     ));
                 }
                 Segment::Rewind(entry) => {
-                    column = column.child(components::dividers::rewind_divider(entry, cx));
+                    column = column.child(self.compose_rewound(index, entry, cx));
                 }
                 Segment::ActivityRun(activities) => {
                     column = column.child(self.compose_work_log(
@@ -658,17 +658,110 @@ impl TimelineView {
         }
     }
 
-    pub(in crate::chat) fn on_rewind_turn(
+    pub(in crate::chat) fn on_open_rewind(
         &mut self,
-        action: &RewindTurn,
+        action: &OpenRewind,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let RewindTurn { turn, mode } = *action;
-        let session_id = self.session_id.clone().unwrap_or_default();
-        self.workspace_store.update(cx, |store, _cx| {
-            store.rewind_turn_for(session_id, turn, mode)
+        let OpenRewind { key, turn, steer } = action.clone();
+        self.open_rewind(key, turn, steer, cx);
+    }
+
+    /// A rewind's divider, with its removed turns to read and the Harness's
+    /// undo while it lasts; or a rewind the Harness did not make.
+    fn compose_rewound(
+        &self,
+        turn: usize,
+        entry: &TimelineEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let EntryContent::Rewound(rewound) = &entry.content else {
+            return components::dividers::rewind_divider(entry, cx);
+        };
+        let store = self.workspace_store.read(cx);
+        let status = store
+            .session_status_for(self.session_id.as_deref(), cx)
+            .and_then(|status| status.rewind.as_ref());
+        let checkpoint = rewound.checkpoint_id.clone();
+        let this = cx.entity().downgrade();
+        let undo =
+            rewound
+                .undo_token
+                .as_ref()
+                .and(status)
+                .and_then(|status| match &status.pending {
+                    Some(pending) if pending.undo && pending.checkpoint_id == checkpoint => {
+                        Some(components::rewind::DividerUndo::InProgress)
+                    }
+                    _ if status.blocked.is_none() => {
+                        let this = this.clone();
+                        Some(components::rewind::DividerUndo::Available(Rc::new(
+                            move |_, cx| {
+                                let checkpoint = checkpoint.clone();
+                                let _ = this.update(cx, |timeline, cx| {
+                                    timeline.undo_rewind(checkpoint, cx)
+                                });
+                            },
+                        )))
+                    }
+                    _ => None,
+                });
+        let harness = store.harness_name_for(self.session_id.as_deref(), cx);
+        let key = format!("rewound:{}", entry.id);
+        let expanded = self.expanded.contains(&key);
+        let on_toggle: components::rewind::Handler = Rc::new(move |_, cx| {
+            let _ = this.update(cx, |timeline, cx| timeline.toggle_expanded(turn, &key, cx));
         });
+        components::rewind::rewound_divider(
+            entry,
+            expanded,
+            on_toggle,
+            undo,
+            harness,
+            &self.motion,
+            cx,
+        )
+    }
+
+    /// The message's rewind: its action opening the panel (a popover, a
+    /// sheet on a phone), or what shows while the rewind is made.
+    fn compose_rewind(
+        &self,
+        menu: &components::bubble::RewindMenu,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if menu.in_progress {
+            return components::bubble::rewind_in_progress(&menu.key, cx);
+        }
+        let compact = self.window_state.read(cx).compact;
+        let trigger = components::bubble::rewind_button(menu, compact, &self.motion, cx);
+        let panel = self.rewind_panel_for(&menu.key, cx);
+        let open = panel.is_some();
+        let actions = self.rewind_panel_actions(cx);
+        let this = cx.entity().downgrade();
+        let (key, turn, steer) = (menu.key.clone(), menu.turn, menu.steer.clone());
+        crate::material::overlay_popover(SharedString::from(format!("rewind-panel-{key}")), cx)
+            .anchor(Anchor::TopRight)
+            .when(compact, |popover| {
+                popover.bottom_sheet(crate::tr!("rewind.title"))
+            })
+            .open(open)
+            .on_open_change(move |opened, _, cx| {
+                let _ = this.update(cx, |timeline, cx| {
+                    if *opened {
+                        timeline.open_rewind(key.clone(), turn, steer.clone(), cx);
+                    } else {
+                        timeline.close_rewind(cx);
+                    }
+                });
+            })
+            .trigger(trigger)
+            .content(move |_, _, cx| match panel {
+                Some(panel) => components::rewind::panel_body(panel, actions, compact, cx),
+                None => div().into_any_element(),
+            })
+            .into_any_element()
     }
 
     pub(in crate::chat) fn open_diff(
@@ -726,42 +819,32 @@ impl TimelineView {
             .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
             .map(|len| &text[..len]);
         let visible = user_visible_text(text, context_len);
-        let rewind_menu = steering
-            .is_none()
+        // A steer is a target only once its harness has a restore point for it.
+        let steer = matches!(steering, Some(SteeringStatus::Accepted)).then(|| entry_id.to_owned());
+        let rewind_menu = (steering.is_none() || steer.is_some())
             .then(|| {
-                self.workspace_store.read(cx).chat_native_rewind_state_for(
+                self.workspace_store.read(cx).chat_rewind_target_for(
                     self.session_id.as_deref(),
                     turn,
+                    steer.as_deref(),
                     cx,
                 )
             })
             .flatten()
-            .map(|state| components::bubble::RewindMenu {
+            .map(|target| components::bubble::RewindMenu {
+                key: entry_id.to_owned(),
                 turn,
-                disabled: state.blocked,
-                modes: state.modes,
+                steer,
+                blocked: target
+                    .rewind
+                    .blocked
+                    .filter(|_| !target.in_progress)
+                    .map(|blocked| components::rewind::blocked_reason(blocked, &target.harness)),
+                in_progress: target.in_progress,
             });
-        let rewind = rewind_menu.clone().map(|menu| {
-            let handlers = menu
-                .modes
-                .iter()
-                .map(|&mode| {
-                    Arc::new(cx.listener(move |this, _, _, cx| {
-                        let session_id = this.session_id.clone().unwrap_or_default();
-                        this.workspace_store.update(cx, |store, _cx| {
-                            store.rewind_turn_for(session_id, turn, mode)
-                        });
-                    })) as components::bubble::SharedClickHandler
-                })
-                .collect();
-            components::bubble::native_rewind_button(
-                menu,
-                self.window_state.read(cx).compact,
-                handlers,
-                &self.motion,
-                cx,
-            )
-        });
+        let rewind = rewind_menu
+            .as_ref()
+            .map(|menu| self.compose_rewind(menu, cx));
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
         let copied = self.copied.is(&copy_key);
@@ -2847,12 +2930,12 @@ This begins after the hard break."#;
         driver.shutdown(cx, &workspace_store, &host);
     }
 
-    /// A user turn's rewind popover offers exactly the scopes its harness
-    /// restores that turn in: Claude Code restores only files of the first
-    /// turn and all three scopes of a later one; OpenCode restores the
-    /// conversation, with or without files, of any turn, and never files alone.
+    /// The rewind panel a message opens offers exactly the scopes its
+    /// Harness restores that message in: Claude Code restores only files of
+    /// the first turn and all three scopes of a later one; OpenCode restores
+    /// the conversation, with or without files, of any turn, never files alone.
     #[gpui::test]
-    fn the_rewind_popover_offers_exactly_the_harness_rewind_modes(cx: &mut TestAppContext) {
+    fn the_rewind_panel_offers_exactly_the_harness_rewind_modes(cx: &mut TestAppContext) {
         use agent::{ProviderKind, RewindMode};
         use gpui::{Modifiers, VisualTestContext, px, size};
 
@@ -2903,10 +2986,11 @@ This begins after the hard break."#;
             window.simulate_mouse_move(bubble.center(), None, Modifiers::default());
             draw_settled(window);
             let trigger = window
-                .debug_bounds(["rewind-0", "rewind-1"][turn])
-                .unwrap_or_else(|| panic!("{provider:?} turn {turn} has a rewind button"));
+                .debug_bounds(["rewind-user-0", "rewind-user-1"][turn])
+                .unwrap_or_else(|| panic!("{provider:?} turn {turn} has a rewind action"));
             window.simulate_click(trigger.center(), Modifiers::default());
             draw_settled(window);
+            assert!(window.debug_bounds("rewind-panel").is_some());
             let shown: Vec<RewindMode> = ALL
                 .into_iter()
                 .filter(|mode| {
@@ -2922,6 +3006,102 @@ This begins after the hard break."#;
                 })
                 .collect();
             assert_eq!(shown, offered, "{provider:?} turn {turn}");
+        }
+    }
+
+    /// A rewind's divider says what the rewind did; a truncating one only
+    /// lets the removed turns be read back, an undoable one adds Undo, and a
+    /// branch adds the way back to the branch it left.
+    #[gpui::test]
+    fn a_rewind_divider_offers_what_its_harness_keeps(cx: &mut TestAppContext) {
+        use agent::{LaterHistory, ProviderKind, RewindMode};
+        use gpui::{Modifiers, VisualTestContext, px, size};
+
+        for (later_history, undo_token, undo) in [
+            (LaterHistory::Truncated, None, None),
+            (
+                LaterHistory::HiddenUntilNextSend,
+                Some("revert"),
+                Some("rewound-undo"),
+            ),
+            (
+                LaterHistory::Branch,
+                Some("/sessions/original.jsonl"),
+                Some("rewound-return"),
+            ),
+        ] {
+            let mut events = Vec::new();
+            for index in 0..2 {
+                events.extend([
+                    agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                        id: format!("user-{index}"),
+                        parent_item_id: None,
+                        content: agent::ItemContent::UserMessage {
+                            text: format!("prompt {index}"),
+                            context_len: None,
+                            attachments: Vec::new(),
+                        },
+                    }),
+                    agent::AgentEvent::TurnCheckpoint {
+                        turn_id: format!("turn-{index}"),
+                        checkpoint_id: format!("checkpoint-{index}"),
+                    },
+                    agent::AgentEvent::TurnCompleted {
+                        turn_id: format!("turn-{index}"),
+                        status: agent::TurnStatus::Completed,
+                        usage: None,
+                    },
+                ]);
+            }
+            events.push(agent::AgentEvent::RewindCompleted {
+                checkpoint_id: "checkpoint-1".into(),
+                mode: RewindMode::Conversation,
+                prefill: None,
+                prefill_attachments: Vec::new(),
+                later_history,
+                files: None,
+                incomplete: None,
+                undo_token: undo_token.map(str::to_owned),
+            });
+            let timeline = Timeline::fold_events(events);
+            let divider = timeline
+                .entries
+                .last()
+                .map(|entry| entry.id.clone())
+                .unwrap();
+            let (workspace_store, window_state, session_id, _driver) =
+                seed_chat_with_history_on(cx, timeline, false, Some(ProviderKind::OpenCode));
+            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+                ChatView::new(workspace_store, window_state, Some(session_id), window, cx)
+            });
+            let window: &mut VisualTestContext = window;
+            window.simulate_resize(size(px(1_024.), px(700.)));
+            draw_settled(window);
+            let toggle = window
+                .debug_bounds(format!("rewound-toggle-{divider}").leak())
+                .unwrap_or_else(|| panic!("{later_history:?}: the removed turn can be read"));
+            for action in ["rewound-undo", "rewound-return"] {
+                assert_eq!(
+                    window
+                        .debug_bounds(format!("{action}-{divider}").leak())
+                        .is_some(),
+                    undo == Some(action),
+                    "{later_history:?}: {action}"
+                );
+            }
+            assert!(
+                window
+                    .debug_bounds(format!("rewound-removed-{divider}").leak())
+                    .is_none(),
+                "the removed turn is folded"
+            );
+            window.simulate_click(toggle.center(), Modifiers::default());
+            draw_settled(window);
+            assert!(
+                window
+                    .debug_bounds(format!("rewound-removed-{divider}").leak())
+                    .is_some()
+            );
         }
     }
 
