@@ -2686,6 +2686,11 @@ impl WorkspaceStore {
         self.index_replica.1.iter().find(|project| project.id == id)
     }
 
+    /// The project a new thread was last started in.
+    pub fn last_project_id(&self) -> Option<&str> {
+        self.settings_replica.last_project_id.as_deref()
+    }
+
     pub fn projects(&self) -> Vec<Project> {
         self.index_replica
             .1
@@ -2862,10 +2867,6 @@ impl WorkspaceStore {
         self.settings_replica.browser.clone()
     }
 
-    pub fn plugin_management(&self) -> &tcode_core::settings::PluginManagementSettings {
-        &self.settings_replica.plugins
-    }
-
     pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
         if let Some(choice) = self.scoped_choice(profile_id) {
             return choice.provider;
@@ -3008,14 +3009,21 @@ impl WorkspaceStore {
         self.providers_replica.acp_marketplace_items.clone()
     }
 
+    /// A profile's plugin catalog listed from `cwd`, or from outside any
+    /// project when `cwd` is `None`.
     pub fn provider_plugin_catalog(
         &self,
         profile_id: &str,
+        cwd: Option<&std::path::Path>,
     ) -> Option<&tcode_protocol::ProviderPluginCatalog> {
-        self.providers_replica
-            .plugins
-            .iter()
-            .find(|catalog| catalog.profile_id == profile_id)
+        self.providers_replica.plugins.iter().find(|catalog| {
+            catalog.profile_id == profile_id && catalog.context_cwd.as_deref() == cwd
+        })
+    }
+
+    /// Every plugin catalog the host holds for this client.
+    pub fn provider_plugin_catalogs(&self) -> &[tcode_protocol::ProviderPluginCatalog] {
+        &self.providers_replica.plugins
     }
 
     pub fn session_cwd_for(&self, session_id: Option<&str>, cx: &App) -> Option<PathBuf> {

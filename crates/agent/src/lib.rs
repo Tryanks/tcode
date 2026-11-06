@@ -20,6 +20,8 @@ mod claude_goal;
 mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
+mod plugin_command;
+pub use plugin_command::plugin_op_command;
 pub mod context_window;
 #[cfg(not(feature = "process"))]
 pub mod claude {
@@ -226,6 +228,8 @@ impl ProviderKind {
                         PluginActionKind::Update,
                     ],
                     marketplaces: true,
+                    scopes: &[PluginScope::User, PluginScope::Project, PluginScope::Local],
+                    unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::SessionAppend,
                 account_login: true,
@@ -258,6 +262,8 @@ impl ProviderKind {
                         PluginActionKind::Disable,
                     ],
                     marketplaces: true,
+                    scopes: &[PluginScope::User],
+                    unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::DeveloperContext,
                 account_login: false,
@@ -300,7 +306,13 @@ impl ProviderKind {
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: true,
                 trust_project_extensions: true,
-                plugin_management: PluginManagement::NONE,
+                plugin_management: PluginManagement {
+                    unmanaged: Some(UnmanagedPlugins {
+                        kind: UnmanagedPluginsKind::Packages,
+                        command: Some("pi install / pi config"),
+                    }),
+                    ..PluginManagement::NONE
+                },
                 instruction_channel: InstructionChannel::None,
                 account_login: false,
                 session_transfer: false,
@@ -325,7 +337,13 @@ impl ProviderKind {
                 option_descriptors: OptionDescriptors::Catalog,
                 home_path: false,
                 trust_project_extensions: false,
-                plugin_management: PluginManagement::NONE,
+                plugin_management: PluginManagement {
+                    unmanaged: Some(UnmanagedPlugins {
+                        kind: UnmanagedPluginsKind::SharedConfig,
+                        command: Some("opencode plugin list"),
+                    }),
+                    ..PluginManagement::NONE
+                },
                 instruction_channel: InstructionChannel::SessionAppend,
                 account_login: false,
                 session_transfer: false,
@@ -345,7 +363,13 @@ impl ProviderKind {
                 option_descriptors: OptionDescriptors::Wire,
                 home_path: true,
                 trust_project_extensions: false,
-                plugin_management: PluginManagement::NONE,
+                plugin_management: PluginManagement {
+                    unmanaged: Some(UnmanagedPlugins {
+                        kind: UnmanagedPluginsKind::EditorOnly,
+                        command: None,
+                    }),
+                    ..PluginManagement::NONE
+                },
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
                 session_transfer: false,
@@ -372,6 +396,8 @@ impl ProviderKind {
                         PluginActionKind::Update,
                     ],
                     marketplaces: true,
+                    scopes: &[PluginScope::User],
+                    unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
                 account_login: false,
@@ -399,17 +425,49 @@ impl ProviderKind {
 pub struct PluginManagement {
     pub actions: &'static [PluginActionKind],
     pub marketplaces: bool,
+    /// The native scopes plugins are installed or enabled in. User scope is
+    /// each account's own configuration directory; project and local scopes
+    /// are files in the project, shared by every account.
+    pub scopes: &'static [PluginScope],
+    /// Set for a harness that extends itself natively in a way Tcode does
+    /// not manage.
+    pub unmanaged: Option<UnmanagedPlugins>,
 }
 
 impl PluginManagement {
     pub const NONE: Self = Self {
         actions: &[],
         marketplaces: false,
+        scopes: &[],
+        unmanaged: None,
     };
+
+    /// Whether Tcode lists and changes this harness's plugins.
+    pub fn manages(&self) -> bool {
+        !self.actions.is_empty() || self.marketplaces
+    }
 
     pub fn supports(&self, action: PluginActionKind) -> bool {
         self.actions.contains(&action)
     }
+}
+
+/// How a harness Tcode does not manage plugins for extends itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnmanagedPlugins {
+    pub kind: UnmanagedPluginsKind,
+    /// What a person runs in a terminal to manage them.
+    pub command: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnmanagedPluginsKind {
+    /// Packages bundling extensions, skills, prompts and themes, per account.
+    Packages,
+    /// Plugins named in one configuration every account shares.
+    SharedConfig,
+    /// Plugins installed only from the harness's own editor.
+    EditorOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -527,6 +585,11 @@ pub struct PluginInstallation {
     /// effective value is [`ProviderPluginEntry::enabled`].
     #[serde(default)]
     pub scope_enabled: Option<bool>,
+    /// A project or local installation of another project than the one the
+    /// catalog was listed from: the CLI lists those home-wide, but this
+    /// project's scope does not hold it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub other_project: bool,
 }
 
 /// Components a plugin declares, by name. A `None` field was not enumerated,
@@ -562,6 +625,10 @@ pub struct ProviderPluginEntry {
     pub name: String,
     #[serde(default)]
     pub version: Option<String>,
+    /// A newer version the native catalog reports for an installed plugin.
+    /// `None` when it reports none, including a CLI that never tells.
+    #[serde(default)]
+    pub latest_version: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     pub source: PluginSource,
@@ -572,6 +639,10 @@ pub struct ProviderPluginEntry {
     pub enabled: Tri,
     #[serde(default)]
     pub declared: Option<DeclaredComponents>,
+    /// The native estimate of what the plugin adds to every session's
+    /// context, as the CLI prints it (`~32 tok`).
+    #[serde(default)]
+    pub always_on: Option<String>,
     #[serde(default)]
     pub errors: Vec<String>,
     #[serde(default)]

@@ -1719,9 +1719,12 @@ fn provider_plugin_catalog_and_commands_use_their_documented_wire_shapes() {
             "id": "alpha@tcode-probe",
             "name": "alpha",
             "version": "1.0.0",
+            "latest_version": "1.1.0",
+            "always_on": "~32 tok",
             "source": {"marketplace": "tcode-probe", "kind": "local_path"},
             "installations": [{"scope": "project", "location": "/cache/alpha/1.0.0",
-                "version": "1.0.0", "scope_enabled": true}],
+                "version": "1.0.0", "scope_enabled": true},
+                {"scope": "local", "version": "1.0.0", "other_project": true}],
             "enabled": "yes",
             "declared": {"skills": ["greet", "hello"], "hooks": ["SessionStart"],
                 "mcp_servers": ["alpha-dead"]},
@@ -1758,8 +1761,12 @@ fn provider_plugin_catalog_and_commands_use_their_documented_wire_shapes() {
             location: Some(PathBuf::from("/cache/alpha/1.0.0")),
             version: Some("1.0.0".into()),
             scope_enabled: Some(true),
+            other_project: false,
         }
     );
+    assert!(alpha.installations[1].other_project);
+    assert_eq!(alpha.latest_version.as_deref(), Some("1.1.0"));
+    assert_eq!(alpha.always_on.as_deref(), Some("~32 tok"));
     let declared = alpha.declared.as_ref().unwrap();
     assert_eq!(declared.agents, None);
     assert_eq!(

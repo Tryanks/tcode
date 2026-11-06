@@ -435,8 +435,8 @@ pub struct AppState {
     pub acp_registry_error: Option<String>,
     /// Registry ids currently downloading (their marketplace row shows a spinner).
     pub acp_installing: std::collections::HashSet<String>,
-    /// Native plugin catalogs by profile id, listed on demand.
-    plugin_catalogs: Revisioned<HashMap<String, plugins::PluginCatalog>>,
+    /// Native plugin catalogs by profile and context, listed on demand.
+    plugin_catalogs: Revisioned<HashMap<plugins::CatalogKey, plugins::PluginCatalog>>,
     mcp: McpWiring,
     control: control::ControlState,
     callback_approval_requests: HashSet<(String, String)>,

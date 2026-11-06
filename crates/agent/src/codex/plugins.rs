@@ -521,6 +521,7 @@ fn entry(
             location: cache_root(plugin, marketplace, skills, hooks),
             version: plugin.local_version.clone().or(plugin.version.clone()),
             scope_enabled: Some(plugin.enabled),
+            other_project: false,
         }]
     } else {
         Vec::new()
@@ -540,6 +541,14 @@ fn entry(
         id: plugin.id.clone(),
         name: plugin.name.clone(),
         version: plugin.version.clone().or(plugin.local_version.clone()),
+        // `version` is what the marketplace backend advertises and
+        // `localVersion` the copy on disk.
+        latest_version: plugin
+            .installed
+            .then(|| plugin.version.clone().zip(plugin.local_version.clone()))
+            .flatten()
+            .filter(|(advertised, local)| advertised != local)
+            .map(|(advertised, _)| advertised),
         description: plugin
             .interface
             .as_ref()
@@ -559,6 +568,7 @@ fn entry(
             untrusted_hooks: plugin.enabled.then(|| untrusted_hooks(&plugin.id, hooks)),
             ..DeclaredComponents::default()
         }),
+        always_on: None,
         errors: Vec::new(),
         actions: actions(plugin),
         diagnostics,
@@ -874,6 +884,7 @@ mod tests {
                 id: ALPHA.into(),
                 name: "alpha".into(),
                 version: Some("0.1.0".into()),
+                latest_version: None,
                 description: Some(
                     "Tcode probe plugin alpha: one skill, one MCP server, one hook.".into()
                 ),
@@ -888,6 +899,7 @@ mod tests {
                     )),
                     version: Some("0.1.0".into()),
                     scope_enabled: Some(true),
+                    other_project: false,
                 }],
                 enabled: Tri::Yes,
                 declared: Some(DeclaredComponents {
@@ -899,6 +911,7 @@ mod tests {
                     lsp_servers: None,
                     apps: names(&[]),
                 }),
+                always_on: None,
                 errors: Vec::new(),
                 actions: vec![
                     PluginAction::Uninstall { scope: user },
@@ -991,6 +1004,7 @@ mod tests {
                 location: None,
                 version: Some("0.1.0".into()),
                 scope_enabled: Some(false),
+                other_project: false,
             }]
         );
         assert_eq!(alpha.declared.as_ref().unwrap().untrusted_hooks, None);

@@ -44,8 +44,6 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::BrowserEnabled(_)
         | SettingsPatch::BrowserHomeUrl(_)
         | SettingsPatch::BrowserAllowEvaluate(_)
-        | SettingsPatch::PluginManagementEnabled(_)
-        | SettingsPatch::PluginManagementProvider { .. }
         | SettingsPatch::ControlEnabled(_)
         | SettingsPatch::ControlDefaultGrant(_)
         | SettingsPatch::ControlProjectGrant { .. }
