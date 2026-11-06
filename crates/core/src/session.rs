@@ -496,11 +496,10 @@ pub enum EntryContent {
         text: String,
         /// Delivery state for a message injected into an already-open turn.
         status: SteeringStatus,
-        /// Byte length of an injected context prefix folded into `text` (the
-        /// orchestrate guidance + configuration composed ahead of the user's own
-        /// words). When present, the UI renders `text[..context_len]` as a
-        /// collapsed disclosure row and keeps the bubble to `text[context_len..]`.
-        /// `None` for ordinary messages and for logs predating the annotation.
+        /// Byte length of a context prefix Tcode folded into `text` ahead of
+        /// the user's own words; only stored messages carry it. When present,
+        /// the UI renders `text[..context_len]` as a collapsed disclosure row
+        /// and keeps the bubble to `text[context_len..]`.
         context_len: Option<usize>,
         /// Local paths of the image attachments sent with this message (empty
         /// for text-only messages and for logs predating the field).

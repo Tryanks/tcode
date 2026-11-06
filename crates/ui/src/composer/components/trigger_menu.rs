@@ -124,52 +124,29 @@ impl Composer {
                 let composer = self.composer_state(cx);
                 let compact_offered = compact_offered(&composer);
                 let goal_offered = goal_offered(&composer).is_some();
-                let mut builtins: Vec<(&str, Option<&str>, &str, MenuAccept)> = vec![
+                let mut builtins: Vec<(&str, &str, MenuAccept)> = vec![
                     (
                         "model",
-                        None,
                         "composer.cmd_model_desc",
                         MenuAccept::OpenModelPicker,
                     ),
-                    (
-                        "orchestrate",
-                        Some("composer.cmd_orchestrate_label"),
-                        "composer.cmd_orchestrate_desc",
-                        MenuAccept::InsertOrchestrate,
-                    ),
-                    (
-                        "later",
-                        None,
-                        "composer.cmd_later_desc",
-                        MenuAccept::InsertLater,
-                    ),
+                    ("later", "composer.cmd_later_desc", MenuAccept::InsertLater),
                 ];
                 if compact_offered {
                     builtins.push((
                         "compact",
-                        None,
                         "composer.cmd_compact_desc",
                         MenuAccept::InsertCommand("compact".into()),
                     ));
                 }
                 if goal_offered {
-                    builtins.push((
-                        "goal",
-                        None,
-                        "composer.cmd_goal_desc",
-                        MenuAccept::InsertGoal,
-                    ));
+                    builtins.push(("goal", "composer.cmd_goal_desc", MenuAccept::InsertGoal));
                 }
                 let mut rows: Vec<MenuRow> = builtins
                     .into_iter()
-                    .filter(|(name, _, _, _)| fuzzy_score(&trigger.query, name).is_some())
-                    .map(|(name, label, desc, accept)| MenuRow {
-                        primary: format!(
-                            "/{}",
-                            label
-                                .map(|key| crate::tr!(key).into_owned())
-                                .unwrap_or_else(|| name.to_string())
-                        ),
+                    .filter(|(name, _, _)| fuzzy_score(&trigger.query, name).is_some())
+                    .map(|(name, desc, accept)| MenuRow {
+                        primary: format!("/{name}"),
                         secondary: crate::tr!(desc).into_owned(),
                         icon: MenuIcon::Command,
                         accept,
@@ -295,7 +272,6 @@ impl Composer {
             MenuAccept::InsertCommand(name) => {
                 self.replace_trigger(&format!("/{name} "), window, cx)
             }
-            MenuAccept::InsertOrchestrate => self.replace_trigger("/orchestrate ", window, cx),
             MenuAccept::InsertLater => self.replace_trigger("/later ", window, cx),
             MenuAccept::InsertGoal => self.replace_trigger("/goal ", window, cx),
             MenuAccept::OpenModelPicker => {

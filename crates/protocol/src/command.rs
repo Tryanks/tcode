@@ -103,11 +103,6 @@ pub enum Command {
     /// Shut down every live provider and PTY, then acknowledge only after the
     /// FIFO store-write barrier has drained.
     ShutdownAllAndFlush,
-    OrchestrateTurn {
-        session_id: String,
-        text: String,
-        attachment_paths: Vec<PathBuf>,
-    },
     ReloadProvider,
     SetHostToken {
         host: String,
@@ -675,7 +670,6 @@ impl Command {
             | Self::RefreshPullRequest { session_id, .. }
             | Self::RunPullRequestAction { session_id, .. }
             | Self::EditPullRequestReviewDraft { session_id, .. }
-            | Self::OrchestrateTurn { session_id, .. }
             | Self::RunGitAction { session_id, .. }
             | Self::SetActiveAcpAgent { session_id, .. }
             | Self::SetTerminalHeight { session_id, .. }

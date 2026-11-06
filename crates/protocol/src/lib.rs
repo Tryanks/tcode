@@ -297,7 +297,9 @@ pub use wire::{
 // FallbackReviewAdvisor, FallbackReviewProvider, FallbackReviewModel and
 // FallbackReviewProfileId patches; and the model_fallback_detected and
 // turn_blocked agent events are no longer emitted, only read from stored
-// logs.
+// logs. Orchestrate goes: the protocol drops the OrchestrateTurn command and
+// the OrchestrateDecisionModels and OrchestrateChildModels patches, and
+// Settings' orchestrate carries only child_approval and child_worktrees.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

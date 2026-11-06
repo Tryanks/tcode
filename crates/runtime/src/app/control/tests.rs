@@ -1022,7 +1022,7 @@ fn patch_settings_applies_allowed_patches_only() {
             state.settings.auto_settle_after_days,
             before.auto_settle_after_days
         );
-        assert_eq!(state.settings.orchestrate, before.orchestrate);
+        assert_eq!(state.settings.subagents, before.subagents);
 
         let wrap = !state.settings.word_wrap_diffs;
         call(

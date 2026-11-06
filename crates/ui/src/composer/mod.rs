@@ -897,9 +897,7 @@ impl Composer {
             cx.notify();
             return;
         }
-        let orchestrate_text = strip_orchestrate_prefix(&text).map(str::to_string);
-        let prompt_text = orchestrate_text.as_deref().unwrap_or(&text);
-        let sent_text = prompt_text.to_string();
+        let sent_text = text.to_string();
         let attachment_paths = self
             .pending_images
             .iter()
@@ -933,7 +931,6 @@ impl Composer {
                                 sent_text.clone(),
                                 attachment_paths.clone(),
                                 false,
-                                false,
                                 true,
                                 window,
                                 cx,
@@ -944,16 +941,7 @@ impl Composer {
             });
             return;
         }
-        self.finish_submit(
-            input,
-            sent_text,
-            attachment_paths,
-            orchestrate_text.is_some(),
-            steer,
-            false,
-            window,
-            cx,
-        );
+        self.finish_submit(input, sent_text, attachment_paths, steer, false, window, cx);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -962,7 +950,6 @@ impl Composer {
         input: &Entity<TextareaState>,
         sent_text: String,
         attachment_paths: Vec<PathBuf>,
-        orchestrate: bool,
         steer: bool,
         relay: bool,
         window: &mut Window,
@@ -977,12 +964,6 @@ impl Composer {
         self.workspace_store.update(cx, |store, _cx| {
             if relay {
                 store.confirm_relay_and_send_for(
-                    self.session_id.clone().unwrap_or_default(),
-                    sent_text,
-                    attachment_paths,
-                );
-            } else if orchestrate {
-                store.orchestrate_turn_for(
                     self.session_id.clone().unwrap_or_default(),
                     sent_text,
                     attachment_paths,

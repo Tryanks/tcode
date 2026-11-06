@@ -564,7 +564,6 @@ impl AppState {
         self.record_user_message(
             session_id,
             &message.text,
-            message.context_len,
             &message.attachments,
             message.delivery_key.as_deref(),
             cx,
@@ -582,14 +581,7 @@ impl AppState {
         if let Some(window) = message.context_window_changed {
             self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
         }
-        // `/orchestrate` stores its provider-only guidance as a prefix and
-        // records the byte boundary in `context_len`. Titles should describe
-        // the user's request, not that hidden orchestration configuration.
-        let title_source = message
-            .context_len
-            .and_then(|len| message.text.get(len..))
-            .unwrap_or(&message.text);
-        self.maybe_generate_title(session_id, title_source, &message.attachments, cx);
+        self.maybe_generate_title(session_id, &message.text, &message.attachments, cx);
     }
 
     /// A parked session finished a turn: keep working through its queue, then
@@ -643,7 +635,6 @@ impl AppState {
         &mut self,
         session_id: &str,
         text: &str,
-        context_len: Option<usize>,
         attachments: &[Attachment],
         delivery_key: Option<&str>,
         cx: &mut HostCx,
@@ -658,7 +649,7 @@ impl AppState {
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: text.to_owned(),
-                context_len,
+                context_len: None,
                 attachments: attachment_paths(attachments),
             },
         });
@@ -750,11 +741,6 @@ impl AppState {
                 let Some(active) = self.resident_mut(target_id) else {
                     return;
                 };
-                // A steered orchestrate turn joins a turn already in flight and is
-                // logged via `record_steer_request`, which carries no split, so it
-                // renders as a plain bubble. Drop any staged split rather than let
-                // it attach to a later queued message.
-                active.pending_context_len = None;
                 active.pending_steers.push(PendingSteer {
                     request_id: request_id.clone(),
                     text,

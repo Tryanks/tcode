@@ -7,9 +7,7 @@ use tcode_core::{
     control::{ControlGrant, FollowUp, SettlementAutomation},
     git::GitAction,
     session::ReviewComment,
-    settings::{
-        ChildApprovalMode, ImageMode, OrchestrateChildModel, ProfileSettingsPatch, SidebarLayout,
-    },
+    settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch, SidebarLayout},
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 use tcode_protocol::{
@@ -254,16 +252,10 @@ impl WorkspaceStore {
     pub fn set_resume_on_limit_reset(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ResumeOnLimitReset(value));
     }
-    pub fn set_orchestrate_decision_models(&mut self, value: Vec<OrchestrateChildModel>) {
-        self.patch_settings(SettingsPatch::OrchestrateDecisionModels(value));
-    }
-    pub fn set_orchestrate_child_models(&mut self, value: Vec<OrchestrateChildModel>) {
-        self.patch_settings(SettingsPatch::OrchestrateChildModels(value));
-    }
-    pub fn set_orchestrate_child_approval(&mut self, value: ChildApprovalMode) {
+    pub fn set_child_approval(&mut self, value: ChildApprovalMode) {
         self.patch_settings(SettingsPatch::OrchestrateChildApproval(value));
     }
-    pub fn set_orchestrate_child_worktrees(&mut self, value: bool) {
+    pub fn set_child_worktrees(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::OrchestrateChildWorktrees(value));
     }
     pub fn set_computer_use_enabled(&mut self, value: bool) {
@@ -794,18 +786,6 @@ impl WorkspaceStore {
         attachment_paths: Vec<PathBuf>,
     ) {
         self.dispatch(Command::ConfirmRelayAndSend {
-            session_id,
-            text,
-            attachment_paths,
-        });
-    }
-    pub fn orchestrate_turn_for(
-        &mut self,
-        session_id: String,
-        text: String,
-        attachment_paths: Vec<PathBuf>,
-    ) {
-        self.dispatch(Command::OrchestrateTurn {
             session_id,
             text,
             attachment_paths,

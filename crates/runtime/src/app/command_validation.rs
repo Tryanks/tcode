@@ -461,7 +461,6 @@ impl AppState {
             Command::SendTurn { .. }
                 | Command::ScheduleTurn { .. }
                 | Command::ConfirmRelayAndSend { .. }
-                | Command::OrchestrateTurn { .. }
                 | Command::Steer { .. }
         ) {
             if Self::conversation_read_only(&active.meta) {

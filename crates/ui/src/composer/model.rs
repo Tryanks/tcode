@@ -61,13 +61,6 @@ pub(super) fn compact_offered(state: &crate::store::ComposerState) -> bool {
             .is_some_and(|provider| provider.caps().manual_compaction)
 }
 
-/// Strip a leading `/orchestrate` command token while rejecting lookalikes
-/// such as `/orchestrated`.
-pub(super) fn strip_orchestrate_prefix(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("/orchestrate")?;
-    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim_start())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// User-facing validation failures for a syntactically recognized `/later`.
 pub(super) enum LaterError {
@@ -213,8 +206,6 @@ pub(super) enum MenuAccept {
     InsertSkill(String),
     /// Insert `/<name> ` for this provider slash command.
     InsertCommand(String),
-    /// Insert the native orchestration command without consuming following text.
-    InsertOrchestrate,
     /// Insert the scheduled-message command prefix.
     InsertLater,
     /// Insert the goal command prefix.
@@ -486,17 +477,6 @@ pub(super) fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 mod tests {
     use super::*;
     use chrono::Timelike as _;
-
-    #[test]
-    fn orchestrate_prefix_requires_a_complete_command_token() {
-        assert_eq!(strip_orchestrate_prefix("/orchestrate"), Some(""));
-        assert_eq!(
-            strip_orchestrate_prefix("/orchestrate   split the work"),
-            Some("split the work")
-        );
-        assert_eq!(strip_orchestrate_prefix("/orchestrated"), None);
-        assert_eq!(strip_orchestrate_prefix("hello /orchestrate"), None);
-    }
 
     fn local_time(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
         Local

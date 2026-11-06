@@ -2,22 +2,18 @@
 //!
 //! The profile tabs (one per provider profile, built-in or user-created),
 //! resolved model catalog, offline/custom-model handling, and selection event
-//! live here so Orchestrate and other settings do not grow subtly different
-//! pickers.
+//! live here so settings surfaces do not grow subtly different pickers.
 
 use std::rc::Rc;
 
 /// How long a model option takes to fold in or out as the list changes.
 const OPTIONS: std::time::Duration = std::time::Duration::from_millis(200);
 
+use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::tabs::{TabBar, TabItem};
-use crate::{
-    icon::{Icon, IconName},
-    sizing::Sizable as _,
-};
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
@@ -47,50 +43,19 @@ pub(crate) struct ModelOption {
 #[derive(Clone, Debug)]
 pub(crate) struct ModelSelected(pub ModelOption);
 
-#[derive(Clone)]
-enum TriggerKind {
-    /// Translation key, resolved at render so a language switch reaches it.
-    Add(&'static str),
-    Selection,
-}
-
 pub(crate) struct ProviderModelPicker {
     store: Entity<WorkspaceStore>,
     popover_id: &'static str,
     trigger_id: &'static str,
-    trigger_kind: TriggerKind,
     /// The active tab: a profile id (built-in or user-created).
     selected_profile: String,
     selected: Option<(ProviderKind, String, Option<String>)>,
-    /// Rows already taken: a model under one account leaves it on offer under another.
-    excluded: Vec<(ProviderKind, String, Option<String>)>,
     _store_subscription: Subscription,
 }
 
 impl EventEmitter<ModelSelected> for ProviderModelPicker {}
 
 impl ProviderModelPicker {
-    pub fn add(
-        store: Entity<WorkspaceStore>,
-        popover_id: &'static str,
-        trigger_id: &'static str,
-        label_key: &'static str,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let store_subscription =
-            observe_store_topics(&store, &[TopicKind::Settings, TopicKind::Providers], cx);
-        Self {
-            store,
-            popover_id,
-            trigger_id,
-            trigger_kind: TriggerKind::Add(label_key),
-            selected_profile: Settings::builtin_profile_id(ProviderKind::Codex).to_string(),
-            selected: None,
-            excluded: Vec::new(),
-            _store_subscription: store_subscription,
-        }
-    }
-
     pub fn selection(
         store: Entity<WorkspaceStore>,
         popover_id: &'static str,
@@ -107,10 +72,8 @@ impl ProviderModelPicker {
             store,
             popover_id,
             trigger_id,
-            trigger_kind: TriggerKind::Selection,
             selected_profile: selection_profile_id(provider, profile_id.as_deref()),
             selected: Some((provider, model, profile_id)),
-            excluded: Vec::new(),
             _store_subscription: store_subscription,
         }
     }
@@ -126,17 +89,6 @@ impl ProviderModelPicker {
         if self.selected.as_ref() != Some(&selected) {
             self.selected_profile = selection_profile_id(provider, selected.2.as_deref());
             self.selected = Some(selected);
-            cx.notify();
-        }
-    }
-
-    pub fn set_excluded(
-        &mut self,
-        excluded: Vec<(ProviderKind, String, Option<String>)>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.excluded != excluded {
-            self.excluded = excluded;
             cx.notify();
         }
     }
@@ -186,48 +138,35 @@ impl ProviderModelPicker {
     }
 
     fn trigger(&self, cx: &Context<Self>) -> Button {
-        match &self.trigger_kind {
-            TriggerKind::Add(label_key) => Button::new(self.trigger_id)
-                .debug_selector(|| self.trigger_id.to_owned())
-                .outline()
-                .small()
-                .icon(IconName::Plus)
-                .label(crate::tr!(*label_key)),
-            TriggerKind::Selection => {
-                let (provider, model, profile_id) = self
-                    .selected
-                    .as_ref()
-                    .map(|(provider, model, profile_id)| {
-                        (*provider, model.as_str(), profile_id.as_deref())
-                    })
-                    .unwrap_or_else(|| {
-                        let kind = self
-                            .store
-                            .read(cx)
-                            .provider_profile_kind(&self.selected_profile);
-                        (kind, "", None)
-                    });
-                let display = self.display_name(provider, model, profile_id, cx);
-                let glyph = profile_glyph(self.store.read(cx), provider, profile_id);
-                Button::new(self.trigger_id)
-                    .ghost()
-                    .outline()
-                    .compact()
+        let (provider, model, profile_id) = self
+            .selected
+            .as_ref()
+            .map(|(provider, model, profile_id)| (*provider, model.as_str(), profile_id.as_deref()))
+            .unwrap_or_else(|| {
+                let kind = self
+                    .store
+                    .read(cx)
+                    .provider_profile_kind(&self.selected_profile);
+                (kind, "", None)
+            });
+        let display = self.display_name(provider, model, profile_id, cx);
+        let glyph = profile_glyph(self.store.read(cx), provider, profile_id);
+        Button::new(self.trigger_id)
+            .ghost()
+            .outline()
+            .compact()
+            .child(
+                h_flex()
+                    .w(px(230.))
+                    .items_center()
+                    .gap_2()
+                    .text_body(false, cx)
+                    .child(glyph)
+                    .child(div().flex_1().min_w_0().child(display))
                     .child(
-                        h_flex()
-                            .w(px(230.))
-                            .items_center()
-                            .gap_2()
-                            .text_body(false, cx)
-                            .child(glyph)
-                            .child(div().flex_1().min_w_0().child(display))
-                            .child(
-                                Icon::new(IconName::ChevronDown)
-                                    .text_color(cx.theme().muted_foreground),
-                            ),
-                    )
-            }
-        }
+                        Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
+                    ),
+            )
     }
 }
 
@@ -237,13 +176,12 @@ impl Render for ProviderModelPicker {
         crate::material::overlay_popover(self.popover_id, cx)
             .trigger(self.trigger(cx))
             .content(move |_, window, cx| {
-                let (profiles, selected_profile, selected, excluded) = {
+                let (profiles, selected_profile, selected) = {
                     let picker = picker.read(cx);
                     (
                         picker.store.read(cx).enabled_profiles(),
                         picker.selected_profile.clone(),
                         picker.selected.clone(),
-                        picker.excluded.clone(),
                     )
                 };
                 let store = picker.read(cx).store.clone();
@@ -279,9 +217,8 @@ impl Render for ProviderModelPicker {
                     .map(|(tab, profile)| {
                         let options: Rc<[ModelOption]> =
                             picker.read(cx).profile_options(&profile.id, cx).into();
-                        let list = option_list(
-                            tab, options, &excluded, &selected, &picker, &store, &popover, cx,
-                        );
+                        let list =
+                            option_list(tab, options, &selected, &picker, &store, &popover, cx);
                         (tab, list)
                     })
                     .collect();
@@ -351,30 +288,18 @@ impl Render for ProviderModelPicker {
     }
 }
 
-/// One profile's options, less the `excluded` ones: an option excluded or
-/// let back in folds out of or into the list as the others glide.
-#[allow(clippy::too_many_arguments)]
+/// One profile's options: an option the catalog adds or drops folds into or
+/// out of the list as the others glide.
 fn option_list(
     tab: usize,
     options: Rc<[ModelOption]>,
-    excluded: &[(ProviderKind, String, Option<String>)],
     selected: &Option<(ProviderKind, String, Option<String>)>,
     picker: &Entity<ProviderModelPicker>,
     store: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
     cx: &App,
 ) -> AnyElement {
-    let available: Rc<[ModelOption]> = options
-        .iter()
-        .filter(|option| {
-            !excluded.iter().any(|(provider, model, profile_id)| {
-                *provider == option.provider
-                    && model == &option.id
-                    && profile_id == &option.profile_id
-            })
-        })
-        .cloned()
-        .collect();
+    let available = options.clone();
     if available.is_empty() {
         return div()
             .size_full()
@@ -494,13 +419,11 @@ fn option_row(
     .on_click(move |_, window, cx| {
         picker.update(cx, |picker, cx| {
             picker.selected_profile = option_profile_id(&selected);
-            if matches!(picker.trigger_kind, TriggerKind::Selection) {
-                picker.selected = Some((
-                    selected.provider,
-                    selected.id.clone(),
-                    selected.profile_id.clone(),
-                ));
-            }
+            picker.selected = Some((
+                selected.provider,
+                selected.id.clone(),
+                selected.profile_id.clone(),
+            ));
             cx.emit(ModelSelected(selected.clone()));
         });
         popover.update(cx, |state, cx| state.dismiss(window, cx));

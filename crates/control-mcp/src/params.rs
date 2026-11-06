@@ -387,7 +387,7 @@ pub struct StartThreadParams {
     pub cwd: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "local (the checkout) or worktree. worktree is only for a subagent: when its directory is a Git repository root it runs on branch tcode/<thread-id> in a dedicated worktree, and the response names the path and branch or why it fell back to the plain directory. Omitted, a subagent follows Settings → Orchestrate child-worktree isolation and any other thread is local."
+        description = "local (the checkout) or worktree. worktree is only for a subagent: when its directory is a Git repository root it runs on branch tcode/<thread-id> in a dedicated worktree, and the response names the path and branch or why it fell back to the plain directory. Omitted, a subagent follows Settings → Control child-worktree isolation and any other thread is local."
     )]
     pub workspace: Option<Workspace>,
     #[serde(default)]
@@ -409,7 +409,7 @@ pub struct StartThreadParams {
     pub profile: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Provider option id → value, as list_providers describes them. The permission mode is not settable: the project's default applies, or for a subagent the one Settings → Orchestrate child approval chooses."
+        description = "Provider option id → value, as list_providers describes them. The permission mode is not settable: the project's default applies, or for a subagent the one Settings → Control child approval chooses."
     )]
     pub options: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]

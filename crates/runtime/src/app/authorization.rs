@@ -249,11 +249,6 @@ impl AppState {
                     attachment_paths,
                     ..
                 }
-                | Command::OrchestrateTurn {
-                    session_id,
-                    attachment_paths,
-                    ..
-                }
                 | Command::Steer {
                     session_id,
                     attachment_paths,

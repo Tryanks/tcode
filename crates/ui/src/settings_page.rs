@@ -22,7 +22,6 @@ use gpui::{
 use gpui_base::{InteractiveElementExt as _, v_flex};
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
-use crate::orchestrate_settings::OrchestrateSettingsPanel;
 use crate::plugins_settings::PluginsSettingsPanel;
 use crate::provider_card::{ManagePlugins, ProviderCard};
 use crate::provider_model_picker::ProviderModelPicker;
@@ -99,7 +98,6 @@ enum Section {
     Usage,
     Browser,
     ComputerUse,
-    Orchestrate,
     Control,
     Plugins,
     #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -121,7 +119,7 @@ enum Section {
 /// Traverse, the least used, comes last. Choosing a machine lives in
 /// `crate::remote`.
 #[cfg(feature = "remote-hosting")]
-const SECTIONS: [Section; 16] = [
+const SECTIONS: [Section; 15] = [
     Section::General,
     Section::Remote,
     Section::Spaces,
@@ -132,7 +130,6 @@ const SECTIONS: [Section; 16] = [
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
-    Section::Orchestrate,
     Section::Plugins,
     Section::Archived,
     Section::ComputerUse,
@@ -140,7 +137,7 @@ const SECTIONS: [Section; 16] = [
     Section::Maintenance,
 ];
 #[cfg(all(target_family = "wasm", not(feature = "remote-hosting")))]
-const SECTIONS: [Section; 15] = [
+const SECTIONS: [Section; 14] = [
     Section::General,
     Section::Remote,
     Section::Spaces,
@@ -150,7 +147,6 @@ const SECTIONS: [Section; 15] = [
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
-    Section::Orchestrate,
     Section::Plugins,
     Section::Archived,
     Section::ComputerUse,
@@ -158,14 +154,13 @@ const SECTIONS: [Section; 15] = [
     Section::Maintenance,
 ];
 #[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
-const SECTIONS: [Section; 12] = [
+const SECTIONS: [Section; 11] = [
     Section::General,
     Section::Threads,
     Section::Control,
     Section::Providers,
     Section::SourceControl,
     Section::Usage,
-    Section::Orchestrate,
     Section::Plugins,
     Section::Archived,
     Section::ComputerUse,
@@ -289,7 +284,6 @@ impl Section {
             | Self::Usage
             | Self::Browser
             | Self::ComputerUse
-            | Self::Orchestrate
             | Self::Control
             | Self::Plugins
             | Self::Archived
@@ -321,7 +315,6 @@ impl Section {
             | Self::Providers
             | Self::Usage
             | Self::ComputerUse
-            | Self::Orchestrate
             | Self::Control
             | Self::Plugins
             | Self::Archived
@@ -346,7 +339,6 @@ impl Section {
             Self::Usage => "settings-nav-usage",
             Self::Browser => "settings-nav-browser",
             Self::ComputerUse => "settings-nav-computer-use",
-            Self::Orchestrate => "settings-nav-orchestrate",
             Self::Control => "settings-nav-control",
             Self::Plugins => "settings-nav-plugins",
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -371,7 +363,6 @@ impl Section {
             Self::Usage => IconName::ChartPie,
             Self::Browser => IconName::Globe,
             Self::ComputerUse => IconName::LayoutDashboard,
-            Self::Orchestrate => IconName::Map,
             Self::Control => IconName::Layers,
             Self::Plugins => IconName::Puzzle,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -396,7 +387,6 @@ impl Section {
             Self::Usage => crate::tr!("settings.usage"),
             Self::Browser => crate::tr!("settings.browser"),
             Self::ComputerUse => crate::tr!("settings.computer_use"),
-            Self::Orchestrate => crate::tr!("settings.orchestrate"),
             Self::Control => crate::tr!("control.title"),
             Self::Plugins => crate::tr!("settings.plugins"),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -477,7 +467,6 @@ pub struct SettingsPage {
     /// Long-lived state for the modal ACP marketplace and custom form.
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
-    orchestrate_panel: Entity<OrchestrateSettingsPanel>,
     /// Each enabled profile's native plugin catalog.
     plugins_panel: Entity<PluginsSettingsPanel>,
     source_control_panel: Entity<crate::source_control_settings::SourceControlPanel>,
@@ -559,7 +548,6 @@ impl SettingsPage {
                 "source_control" => Section::SourceControl,
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
-                "orchestrate" => Section::Orchestrate,
                 "control" => Section::Control,
                 "plugins" => Section::Plugins,
                 #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -657,8 +645,6 @@ impl SettingsPage {
             Self::return_to_settings_root(&window_state, cx);
         }
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
-        let orchestrate_panel =
-            cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
         let content_scroll = ScrollHandle::new();
         let plugins_panel = cx.new(|cx| {
             PluginsSettingsPanel::new(
@@ -705,7 +691,6 @@ impl SettingsPage {
             provider_cards: Vec::new(),
             provider_card_subscriptions: Vec::new(),
             acp_panel,
-            orchestrate_panel,
             plugins_panel,
             source_control_panel,
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -1391,9 +1376,6 @@ impl SettingsPage {
                     // so their cards need no rebuild — only the panels and
                     // inputs holding a copy of a reset preference do.
                     page.update(cx, |page, cx| {
-                        let store = page.store.clone();
-                        page.orchestrate_panel =
-                            cx.new(|cx| OrchestrateSettingsPanel::new(store, window, cx));
                         // The Home URL input now holds a stale override.
                         let home_url = page
                             .store
@@ -1456,7 +1438,6 @@ impl SettingsPage {
             Section::Usage => self.render_usage(window, cx),
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
-            Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
             Section::Control => self.render_control(window, cx),
             Section::Plugins => v_flex().child(self.plugins_panel.clone()),
             #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
@@ -3711,7 +3692,6 @@ mod tests {
                 "settings-nav-threads",
                 "settings-nav-providers",
                 "settings-nav-usage",
-                "settings-nav-orchestrate",
                 "settings-nav-archived",
             ] {
                 assert!(

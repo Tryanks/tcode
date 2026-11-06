@@ -35,7 +35,6 @@ mod macos_backdrop;
 pub mod material;
 mod motion;
 mod move_thread_dialog;
-mod orchestrate_settings;
 pub mod overlay;
 /// The shared pairing form: origin validation, stale-result
 /// generations and fixed-origin behavior, reused by every client shell.
