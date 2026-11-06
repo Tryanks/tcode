@@ -125,6 +125,20 @@ pub(crate) fn cjk_font_fallbacks() -> Option<gpui::FontFallbacks> {
     })
 }
 
+/// The items of a list read inside a sentence, joined as the current language
+/// writes one ("a, b" in English, "a、b" in Chinese and Japanese).
+pub(crate) fn join_list<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> String {
+    let separator = crate::tr!("list.separator");
+    let mut list = String::new();
+    for (index, item) in items.into_iter().enumerate() {
+        if index > 0 {
+            list.push_str(&separator);
+        }
+        list.push_str(item.as_ref());
+    }
+    list
+}
+
 /// Set the process-global translation locale.
 pub fn set_locale(locale: &str) {
     rust_i18n::set_locale(locale);

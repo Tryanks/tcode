@@ -469,11 +469,7 @@ pub fn watch_notice_kinds(notice: &WatchNotice) -> String {
         WatchNotice::Merged => vec!["pull_requests.kind_merged"],
         WatchNotice::Unreadable => vec!["pull_requests.kind_unreadable"],
     };
-    parts
-        .into_iter()
-        .map(|key| crate::tr!(key).into_owned())
-        .collect::<Vec<_>>()
-        .join(", ")
+    crate::i18n::join_list(parts.into_iter().map(|key| crate::tr!(key)))
 }
 
 /// The toast a watch's wake or end raises: its kind and message.

@@ -1158,6 +1158,11 @@ time:
   duration_seconds: "%{seconds}s"
   duration_hours: "%{hours}h %{minutes}m %{seconds}s"
   duration_days: "%{days}d %{hours}h %{minutes}m"
+  span_days: "%{days}d %{hours}h"
+  span_hours: "%{hours}h %{minutes}m"
+  span_minutes: "%{minutes}m"
+list:
+  separator: ", "
 export:
   title: "Export thread"
   ready: "%{name} · %{size}"
@@ -1557,7 +1562,6 @@ spaces:
     project: "Share project «%{name}»"
     new: "New space and share…"
     badge: "Shared in %{names}"
-    separator: ", "
   shared:
     title: "«%{name}» is ready"
     description: "Send this link to collaborators; they will see «%{project}» and its threads."

@@ -358,12 +358,8 @@ pub(super) fn present_runtime_toast(toast: &RuntimeToast) -> PresentedRuntimeToa
         | RuntimeToast::ProviderUpdateProgress { operation, run }
         | RuntimeToast::ProviderUpdateFinished { operation, run } => {
             let finished = matches!(toast, RuntimeToast::ProviderUpdateFinished { .. });
-            let failed = run
-                .failed
-                .iter()
-                .map(|provider| provider.display_name())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let failed =
+                crate::i18n::join_list(run.failed.iter().map(|provider| provider.display_name()));
             let title = if finished {
                 if run.failed.is_empty() {
                     crate::tr!("providers.updated_count", count = run.completed).into_owned()

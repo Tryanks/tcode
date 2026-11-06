@@ -754,12 +754,7 @@ impl Target {
             if failing.is_empty() {
                 crate::tr!("pull_requests.actions.ask_checks_unnamed", number = number).into_owned()
             } else {
-                let mut names = failing
-                    .iter()
-                    .take(5)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let mut names = crate::i18n::join_list(failing.iter().take(5));
                 if failing.len() > 5 {
                     names.push(' ');
                     names.push_str(&crate::tr!(
