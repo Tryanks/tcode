@@ -2,7 +2,7 @@
 //! --stdio` per Tcode session, the server's `/api` routes, and its
 //! `/api/event` SSE stream.
 
-use crate::{LaterHistory, RewindFailure, RewindFailureReason};
+use crate::{LaterHistory, RewindFailure, RewindFailureReason, RewindFile, RewindFiles};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -610,27 +610,27 @@ impl SessionActor for OpenCodeActor {
                 checkpoint_id,
                 mode,
             } => {
-                let event = match self.rewind(&checkpoint_id, mode) {
-                    Ok(prefill) => AgentEvent::RewindCompleted {
+                let event = match self.rewind(&checkpoint_id, mode).await {
+                    Ok(event) => event,
+                    Err(failure) => AgentEvent::RewindFailed {
                         checkpoint_id,
                         mode,
-                        prefill,
-                        prefill_attachments: Vec::new(),
-                        later_history: LaterHistory::Truncated,
-                        files: None,
-                        incomplete: None,
-                        undo_token: None,
-                    },
-                    Err(error) => AgentEvent::RewindFailed {
-                        checkpoint_id,
-                        mode,
-                        failure: RewindFailure::new(RewindFailureReason::Other, error),
+                        failure,
                     },
                 };
                 self.events.emit(event).await;
             }
-            command
-            @ (SessionCommand::PreviewRewind { .. } | SessionCommand::UndoRewind { .. }) => {
+            SessionCommand::UndoRewind { checkpoint_id, .. } => {
+                let event = match self.undo_rewind(&checkpoint_id) {
+                    Ok(()) => AgentEvent::RewindUndone { checkpoint_id },
+                    Err(failure) => AgentEvent::RewindUndoFailed {
+                        checkpoint_id,
+                        failure,
+                    },
+                };
+                self.events.emit(event).await;
+            }
+            command @ SessionCommand::PreviewRewind { .. } => {
                 if let Some(event) = command
                     .rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
                 {
@@ -925,30 +925,113 @@ impl OpenCodeActor {
     }
 
     /// OpenCode reverts the conversation to a user message, restoring the
-    /// files its steps changed when asked; it has no files-only restore.
-    fn rewind(&mut self, checkpoint_id: &str, mode: RewindMode) -> Result<Option<String>, String> {
+    /// files its steps changed when asked; it has no files-only restore. The
+    /// revert stays staged, as OpenCode's own /undo leaves it: hidden and
+    /// undoable (`DELETE …/revert`) until the next prompt or compaction
+    /// commits it, which OpenCode does itself.
+    async fn rewind(
+        &mut self,
+        checkpoint_id: &str,
+        mode: RewindMode,
+    ) -> Result<AgentEvent, RewindFailure> {
         if !mode.includes_conversation() {
-            return Err(
+            return Err(RewindFailure::new(
+                RewindFailureReason::Unsupported,
                 "OpenCode restores files only together with the conversation that changed them"
-                    .into(),
-            );
+                    .to_owned(),
+            ));
         }
-        let prefill = self
+        // A staging refuses a busy session; OpenCode's /undo interrupts the
+        // running turn and waits for it to end first.
+        self.finish_running_turn().await?;
+        let message = self
             .http
             .get(&self.session_path(&format!("message/{checkpoint_id}")))
-            .ok()
-            .and_then(|message| message.pointer("/data/text")?.as_str().map(str::to_owned));
-        self.http
+            .map_err(rewind_failure)?;
+        // A staging over a staged revert moves its boundary, and clearing it
+        // would bring back both cuts, which no undo of the later one shows.
+        let staged_before = self.staged_revert()?.is_some();
+        let revert = self
+            .http
             .post(
                 &self.session_path("revert/stage"),
                 &json!({ "messageID": checkpoint_id, "files": mode.includes_files() }),
             )
-            .map_err(|err| err.to_string())?;
+            .map_err(rewind_failure)?;
+        Ok(AgentEvent::RewindCompleted {
+            checkpoint_id: checkpoint_id.to_owned(),
+            mode,
+            prefill: message
+                .pointer("/data/text")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            prefill_attachments: local_attachments(&message["data"]["files"]),
+            later_history: LaterHistory::HiddenUntilNextSend,
+            files: mode
+                .includes_files()
+                .then(|| reverted_files(&revert["data"]["files"])),
+            incomplete: None,
+            undo_token: (!staged_before).then(|| checkpoint_id.to_owned()),
+        })
+    }
+
+    /// The message the session's staged revert hides from, if one is staged.
+    fn staged_revert(&self) -> Result<Option<String>, RewindFailure> {
+        let session = self
+            .http
+            .get(&format!("/api/session/{}", self.mapper.root))
+            .map_err(rewind_failure)?;
+        Ok(session
+            .pointer("/data/revert/messageID")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
+    /// Interrupt the turn that runs and take its events up to its end, so the
+    /// rewind's answer follows the turn's.
+    async fn finish_running_turn(&mut self) -> Result<(), RewindFailure> {
+        if self.mapper.active_turn.is_none() {
+            return Ok(());
+        }
         self.http
-            .post_empty(&self.session_path("revert/commit"), &json!({}))
-            .map_err(|err| err.to_string())?;
-        self.prompts.remove(checkpoint_id);
-        Ok(prefill)
+            .post(&self.session_path("interrupt"), &json!({}))
+            .map_err(rewind_failure)?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.mapper.active_turn.is_some() {
+            let next = future::or(async { Some(self.transport.recv().await) }, async {
+                smol::Timer::at(deadline).await;
+                None
+            })
+            .await;
+            let Some(item) = next else {
+                return Err(RewindFailure::new(
+                    RewindFailureReason::TurnRunning,
+                    "the interrupted turn did not end within 30 s".to_owned(),
+                ));
+            };
+            if !matches!(
+                self.handle_transport(item).await,
+                TransportOutcome::Continue
+            ) {
+                return Err(RewindFailure::new(RewindFailureReason::ProcessGone, None));
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear the staged revert the rewind to `checkpoint_id` left, which puts
+    /// back what it hid and the files it reverted.
+    fn undo_rewind(&mut self, checkpoint_id: &str) -> Result<(), RewindFailure> {
+        if self.staged_revert()?.as_deref() != Some(checkpoint_id) {
+            // A prompt or a compaction committed it.
+            return Err(RewindFailure::new(
+                RewindFailureReason::Expired,
+                "OpenCode has no staged revert at this message".to_owned(),
+            ));
+        }
+        self.http
+            .delete(&self.session_path("revert"))
+            .map_err(rewind_failure)
     }
 
     async fn handle_event(&mut self, event: &Value) {
@@ -1260,6 +1343,81 @@ fn prompt_body(text: String, attachments: &[Attachment], delivery: &str) -> Valu
     body
 }
 
+/// What a refused request means for a rewind, with OpenCode's words.
+fn rewind_failure(error: AgentError) -> RewindFailure {
+    let detail = error.to_string();
+    let status = detail
+        .split("OpenCode HTTP ")
+        .nth(1)
+        .and_then(|rest| rest.get(..3))
+        .and_then(|status| status.parse::<u16>().ok());
+    let reason = match (&error, status) {
+        (_, Some(409)) => RewindFailureReason::Busy,
+        (_, Some(404)) => RewindFailureReason::TargetNotFound,
+        (AgentError::Provider(_), _) => RewindFailureReason::Other,
+        _ => RewindFailureReason::ProcessGone,
+    };
+    RewindFailure::new(reason, detail)
+}
+
+/// The files a staged revert restored (`Session.Revert.files`).
+fn reverted_files(files: &Value) -> RewindFiles {
+    RewindFiles {
+        files: files
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|file| {
+                Some(RewindFile {
+                    path: file["file"].as_str()?.to_owned(),
+                    insertions: file["additions"].as_u64(),
+                    deletions: file["deletions"].as_u64(),
+                })
+            })
+            .collect(),
+        ..RewindFiles::default()
+    }
+}
+
+/// The attachments of a restored prompt that are files on this machine. An
+/// inline attachment (Tcode sends its images as `data:` URLs) has no path to
+/// put back in a composer, so the prompt comes back without it.
+fn local_attachments(files: &Value) -> Vec<String> {
+    files
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let path = file
+                .pointer("/source/uri")?
+                .as_str()?
+                .strip_prefix("file://")?;
+            Some(percent_decode(path))
+        })
+        .collect()
+}
+
+/// `decodeURIComponent` of a `file://` URL's path.
+fn percent_decode(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let Some(byte) = path
+                .get(index + 1..index + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            decoded.push(byte);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
 fn form_question(field: &Value) -> Option<UserInputQuestion> {
     let key = field["key"].as_str()?;
     let title = field["title"].as_str();
@@ -1474,13 +1632,18 @@ impl Mapper {
                 self.turn_processed = 0;
                 self.turn_cost = None;
                 self.last_error = None;
-                mapped.events.extend(crate::start_mapped_turn(
-                    "opencode",
-                    &mut self.turn_counter,
-                    &mut self.active_turn,
-                    &mut self.turn_usage,
-                    &mut self.turn_failed,
-                ));
+                if self.active_turn.is_none() {
+                    // The event's id, unique across the session's servers, names
+                    // the turn: a counter restarts with every server.
+                    let turn_id = event["id"].as_str().map(str::to_owned).unwrap_or_else(|| {
+                        self.turn_counter += 1;
+                        format!("opencode-turn-{}", self.turn_counter)
+                    });
+                    self.active_turn = Some(turn_id.clone());
+                    self.turn_usage = None;
+                    self.turn_failed = false;
+                    mapped.events.push(AgentEvent::TurnStarted { turn_id });
+                }
             }
             "session.execution.succeeded"
             | "session.execution.failed"
@@ -2966,13 +3129,13 @@ cat > /dev/null
                 until(&handle, turn_completed).await,
                 vec![
                     json!({"type": "turn_accepted", "delivery_id": 1}),
-                    json!({"type": "turn_started", "turn_id": "opencode-turn-1"}),
-                    json!({"type": "turn_checkpoint", "turn_id": "opencode-turn-1", "checkpoint_id": "msg_198aac9f2001K4cb8mDh24jTzH"}),
+                    json!({"type": "turn_started", "turn_id": "evt_198aac9f5002tcru464AZ7pzsT"}),
+                    json!({"type": "turn_checkpoint", "turn_id": "evt_198aac9f5002tcru464AZ7pzsT", "checkpoint_id": "msg_198aac9f2001K4cb8mDh24jTzH"}),
                     json!({"type": "item_started", "id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "content": {"kind": "assistant_message", "text": ""}}),
                     json!({"type": "delta", "item_id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "kind": "assistant_text", "text": "PONG"}),
                     json!({"type": "item_completed", "id": "msg_198aaca0a001IZCSKwcEekLiz8:text:0", "content": {"kind": "assistant_message", "text": "PONG"}}),
                     json!({"type": "token_usage", "freshness": "current", "turn_processed_tokens": null, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": null, "duration_ms": null}),
-                    json!({"type": "turn_completed", "turn_id": "opencode-turn-1", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 9667, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
+                    json!({"type": "turn_completed", "turn_id": "evt_198aac9f5002tcru464AZ7pzsT", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 9667, "input_tokens": 6335, "cached_input_tokens": 3328, "output_tokens": 4, "used_tokens": 9667, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
                 ]
             );
             shut_down(handle).await;
@@ -3037,7 +3200,7 @@ cat > /dev/null
                     json!({"type": "item_started", "id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "content": {"kind": "assistant_message", "text": ""}}),
                     json!({"type": "delta", "item_id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "kind": "assistant_text", "text": "DONE"}),
                     json!({"type": "item_completed", "id": "msg_198ac5ee50018mgQBTDX0Qzgxm:text:0", "content": {"kind": "assistant_message", "text": "DONE"}}),
-                    json!({"type": "turn_completed", "turn_id": "opencode-turn-1", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 20463, "input_tokens": 125, "cached_input_tokens": 10112, "output_tokens": 4, "used_tokens": 10241, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
+                    json!({"type": "turn_completed", "turn_id": "evt_198ac3fd8001s3nuRIcz3LxsHw", "status": "completed", "usage": {"freshness": "current", "turn_processed_tokens": 20463, "input_tokens": 125, "cached_input_tokens": 10112, "output_tokens": 4, "used_tokens": 10241, "context_window": null, "total_processed_tokens": null, "cost_usd": 0.0, "duration_ms": null}}),
                 ]
             );
             shut_down(handle).await;
@@ -3060,7 +3223,7 @@ cat > /dev/null
             send(&handle, turn("Record todos, create notes2.txt, edit it")).await;
             let write = "msg_198b17ffc001GbWFSCOl8PceDQ:chatcmpl-tool-900118863147ca5c";
             let edit = "msg_198b183de001BRg89zKzkJddrX:chatcmpl-tool-abdddfec25b4b5cb";
-            let turn_diff = json!({"type": "turn_changes_updated", "turn_id": "opencode-turn-1", "changes": [{"path": "notes2.txt", "kind": "create", "diff": "diff --git a/notes2.txt b/notes2.txt\nnew file mode 100644\nindex 0000000..a5b73ed\n--- /dev/null\n+++ b/notes2.txt\n@@ -0,0 +1 @@\n+green\n"}], "completeness": "exact"});
+            let turn_diff = json!({"type": "turn_changes_updated", "turn_id": "evt_198b1771a001fVaE42MZK8jx3H", "changes": [{"path": "notes2.txt", "kind": "create", "diff": "diff --git a/notes2.txt b/notes2.txt\nnew file mode 100644\nindex 0000000..a5b73ed\n--- /dev/null\n+++ b/notes2.txt\n@@ -0,0 +1 @@\n+green\n"}], "completeness": "exact"});
             let mut events = items_only(until(&handle, turn_completed).await);
             events.pop();
             assert_eq!(
@@ -3069,7 +3232,7 @@ cat > /dev/null
                     json!({"type": "item_started", "id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "content": {"kind": "assistant_message", "text": ""}}),
                     json!({"type": "delta", "item_id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "kind": "assistant_text", "text": "I'll do these in order.\n\n"}),
                     json!({"type": "item_completed", "id": "msg_198b17729001BfnSeHTUEw26zm:text:0", "content": {"kind": "assistant_message", "text": "I'll do these in order.\n\n"}}),
-                    json!({"type": "plan_updated", "turn_id": "opencode-turn-1", "explanation": null, "steps": [{"step": "Write code", "status": "inProgress"}, {"step": "Test code", "status": "pending"}]}),
+                    json!({"type": "plan_updated", "turn_id": "evt_198b1771a001fVaE42MZK8jx3H", "explanation": null, "steps": [{"step": "Write code", "status": "inProgress"}, {"step": "Test code", "status": "pending"}]}),
                     json!({"type": "item_started", "id": write, "content": {"kind": "file_change", "changes": [], "status": "in_progress"}}),
                     json!({"type": "item_updated", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "modify", "diff": null}], "status": "in_progress"}}),
                     json!({"type": "item_completed", "id": write, "content": {"kind": "file_change", "changes": [{"path": "/work/project/notes2.txt", "kind": "create", "diff": "+blue"}], "status": "completed"}}),
@@ -3186,7 +3349,7 @@ cat > /dev/null
     fn permission_requests_offer_native_options_and_each_answer_reaches_the_asking_session() {
         const REQUEST: &str = "per_198adfe110010MaNqr8j5fFdKI";
         let reply = format!("POST /api/session/ses_root/permission/{REQUEST}/reply");
-        let asked = json!({"type": "approval_requested", "id": REQUEST, "turn_id": "opencode-turn-1", "kind": {"kind": "exec_command", "command": "echo hi", "cwd": null, "reason": null}, "options": [
+        let asked = json!({"type": "approval_requested", "id": REQUEST, "turn_id": "evt_198adf559002Wm9xfuCNpOnQpw", "kind": {"kind": "exec_command", "command": "echo hi", "cwd": null, "reason": null}, "options": [
             {"id": "once", "label": "Allow once", "kind": "allow_once"},
             {"id": "always", "label": "Always allow", "kind": "allow_always"},
             {"id": "reject", "label": "Reject", "kind": "reject_once"},
@@ -3409,15 +3572,38 @@ cat > /dev/null
                 until(&handle, turn_completed).await,
                 vec![
                     json!({"type": "item_completed", "id": id, "content": {"kind": "command_execution", "command": "sleep 30", "output": "", "exit_code": null, "status": "interrupted"}}),
-                    json!({"type": "turn_completed", "turn_id": "opencode-turn-1", "status": "interrupted", "usage": null}),
+                    json!({"type": "turn_completed", "turn_id": "evt_198ae3e27001B11JrPf6Fy7Nv1", "status": "interrupted", "usage": null}),
                 ]
             );
             shut_down(handle).await;
         });
     }
 
+    const STAGE: &str = "POST /api/session/ses_root/revert/stage";
+    const SESSION_GET: &str = "GET /api/session/ses_root";
+
+    /// `GET …/message/{id}` for a user prompt with an image Tcode sent inline
+    /// and a file attached by path.
+    fn user_message(id: &str, text: &str) -> String {
+        format!(
+            r#"{{"data":{{"type":"user","id":"{id}","text":"{text}","time":{{"created":1793562692083}},"files":[{{"data":"aGk=","mime":"image/png","source":{{"type":"uri","uri":"data:image/png;base64,aGk="}},"name":"shot.png"}},{{"data":"aGk=","mime":"text/plain","source":{{"type":"uri","uri":"file:///work/project/notes%20one.txt"}},"name":"notes one.txt"}}]}}}}"#
+        )
+    }
+
+    /// `GET /api/session/{id}`, with the revert it has staged.
+    fn session_with_revert(message_id: Option<&str>) -> String {
+        let revert = message_id
+            .map(|id| format!(r#","revert":{{"messageID":"{id}"}}"#))
+            .unwrap_or_default();
+        format!(r#"{{"data":{{"id":"ses_root"{revert}}}}}"#)
+    }
+
+    /// A rewind stages OpenCode's revert and leaves it staged, as its /undo
+    /// does: hidden and undoable until the next prompt commits it, which
+    /// OpenCode does itself. A refusal keeps OpenCode's words; an undo clears
+    /// the staged revert.
     #[test]
-    fn a_rewind_reverts_the_conversation_and_files_to_its_prompt() {
+    fn a_rewind_stays_staged_and_is_undone_by_clearing_it() {
         smol::block_on(async {
             const PROMPT_ID: &str = "msg_198aac9f2001K4cb8mDh24jTzH";
             let fixture = fixture(
@@ -3427,41 +3613,144 @@ cat > /dev/null
                     (
                         &format!("GET /api/session/ses_root/message/{PROMPT_ID}"),
                         200,
-                        format!(
-                            r#"{{"data":{{"type":"user","id":"{PROMPT_ID}","text":"Reply with exactly: PONG","time":{{"created":1793562692083}}}}}}"#
-                        ),
+                        user_message(PROMPT_ID, "Reply with exactly: PONG"),
+                    ),
+                    (SESSION_GET, 200, session_with_revert(None)),
+                    (SESSION_GET, 200, session_with_revert(None)),
+                    (SESSION_GET, 200, session_with_revert(Some(PROMPT_ID))),
+                    (
+                        STAGE,
+                        409,
+                        r#"{"_tag":"SessionBusyError","sessionID":"ses_root","message":"Session is busy"}"#.into(),
                     ),
                     (
-                        "POST /api/session/ses_root/revert/stage",
+                        STAGE,
                         200,
-                        format!(r#"{{"data":{{"messageID":"{PROMPT_ID}","files":[]}}}}"#),
+                        format!(
+                            r#"{{"data":{{"messageID":"{PROMPT_ID}","snapshot":"4b825dc","files":[{{"file":"notes.txt","patch":"@@","additions":1,"deletions":2,"status":"modified"}}]}}}}"#
+                        ),
                     ),
                 ],
             );
             let handle = open(fixture.options.clone()).await;
             send(&handle, turn("Reply with exactly: PONG")).await;
             until(&handle, turn_completed).await;
+            let rewind = SessionCommand::Rewind {
+                checkpoint_id: PROMPT_ID.into(),
+                mode: RewindMode::FilesAndConversation,
+            };
+            send(&handle, rewind.clone()).await;
+            assert_eq!(
+                serde_json::to_value(recv(&handle).await).unwrap(),
+                json!({"type": "rewind_failed", "checkpoint_id": PROMPT_ID, "mode": "files_and_conversation", "failure": {"reason": "busy", "detail": "provider reported error: OpenCode HTTP 409: Session is busy"}})
+            );
+            send(&handle, rewind).await;
+            assert_eq!(
+                serde_json::to_value(recv(&handle).await).unwrap(),
+                json!({
+                    "type": "rewind_completed",
+                    "checkpoint_id": PROMPT_ID,
+                    "mode": "files_and_conversation",
+                    "prefill": "Reply with exactly: PONG",
+                    "prefill_attachments": ["/work/project/notes one.txt"],
+                    "later_history": "hidden_until_next_send",
+                    "files": {"files": [{"path": "notes.txt", "insertions": 1, "deletions": 2}]},
+                    "undo_token": PROMPT_ID,
+                })
+            );
             send(
                 &handle,
-                SessionCommand::Rewind {
+                SessionCommand::UndoRewind {
                     checkpoint_id: PROMPT_ID.into(),
-                    mode: RewindMode::FilesAndConversation,
+                    undo_token: PROMPT_ID.into(),
                 },
             )
             .await;
             assert_eq!(
                 serde_json::to_value(recv(&handle).await).unwrap(),
-                json!({"type": "rewind_completed", "checkpoint_id": PROMPT_ID, "mode": "files_and_conversation", "prefill": "Reply with exactly: PONG", "later_history": "truncated"})
+                json!({"type": "rewind_undone", "checkpoint_id": PROMPT_ID})
             );
             shut_down(handle).await;
             assert_eq!(
                 fixture.server.writes()[3..],
                 [
+                    (STAGE.into(), json!({"messageID": PROMPT_ID, "files": true})),
+                    (STAGE.into(), json!({"messageID": PROMPT_ID, "files": true})),
+                    ("DELETE /api/session/ses_root/revert".into(), Value::Null),
+                ]
+            );
+        });
+    }
+
+    /// OpenCode refuses to stage a revert while a turn runs; like its /undo,
+    /// the rewind interrupts the turn and waits for its end, which reaches
+    /// the thread before the rewind's answer.
+    #[test]
+    fn a_rewind_during_a_turn_interrupts_it_first() {
+        smol::block_on(async {
+            const PROMPT_ID: &str = "msg_198ae3e26001hGwkRovRB1DaDH";
+            let interrupt = "POST /api/session/ses_root/interrupt";
+            let fixture = fixture(
+                script(
+                    "interrupt_turn.jsonl",
+                    &[
+                        ("session.inbox.enqueued", PROMPT, 1),
+                        ("shell.exited", interrupt, 1),
+                    ],
+                ),
+                vec![
+                    (PROMPT, 200, inbox(PROMPT_ID)),
+                    (interrupt, 200, r#"{"interrupted":true}"#.into()),
                     (
-                        "POST /api/session/ses_root/revert/stage".into(),
-                        json!({"messageID": PROMPT_ID, "files": true})
+                        &format!("GET /api/session/ses_root/message/{PROMPT_ID}"),
+                        200,
+                        user_message(PROMPT_ID, "Run sleep 30"),
                     ),
-                    ("POST /api/session/ses_root/revert/commit".into(), json!({})),
+                    (SESSION_GET, 200, session_with_revert(None)),
+                    (
+                        STAGE,
+                        200,
+                        format!(r#"{{"data":{{"messageID":"{PROMPT_ID}"}}}}"#),
+                    ),
+                ],
+            );
+            let handle = open(fixture.options.clone()).await;
+            send(&handle, turn("Run sleep 30")).await;
+            until(&handle, |event| {
+                matches!(event, AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::CommandExecution { command, .. }, .. }) if command == "sleep 30")
+            })
+            .await;
+            send(
+                &handle,
+                SessionCommand::Rewind {
+                    checkpoint_id: PROMPT_ID.into(),
+                    mode: RewindMode::Conversation,
+                },
+            )
+            .await;
+            let events = until(&handle, |event| {
+                matches!(event, AgentEvent::RewindCompleted { .. })
+            })
+            .await;
+            let kinds: Vec<_> = events
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .filter(|kind| *kind != "token_usage")
+                .collect();
+            assert_eq!(
+                kinds,
+                ["item_completed", "turn_completed", "rewind_completed"]
+            );
+            assert_eq!(events.last().unwrap()["files"], Value::Null);
+            shut_down(handle).await;
+            assert_eq!(
+                fixture.server.writes()[3..],
+                [
+                    (interrupt.into(), json!({})),
+                    (
+                        STAGE.into(),
+                        json!({"messageID": PROMPT_ID, "files": false})
+                    ),
                 ]
             );
         });
@@ -3483,10 +3772,10 @@ cat > /dev/null
             assert_eq!(
                 until(&handle, turn_completed).await,
                 vec![
-                    json!({"type": "turn_started", "turn_id": "opencode-turn-1"}),
+                    json!({"type": "turn_started", "turn_id": "evt_198b05ab80022gwehZCwzMKLQq"}),
                     json!({"type": "context_compacted", "in_progress": true, "trigger": "manual", "pre_tokens": null, "post_tokens": null, "dropped_tokens": null, "duration_ms": null}),
                     json!({"type": "context_compacted", "in_progress": false, "trigger": "manual", "pre_tokens": null, "post_tokens": null, "dropped_tokens": null, "duration_ms": null}),
-                    json!({"type": "turn_completed", "turn_id": "opencode-turn-1", "status": "completed", "usage": null}),
+                    json!({"type": "turn_completed", "turn_id": "evt_198b05ab80022gwehZCwzMKLQq", "status": "completed", "usage": null}),
                 ]
             );
             shut_down(handle).await;
@@ -3653,5 +3942,28 @@ cat > /dev/null
                 ])
             );
         });
+    }
+
+    /// A thread's fold finds a turn by its id, so a provider started again on
+    /// the same session (after the idle grace let the last one go) must not
+    /// name its turns as the earlier process did: its restore points and
+    /// changes would land on the earlier turns.
+    #[test]
+    fn turns_of_a_restarted_server_are_named_apart_from_earlier_ones() {
+        let turn_ids = |fixture: &str| -> Vec<String> {
+            let mut mapper = Mapper::new("ses_root".into(), Vec::new(), HashMap::new());
+            frames(fixture)
+                .iter()
+                .flat_map(|frame| mapper.on_event(frame).events)
+                .filter_map(|event| match event {
+                    AgentEvent::TurnStarted { turn_id } => Some(turn_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = turn_ids("text_turn.jsonl");
+        let later = turn_ids("files_turn.jsonl");
+        assert_eq!((first.len(), later.len()), (1, 1));
+        assert_ne!(first, later);
     }
 }
