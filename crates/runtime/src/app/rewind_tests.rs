@@ -430,3 +430,69 @@ fn a_rewind_during_a_running_turn_keeps_the_queued_message_waiting() {
     assert!(status.queue_held);
     assert_eq!(status.queued_messages.len(), 1);
 }
+
+/// A Harness that answers a conversation rewind without the prompt (Codex's
+/// `thread/revert`) still gives the asking client its prompt back: the one
+/// Tcode stored for the turn, as Codex's own client refills from its
+/// transcript.
+#[test]
+fn a_rewind_answered_without_the_prompt_refills_the_one_tcode_stored() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-rewind-stored-prompt");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let (sender, commands) = smol::channel::unbounded();
+    state.update(cx, |state, cx| {
+        install(state, ProviderKind::Codex, cwd, Runtime::Live(sender));
+        for (index, prompt) in [(1, "the first prompt"), (2, "the second prompt")] {
+            state.record_user_message("rewound-thread", prompt, &[], None, cx);
+            for event in [
+                AgentEvent::TurnStarted {
+                    turn_id: format!("turn-{index}"),
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: format!("turn-{index}"),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                AgentEvent::TurnCheckpoint {
+                    turn_id: format!("turn-{index}"),
+                    checkpoint_id: format!("checkpoint-{index}"),
+                },
+            ] {
+                state.record_event("rewound-thread", &event, cx);
+            }
+        }
+    });
+    state.dispatch_command(cx, 1, rewind_command("phone"));
+    cx.run_until_parked();
+    assert!(matches!(
+        next_command(&commands),
+        Ok(SessionCommand::Rewind { checkpoint_id, .. }) if checkpoint_id == "checkpoint-2"
+    ));
+    cx.drain_outgoing();
+    state.update(cx, |state, cx| {
+        let mut answer = completed("unused");
+        if let AgentEvent::RewindCompleted { prefill, .. } = &mut answer {
+            *prefill = None;
+        }
+        state.on_event("rewound-thread", answer, cx);
+    });
+    cx.run_until_parked();
+    let prefills: Vec<_> = cx
+        .drain_outgoing()
+        .into_iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                event:
+                    ServerEvent::RewindPrefill {
+                        client_id, text, ..
+                    },
+                ..
+            }) => Some((client_id, text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prefills, [("phone".into(), "the second prompt".into())]);
+}

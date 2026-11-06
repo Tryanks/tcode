@@ -1,7 +1,7 @@
 //! Codex provider: a small client for the newline-delimited JSON protocol used
 //! by `codex app-server`.
 
-use crate::{RewindFailure, RewindFailureReason};
+use crate::{LaterHistory, RewindFailure, RewindFailureReason, RewindMode};
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
 #[cfg(test)]
@@ -597,6 +597,11 @@ fn thread_config(selections: &[OptionSelection]) -> Option<Value> {
 }
 
 enum PendingRequest {
+    /// `thread/revert` for [`SessionCommand::Rewind`]; the checkpoint is the
+    /// native id of the turn reverted with everything after it.
+    Revert {
+        checkpoint_id: String,
+    },
     TurnStart {
         permission: String,
         settings: Option<Value>,
@@ -712,6 +717,11 @@ struct Actor {
     pending_steers: Vec<(String, String)>,
     /// [`SessionOptions::instructions`], sent as `turn/start.additionalContext`.
     instructions: Option<String>,
+    /// A retry's `turn/start` with empty input is on its way: the turn it
+    /// starts has no prompt to rewind to.
+    continuing: bool,
+    /// Turns that continue a failed one rather than answer a prompt.
+    continuations: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -743,6 +753,7 @@ async fn run_actor(
     let startup = initialize_and_open_thread(&opts, &mut stdin, &lines).await;
     let OpenedThread {
         thread_id,
+        unrevertable,
         model,
         next_id,
         provider_commands,
@@ -796,6 +807,8 @@ async fn run_actor(
         interrupted: false,
         pending_steers: Vec::new(),
         instructions: opts.instructions.clone(),
+        continuing: false,
+        continuations: HashSet::new(),
     };
 
     let started = AgentEvent::SessionStarted {
@@ -810,6 +823,12 @@ async fn run_actor(
         stop_child(&mut actor.child, actor.stdin);
         return;
     }
+    actor
+        .events
+        .emit(AgentEvent::RewindAvailability {
+            unavailable: unrevertable,
+        })
+        .await;
     actor.emit_permissions(None).await;
     // Replace the composer's cached `/` + `$` menu data even when discovery is
     // empty, so removed prompts/skills do not linger from a prior session.
@@ -1107,6 +1126,22 @@ impl SessionActor for Actor {
                     PendingRequest::Steer { request_id, text },
                 )
             }
+            SessionCommand::Rewind {
+                checkpoint_id,
+                mode: RewindMode::Conversation,
+            } => {
+                // The server shuts the thread's runtime down first, which
+                // interrupts a running turn, and reloads it under the same id.
+                let params = json!({
+                    "threadId": self.thread_id,
+                    "beforeTurnId": checkpoint_id,
+                });
+                self.request(
+                    "thread/revert",
+                    params,
+                    PendingRequest::Revert { checkpoint_id },
+                )
+            }
             command @ (SessionCommand::Rewind { .. }
             | SessionCommand::PreviewRewind { .. }
             | SessionCommand::UndoRewind { .. }) => {
@@ -1183,6 +1218,7 @@ impl SessionActor for Actor {
         self.retry_deadline = None;
         let mut params = self.build_turn_params("", self.last_turn_options.as_ref(), &[]);
         params["input"] = json!([]);
+        self.continuing = true;
         self.request(
             "turn/start",
             params,
@@ -1314,6 +1350,9 @@ fn spawn_server(
 
 struct OpenedThread {
     thread_id: String,
+    /// Why `thread/revert` refuses this thread, when it does: only paginated
+    /// threads that are written to disk can be reverted.
+    unrevertable: Option<RewindFailureReason>,
     model: Option<String>,
     next_id: i64,
     provider_commands: Vec<ProviderCommand>,
@@ -1375,6 +1414,9 @@ async fn initialize_and_open_thread(
         .map(str::to_owned)
         .or_else(|| opts.model.clone());
     let effective_permission = effective_permission(&result);
+    let unrevertable = (result.pointer("/thread/ephemeral") == Some(&json!(true))
+        || result.pointer("/thread/historyMode") != Some(&json!("paginated")))
+    .then_some(RewindFailureReason::Unsupported);
 
     // Discover the session's skills for the composer's `$` menu. Supported since
     // codex 0.144.1 (verified live); a failure is non-fatal so older builds
@@ -1399,6 +1441,7 @@ async fn initialize_and_open_thread(
     next_id += 1;
     Ok(OpenedThread {
         thread_id,
+        unrevertable,
         model,
         next_id,
         provider_commands,
@@ -1511,6 +1554,18 @@ fn parse_codex_skills(result: &Value) -> Vec<ProviderCommand> {
 /// Render a JSON-RPC error object with everything the server sent — message,
 /// code, and the `data` payload — falling back to the raw JSON when even the
 /// message is missing. Losing any of it makes provider failures undiagnosable.
+/// Why `thread/revert` refused, from its JSON-RPC error.
+fn revert_failure_reason(error: &Value) -> RewindFailureReason {
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    if message.contains("ephemeral") || message.contains("paginated") {
+        RewindFailureReason::Unsupported
+    } else if message.contains("no rollout") {
+        RewindFailureReason::TargetNotFound
+    } else {
+        RewindFailureReason::Other
+    }
+}
+
 fn describe_rpc_error(error: &Value) -> String {
     let Some(message) = error.get("message").and_then(Value::as_str) else {
         return error.to_string();
@@ -1870,6 +1925,10 @@ impl Actor {
                 let _ = reply.try_send(result);
                 return;
             }
+            if let Some(PendingRequest::Revert { checkpoint_id }) = pending {
+                self.finish_revert(checkpoint_id, &value).await;
+                return;
+            }
             if let Some(PendingRequest::GoalSnapshot) = &pending {
                 // A build without goals, or with the feature off, rejects the
                 // request; that is simply a thread without a goal.
@@ -1962,6 +2021,51 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// `thread/revert` answered. The reverted thread's runtime was shut down
+    /// and reloaded: a turn it interrupted is over even when its end was not
+    /// relayed, and the server cancelled the requests it had open.
+    async fn finish_revert(&mut self, checkpoint_id: String, response: &Value) {
+        let event = if let Some(error) = response.get("error") {
+            AgentEvent::RewindFailed {
+                checkpoint_id,
+                mode: RewindMode::Conversation,
+                failure: RewindFailure::new(
+                    revert_failure_reason(error),
+                    describe_rpc_error(error),
+                ),
+            }
+        } else {
+            if let Some(turn_id) = self.active_turn.take() {
+                self.clear_retry().await;
+                self.events
+                    .emit(AgentEvent::TurnCompleted {
+                        turn_id,
+                        status: TurnStatus::Interrupted,
+                        usage: None,
+                    })
+                    .await;
+            }
+            self.interrupted = false;
+            self.async_questions = None;
+            self.pending_steers.clear();
+            self.approvals.clear();
+            self.guardian_denials.clear();
+            self.user_inputs.clear();
+            self.elicitations.clear();
+            AgentEvent::RewindCompleted {
+                checkpoint_id,
+                mode: RewindMode::Conversation,
+                prefill: None,
+                prefill_attachments: Vec::new(),
+                later_history: LaterHistory::Truncated,
+                files: None,
+                incomplete: None,
+                undo_token: None,
+            }
+        };
+        self.events.emit(event).await;
     }
 
     /// Codex echoes user input as a `userMessage` item only once the turn loop
@@ -2303,6 +2407,9 @@ impl Actor {
             }
             "turn/started" => {
                 if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
+                    if std::mem::take(&mut self.continuing) {
+                        self.continuations.insert(id.to_owned());
+                    }
                     self.active_turn = Some(id.into());
                     self.retry = None;
                     self.retry_deadline = None;
@@ -2391,6 +2498,8 @@ impl Actor {
                     }
                 }
                 let usage = self.usage_by_turn.remove(&id);
+                let checkpoint =
+                    (!id.is_empty() && !self.continuations.remove(&id)).then(|| id.clone());
                 self.events
                     .emit(AgentEvent::TurnCompleted {
                         turn_id: id,
@@ -2398,6 +2507,16 @@ impl Actor {
                         usage,
                     })
                     .await;
+                // A finished turn's prompt is a point `thread/revert` can go
+                // back to; a steer inside it is not.
+                if let Some(turn_id) = checkpoint {
+                    self.events
+                        .emit(AgentEvent::TurnCheckpoint {
+                            checkpoint_id: turn_id.clone(),
+                            turn_id,
+                        })
+                        .await;
+                }
             }
             "turn/diff/updated" => {
                 let turn_id = notification_turn_id(params, &self.active_turn).unwrap_or_default();
@@ -2586,6 +2705,8 @@ impl Actor {
                     .emit(AgentEvent::GoalUpdated { goal: None })
                     .await;
             }
+            // The `thread/revert` response settles the rewind.
+            "thread/reverted" => {}
             "thread/closed" => {
                 self.events
                     .emit(AgentEvent::Warning {
@@ -3206,6 +3327,7 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
         Some(PendingRequest::SubagentMetadata { .. }) => "thread/read",
         Some(PendingRequest::GuardianApproval { .. }) => "thread/approveGuardianDeniedAction",
         Some(PendingRequest::InjectItems) => "thread/inject_items",
+        Some(PendingRequest::Revert { .. }) => "thread/revert",
         Some(PendingRequest::Compact) => "thread/compact/start",
         Some(PendingRequest::GoalChange) => "thread/goal",
         Some(PendingRequest::GoalSnapshot) => "thread/goal/get",
@@ -4703,6 +4825,8 @@ mod tests {
                 last_turn_options: None,
                 interrupted: false,
                 instructions: None,
+                continuing: false,
+                continuations: HashSet::new(),
             },
             event_rx,
         )
@@ -5052,6 +5176,10 @@ mod tests {
                             matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "T1")
                         );
                         assert!(actor.active_turn.is_none());
+                        assert!(matches!(
+                            events.try_recv().unwrap(),
+                            AgentEvent::TurnCheckpoint { turn_id, .. } if turn_id == "T1"
+                        ));
                     }
                 }
             }
@@ -5180,6 +5308,10 @@ mod tests {
                 events.recv().await.unwrap(),
                 AgentEvent::TurnCompleted { .. }
             ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCheckpoint { .. }
+            ));
             let mut answers = serde_json::Map::new();
             answers.insert(
                 r#"["request_user_input_async","call_r",0]"#.into(),
@@ -5307,6 +5439,10 @@ mod tests {
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::TurnCompleted { .. }
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCheckpoint { .. }
             ));
             actor
                 .handle_command(SessionCommand::Steer {
@@ -7309,6 +7445,10 @@ mod tests {
                     ..
                 }
             ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::TurnCheckpoint { .. }
+            ));
 
             let approval_line = include_str!("../tests/fixtures/codex/v2_messages.jsonl")
                 .lines()
@@ -7354,5 +7494,158 @@ mod tests {
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
+    }
+
+    /// The 0.166.0 `thread/revert` wire: a finished turn's native id is its
+    /// restore point; the revert names it as `beforeTurnId`; a turn it stops
+    /// ends interrupted before the rewind is reported; a refusal keeps
+    /// Codex's words and says why.
+    #[test]
+    fn a_rewind_reverts_the_thread_before_a_finished_turn() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let next = || events.try_recv().unwrap();
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"T1"}}}"#)
+                .await;
+            actor
+                .handle_line(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"T1","status":"completed"}}}"#)
+                .await;
+            assert!(matches!(next(), AgentEvent::TurnStarted { .. }));
+            assert!(matches!(next(), AgentEvent::TurnCompleted { .. }));
+            assert_eq!(
+                serde_json::to_value(next()).unwrap(),
+                json!({"type": "turn_checkpoint", "turn_id": "T1", "checkpoint_id": "T1"})
+            );
+
+            actor
+                .handle_line(r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"T2"}}}"#)
+                .await;
+            assert!(matches!(next(), AgentEvent::TurnStarted { .. }));
+            async fn revert(actor: &mut Actor) -> Value {
+                actor
+                    .handle_command(SessionCommand::Rewind {
+                        checkpoint_id: "T1".into(),
+                        mode: RewindMode::Conversation,
+                    })
+                    .await
+                    .unwrap();
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed request")
+                };
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], "thread/revert");
+                assert_eq!(
+                    request["params"],
+                    json!({"threadId": "thread-1", "beforeTurnId": "T1"})
+                );
+                request["id"].clone()
+            }
+            let id = revert(&mut actor).await;
+            actor
+                .handle_line(
+                    &json!({"id": id, "result": {
+                        "thread": {"id": "thread-1", "historyMode": "paginated", "ephemeral": false, "turns": []},
+                        "turnsBackwardsCursor": null, "itemsBackwardsCursor": null
+                    }})
+                    .to_string(),
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_value(next()).unwrap(),
+                json!({"type": "turn_completed", "turn_id": "T2", "status": "interrupted", "usage": null})
+            );
+            assert_eq!(
+                serde_json::to_value(next()).unwrap(),
+                json!({"type": "rewind_completed", "checkpoint_id": "T1", "mode": "conversation",
+                       "prefill": null, "later_history": "truncated"})
+            );
+
+            let id = revert(&mut actor).await;
+            actor
+                .handle_line(
+                    &json!({"id": id, "error": {
+                        "code": -32600, "message": "ephemeral threads do not support thread/revert"
+                    }})
+                    .to_string(),
+                )
+                .await;
+            assert!(matches!(
+                next(),
+                AgentEvent::RewindFailed { failure, .. }
+                    if failure.reason == RewindFailureReason::Unsupported
+                        && failure.detail.as_deref().is_some_and(|detail| detail.contains("ephemeral"))
+            ));
+            assert!(events.try_recv().is_err());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    /// Only a paginated thread written to disk can be reverted, so each
+    /// session says whether its thread can (0.166.0 `Thread.historyMode`,
+    /// `Thread.ephemeral`).
+    #[cfg(unix)]
+    #[test]
+    fn a_thread_says_whether_it_can_be_reverted() {
+        use std::os::unix::fs::PermissionsExt;
+        for (history_mode, unavailable) in [
+            ("paginated", None),
+            ("legacy", Some(RewindFailureReason::Unsupported)),
+        ] {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("agent-codex-history-{nonce}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("codex");
+            let thread =
+                json!({"thread": {"id": "t", "historyMode": history_mode, "ephemeral": false}});
+            let script = format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
+  [ -z "$id" ] && continue
+  case "$line" in
+    *'"thread/start"'*) echo "{{\"id\":$id,\"result\":{thread}}}" ;;
+    *'"initialize"'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *) echo "{{\"id\":$id,\"error\":{{\"code\":-32601,\"message\":\"no\"}}}}" ;;
+  esac
+done
+"#,
+                thread = thread.to_string().replace('"', "\\\"")
+            );
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            smol::block_on(async {
+                let handle = start(SessionOptions {
+                    cwd: dir.clone(),
+                    model: None,
+                    resume: None,
+                    fork: false,
+                    binary_path: Some(bin.clone()),
+                    option_selections: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    launch_env: LaunchEnv::default(),
+                    extra_args: Vec::new(),
+                    acp: None,
+                    instructions: None,
+                })
+                .await
+                .unwrap();
+                loop {
+                    if let AgentEvent::RewindAvailability {
+                        unavailable: reported,
+                    } = handle.events.recv().await.unwrap()
+                    {
+                        assert_eq!(reported, unavailable, "{history_mode}");
+                        break;
+                    }
+                }
+                let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            });
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

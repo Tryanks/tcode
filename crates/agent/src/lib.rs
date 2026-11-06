@@ -300,7 +300,17 @@ impl ProviderKind {
             ProviderKind::Codex => Caps {
                 supports_steering: true,
                 supports_fork: true,
-                rewind: None,
+                // `thread/revert`: conversation only, never files (its undo
+                // was removed); a turn it reverts while running is stopped.
+                rewind: Some(RewindControl {
+                    modes: &[RewindMode::Conversation],
+                    first_turn_conversation: true,
+                    steer_targets: false,
+                    later_history: LaterHistory::Truncated,
+                    preview: RewindPreviewKind::None,
+                    running_turn: RunningTurnPolicy::Interrupt,
+                    restores_command_edits: false,
+                }),
                 manual_compaction: true,
                 goals: Some(GoalControl {
                     pause: true,

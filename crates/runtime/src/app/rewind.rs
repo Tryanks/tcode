@@ -383,6 +383,25 @@ impl AppState {
             return;
         }
         let request = self.rewind_requests.remove(session_id);
+        let mut event = event;
+        if let AgentEvent::RewindCompleted {
+            checkpoint_id,
+            mode,
+            prefill: prefill @ None,
+            prefill_attachments,
+            ..
+        } = &mut event
+            && mode.includes_conversation()
+            && let Some((text, attachments)) = self
+                .resident(session_id)
+                .and_then(|active| stored_prompt(&active.timeline, checkpoint_id))
+        {
+            // A Harness that answers without the prompt (Codex) has its own
+            // client refill it from the transcript it keeps; Tcode refills it
+            // from the one it stored.
+            *prefill = Some(text);
+            *prefill_attachments = attachments;
+        }
         if let AgentEvent::RewindFailed { failure, .. }
         | AgentEvent::RewindUndoFailed { failure, .. } = &event
         {
@@ -442,6 +461,53 @@ impl AppState {
         // finished a turn, so its process is reaped after the grace.
         self.mark_resident_idle(session_id, cx);
     }
+}
+
+/// The words and images of the message the restore point `checkpoint_id`
+/// stands before, as Tcode stored them: the prompt that opened its turn, or
+/// the steer.
+fn stored_prompt(
+    timeline: &tcode_core::session::Timeline,
+    checkpoint_id: &str,
+) -> Option<(String, Vec<String>)> {
+    let (turn, steer) = timeline
+        .turns
+        .iter()
+        .enumerate()
+        .find_map(|(index, turn)| {
+            if turn.provider_checkpoint_id.as_deref() == Some(checkpoint_id) {
+                return Some((index, None));
+            }
+            turn.steer_checkpoints
+                .iter()
+                .find(|(_, checkpoint)| checkpoint == checkpoint_id)
+                .map(|(steer, _)| (index, Some(steer.as_str())))
+        })?;
+    timeline.entries.iter().find_map(|entry| {
+        if entry.turn != turn || steer.is_some_and(|steer| entry.id != steer) {
+            return None;
+        }
+        let (text, context_len, attachments) = match &entry.content {
+            EntryContent::Item(agent::ItemContent::UserMessage {
+                text,
+                context_len,
+                attachments,
+            })
+            | EntryContent::Steer {
+                text,
+                context_len,
+                attachments,
+                ..
+            } => (text, context_len, attachments),
+            _ => return None,
+        };
+        let text = context_len
+            .and_then(|len| text.get(len..))
+            .unwrap_or(text)
+            .trim_start()
+            .to_owned();
+        Some((text, attachments.clone()))
+    })
 }
 
 #[cfg(test)]
