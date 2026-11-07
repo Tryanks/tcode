@@ -29,7 +29,11 @@ impl AppState {
     /// start now.
     pub(super) fn fork_status(&self, active: &ActiveSession) -> Option<ForkStatus> {
         let control = active.meta.provider.caps().fork_at?;
-        if Self::conversation_read_only(&active.meta) || active.meta.resume_cursor.is_none() {
+        // A branch not started yet holds the source's cursor, not its session's.
+        if Self::conversation_read_only(&active.meta)
+            || active.meta.resume_cursor.is_none()
+            || matches!(active.meta.pending_fork, Some(ForkPoint::Branch { .. }))
+        {
             return None;
         }
         Some(ForkStatus {
@@ -222,9 +226,14 @@ impl AppState {
             host_cx.enqueue(move |state, cx| match result {
                 Ok(()) => {
                     // The parent's restore points do not address a new session.
-                    if new_session {
-                        state.record_event(&fork.id, &AgentEvent::CheckpointsCleared, cx);
-                    }
+                    // A branch keeps them, but not the return from a rewind in
+                    // the rows it was copied with: that left another session.
+                    let closing = if new_session {
+                        AgentEvent::CheckpointsCleared
+                    } else {
+                        AgentEvent::RewindUndoClosed
+                    };
+                    state.record_event(&fork.id, &closing, cx);
                     state.select_session(&fork.id, cx);
                     state.reply_to_subscription(
                         None,

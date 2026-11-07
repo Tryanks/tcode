@@ -442,3 +442,92 @@ fn a_rewind_that_left_no_branch_opens_nothing() {
         assert_eq!(refused.code, "rewind_unavailable");
     }
 }
+
+/// Two rewinds with nothing sent between them: the log of the later branch
+/// ends on the earlier divider with its return still open. That return would
+/// move the branch's thread into a session that belongs to no thread, so it
+/// closes and the earlier branch opens like any other: as one thread, found
+/// again however it is asked for. A branch not started yet is not on its
+/// session yet, so nothing forks from it.
+#[test]
+fn a_branch_opened_after_two_rewinds_cannot_return_to_the_earlier_one() {
+    const EARLIER: &str = "/sessions/earlier.jsonl";
+    const LATER: &str = "/sessions/later.jsonl";
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-two-rewinds");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = host(&store, cx);
+    state.update(cx, |state, cx| {
+        install(state, ProviderKind::Pi, cwd, cx);
+        turn(state, cx, 0, "first", &[]);
+        turn(state, cx, 1, "second", &[]);
+        turn(state, cx, 2, "third", &[]);
+        state.record_event(
+            SOURCE,
+            &rewound("checkpoint-2", agent::LaterHistory::Branch, Some(EARLIER)),
+            cx,
+        );
+        state.record_event(
+            SOURCE,
+            &rewound("checkpoint-1", agent::LaterHistory::Branch, Some(LATER)),
+            cx,
+        );
+        turn(state, cx, 3, "second, edited", &[]);
+    });
+    cx.run_until_parked();
+
+    let CommandResponse::SessionId(Some(branch)) =
+        send(&state, cx, 1, open_branch(1, "checkpoint-1")).unwrap()
+    else {
+        panic!("the branch answers with its thread");
+    };
+    settled(cx, &branch);
+    state.read(|state| {
+        assert_eq!(
+            state.residents.live[&branch].meta.pending_fork,
+            Some(ForkPoint::Branch {
+                token: LATER.into()
+            })
+        );
+    });
+
+    let undone = json!({"type": "undo_rewind", "content": {
+        "session_id": branch, "checkpoint_id": "checkpoint-2",
+    }});
+    let refused = send(&state, cx, 2, undone).unwrap_err();
+    assert_eq!(refused.code, "rewind_unavailable");
+
+    let refused = send(
+        &state,
+        cx,
+        3,
+        json!({"type": "fork_thread", "content": {
+            "id": branch, "at": {"turn": 1, "checkpoint_id": "checkpoint-1"},
+        }}),
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, "fork_unavailable");
+
+    let open_earlier = json!({"type": "open_rewound_branch", "content": {
+        "session_id": branch, "turn": 2, "checkpoint_id": "checkpoint-2",
+    }});
+    let CommandResponse::SessionId(Some(earlier)) =
+        send(&state, cx, 4, open_earlier.clone()).unwrap()
+    else {
+        panic!("the earlier branch answers with its thread");
+    };
+    settled(cx, &earlier);
+    state.read(|state| {
+        assert_eq!(
+            state.residents.live[&earlier].meta.pending_fork,
+            Some(ForkPoint::Branch {
+                token: EARLIER.into()
+            })
+        );
+    });
+    assert_eq!(
+        send(&state, cx, 5, open_earlier).unwrap(),
+        CommandResponse::SessionId(Some(earlier)),
+    );
+}
