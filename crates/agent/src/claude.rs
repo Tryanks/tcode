@@ -88,9 +88,11 @@ pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
 /// is set, else in the home directory itself rather than in `~/.claude`.
 pub fn account_file(launch_env: &LaunchEnv) -> Option<PathBuf> {
     let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
-    child_env("CLAUDE_CONFIG_DIR")
-        .or_else(|| child_env("HOME"))
-        .map(|dir| dir.join(".claude.json"))
+    account_file_in(child_env("CLAUDE_CONFIG_DIR"), child_env("HOME"))
+}
+
+fn account_file_in(config_dir: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    config_dir.or(home).map(|dir| dir.join(".claude.json"))
 }
 
 // Credentials and per-account state (`.claude.json`, `projects/`) must not
@@ -4258,22 +4260,12 @@ mod tests {
     /// `~/.claude`, not in it, for the default account.
     #[test]
     fn account_file_sits_in_a_configured_dir_and_beside_dot_claude_otherwise() {
-        let launch_env = |pairs: &[(&str, &str)]| LaunchEnv {
-            env: pairs
-                .iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect(),
-            home: None,
-        };
         assert_eq!(
-            account_file(&launch_env(&[
-                ("CLAUDE_CONFIG_DIR", "/configured"),
-                ("HOME", "/home")
-            ])),
+            account_file_in(Some("/configured".into()), Some("/home".into())),
             Some(PathBuf::from("/configured/.claude.json"))
         );
         assert_eq!(
-            account_file(&launch_env(&[("HOME", "/home")])),
+            account_file_in(None, Some("/home".into())),
             Some(PathBuf::from("/home/.claude.json"))
         );
     }
