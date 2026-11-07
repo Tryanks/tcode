@@ -21,6 +21,8 @@ use tcode_ui::overlay::{DialogActions, OverlayExt as _};
 use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 mod migration;
+#[cfg(target_os = "macos")]
+mod notifications;
 mod preview_smoke;
 
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
@@ -447,6 +449,16 @@ impl LocalKernel {
     }
 }
 
+/// Notification Center, on the platform it is written for. Windows and Linux
+/// have no notifier yet.
+fn with_system_notifier(host: NativeClientHost) -> NativeClientHost {
+    #[cfg(target_os = "macos")]
+    if let Some(notifier) = notifications::MacNotifier::new() {
+        return host.with_system_notifier(notifier);
+    }
+    host
+}
+
 fn main() {
     env_logger::init();
     tcode_services::process::raise_open_file_limit();
@@ -485,11 +497,11 @@ fn main() {
     tcode_ui::set_client_data_dir(data_dir.clone());
     // Launching an editor is process work this crate already owns the helpers
     // for, so it is injected rather than linked into the UI.
-    let native_client = Rc::new(
+    let native_client = Rc::new(with_system_notifier(
         NativeClientHost::new(data_dir.clone(), machine_name()).with_editor_opener(|path| {
             tcode_services::desktop::open_in_zed(path).map_err(|error| error.to_string())
         }),
-    );
+    ));
 
     if let Some(index) = args.iter().position(|arg| arg == "--pair") {
         // Pairing writes hosts.json and device.json, at which a later move of

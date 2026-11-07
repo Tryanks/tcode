@@ -68,6 +68,7 @@ pub mod sidebar;
 pub mod sizing;
 mod source_control_settings;
 pub mod store;
+mod system_notifications;
 mod terminal_drawer;
 mod terminal_key_bar;
 #[cfg(test)]
