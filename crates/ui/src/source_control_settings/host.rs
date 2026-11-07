@@ -1248,6 +1248,7 @@ pub(super) fn open(
     window.open_dialog(cx, move |dialog, _, cx| {
         let content = editor.clone();
         dialog
+            .sheet()
             .title(editor.read(cx).title(cx))
             .content(move |el, _, _| el.child(content.clone()))
             .footer(HostEditor::footer(&editor, cx))

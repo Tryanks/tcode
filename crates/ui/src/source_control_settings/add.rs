@@ -279,7 +279,9 @@ pub(super) fn open(
     let focus = add.read(cx).input.clone();
     window.open_dialog(cx, move |dialog, _, cx| {
         let content = add.clone();
-        let dialog = dialog.content(move |el, _, _| el.child(content.clone()));
+        let dialog = dialog
+            .sheet()
+            .content(move |el, _, _| el.child(content.clone()));
         if let Some(editor) = add.read(cx).connecting.clone() {
             return dialog
                 .title(editor.read(cx).title(cx))

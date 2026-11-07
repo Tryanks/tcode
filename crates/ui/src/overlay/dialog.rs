@@ -2,8 +2,8 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, ClickEvent, FocusHandle, InteractiveElement as _, IntoElement, ParentElement,
-    Pixels, RenderOnce, SharedString, StyleRefinement, Styled, WeakFocusHandle, Window, div,
-    prelude::FluentBuilder as _, px,
+    Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    WeakFocusHandle, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::motion::PresenceSample;
 
@@ -262,6 +262,80 @@ impl DialogBase {
     }
 }
 
+/// A dialog's sheet form on gpui-base's [`gpui_base::Sheet`]. That host has no
+/// `Confirm` action, topmost switch or Escape switch of its own, which is why
+/// [`Dialog::sheet`] is kept to dialogs that do not close on Enter, and it
+/// announces no dialog, so the surface takes that role.
+struct SheetForm {
+    focus: FocusHandle,
+    close: super::SheetClose,
+    binding: gpui::Entity<super::SheetBack>,
+    drag_progress: f32,
+    insets: gpui::Edges<Pixels>,
+    max_height: Pixels,
+}
+
+impl SheetForm {
+    fn new(
+        focus: FocusHandle,
+        open: bool,
+        close: impl Fn(&mut Window, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let close: super::SheetClose = Rc::new(close);
+        let swiped = close.clone();
+        let binding = super::bind_sheet(
+            "tcode-dialog".into(),
+            focus.clone(),
+            open,
+            move |window, cx| swiped(window, cx),
+            window,
+            cx,
+        );
+        let drag = binding.read(cx);
+        let drag_progress = crate::edge_back::settle(
+            "dialog-edge-offset",
+            drag.progress,
+            drag.dragging,
+            window,
+            cx,
+        );
+        let insets = crate::window_seam::content_insets_gliding("dialog-seam", None, window, cx);
+        let max_height = super::sheet_max_height(&insets, window);
+        Self {
+            focus,
+            close,
+            binding,
+            drag_progress,
+            insets,
+            max_height,
+        }
+    }
+
+    fn render(
+        self,
+        surface: impl IntoElement,
+        backdrop: impl IntoElement,
+        overlay_closable: bool,
+        presence: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        let close = self.close;
+        gpui_base::Sheet::new(cx)
+            .focus_handle(self.focus)
+            .overlay_closable(overlay_closable)
+            .request_close(move |window, cx| close(window, cx))
+            .overlay(backdrop)
+            .surface(
+                super::sheet_anchor(self.binding, self.drag_progress, presence, window, cx)
+                    .child(surface),
+            )
+            .into_any_element()
+    }
+}
+
 #[derive(IntoElement)]
 pub struct Dialog {
     base: DialogBase,
@@ -274,6 +348,7 @@ pub struct Dialog {
     max_width: Option<Pixels>,
     close_button: bool,
     fill: bool,
+    sheet: bool,
     overlay: bool,
     overlay_closable: bool,
     keyboard: bool,
@@ -297,6 +372,7 @@ impl Dialog {
             max_width: None,
             close_button: true,
             fill: false,
+            sheet: false,
             overlay: true,
             overlay_closable: true,
             keyboard: true,
@@ -342,6 +418,15 @@ impl Dialog {
     /// its own chrome, as the image viewer does.
     pub fn fill(mut self) -> Self {
         self.fill = true;
+        self
+    }
+
+    /// On a compact window, rise from the bottom edge as a sheet instead of
+    /// floating a card: for a short form the thumb and the keyboard work from
+    /// there. A dialog that closes on Enter stays a card (see the sheet's
+    /// host in `render`).
+    pub fn sheet(mut self) -> Self {
+        self.sheet = true;
         self
     }
     pub fn w(mut self, width: impl Into<Pixels>) -> Self {
@@ -436,6 +521,38 @@ impl RenderOnce for Dialog {
             .presence
             .is_some_and(|presence| presence.phase == PresencePhase::Exiting);
         let y = viewport.height / 10. + inset * self.layer as f32;
+        let as_sheet = self.sheet && crate::window_seam::window_is_compact(window, cx);
+        // Turning compact or wide, the surface glides from where the other
+        // form drew it; each form is placed against the window.
+        let place = self.sheet.then(|| {
+            window
+                .use_keyed_state("tcode-dialog-place", cx, |_, _| {
+                    motion::reflow::ReflowState::default()
+                })
+                .read(cx)
+                .scope(u64::from(as_sheet))
+                .in_window()
+        });
+        let sheet = as_sheet.then(|| {
+            let (on_cancel, on_close) = (
+                self.button_props.on_cancel.clone(),
+                self.button_props.on_close.clone(),
+            );
+            SheetForm::new(
+                self.focus_handle.clone(),
+                !exiting,
+                move |window, cx| {
+                    let event = ClickEvent::default();
+                    if on_cancel(&event, window, cx) {
+                        window.close_dialog(cx);
+                        on_close(&event, window, cx);
+                    }
+                },
+                window,
+                cx,
+            )
+        });
+        let scrim = progress * (1. - sheet.as_ref().map_or(0., |sheet| sheet.drag_progress));
         let content = self
             .content
             .map(|builder| builder(DialogContent::new(), window, cx));
@@ -443,9 +560,7 @@ impl RenderOnce for Dialog {
         let backdrop = div()
             .absolute()
             .size_full()
-            .when(self.overlay, |el| {
-                el.bg(crate::material::scrim(progress, cx))
-            })
+            .when(self.overlay, |el| el.bg(crate::material::scrim(scrim, cx)))
             .when(exiting, |el| el.occlude())
             .on_scroll(|_, _, cx| cx.stop_propagation());
         let popup = div()
@@ -454,6 +569,20 @@ impl RenderOnce for Dialog {
             .map(|el| {
                 if self.fill {
                     return el.inset_0().overflow_hidden();
+                }
+                if let Some(sheet) = &sheet {
+                    // The sheet reaches the screen's bottom edge, under the
+                    // home indicator and behind the keyboard; what it holds
+                    // stays above them.
+                    return crate::material::sheet_chrome(el, cx)
+                        .relative()
+                        .w(viewport.width)
+                        .max_h(sheet.max_height + sheet.insets.bottom)
+                        .flex()
+                        .flex_col()
+                        .gap(inset)
+                        .px(inset)
+                        .pb(sheet.insets.bottom + inset);
                 }
                 el.left(x)
                     .top(y + motion::lift(progress))
@@ -474,6 +603,11 @@ impl RenderOnce for Dialog {
             .occlude()
             .opacity(progress)
             .refine_style(&self.style)
+            .when(as_sheet, |el| {
+                el.role(gpui::Role::Dialog)
+                    .debug_selector(|| "dialog-sheet".into())
+                    .child(crate::material::sheet_grabber(cx))
+            })
             .when_some(self.title, |el, title| {
                 // `pr_8` keeps a long title clear of the close button.
                 el.child(
@@ -516,18 +650,37 @@ impl RenderOnce for Dialog {
                     .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
         });
-        self.base.render(
-            self.layer,
-            self.topmost && !exiting,
-            self.focus_handle,
-            self.keyboard && !exiting,
-            self.overlay_closable && !exiting,
-            backdrop,
-            popup,
-            self.button_props.on_ok,
-            self.button_props.on_cancel,
-            self.button_props.on_close,
-        )
+        let popup = match &place {
+            Some(place) => place.part("surface", popup),
+            None => popup.into_any_element(),
+        };
+        let host = if let Some(sheet) = sheet {
+            sheet.render(
+                popup,
+                backdrop,
+                self.overlay_closable && !exiting,
+                progress,
+                window,
+                cx,
+            )
+        } else {
+            self.base.render(
+                self.layer,
+                self.topmost && !exiting,
+                self.focus_handle,
+                self.keyboard && !exiting,
+                self.overlay_closable && !exiting,
+                backdrop,
+                popup,
+                self.button_props.on_ok,
+                self.button_props.on_cancel,
+                self.button_props.on_close,
+            )
+        };
+        match place {
+            Some(place) => place.render(host),
+            None => host,
+        }
     }
 }
 

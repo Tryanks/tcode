@@ -467,6 +467,49 @@ pub(crate) fn bind_sheet(
     state
 }
 
+/// The tallest a sheet's content may stand: it stops a window strip short of
+/// the top, so the page it covers stays in view, and clear of the home
+/// indicator and keyboard, which `insets` carry.
+pub(crate) fn sheet_max_height(
+    insets: &gpui::Edges<gpui::Pixels>,
+    window: &Window,
+) -> gpui::Pixels {
+    (window.viewport_size().height
+        - insets.top
+        - px(crate::window_caption::CAPTION_STRIP_HEIGHT)
+        - insets.bottom)
+        .max(px(0.))
+}
+
+/// Where a sheet stands at the window's bottom edge: lowered by the
+/// edge-back drag, by what is left of `presence` while it comes or goes, and
+/// measuring the height that drag is taken against.
+pub(crate) fn sheet_anchor(
+    binding: Entity<SheetBack>,
+    drag_progress: f32,
+    presence: f32,
+    window: &Window,
+    cx: &App,
+) -> gpui::Div {
+    let sheet = binding.read(cx);
+    let lowered = if sheet.open {
+        drag_progress
+    } else {
+        drag_progress.max(1. - presence)
+    };
+    let offset = crate::edge_back::BackProgress::offset(lowered, sheet.height);
+    div()
+        .absolute()
+        .left_0()
+        .bottom(-offset)
+        .w(window.viewport_size().width)
+        .on_children_prepainted(move |bounds, _, cx| {
+            if let Some(bounds) = bounds.first() {
+                binding.update(cx, |binding, _| binding.height = bounds.size.height);
+            }
+        })
+}
+
 pub(crate) fn dialog_open(window: &Window, cx: &App) -> bool {
     window
         .root::<gpui_base::Root>()
@@ -714,6 +757,91 @@ mod tests {
             0,
             "a successful action closes the dialog"
         );
+    }
+
+    /// Opens a [`Dialog::sheet`] form whose cancel `vetoes` or not, at rest.
+    fn open_sheet(
+        vetoes: Rc<std::cell::Cell<bool>>,
+        closed: Rc<std::cell::Cell<usize>>,
+        width: f32,
+        cx: &mut TestAppContext,
+    ) -> &mut VisualTestContext {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| Body);
+            gpui_base::Root::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(width), px(800.)));
+        cx.update(|window, cx| {
+            window.open_dialog(cx, move |dialog, _, _| {
+                let (vetoes, closed) = (vetoes.clone(), closed.clone());
+                dialog
+                    .sheet()
+                    .title("Connect")
+                    .child(div().debug_selector(|| "form".into()).h(px(120.)))
+                    .on_cancel(move |_, _, _| !vetoes.get())
+                    .on_close(move |_, _, _| closed.set(closed.get() + 1))
+            });
+        });
+        crate::test_frames::draw_settled(cx);
+        cx
+    }
+
+    /// On a phone width the form rises from the bottom edge across the whole
+    /// window, its content above the keyboard; on a wide window it stays the
+    /// centred card.
+    #[gpui::test]
+    fn a_sheet_dialog_stands_on_the_bottom_edge_only_when_compact(cx: &mut TestAppContext) {
+        let shut = || Rc::new(std::cell::Cell::new(false));
+        let closed = Rc::new(std::cell::Cell::new(0));
+        let cx = open_sheet(shut(), closed, 390., cx);
+        let sheet = cx.debug_bounds("dialog-sheet").expect("the sheet form");
+        assert_eq!(sheet.left(), px(0.));
+        assert_eq!(sheet.size.width, px(390.));
+        assert_eq!(sheet.bottom(), px(800.));
+
+        let keyboard = px(300.);
+        crate::window_seam::occlude_for_test(
+            cx,
+            gpui::Edges {
+                bottom: keyboard,
+                ..Default::default()
+            },
+        );
+        crate::test_frames::draw_settled(cx);
+        let form = cx.debug_bounds("form").unwrap();
+        assert!(form.bottom() <= px(800.) - keyboard, "{form:?}");
+
+        cx.simulate_resize(size(px(1024.), px(800.)));
+        crate::window_seam::occlude_for_test(cx, Default::default());
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("dialog-sheet").is_none(),
+            "a wide window keeps the card"
+        );
+        assert!(cx.debug_bounds("form").unwrap().bottom() < px(800.));
+    }
+
+    /// The sheet form closes the ways a dialog does, and a cancel that says no
+    /// keeps it open whichever way it was asked.
+    #[gpui::test]
+    fn a_sheet_dialog_closes_as_a_dialog_does(cx: &mut TestAppContext) {
+        let vetoes = Rc::new(std::cell::Cell::new(true));
+        let closed = Rc::new(std::cell::Cell::new(0));
+        let cx = open_sheet(vetoes.clone(), closed.clone(), 390., cx);
+        let backdrop = gpui::point(px(195.), px(20.));
+
+        cx.simulate_click(backdrop, Default::default());
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("dialog-sheet").is_some());
+        assert_eq!(closed.get(), 0);
+
+        vetoes.set(false);
+        cx.simulate_click(backdrop, Default::default());
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("dialog-sheet").is_none());
+        assert_eq!(closed.get(), 1);
     }
 
     #[gpui::test]

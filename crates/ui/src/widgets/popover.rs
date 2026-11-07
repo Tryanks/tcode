@@ -466,7 +466,6 @@ impl Popover {
             cx,
         );
         let drag = binding.read(cx);
-        let sheet_height = drag.height;
         let drag_progress = crate::edge_back::settle(
             (self.id.clone(), "edge-offset"),
             drag.progress,
@@ -506,9 +505,7 @@ impl Popover {
         if presence.should_render() && (open || progress > 0.) {
             let viewport = window.viewport_size();
             let insets = crate::window_seam::content_insets_gliding("sheet-seam", None, window, cx);
-            // The sheet stops a window strip short of the top so the page it
-            // covers stays in view; no owner names that reserve yet.
-            let max_height = (viewport.height - insets.top - px(52.) - insets.bottom).max(px(0.));
+            let max_height = crate::overlay::sheet_max_height(&insets, window);
             // The grabber, the title row and the hairline above the content.
             let chrome_height =
                 px(material::SHEET_GRABBER_HEIGHT + material::SHEET_TITLE_HEIGHT + 1.);
@@ -596,26 +593,14 @@ impl Popover {
                                 .bg(material::scrim(progress * (1. - drag_progress), cx)),
                         )
                         .surface(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .bottom(-crate::edge_back::BackProgress::offset(
-                                    if open {
-                                        drag_progress
-                                    } else {
-                                        drag_progress.max(1. - progress)
-                                    },
-                                    sheet_height,
-                                ))
-                                .w(viewport.width)
-                                .on_children_prepainted(move |bounds, _, cx| {
-                                    if let Some(bounds) = bounds.first() {
-                                        binding.update(cx, |binding, _| {
-                                            binding.height = bounds.size.height
-                                        });
-                                    }
-                                })
-                                .child(surface),
+                            crate::overlay::sheet_anchor(
+                                binding,
+                                drag_progress,
+                                progress,
+                                window,
+                                cx,
+                            )
+                            .child(surface),
                         ),
                 )
                 .with_priority(gpui_base::POPUP_PRIORITY),

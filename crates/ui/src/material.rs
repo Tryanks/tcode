@@ -183,13 +183,16 @@ pub const SHEET_TITLE_HEIGHT: f32 = 48.;
 /// The compact bottom sheet's surface: top corners at the sheet radius, opaque
 /// fill, a hairline along its top edge and the large soft shadow.
 pub fn sheet_contour<E: Styled>(el: E, cx: &App) -> Raised<E> {
-    raised(
-        el.rounded_t(radius_overlay_sheet(cx))
-            .bg(cx.theme().popover)
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .shadow_xl(),
-    )
+    raised(sheet_chrome(el, cx))
+}
+
+/// What [`sheet_contour`] draws, for a surface raised by its own host.
+pub(crate) fn sheet_chrome<E: Styled>(el: E, cx: &App) -> E {
+    el.rounded_t(radius_overlay_sheet(cx))
+        .bg(cx.theme().popover)
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .shadow_xl()
 }
 
 /// The window edge a [`floating_panel`] is docked against.

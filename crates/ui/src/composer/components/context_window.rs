@@ -233,6 +233,7 @@ pub(in super::super) fn open(
         let content = dialog.clone();
         let apply = dialog.clone();
         builder
+            .sheet()
             .title(crate::tr!("composer.context_window_title").into_owned())
             .content(move |content_el, _, _| content_el.child(content.clone()))
             .footer(
