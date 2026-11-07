@@ -84,10 +84,10 @@ pub enum ProviderKind {
 pub struct Caps {
     pub supports_steering: bool,
     pub supports_fork: bool,
-    /// What the harness's own fork through a finished turn does
+    /// Whether the harness forks through a finished turn itself
     /// ([`ForkPoint::Before`] the next prompt, [`ForkPoint::Tail`] from the
-    /// last turn), when it has one.
-    pub fork_at: Option<ForkControl>,
+    /// last turn).
+    pub fork_at: bool,
     /// What the harness's own rewind does ([`SessionCommand::Rewind`]), when
     /// it has one. A thread can withdraw it ([`AgentEvent::RewindAvailability`])
     /// and a preview narrows it for one message ([`AgentEvent::RewindPreviewed`]).
@@ -118,14 +118,6 @@ pub struct Caps {
     /// A session resumes under another account profile of this provider once
     /// [`transfer_session`] has copied its native files into that profile's home.
     pub session_transfer: bool,
-}
-
-/// What a harness's own fork through a finished turn does. It leaves the
-/// session it forks as it is, a turn running there included.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ForkControl {
-    /// A fork can begin before the session's first message, with nothing in it.
-    pub first_turn: bool,
 }
 
 /// Where a session started from [`SessionOptions::resume`] goes on instead of
@@ -282,7 +274,7 @@ impl ProviderKind {
                 supports_fork: true,
                 // `--resume-session-at` keeps the entries up to the message the
                 // prompt was answering; the first prompt has none.
-                fork_at: Some(ForkControl { first_turn: false }),
+                fork_at: true,
                 rewind: Some(RewindControl {
                     modes: &[
                         RewindMode::FilesAndConversation,
@@ -339,7 +331,7 @@ impl ProviderKind {
                 supports_fork: true,
                 // `thread/fork {lastTurnId}`, the turn before the prompt's: the
                 // first prompt has none.
-                fork_at: Some(ForkControl { first_turn: false }),
+                fork_at: true,
                 // `thread/revert`: conversation only, never files (its undo
                 // was removed); a turn it reverts while running is stopped.
                 rewind: Some(RewindControl {
@@ -385,7 +377,7 @@ impl ProviderKind {
             ProviderKind::Acp => Caps {
                 supports_steering: false,
                 supports_fork: false,
-                fork_at: None,
+                fork_at: false,
                 rewind: None,
                 manual_compaction: false,
                 goals: None,
@@ -410,7 +402,7 @@ impl ProviderKind {
                 supports_fork: false,
                 // RPC `fork`, in a process of the fork's own so the source's
                 // running turn, which that request aborts, is left alone.
-                fork_at: Some(ForkControl { first_turn: true }),
+                fork_at: true,
                 // RPC `fork` goes on in a new session file from before a user
                 // message and keeps the old one, which `switch_session` returns
                 // to; files are not pi's to restore.
@@ -452,7 +444,7 @@ impl ProviderKind {
                 supports_steering: true,
                 supports_fork: true,
                 // `POST /api/session/{id}/fork {before}`.
-                fork_at: Some(ForkControl { first_turn: true }),
+                fork_at: true,
                 // A revert restores the conversation, with or without the
                 // files its steps changed; there is no files-only revert. It
                 // stays staged until the next prompt or compaction commits it,
@@ -495,7 +487,7 @@ impl ProviderKind {
             ProviderKind::Cursor => Caps {
                 supports_steering: false,
                 supports_fork: false,
-                fork_at: None,
+                fork_at: false,
                 rewind: None,
                 manual_compaction: false,
                 goals: None,
@@ -522,7 +514,7 @@ impl ProviderKind {
                 supports_steering: true,
                 supports_fork: true,
                 // `_x.ai/session/fork` with the prompt's number.
-                fork_at: Some(ForkControl { first_turn: false }),
+                fork_at: true,
                 // `_x.ai/rewind/execute`: a prompt's number, in every mode its
                 // /rewind offers. The files are the snapshots its own tools
                 // took; a dry run lists them and those changed since.

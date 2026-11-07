@@ -1178,7 +1178,7 @@ impl AppState {
                     caps: CapsFacts {
                         steering: caps.supports_steering,
                         fork: caps.supports_fork,
-                        fork_at: caps.fork_at.is_some(),
+                        fork_at: caps.fork_at,
                         native_rewind: caps.rewind.map(|rewind| RewindFacts {
                             modes: rewind.modes,
                             first_turn_conversation: rewind.first_turn_conversation,
