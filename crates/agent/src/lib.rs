@@ -21,6 +21,8 @@ mod claude_manifest;
 #[cfg(feature = "process")]
 mod claude_plugins;
 mod plugin_command;
+#[cfg(feature = "process")]
+mod source_plugins;
 pub use plugin_command::plugin_op_command;
 pub mod context_window;
 #[cfg(not(feature = "process"))]
@@ -291,6 +293,7 @@ impl ProviderKind {
                     ],
                     marketplaces: true,
                     scopes: &[PluginScope::User, PluginScope::Project, PluginScope::Local],
+                    source_install: false,
                     unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::SessionAppend,
@@ -335,6 +338,7 @@ impl ProviderKind {
                     ],
                     marketplaces: true,
                     scopes: &[PluginScope::User],
+                    source_install: false,
                     unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::DeveloperContext,
@@ -390,10 +394,13 @@ impl ProviderKind {
                 home_path: true,
                 trust_project_extensions: true,
                 plugin_management: PluginManagement {
-                    unmanaged: Some(UnmanagedPlugins {
-                        kind: UnmanagedPluginsKind::Packages,
-                        command: Some("pi install / pi config"),
-                    }),
+                    actions: &[
+                        PluginActionKind::Install,
+                        PluginActionKind::Uninstall,
+                        PluginActionKind::Update,
+                    ],
+                    scopes: &[PluginScope::User, PluginScope::Project],
+                    source_install: true,
                     ..PluginManagement::NONE
                 },
                 instruction_channel: InstructionChannel::None,
@@ -429,10 +436,13 @@ impl ProviderKind {
                 home_path: false,
                 trust_project_extensions: false,
                 plugin_management: PluginManagement {
-                    unmanaged: Some(UnmanagedPlugins {
-                        kind: UnmanagedPluginsKind::SharedConfig,
-                        command: Some("opencode plugin list"),
-                    }),
+                    actions: &[
+                        PluginActionKind::Install,
+                        PluginActionKind::Uninstall,
+                        PluginActionKind::Update,
+                    ],
+                    scopes: &[PluginScope::User],
+                    source_install: true,
                     ..PluginManagement::NONE
                 },
                 instruction_channel: InstructionChannel::SessionAppend,
@@ -457,7 +467,6 @@ impl ProviderKind {
                 plugin_management: PluginManagement {
                     unmanaged: Some(UnmanagedPlugins {
                         kind: UnmanagedPluginsKind::EditorOnly,
-                        command: None,
                     }),
                     ..PluginManagement::NONE
                 },
@@ -503,6 +512,7 @@ impl ProviderKind {
                     ],
                     marketplaces: true,
                     scopes: &[PluginScope::User],
+                    source_install: false,
                     unmanaged: None,
                 },
                 instruction_channel: InstructionChannel::PerPromptUserBlock,
@@ -535,6 +545,9 @@ pub struct PluginManagement {
     /// each account's own configuration directory; project and local scopes
     /// are files in the project, shared by every account.
     pub scopes: &'static [PluginScope],
+    /// There is no catalog: an install takes a package source a person
+    /// types.
+    pub source_install: bool,
     /// Set for a harness that extends itself natively in a way Tcode does
     /// not manage.
     pub unmanaged: Option<UnmanagedPlugins>,
@@ -545,6 +558,7 @@ impl PluginManagement {
         actions: &[],
         marketplaces: false,
         scopes: &[],
+        source_install: false,
         unmanaged: None,
     };
 
@@ -562,16 +576,10 @@ impl PluginManagement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnmanagedPlugins {
     pub kind: UnmanagedPluginsKind,
-    /// What a person runs in a terminal to manage them.
-    pub command: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnmanagedPluginsKind {
-    /// Packages bundling extensions, skills, prompts and themes, per account.
-    Packages,
-    /// Plugins named in one configuration every account shares.
-    SharedConfig,
     /// Plugins installed only from the harness's own editor.
     EditorOnly,
 }
@@ -855,9 +863,9 @@ pub async fn list_plugins(
         ProviderKind::ClaudeCode => claude_plugins::list(context).await,
         ProviderKind::Codex => codex::plugins::list(context).await,
         ProviderKind::Grok => grok::plugins::list(context).await,
-        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Acp => {
-            Err(no_plugin_management(provider))
-        }
+        ProviderKind::Pi => source_plugins::list_pi(context).await,
+        ProviderKind::OpenCode => source_plugins::list_opencode(context).await,
+        ProviderKind::Cursor | ProviderKind::Acp => Err(no_plugin_management(provider)),
     }
 }
 
@@ -872,9 +880,9 @@ pub async fn run_plugin_op(
         ProviderKind::ClaudeCode => claude_plugins::run(context, op).await,
         ProviderKind::Codex => codex::plugins::run(context, op).await,
         ProviderKind::Grok => grok::plugins::run(context, op).await,
-        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Acp => {
-            Err(no_plugin_management(provider))
-        }
+        ProviderKind::Pi => source_plugins::run_pi(context, op).await,
+        ProviderKind::OpenCode => source_plugins::run_opencode(context, op).await,
+        ProviderKind::Cursor | ProviderKind::Acp => Err(no_plugin_management(provider)),
     }
 }
 

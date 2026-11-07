@@ -293,6 +293,11 @@ impl AppState {
         let available = match command {
             Command::InstallProviderPlugin {
                 entry_id, scope, ..
+            } if management.source_install => {
+                !entry_id.trim().is_empty() && management.scopes.contains(scope)
+            }
+            Command::InstallProviderPlugin {
+                entry_id, scope, ..
             } => offered(entry_id, PluginAction::Install { scope: *scope }),
             Command::UninstallProviderPlugin {
                 entry_id, scope, ..
@@ -866,6 +871,65 @@ mod tests {
                 _ => None,
             })
             .expect("command acknowledged")
+    }
+
+    /// A harness without a catalog installs what a person typed, which no
+    /// listing could have offered, in a scope it has and no other.
+    #[test]
+    fn a_typed_package_source_is_installed_in_a_scope_the_harness_has() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("tcode-fake-pi-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("argv.log");
+        let binary = dir.join("pi");
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\necho 'No packages installed.'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let store = TestStore::new("tcode-plugin-source");
+        let cx = &mut TestAppContext::default();
+        let mut host = TestClientState::new((*store).clone());
+        host.settings.provider_mut(ProviderKind::Pi).binary_path = Some(binary);
+        let state = cx.new_entity(host);
+        state.dispatch_command(
+            cx,
+            1,
+            Command::RefreshProviderPlugins {
+                profile_id: "pi".into(),
+                cwd: Some(dir.clone()),
+            },
+        );
+        let settled = |state: &TestClientState| {
+            state.provider_plugin_catalogs().iter().any(|catalog| {
+                catalog.profile_id == "pi"
+                    && !catalog.loading
+                    && catalog.pending.is_empty()
+                    && matches!(catalog.state, PluginCatalogState::Fresh)
+            })
+        };
+        cx.run_until(settled);
+        let install = |scope| Command::InstallProviderPlugin {
+            profile_id: "pi".into(),
+            entry_id: "npm:typed".into(),
+            scope,
+            cwd: Some(dir.clone()),
+        };
+        state.dispatch_command(cx, 2, install(PluginScope::Local));
+        cx.run_until_parked();
+        assert_eq!(ack(cx, 2).unwrap_err().code, "plugin_action_unavailable");
+        state.dispatch_command(cx, 3, install(PluginScope::Project));
+        cx.run_until(|state| {
+            settled(state)
+                && fs::read_to_string(&log)
+                    .is_ok_and(|calls| calls.contains("install npm:typed -l --approve"))
+        });
+        assert_eq!(ack(cx, 3).unwrap(), CommandResponse::Unit);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
