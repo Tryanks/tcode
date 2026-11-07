@@ -543,7 +543,10 @@ fn reads_are_refused_outside_scope_and_leave_the_target_untouched() {
         assert_eq!(meta.updated_at, before.1.updated_at);
         assert!(state.resident("target").is_none(), "the read woke nothing");
         assert!(
-            state.control_activity(10).is_empty(),
+            state
+                .control_activity(&Default::default(), 10)
+                .entries
+                .is_empty(),
             "a read is not a write"
         );
     });

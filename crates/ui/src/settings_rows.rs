@@ -13,6 +13,7 @@ use gpui_base::{h_flex, v_flex};
 
 use crate::icon::{Icon, IconName};
 use crate::motion::{GlideState, SizeGlide, owned::Owned, reflow::Reflow};
+use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -590,18 +591,33 @@ impl RenderOnce for ToggleRow {
 
 /// The trigger of a settings select.
 pub fn dropdown_trigger(id: &'static str, label: impl Into<SharedString>, cx: &App) -> Button {
-    Button::new(id).ghost().outline().compact().child(
-        h_flex()
-            // One width for every select trigger, so a column of them lines up; gpui-base's
-            // Select is not adopted yet.
-            .w(px(160.))
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(label.into())
-            .child(Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground)),
-    )
+    Button::new(id)
+        .debug_selector(move || id.to_string())
+        .ghost()
+        .outline()
+        .compact()
+        .child(
+            h_flex()
+                // One width for every select trigger, so a column of them lines up; gpui-base's
+                // Select is not adopted yet.
+                .w(px(160.))
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(label.into())),
+                )
+                .child(Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground)),
+        )
 }
+
+/// The height a [`select_row`]'s menu scrolls past; gpui-base's Select is not
+/// adopted yet.
+const SELECT_MENU_MAX_HEIGHT: f32 = 360.;
 
 /// One choice of a [`select_row`].
 #[derive(Clone)]
@@ -642,14 +658,17 @@ pub(crate) fn select_row<T: Clone + 'static>(
                 .role(Role::Menu)
                 .aria_label(menu_label.clone())
                 .p_1()
-                // Each menu names its own floor so its longest option fits; gpui-base's
-                // Select is not adopted yet.
+                // Each menu names its own floor so its longest option fits, and
+                // a long list scrolls; gpui-base's Select is not adopted yet.
                 .min_w(px(menu_width))
+                .max_h(px(SELECT_MENU_MAX_HEIGHT))
+                .overflow_y_scroll_area()
                 .gap_0p5()
                 .children(options.clone().into_iter().map(|option| {
                     let popover = cx.entity();
                     let on_select = on_select.clone();
                     let label = option.label.clone();
+                    let selector = option.id.clone();
                     let item = crate::material::accessible_clickable(
                         crate::material::menu_item_frame(
                             compact,
@@ -661,6 +680,7 @@ pub(crate) fn select_row<T: Clone + 'static>(
                         label.clone(),
                         cx,
                     )
+                    .debug_selector(move || selector.to_string())
                     .aria_selected(option.selected)
                     .w_full()
                     .text_body(compact, cx)

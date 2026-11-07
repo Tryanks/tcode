@@ -159,7 +159,10 @@ fn update_threads_previews_then_settles_with_its_real_side_effects() {
         assert!(done.pull_requests[0].watch.is_some());
         assert_eq!(state.resident("done").unwrap().queue.len(), 1);
         assert!(
-            state.control_activity(10).is_empty(),
+            state
+                .control_activity(&Default::default(), 10)
+                .entries
+                .is_empty(),
             "a preview audits nothing"
         );
     });

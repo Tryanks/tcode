@@ -7,7 +7,7 @@ use gpui_base::StyledExt as _;
 use tcode_core::control::{ControlGrant, ControlGrantRequest, ControlScope, ControlSettings};
 use tcode_core::project::Project;
 use tcode_core::settings::ChildApprovalMode;
-use tcode_protocol::ControlActivityEntry;
+use tcode_protocol::{ControlActivityEntry, ControlActivityFilter, ControlActivityPage};
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -18,8 +18,8 @@ const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How many recent `tcode_control` writes the section lists.
-const ACTIVITY_LIMIT: u32 = 50;
+/// How many `tcode_control` writes the section adds at a time.
+const ACTIVITY_PAGE: u32 = 50;
 
 /// What the activity list shows; the entries themselves are read where drawn.
 #[derive(Clone, PartialEq)]
@@ -27,15 +27,31 @@ enum ActivityState {
     Loading,
     Failed(String),
     Empty,
+    NoMatch,
     Entries,
 }
 
-#[derive(Default)]
 pub(super) struct ControlSection {
-    activity: Option<Result<Vec<ControlActivityEntry>, String>>,
+    activity: Option<Result<ControlActivityPage, String>>,
     activity_task: Option<gpui::Task<()>>,
     /// Latches the one activity query fired when the section opens.
     activity_requested: bool,
+    activity_filter: ControlActivityFilter,
+    /// A page is the newest `limit` entries rather than the next ones, so a
+    /// write arriving between two pages cannot shift one into the other.
+    activity_limit: u32,
+}
+
+impl Default for ControlSection {
+    fn default() -> Self {
+        Self {
+            activity: None,
+            activity_task: None,
+            activity_requested: false,
+            activity_filter: ControlActivityFilter::default(),
+            activity_limit: ACTIVITY_PAGE,
+        }
+    }
 }
 
 impl ControlSection {
@@ -84,9 +100,13 @@ fn thread_link(id: SharedString, title: String, thread_id: String, cx: &App) -> 
 impl SettingsPage {
     fn refresh_control_activity(&mut self, cx: &mut Context<Self>) {
         self.control.activity_requested = true;
+        let (limit, filter) = (
+            self.control.activity_limit,
+            self.control.activity_filter.clone(),
+        );
         let query = self
             .store
-            .update(cx, |store, cx| store.control_activity(ACTIVITY_LIMIT, cx));
+            .update(cx, |store, cx| store.control_activity(limit, filter, cx));
         self.control.activity_task = Some(cx.spawn(async move |this, cx| {
             let result = query.await;
             let _ = this.update(cx, |this, cx| {
@@ -96,6 +116,16 @@ impl SettingsPage {
             });
         }));
         cx.notify();
+    }
+
+    fn filter_control_activity(
+        &mut self,
+        change: impl FnOnce(&mut ControlActivityFilter),
+        cx: &mut Context<Self>,
+    ) {
+        change(&mut self.control.activity_filter);
+        self.control.activity_limit = ACTIVITY_PAGE;
+        self.refresh_control_activity(cx);
     }
 
     pub(super) fn render_control(
@@ -887,10 +917,12 @@ impl SettingsPage {
         let state = match &self.control.activity {
             None => ActivityState::Loading,
             Some(Err(error)) => ActivityState::Failed(error.clone()),
-            Some(Ok(entries)) if entries.is_empty() => ActivityState::Empty,
-            Some(Ok(_)) => ActivityState::Entries,
+            Some(Ok(page)) if !page.entries.is_empty() => ActivityState::Entries,
+            Some(Ok(page)) if page.threads.is_empty() => ActivityState::Empty,
+            Some(Ok(_)) => ActivityState::NoMatch,
         };
         let refresh = Button::new("control-activity-refresh")
+            .debug_selector(|| "control-activity-refresh".into())
             .ghost()
             .xsmall()
             .icon(IconName::RefreshCw)
@@ -921,13 +953,156 @@ impl SettingsPage {
                     )
                     .child(div().pb_1().child(refresh)),
             )
+            .children(self.control_activity_filters(compact, cx))
             .child(body)
+            .children(self.control_activity_more(cx))
             .child(crate::settings_rows::footnote(
-                crate::tr!("control.settings.activity_footnote", count = ACTIVITY_LIMIT),
+                crate::tr!("control.settings.activity_footnote"),
                 compact,
                 cx,
             ))
             .into_any_element()
+    }
+
+    /// The thread and kind selects, once the log has anything to choose from.
+    fn control_activity_filters(
+        &self,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let Some(Ok(page)) = &self.control.activity else {
+            return None;
+        };
+        if page.threads.is_empty() {
+            return None;
+        }
+        let filter = &self.control.activity_filter;
+        let select = |key: &'static str, value, label: String, selected: bool| SelectRowOption {
+            value,
+            id: SharedString::from(format!("control-activity-{key}-{label}")),
+            label: label.into(),
+            description: None,
+            selected,
+        };
+        let mut threads = vec![select(
+            "thread",
+            None,
+            crate::tr!("control.settings.activity_all_threads").into_owned(),
+            filter.thread_id.is_none(),
+        )];
+        threads.extend(page.threads.iter().map(|thread| {
+            let title = if thread.title.is_empty() {
+                crate::tr!("control.settings.deleted_thread").into_owned()
+            } else {
+                thread.title.clone()
+            };
+            let selected = filter.thread_id.as_ref() == Some(&thread.id);
+            select("thread", Some(thread.id.clone()), title, selected)
+        }));
+        let mut kinds = vec![select(
+            "kind",
+            None,
+            crate::tr!("control.settings.activity_all_kinds").into_owned(),
+            filter.action.is_none(),
+        )];
+        kinds.extend(page.actions.iter().map(|action| {
+            let selected = filter.action.as_ref() == Some(action);
+            select(
+                "kind",
+                Some(action.clone()),
+                crate::control::action_label(action),
+                selected,
+            )
+        }));
+        let selected = |options: &[SelectRowOption<Option<String>>]| -> SharedString {
+            options
+                .iter()
+                .find(|option| option.selected)
+                .or(options.first())
+                .map(|option| option.label.clone())
+                .unwrap_or_default()
+        };
+        let page = cx.entity();
+        let thread_row = crate::settings_rows::select_row(
+            "control-activity-thread",
+            "control-activity-thread-popover",
+            "control-activity-thread-menu",
+            240.,
+            crate::tr!("control.settings.activity_thread")
+                .into_owned()
+                .into(),
+            None,
+            selected(&threads),
+            threads,
+            None,
+            crate::settings_rows::flip_row(&self.motion, "control-activity-thread", compact),
+            {
+                let page = page.clone();
+                move |thread, _, cx| {
+                    page.update(cx, |page, cx| {
+                        page.filter_control_activity(|filter| filter.thread_id = thread, cx)
+                    })
+                }
+            },
+            cx,
+        );
+        let kind_row = crate::settings_rows::select_row(
+            "control-activity-kind",
+            "control-activity-kind-popover",
+            "control-activity-kind-menu",
+            240.,
+            crate::tr!("control.settings.activity_kind")
+                .into_owned()
+                .into(),
+            None,
+            selected(&kinds),
+            kinds,
+            None,
+            crate::settings_rows::flip_row(&self.motion, "control-activity-kind", compact),
+            move |action, _, cx| {
+                page.update(cx, |page, cx| {
+                    page.filter_control_activity(|filter| filter.action = action, cx)
+                })
+            },
+            cx,
+        );
+        Some(
+            crate::material::group(cx)
+                .mb_3()
+                .child(thread_row)
+                .child(crate::material::row_hairline(
+                    px(crate::material::CARD_INSET),
+                    cx,
+                ))
+                .child(kind_row)
+                .into_any_element(),
+        )
+    }
+
+    /// "Show more", while the filter matches more than the list holds.
+    fn control_activity_more(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Some(Ok(page)) = &self.control.activity else {
+            return None;
+        };
+        (page.total as usize > page.entries.len()).then(|| {
+            div()
+                .pt_2()
+                .flex()
+                .justify_center()
+                .child(
+                    Button::new("control-activity-more")
+                        .debug_selector(|| "control-activity-more".into())
+                        .ghost()
+                        .small()
+                        .label(crate::tr!("control.settings.activity_more"))
+                        .disabled(self.control.activity_task.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.control.activity_limit += ACTIVITY_PAGE;
+                            this.refresh_control_activity(cx);
+                        })),
+                )
+                .into_any_element()
+        })
     }
 
     fn control_activity_state(
@@ -937,7 +1112,7 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let entries = match state {
+        let entries = match state.clone() {
             ActivityState::Loading => {
                 return vec![
                     crate::material::group(cx)
@@ -974,16 +1149,18 @@ impl SettingsPage {
             }
             // Entries leaving for another state draw none: they are gone.
             ActivityState::Entries => match &self.control.activity {
-                Some(Ok(entries)) if !entries.is_empty() => entries.clone(),
+                Some(Ok(page)) if !page.entries.is_empty() => page.entries.clone(),
                 _ => return Vec::new(),
             },
-            ActivityState::Empty => {
+            ActivityState::Empty | ActivityState::NoMatch => {
+                let message = if state == ActivityState::Empty {
+                    crate::tr!("control.settings.activity_empty")
+                } else {
+                    crate::tr!("control.settings.activity_no_match")
+                };
                 return vec![
                     crate::material::group(cx)
-                        .child(crate::material::empty_row(
-                            crate::tr!("control.settings.activity_empty"),
-                            cx,
-                        ))
+                        .child(crate::material::empty_row(message, cx))
                         .into_any_element(),
                 ];
             }

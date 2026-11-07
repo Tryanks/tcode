@@ -53,7 +53,8 @@ pub use event::{
     TerminalContextStatus, TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, Topic,
 };
 pub use query::{
-    DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
+    ControlActivityFilter, ControlActivityPage, ControlActivityThread, DeviceAccess,
+    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
     GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
     MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
     PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
@@ -350,6 +351,9 @@ pub use wire::{
 // Fork from a message: ForkThread takes an optional at (ForkAt), answered with
 // CommandResponse::ForkedAt; SessionStatus has fork_at (ForkStatus); SessionMeta
 // has fork_origin and pending_fork is a ForkPoint (a stored bool still reads).
+// are new. Query::ControlActivity takes a filter (ControlActivityFilter) and
+// answers a ControlActivityPage: the matching entries, how many match, and the
+// threads and actions the log offers to filter by.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

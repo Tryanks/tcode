@@ -3578,15 +3578,16 @@ impl WorkspaceStore {
     pub fn control_activity(
         &self,
         limit: u32,
+        filter: tcode_protocol::ControlActivityFilter,
         cx: &mut App,
-    ) -> Task<Result<Vec<tcode_protocol::ControlActivityEntry>, String>> {
+    ) -> Task<Result<tcode_protocol::ControlActivityPage, String>> {
         if !self.scope.is_full() || !self.baseline_topics.contains(&Topic::Scope) {
             return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
         }
         let host = self.host.clone();
         cx.spawn(
-            async move |_| match host.query(Query::ControlActivity { limit }).await {
-                Ok(QueryResponse::ControlActivity(entries)) => Ok(entries),
+            async move |_| match host.query(Query::ControlActivity { limit, filter }).await {
+                Ok(QueryResponse::ControlActivity(page)) => Ok(page),
                 Ok(_) => Err("unexpected control activity response".into()),
                 Err(error) => Err(error.message),
             },
