@@ -1,6 +1,7 @@
 //! Reviewers and labels: the block at the top of the conversation and the one picker both are
 //! changed through. A picker stages its changes and applies them together.
 
+use crate::widgets::TooltipTrigger as _;
 use std::collections::BTreeMap;
 
 use gpui::{
@@ -32,6 +33,15 @@ use crate::{
         tooltip::Tooltip,
     },
 };
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PickerKind {
@@ -74,6 +84,106 @@ fn label_color(hex: Option<&str>, cx: &App) -> gpui::Hsla {
 /// A label's colour swatch; no token sizes a swatch.
 fn dot(color: gpui::Hsla) -> impl IntoElement {
     div().flex_none().size(px(10.)).rounded_full().bg(color)
+}
+
+/// A part of a meta row, kept as what it shows so one that leaves is drawn as it was.
+#[derive(Clone)]
+enum MetaChip {
+    Caption {
+        icon: IconName,
+        title: String,
+    },
+    /// The row's word for none.
+    Empty(String),
+    Reviewer {
+        name: String,
+        /// A person's login and where their picture is read; none for a team.
+        avatar: Option<(String, Option<gpui::ImageSource>)>,
+        icon: IconName,
+        color: gpui::Hsla,
+        tooltip: String,
+    },
+    Label {
+        name: String,
+        color: gpui::Hsla,
+        description: Option<String>,
+    },
+    /// The row's edit trigger, which the row builds.
+    Edit,
+}
+
+impl MetaChip {
+    fn render(&self, muted: gpui::Hsla, cx: &App) -> AnyElement {
+        match self {
+            Self::Caption { icon, title } => h_flex()
+                // The caption column is as wide as the longer of the two captions; no
+                // token names a label column.
+                .min_w(px(72.))
+                .gap_1()
+                .items_center()
+                .text_color(muted)
+                .child(Icon::new(icon.clone()))
+                .child(title.clone())
+                .into_any_element(),
+            Self::Empty(text) => div()
+                .text_color(muted)
+                .child(text.clone())
+                .into_any_element(),
+            Self::Reviewer {
+                name,
+                avatar,
+                icon,
+                color,
+                tooltip,
+            } => {
+                let (verdict, icon, color) = (
+                    SharedString::from(format!("pr-reviewer-verdict-{name}")),
+                    icon.clone(),
+                    *color,
+                );
+                let tooltip = tooltip.clone();
+                h_flex()
+                    .id(SharedString::from(format!("pr-reviewer-{name}")))
+                    .gap_1()
+                    .items_center()
+                    .when_some(avatar.clone(), |chip, (login, source)| {
+                        chip.child(super::conversation::avatar_image(&login, source, 16., cx))
+                    })
+                    .child(name.clone())
+                    // A review recolours the reviewer's verdict where it stands.
+                    .child(crate::motion::Sampled::new(move |window, cx| {
+                        crate::motion::status_icon(verdict, icon, color, CHANGE, window, cx)
+                    }))
+                    .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
+                    .into_any_element()
+            }
+            Self::Label {
+                name,
+                color,
+                description,
+            } => h_flex()
+                .id(SharedString::from(format!("pr-label-{name}")))
+                .debug_selector({
+                    let name = name.clone();
+                    move || format!("pr-label-{name}")
+                })
+                .px(cx.theme().tokens.spacing.sm)
+                .gap_1()
+                .items_center()
+                .rounded(material::radius_chip(cx))
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .text_token(&cx.theme().tokens.typography.xs)
+                .child(dot(*color))
+                .child(name.clone())
+                .when_some(description.clone(), |chip, description| {
+                    chip.with_tooltip(move |_, _| Tooltip::new(description.clone()))
+                })
+                .into_any_element(),
+            Self::Edit => div().into_any_element(),
+        }
+    }
 }
 
 impl PullRequestView {
@@ -250,7 +360,7 @@ impl PullRequestView {
         }
         let muted = cx.theme().muted_foreground;
         let compact = self.compact(cx);
-        let reviewers: Vec<AnyElement> = conversation
+        let reviewers: Vec<(SharedString, MetaChip)> = conversation
             .reviewers
             .iter()
             .map(|state| {
@@ -293,78 +403,91 @@ impl PullRequestView {
                     state = crate::tr!(word).into_owned()
                 )
                 .into_owned();
-                h_flex()
-                    .id(SharedString::from(format!("pr-reviewer-{name}")))
-                    .gap_1()
-                    .items_center()
-                    .when(!team, |chip| {
-                        chip.child(self.avatar(
-                            &state.reviewer.login,
-                            state.avatar_url.as_deref(),
-                            16.,
-                            cx,
-                        ))
-                    })
-                    .child(name)
-                    .child(Icon::new(icon).text_color(color))
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                    .into_any_element()
+                let avatar = (!team).then(|| {
+                    (
+                        state.reviewer.login.clone(),
+                        self.avatar_source(state.avatar_url.as_deref()),
+                    )
+                });
+                (
+                    SharedString::from(format!("reviewer-{name}")),
+                    MetaChip::Reviewer {
+                        name,
+                        avatar,
+                        icon,
+                        color,
+                        tooltip,
+                    },
+                )
             })
             .collect();
-        let labels: Vec<AnyElement> = conversation
+        let labels: Vec<(SharedString, MetaChip)> = conversation
             .labels
             .iter()
             .map(|label| {
-                let description = label.description.clone();
-                h_flex()
-                    .id(SharedString::from(format!("pr-label-{}", label.name)))
-                    .px(cx.theme().tokens.spacing.sm)
-                    .gap_1()
-                    .items_center()
-                    .rounded(material::radius_chip(cx))
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
-                    .text_token(&cx.theme().tokens.typography.xs)
-                    .child(dot(label_color(label.color.as_deref(), cx)))
-                    .child(label.name.clone())
-                    .when_some(description, |chip, description| {
-                        chip.tooltip(move |window, cx| {
-                            Tooltip::new(description.clone()).build(window, cx)
-                        })
-                    })
-                    .into_any_element()
+                (
+                    SharedString::from(format!("label-{}", label.name)),
+                    MetaChip::Label {
+                        name: label.name.clone(),
+                        color: label_color(label.color.as_deref(), cx),
+                        description: label.description.clone(),
+                    },
+                )
             })
             .collect();
+        // One wrapping row: its caption, then its chips or the word for none, then its edit
+        // trigger. A chip that comes or goes widens in or narrows away, carrying the gap before
+        // it, and the word for none gives way to the first chip as it arrives; the row starts a
+        // gap early so each line's first part sits at its start.
         let row = |selector: &'static str,
                    icon: IconName,
                    title: &'static str,
                    empty: &'static str,
-                   chips: Vec<AnyElement>,
-                   edit: Option<AnyElement>,
-                   cx: &App| {
-            h_flex()
-                .debug_selector(|| selector.into())
-                .gap_2()
-                .items_center()
-                .flex_wrap()
-                .child(
-                    // The caption column is as wide as the longer of the two captions; no
-                    // token names a label column.
+                   chips: Vec<(SharedString, MetaChip)>,
+                   edit: Option<AnyElement>| {
+            let mut parts = vec![(
+                SharedString::from("caption"),
+                MetaChip::Caption {
+                    icon,
+                    title: crate::tr!(title).into_owned(),
+                },
+            )];
+            if chips.is_empty() {
+                parts.push((
+                    "empty".into(),
+                    MetaChip::Empty(crate::tr!(empty).into_owned()),
+                ));
+            }
+            parts.extend(chips);
+            if edit.is_some() {
+                parts.push(("edit".into(), MetaChip::Edit));
+            }
+            let mut edit = edit;
+            crate::motion::Sampled::new(move |window, cx| {
+                let parts = crate::motion::keyed_across(
+                    selector,
+                    parts,
+                    ROWS,
+                    window,
+                    cx,
+                    |_, part, _, cx| {
+                        let part = match part {
+                            MetaChip::Edit => edit.take(),
+                            part => Some(part.render(muted, cx)),
+                        };
+                        div().pl_2().children(part).into_any_element()
+                    },
+                );
+                parts.render(
                     h_flex()
-                        .min_w(px(72.))
-                        .gap_1()
+                        .debug_selector(|| selector.into())
+                        .ml(gpui::rems(-0.5))
+                        .gap_y_2()
                         .items_center()
-                        .text_color(muted)
-                        .child(Icon::new(icon))
-                        .child(crate::tr!(title)),
+                        .flex_wrap()
+                        .text_color(cx.theme().foreground),
                 )
-                .when(chips.is_empty(), |row| {
-                    row.child(div().text_color(muted).child(crate::tr!(empty)))
-                })
-                .children(chips)
-                .children(edit)
-                .text_color(cx.theme().foreground)
+            })
         };
         let reviewers_edit = can_review.then(|| self.picker_popover(PickerKind::Reviewers, cx));
         let labels_edit = can_label.then(|| self.picker_popover(PickerKind::Labels, cx));
@@ -382,7 +505,6 @@ impl PullRequestView {
                     "pull_requests.meta.no_reviewers",
                     reviewers,
                     reviewers_edit,
-                    cx,
                 ))
                 // A host without labels may still report some, which show read-only.
                 .when(labelled || !conversation.labels.is_empty(), |block| {
@@ -393,7 +515,6 @@ impl PullRequestView {
                         "pull_requests.meta.no_labels",
                         labels,
                         labels_edit,
-                        cx,
                     ))
                 })
                 .into_any_element(),
@@ -441,11 +562,24 @@ impl PullRequestView {
             popover
         };
         popover
-            .content(move |_, _, cx| Self::picker_body(&view, cx))
+            .content(move |_, window, cx| Self::picker_body(&view, window, cx))
             .into_any_element()
     }
 
-    fn picker_body(view: &Entity<Self>, cx: &mut App) -> AnyElement {
+    fn picker_body(view: &Entity<Self>, window: &mut Window, cx: &mut App) -> AnyElement {
+        let loading = view
+            .read(cx)
+            .picker()
+            .is_some_and(|picker| picker.rows.is_none() && picker.error.is_none());
+        // The rows, or what the host said instead, cross-fade over the loading line.
+        let spinning = gpui_base::motion::transition(
+            "pr-picker-loading",
+            if loading { 1. } else { 0. },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let glide = crate::motion::GlideState::keyed("pr-picker-height", window, cx);
         let this = view.read(cx);
         let compact = this.compact(cx);
         let host_name = this.host_name(cx);
@@ -455,6 +589,12 @@ impl PullRequestView {
         let kind = picker.kind;
         let filter = picker.filter.read(cx).value().to_lowercase();
         let row_height = px(material::selectable_row_height(compact));
+        let answered = match (&picker.rows, &picker.error) {
+            (_, Some(_)) => 1,
+            (None, None) => 0,
+            (Some(rows), None) if rows.is_empty() => 2,
+            (Some(_), None) => 3,
+        };
         let body: AnyElement = match (&picker.rows, &picker.error) {
             (_, Some(error)) => div()
                 .px_2()
@@ -466,15 +606,7 @@ impl PullRequestView {
                         .into_owned(),
                 )
                 .into_any_element(),
-            (None, None) => h_flex()
-                .px_2()
-                .h(row_height)
-                .gap_2()
-                .items_center()
-                .text_secondary(compact, cx)
-                .child(Spinner::new())
-                .child(crate::tr!("pull_requests.meta.loading"))
-                .into_any_element(),
+            (None, None) => loading_line(row_height, compact, cx).into_any_element(),
             (Some(rows), None) if rows.is_empty() => material::empty_row(
                 crate::tr!(match kind {
                     PickerKind::Labels => "pull_requests.meta.labels_empty",
@@ -564,7 +696,30 @@ impl PullRequestView {
             .gap_1()
             .font_family(cx.theme().font_family.clone())
             .child(div().p_1().child(Input::new(&picker.filter)))
-            .child(body)
+            .child(
+                // The popover's height glides from the loading line's to what the host answered.
+                crate::motion::SizeGlide::new(
+                    &glide,
+                    div()
+                        .relative()
+                        .child(
+                            div()
+                                .opacity(if loading { 1. } else { 1. - spinning })
+                                .child(body),
+                        )
+                        .when(!loading && spinning > 0., |slot| {
+                            slot.child(
+                                loading_line(row_height, compact, cx)
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .right_0()
+                                    .opacity(spinning),
+                            )
+                        }),
+                )
+                .on_change(answered),
+            )
             .when(!picker.complete, |body| {
                 body.child(div().px_2().text_secondary(compact, cx).child(crate::tr!(
                     match kind {
@@ -649,4 +804,16 @@ fn reviewer_rows(reviewers: PullRequestReviewerCandidates) -> Vec<Row> {
             reviewer: Some(candidate.reviewer),
         })
         .collect()
+}
+
+/// The picker's line while the host's choices are read.
+fn loading_line(height: gpui::Pixels, compact: bool, cx: &App) -> gpui::Div {
+    h_flex()
+        .px_2()
+        .h(height)
+        .gap_2()
+        .items_center()
+        .text_secondary(compact, cx)
+        .child(Spinner::new())
+        .child(crate::tr!("pull_requests.meta.loading"))
 }

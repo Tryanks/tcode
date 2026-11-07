@@ -42,6 +42,23 @@ impl SpeechState {
             .as_ref()
             .is_some_and(|recognizer| recognizer.is_available(self.locale))
     }
+    /// Re-reads what the platform answers availability from, then redraws.
+    pub(super) fn refresh_permission(&self, cx: &mut Context<Self>) {
+        let Some(refresh) = self
+            .recognizer
+            .as_ref()
+            .and_then(|recognizer| recognizer.permission_refresh())
+        else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move { refresh() })
+                .await;
+            _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
     pub(super) fn status(&self) -> SpeechStatus {
         self.dictation.status()
     }

@@ -9,7 +9,7 @@ mod repository;
 use crate::{
     forge::{
         Anchoring, Forge, ForgeError, ForgeErrorKind, Moved, Repository, Summary, Tails,
-        ViewedMarks,
+        ViewedMarks, account,
     },
     settings::SettingsStore,
 };
@@ -28,7 +28,7 @@ use tcode_core::{
     },
     pull_request_watch::{CheckStatus, PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{CredentialSource, HostProblem, HostSettings, HostStatus},
+    settings::{CredentialSource, HostProblem, HostSettings, HostStatus, TokenCheck},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState,
@@ -533,6 +533,10 @@ impl Forge for GitLab {
                 let source = credential
                     .as_ref()
                     .map(|credential| credential.source.clone());
+                let (assessed, login) = credential
+                    .as_ref()
+                    .map(|credential| self.api.assessed(&host, credential))
+                    .unwrap_or_default();
                 let problem = match &credential {
                     None if !enabled => None,
                     None if glab => Some(HostProblem::NotSignedIn {
@@ -542,14 +546,8 @@ impl Forge for GitLab {
                     None => Some(HostProblem::NoCredential {
                         tools_missing: vec!["glab".into()],
                     }),
-                    Some(credential)
-                        if enabled
-                            && credential.source == CredentialSource::Saved
-                            && !self.api.verified(&host, credential) =>
-                    {
-                        Some(HostProblem::Unverified)
-                    }
-                    Some(_) => None,
+                    Some(_) if !enabled => None,
+                    Some(_) => assessed,
                 };
                 (
                     host.clone(),
@@ -575,6 +573,7 @@ impl Forge for GitLab {
                         )),
                         access_token_url: None,
                         token_scopes: vec!["api".into()],
+                        login,
                     },
                 )
             })
@@ -583,6 +582,14 @@ impl Forge for GitLab {
 
     fn forget_credential(&self, host: &str) {
         self.api.forget(host);
+    }
+
+    fn check_token(&self, host: &str, token: &str, _: Option<&str>) -> TokenCheck {
+        account::check(self.api.whose(host, token.trim()))
+    }
+
+    fn identify(&self, host: &str) {
+        self.api.identify(host);
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
@@ -849,6 +856,33 @@ mod tests {
                 Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
                     .unwrap()
                     .agent = agent;
+                host
+            },
+        );
+    }
+
+    #[test]
+    fn tokens_are_checked_before_saving_and_accounts_learned() {
+        crate::forge::verification_tests::token_checks(
+            HostKind::Gitlab,
+            "gitlab.com",
+            crate::forge::verification_tests::CurrentUser {
+                path: "/api/v4/user",
+                body: br#"{"username":"lin","name":"Lin Chen"}"#,
+                account: tcode_core::settings::HostAccount {
+                    login: "lin".into(),
+                    name: Some("Lin Chen".into()),
+                },
+                then: &[br#"{"scopes":["api","read_user"]}"#],
+                environment: &[("GITLAB_TOKEN", "environment-token")],
+                email: None,
+            },
+            |store, builder, environment| {
+                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+                let mut host = GitLab::new(store, environment, viewed);
+                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
+                    .unwrap()
+                    .agent = builder.build();
                 host
             },
         );

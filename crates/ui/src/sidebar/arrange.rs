@@ -1,24 +1,43 @@
 //! Pinning and arranging threads. Rows of the desktop threads view drag within
 //! and between the Pinned, Active and Settled sections; the phone's Arrange
 //! threads page drags by handle; Move up / Move down write the same keys
-//! without a drag. Rows of the project view do none of this.
+//! without a drag. Rows of the project view, and every row in member scope,
+//! are not arranged; on the desktop they still drag, onto the chat column's
+//! panes.
 //!
 //! gpui-base has no sortable-list primitive (its dock drag is specific to tab
 //! groups), so the drag composes GPUI's `on_drag`, `on_drag_move` and
-//! `on_drop`, and GPUI does not cancel a drag on Escape by itself.
+//! `on_drop`, and GPUI does not cancel a drag on Escape by itself. The payload
+//! is the dock's host-owned `AnyDrag`, the only kind its panes accept; the row
+//! it carries is a [`drag_ghost`].
 
 use super::*;
+use crate::motion::drag_ghost;
 use gpui::{DragMoveEvent, KeystrokeEvent, MouseButton, Pixels, WeakEntity, deferred};
+use gpui_base::dock::AnyDrag;
 use tcode_core::thread_sort::{order_key_between, plan_reorder, thread_section};
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// A `semantic_chip`'s height: one `xs` line and its 1pt insets.
 const BOUNDARY_LABEL_HEIGHT: f32 = 18.;
 const EMPTY_TARGET_HEIGHT: f32 = 36.;
 const ARRANGE_HANDLE_SIZE: f32 = 44.;
 
-/// The drag payload; the sidebar keeps the drag's state in [`ThreadDrag`].
+/// The drag payload, carried as an `AnyDrag`; the sidebar keeps the drag's
+/// state in [`ThreadDrag`].
+#[derive(Clone)]
 pub(super) struct DraggedThread {
     session_id: String,
+    /// Whether the drag can move the row within the list.
+    arranges: bool,
     from: ThreadSection,
     scope: Option<String>,
     title: SharedString,
@@ -26,8 +45,16 @@ pub(super) struct DraggedThread {
     compact: bool,
 }
 
+/// The thread `item` carries, when a threads list row started it.
+pub(crate) fn thread_carried(item: &AnyDrag) -> Option<&str> {
+    item.value()
+        .downcast_ref::<DraggedThread>()
+        .map(|dragged| dragged.session_id.as_str())
+}
+
 pub(super) struct ThreadDrag {
     pub(super) session_id: String,
+    arranges: bool,
     from: ThreadSection,
     /// The project the drag stays inside; `None` is every project.
     scope: Option<String>,
@@ -38,10 +65,25 @@ pub(super) struct ThreadDrag {
     /// which gap indexes count.
     others: ThreadSections<String>,
     over: Option<ThreadSection>,
+    /// Where the drag began, which it returns to once it leaves the list.
+    home: (Option<(ThreadSection, usize)>, Option<ThreadSection>),
     can_settle: bool,
-    width: Pixels,
     auto_scroll: gpui_base::AutoScroll,
     _escape: Subscription,
+}
+
+/// Where a drop put a thread, which the list shows until the store lists it
+/// there: the host takes the move a round trip after the drop, and the
+/// store lists the thread where it was until then, which would send its
+/// row back there and on again.
+pub(super) struct Landing {
+    session_id: String,
+    from: ThreadSection,
+    scope: Option<String>,
+    gap: (ThreadSection, usize),
+    /// The store's thread list revision when the host took the move; the
+    /// first list after it is the host's word on where the thread is.
+    taken: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,22 +141,15 @@ impl ThreadDrag {
 
     /// The sections as they would be after the drop, when the drag is over
     /// a list showing `scope`.
-    pub(super) fn preview<'a>(
+    fn preview<'a>(
         &self,
         scope: Option<&str>,
-        mut sections: ThreadSections<&'a SessionMeta>,
+        sections: ThreadSections<&'a SessionMeta>,
     ) -> ThreadSections<&'a SessionMeta> {
-        let Some((section, index)) = self.gap.filter(|_| self.scope.as_deref() == scope) else {
-            return sections;
-        };
-        let from = sections.section_mut(self.from);
-        let Some(position) = from.iter().position(|meta| meta.id == self.session_id) else {
-            return sections;
-        };
-        let meta = from.remove(position);
-        let to = sections.section_mut(section);
-        to.insert(index.min(to.len()), meta);
-        sections
+        match self.gap.filter(|_| self.scope.as_deref() == scope) {
+            Some(gap) => moved(sections, &self.session_id, self.from, gap),
+            None => sections,
+        }
     }
 
     /// The section a list showing `scope` marks as the drop target.
@@ -125,83 +160,120 @@ impl ThreadDrag {
     }
 }
 
-/// The lifted row that follows the pointer.
-pub(super) struct ThreadDragView {
-    sidebar: WeakEntity<SessionsSidebar>,
-    title: SharedString,
-    compact: bool,
+/// `sections` with thread `id` taken out of `from` and put at `index` among
+/// the other rows of `section`.
+fn moved<'a>(
+    mut sections: ThreadSections<&'a SessionMeta>,
+    id: &str,
+    from: ThreadSection,
+    (section, index): (ThreadSection, usize),
+) -> ThreadSections<&'a SessionMeta> {
+    let rows = sections.section_mut(from);
+    let Some(position) = rows.iter().position(|meta| meta.id == id) else {
+        return sections;
+    };
+    let meta = rows.remove(position);
+    let to = sections.section_mut(section);
+    to.insert(index.min(to.len()), meta);
+    sections
 }
 
-impl Render for ThreadDragView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (action, width) = self
-            .sidebar
-            .upgrade()
-            .and_then(|sidebar| {
-                let drag = sidebar.read(cx).drag.as_ref()?;
-                Some((drag.action(), drag.width))
-            })
-            .unwrap_or((None, px(240.)));
-        if self.compact {
-            // The lifted `list_row` a finger carries: its height and inset,
-            // floated at the overlay radius.
-            return v_flex()
-                .w(width)
-                .min_h(px(crate::material::LIST_ROW_MIN_HEIGHT))
-                .justify_center()
-                .px(px(COMPACT_PAGE_INSET))
-                .py(cx.theme().tokens.spacing.sm)
-                .rounded(crate::material::radius_overlay(cx))
-                .bg(cx.theme().list_active)
-                .shadow_lg()
-                .child(
-                    div()
-                        .text_body(true, cx)
-                        .line_clamp(2)
-                        .text_color(cx.theme().foreground)
-                        .child(self.title.clone()),
-                )
-                .when_some(action, |card, action| {
-                    card.child(
-                        div()
-                            .text_secondary(true, cx)
-                            .text_color(cx.theme().primary)
-                            .child(action.label()),
-                    )
-                })
-                .into_any_element();
-        }
-        crate::material::selectable_row_two_line(h_flex(), true, false, cx)
-            .w(width)
-            .shadow_lg()
-            .text_color(cx.theme().sidebar_foreground)
-            .child(sidebar_label(self.title.clone()).text_body(false, cx))
-            .when_some(action, |row, action| {
-                row.child(
-                    h_flex()
-                        .id("thread-drag-badge")
-                        .role(Role::Status)
-                        .aria_label(action.label())
-                        // A bordered status badge with a leading icon:
-                        // `semantic_chip` takes neither.
-                        .flex_none()
-                        .h(px(20.))
-                        .px(px(6.))
-                        .gap_1()
-                        .items_center()
-                        .rounded(crate::material::radius_chip(cx))
-                        .border_1()
-                        .border_color(cx.theme().primary.opacity(0.4))
-                        .bg(cx.theme().primary.opacity(0.1))
-                        .text_token(&cx.theme().tokens.typography.xs)
-                        .font_medium()
-                        .text_color(cx.theme().primary)
-                        .child(Icon::new(action.icon()))
-                        .child(action.label()),
-                )
-            })
-            .into_any_element()
+/// The slot a thread's row lifts from and settles into, in whichever list
+/// shows it.
+pub(super) fn thread_slot(id: &str) -> SharedString {
+    format!("thread-{id}").into()
+}
+
+/// The row a drag carries: its title, and what dropping it where it is would
+/// do.
+fn carried_thread(
+    sidebar: &WeakEntity<SessionsSidebar>,
+    title: &SharedString,
+    compact: bool,
+    lift: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyElement {
+    let action = sidebar
+        .upgrade()
+        .and_then(|sidebar| sidebar.read(cx).drag.as_ref()?.action());
+    if compact {
+        // The lifted `list_row` a finger carries: its height and inset,
+        // floated at the overlay radius.
+        let badge = crate::motion::cross_fade_part(
+            "thread-drag-action",
+            action,
+            CHANGE,
+            window,
+            cx,
+            |action, _, cx| {
+                div()
+                    .text_secondary(true, cx)
+                    .text_color(cx.theme().primary)
+                    .children(action.map(DragAction::label))
+                    .into_any_element()
+            },
+        );
+        return drag_ghost::lifted(v_flex(), lift)
+            .w_full()
+            .min_h(px(crate::material::LIST_ROW_MIN_HEIGHT))
+            .justify_center()
+            .px(px(COMPACT_PAGE_INSET))
+            .py(cx.theme().tokens.spacing.sm)
+            .rounded(crate::material::radius_overlay(cx))
+            .bg(cx.theme().list_active)
+            .child(
+                div()
+                    .text_body(true, cx)
+                    .line_clamp(2)
+                    .text_color(cx.theme().foreground)
+                    .child(title.clone()),
+            )
+            .child(badge)
+            .into_any_element();
     }
+    let badge = crate::motion::cross_fade_part(
+        "thread-drag-action",
+        action,
+        CHANGE,
+        window,
+        cx,
+        |action, _, cx| {
+            let Some(action) = *action else {
+                return div().into_any_element();
+            };
+            h_flex()
+                .id("thread-drag-badge")
+                .role(Role::Status)
+                .aria_label(action.label())
+                // A bordered status badge with a leading icon:
+                // `semantic_chip` takes neither.
+                .flex_none()
+                .h(px(20.))
+                .px(px(6.))
+                .gap_1()
+                .items_center()
+                .rounded(crate::material::radius_chip(cx))
+                .border_1()
+                .border_color(cx.theme().primary.opacity(0.4))
+                .bg(cx.theme().primary.opacity(0.1))
+                .text_token(&cx.theme().tokens.typography.xs)
+                .font_medium()
+                .text_color(cx.theme().primary)
+                .child(Icon::new(action.icon()))
+                .child(action.label())
+                .into_any_element()
+        },
+    );
+    drag_ghost::lifted(
+        crate::material::selectable_row_two_line(h_flex(), true, false, cx),
+        lift,
+    )
+    .w_full()
+    .text_color(cx.theme().sidebar_foreground)
+    .child(sidebar_label(title.clone()).text_body(false, cx))
+    .child(div().flex_none().child(badge))
+    .into_any_element()
 }
 
 impl SessionsSidebar {
@@ -248,8 +320,8 @@ impl SessionsSidebar {
         }
     }
 
-    /// The payload a row starts a drag with, or `None` where rows do not drag:
-    /// in member scope and while the row is being renamed.
+    /// The payload a row starts a drag with, or `None` while the row is
+    /// being renamed.
     pub(super) fn dragged_thread(
         &self,
         meta: &SessionMeta,
@@ -257,10 +329,9 @@ impl SessionsSidebar {
         cx: &App,
     ) -> Option<DraggedThread> {
         let store = self.store.read(cx);
-        let draggable =
-            store.scope().is_full() && state.renaming.is_none() && !self.in_project_view(cx);
-        draggable.then(|| DraggedThread {
+        state.renaming.is_none().then(|| DraggedThread {
             session_id: meta.id.clone(),
+            arranges: store.scope().is_full() && !self.in_project_view(cx),
             from: thread_section(meta),
             scope: self.list_scope(cx),
             title: meta.title.clone().into(),
@@ -278,16 +349,68 @@ impl SessionsSidebar {
         cx: &Context<Self>,
     ) -> E {
         let sidebar = cx.entity().downgrade();
-        element.on_drag(dragged, move |dragged, _, _, cx| {
-            Self::begin_drag(sidebar.clone(), dragged, cx)
+        element.on_drag(AnyDrag::new(dragged.clone()), move |_, grab, window, cx| {
+            Self::begin_drag(sidebar.clone(), &dragged, grab, window, cx)
         })
+    }
+
+    /// `sections` of a list showing `scope` as a drag over it would leave
+    /// them, or as a drop the store has yet to list left them.
+    pub(super) fn arranged<'a>(
+        &self,
+        scope: Option<&str>,
+        sections: ThreadSections<&'a SessionMeta>,
+    ) -> ThreadSections<&'a SessionMeta> {
+        if let Some(drag) = &self.drag {
+            return drag.preview(scope, sections);
+        }
+        match self
+            .landing
+            .as_ref()
+            .filter(|landing| landing.scope.as_deref() == scope)
+        {
+            Some(landing) => moved(sections, &landing.session_id, landing.from, landing.gap),
+            None => sections,
+        }
+    }
+
+    /// The host answered the lifecycle commands for `sessions`: a drop of
+    /// one of them it took is listed where it landed from the next thread
+    /// list on; one it refused goes back.
+    pub(super) fn lifecycle_answered(
+        &mut self,
+        sessions: &[String],
+        taken: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .landing
+            .as_ref()
+            .is_some_and(|landing| sessions.contains(&landing.session_id))
+        {
+            return;
+        }
+        if taken {
+            let revision = self.store.read(cx).thread_list_revision();
+            self.landing.as_mut().expect("checked above").taken = Some(revision);
+        } else {
+            self.landing = None;
+        }
+        cx.notify();
+    }
+
+    /// The thread a drag in progress carries.
+    pub(crate) fn dragged_session(&self) -> Option<&str> {
+        self.drag.as_ref().map(|drag| drag.session_id.as_str())
     }
 
     fn begin_drag(
         sidebar: WeakEntity<Self>,
         dragged: &DraggedThread,
+        grab: gpui::Point<Pixels>,
+        window: &mut Window,
         cx: &mut App,
-    ) -> Entity<ThreadDragView> {
+    ) -> Entity<drag_ghost::Carried> {
         let escape = {
             let sidebar = sidebar.clone();
             cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
@@ -301,8 +424,9 @@ impl SessionsSidebar {
             })
         };
         let _ = sidebar.update(cx, |this, cx| {
+            this.landing = None;
             let sections = this.scoped_sections(dragged.scope.as_deref(), cx);
-            let gap = (dragged.from != ThreadSection::Settled)
+            let gap = (dragged.arranges && dragged.from != ThreadSection::Settled)
                 .then(|| {
                     sections
                         .section(dragged.from)
@@ -320,8 +444,10 @@ impl SessionsSidebar {
                     .map(|(meta, _)| meta.id.clone())
                     .collect()
             };
+            let over = dragged.arranges.then_some(dragged.from);
             this.drag = Some(ThreadDrag {
                 session_id: dragged.session_id.clone(),
+                arranges: dragged.arranges,
                 from: dragged.from,
                 scope: dragged.scope.clone(),
                 gap,
@@ -330,9 +456,9 @@ impl SessionsSidebar {
                     active: others(ThreadSection::Active),
                     settled: vec![],
                 },
-                over: Some(dragged.from),
+                over,
+                home: (gap, over),
                 can_settle: dragged.can_settle,
-                width: px(240.),
                 auto_scroll: Default::default(),
                 _escape: escape,
             });
@@ -340,11 +466,14 @@ impl SessionsSidebar {
             cx.notify();
         });
         crate::haptics::threshold();
-        cx.new(|_| ThreadDragView {
-            sidebar,
-            title: dragged.title.clone(),
-            compact: dragged.compact,
-        })
+        let (title, compact) = (dragged.title.clone(), dragged.compact);
+        drag_ghost::lift(
+            thread_slot(&dragged.session_id),
+            grab,
+            move |lift, window, cx| carried_thread(&sidebar, &title, compact, lift, window, cx),
+            window,
+            cx,
+        )
     }
 
     /// Escape: the row returns to its place.
@@ -357,10 +486,27 @@ impl SessionsSidebar {
         true
     }
 
-    /// A drag released outside every drop target ends without a drop.
+    /// A drag released outside every drop target ends without a drop; a
+    /// drop's landing ends once the store lists the thread where it landed,
+    /// or lists the threads again after the host took the move.
     pub(super) fn clear_finished_drag(&mut self, cx: &App) {
         if self.drag.is_some() && !cx.has_active_drag() {
             self.drag = None;
+        }
+        if self.landing.is_none() {
+            return;
+        }
+        let sessions = self.thread_lists(cx).flat;
+        let revision = self.store.read(cx).thread_list_revision();
+        let landing = self.landing.as_ref().expect("checked above");
+        let (section, index) = landing.gap;
+        let listed = project_threads(&sessions, landing.scope.as_deref())
+            .section(section)
+            .iter()
+            .position(|meta| meta.id == landing.session_id)
+            == Some(index);
+        if listed || landing.taken.is_some_and(|taken| taken != revision) {
+            self.landing = None;
         }
     }
 
@@ -371,15 +517,13 @@ impl SessionsSidebar {
         element: gpui::Div,
         zone: DropZone,
         scope: Option<String>,
-        inset: f32,
         cx: &Context<Self>,
     ) -> gpui::Div {
-        element.on_drag_move::<DraggedThread>(cx.listener(
-            move |this, event: &DragMoveEvent<DraggedThread>, _, cx| {
+        element.on_drag_move::<AnyDrag>(cx.listener(
+            move |this, event: &DragMoveEvent<AnyDrag>, _, cx| {
                 if event.bounds.contains(&event.event.position) {
                     let lower = event.event.position.y > event.bounds.center().y;
-                    let width = event.bounds.size.width - px(inset * 2.);
-                    this.drag_over(&zone, scope.as_deref(), lower, width, cx);
+                    this.drag_over(&zone, scope.as_deref(), lower, cx);
                 }
             },
         ))
@@ -390,10 +534,9 @@ impl SessionsSidebar {
         zone: &DropZone,
         scope: Option<&str>,
         lower: bool,
-        width: Pixels,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = self.drag.as_ref() else {
+        let Some(drag) = self.drag.as_ref().filter(|drag| drag.arranges) else {
             return;
         };
         let (mut gap, mut over) = (drag.gap, drag.over);
@@ -427,25 +570,37 @@ impl SessionsSidebar {
             }
         }
         let drag = self.drag.as_mut().expect("checked above");
-        let row = matches!(zone, DropZone::Row { .. });
         if (drag.gap, drag.over) != (gap, over) {
             crate::haptics::selection();
-        }
-        if (drag.gap, drag.over) != (gap, over) || (row && drag.width != width) {
             drag.gap = gap;
             drag.over = over;
-            if row {
-                drag.width = width;
-            }
             self.compact_model_dirty = true;
             cx.notify();
         }
     }
 
+    /// A drag carried out of the list, toward the chat column's panes, puts
+    /// the row back where it began until it returns.
+    pub(super) fn drag_left_list(
+        &mut self,
+        event: &DragMoveEvent<AnyDrag>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        if event.bounds.contains(&event.event.position) || (drag.gap, drag.over) == drag.home {
+            return;
+        }
+        (drag.gap, drag.over) = drag.home;
+        self.compact_model_dirty = true;
+        cx.notify();
+    }
+
     /// Scroll the list under a drag held near its top or bottom edge.
     pub(super) fn drag_auto_scroll(
         &mut self,
-        event: &DragMoveEvent<DraggedThread>,
+        event: &DragMoveEvent<AnyDrag>,
         cx: &mut Context<Self>,
     ) {
         let Some(drag) = self.drag.as_mut() else {
@@ -481,28 +636,40 @@ impl SessionsSidebar {
             return;
         };
         cx.notify();
-        match (drag.over, drag.gap) {
+        let gap = match (drag.over, drag.gap) {
             (Some(ThreadSection::Settled), _) => {
-                if drag.action() == Some(DragAction::Settle) {
+                (drag.action() == Some(DragAction::Settle)).then(|| {
                     self.settle_thread(&drag.session_id, window, cx);
-                }
+                    // The shelf lists the newest settled first.
+                    (ThreadSection::Settled, 0)
+                })
             }
-            (Some(over), Some((section, index))) if over == section => self.place_thread(
-                &drag.session_id,
-                section,
-                index,
-                drag.scope.as_deref(),
-                window,
-                cx,
-            ),
-            _ => {}
-        }
+            (Some(over), Some((section, index))) if over == section => self
+                .place_thread(
+                    &drag.session_id,
+                    section,
+                    index,
+                    drag.scope.as_deref(),
+                    window,
+                    cx,
+                )
+                .then_some((section, index)),
+            _ => None,
+        };
+        self.landing = gap.map(|gap| Landing {
+            session_id: drag.session_id,
+            from: drag.from,
+            scope: drag.scope,
+            gap,
+            taken: None,
+        });
     }
 
     /// Put a thread at `index` among the other rows of `to` that `scope`
     /// shows, pinning, unpinning or un-settling it on the way. Only the moved
     /// thread's key is written unless its neighbours need fresh keys; rows
-    /// outside `scope` keep theirs.
+    /// outside `scope` keep theirs. Returns whether it asked the host to
+    /// move the thread.
     fn place_thread(
         &mut self,
         id: &str,
@@ -511,9 +678,9 @@ impl SessionsSidebar {
         scope: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(meta) = self.store.read(cx).thread_meta(id).cloned() else {
-            return;
+            return false;
         };
         let from = thread_section(&meta);
         let key = |meta: &SessionMeta| match to {
@@ -529,7 +696,7 @@ impl SessionsSidebar {
                 .position(|(meta, _)| meta.id == id)
                 == Some(index)
         {
-            return;
+            return false;
         }
         let others: Vec<_> = rows.iter().filter(|(meta, _)| meta.id != id).collect();
         let mut ordered: Vec<(String, Option<String>)> = others
@@ -612,9 +779,11 @@ impl SessionsSidebar {
             }
         };
         commands.extend(neighbours);
-        if !commands.is_empty() {
-            self.perform_lifecycle(commands, undo, window, cx);
+        if commands.is_empty() {
+            return false;
         }
+        self.perform_lifecycle(commands, undo, window, cx);
+        true
     }
 
     /// Whether a thread can move up and down within its section, or `None`
@@ -752,44 +921,85 @@ impl SessionsSidebar {
         section: ThreadSection,
         empty: bool,
         scope: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let Some(drag) = self.drag.as_ref().filter(|drag| drag.scope == scope) else {
-            return div().into_any_element();
+        let drag = self.drag.as_ref().filter(|drag| drag.scope == scope);
+        let targeted = drag.map(|drag| drag.target(scope.as_deref()) == Some(section));
+        let id = SharedString::from(format!("drag-boundary-{section:?}"));
+        // The seam's label fades in as a drag starts and out as it ends, and
+        // lights up while the drag targets its section; an empty section's
+        // target folds open in its place instead.
+        let shown = crate::motion::shown(id.clone(), targeted.filter(|_| !empty), SHOW, window, cx);
+        let target = crate::motion::shown(
+            SharedString::from(format!("drag-boundary-target-{section:?}")),
+            targeted.filter(|_| empty).map(|_| ()),
+            SHOW,
+            window,
+            cx,
+        );
+        let lit = transition(
+            (id, "lit"),
+            if targeted == Some(true) { 1. } else { 0. },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let seam = shown.map(|shown| self.render_seam_label(section, lit, shown, cx));
+        let Some(target) = target else {
+            return seam.unwrap_or_else(|| div().into_any_element());
         };
-        let targeted = drag.target(scope.as_deref()) == Some(section);
-        let color = if targeted {
-            cx.theme().primary
-        } else {
-            cx.theme().sidebar_foreground
-        };
+        let color = gpui_base::animation::Lerp::lerp(
+            &cx.theme().sidebar_foreground,
+            &cx.theme().primary,
+            lit,
+        );
         let label = match section {
             ThreadSection::Pinned => crate::tr!("sidebar.pinned"),
             _ => crate::tr!("sidebar.active"),
         };
-        if empty {
-            let target = div().w_full().py_1().child(
-                h_flex()
-                    .h(px(EMPTY_TARGET_HEIGHT - 8.))
-                    .px_2()
-                    .items_center()
-                    .rounded(crate::material::radius_chip(cx))
-                    .border_1()
-                    .border_dashed()
-                    .border_color(cx.theme().primary)
-                    .text_caption(cx)
-                    .text_color(color)
-                    .child(label),
-            );
-            return self
-                .drop_zone(target, DropZone::Start(section), scope, 0., cx)
-                .into_any_element();
-        }
-        let rule = if targeted {
-            cx.theme().primary.opacity(0.5)
-        } else {
-            cx.theme().border
+        let target_row = div().w_full().py_1().child(
+            h_flex()
+                .h(px(EMPTY_TARGET_HEIGHT - 8.))
+                .px_2()
+                .items_center()
+                .rounded(crate::material::radius_chip(cx))
+                .border_1()
+                .border_dashed()
+                .border_color(cx.theme().primary)
+                .text_caption(cx)
+                .text_color(color)
+                .child(label),
+        );
+        div()
+            .w_full()
+            .child(self.drop_zone(
+                div().w_full().child(target.fold(target_row)),
+                DropZone::Start(section),
+                scope,
+                cx,
+            ))
+            .children(seam)
+            .into_any_element()
+    }
+
+    /// The label on the seam at the start of a non-empty section, lit as far
+    /// as `lit` toward the drag-target colour.
+    fn render_seam_label(
+        &self,
+        section: ThreadSection,
+        lit: f32,
+        shown: crate::motion::Shown<bool>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let label = match section {
+            ThreadSection::Pinned => crate::tr!("sidebar.pinned"),
+            _ => crate::tr!("sidebar.active"),
         };
+        let theme = cx.theme();
+        let rule =
+            gpui_base::animation::Lerp::lerp(&theme.border, &theme.primary.opacity(0.5), lit);
+        let text = gpui_base::animation::Lerp::lerp(&theme.muted_foreground, &theme.primary, lit);
         // Deferred so the label paints after the rows on both sides of the
         // seam, centered on the seam rather than on a row's title line. The
         // sidebar background is transparent, so the hairline stops at the pill
@@ -799,73 +1009,47 @@ impl SessionsSidebar {
             .w_full()
             .h_0()
             .child(deferred(
-                h_flex()
+                div()
                     .absolute()
                     .top(px(-BOUNDARY_LABEL_HEIGHT / 2.))
                     .left_0()
                     .right_0()
-                    .h(px(BOUNDARY_LABEL_HEIGHT))
-                    .gap_1()
-                    .items_center()
-                    .child(div().flex_none().w_2().h(px(1.)).bg(rule))
-                    .child(crate::material::semantic_chip(
-                        label,
-                        cx.theme().muted,
-                        if targeted {
-                            cx.theme().primary
-                        } else {
-                            cx.theme().muted_foreground
-                        },
-                        cx,
-                    ))
-                    .child(div().flex_1().h(px(1.)).bg(rule)),
+                    .child(
+                        shown.fade(
+                            h_flex()
+                                .w_full()
+                                .h(px(BOUNDARY_LABEL_HEIGHT))
+                                .gap_1()
+                                .items_center()
+                                .child(div().flex_none().w_2().h(px(1.)).bg(rule))
+                                .child(crate::material::semantic_chip(label, theme.muted, text, cx))
+                                .child(div().flex_1().h(px(1.)).bg(rule)),
+                        ),
+                    ),
             ))
             .into_any_element()
     }
 
-    /// The height of the target [`Self::render_drag_boundary`] shows for an
-    /// empty section, for row offsets; a label takes none.
-    pub(super) fn drag_boundary_height(&self, empty: bool, scope: Option<&str>) -> f32 {
-        let dragging = self
-            .drag
-            .as_ref()
-            .is_some_and(|drag| drag.scope.as_deref() == scope);
-        if dragging && empty {
-            EMPTY_TARGET_HEIGHT
-        } else {
-            0.
-        }
-    }
-
-    /// The slot a dragged row leaves while it follows the pointer.
-    pub(super) fn render_drag_gap(height: f32) -> gpui::AnyElement {
-        div().w_full().h(px(height)).into_any_element()
-    }
-
     pub(crate) fn render_arrange(
         &mut self,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         self.clear_finished_drag(cx);
         let scope = self.arrange_scope.clone();
-        let sessions = self.store.read(cx).flat_sessions();
+        let sessions = self.thread_lists(cx).flat;
         let sections = partition_threads(sessions.iter().filter(|meta| {
             scope
                 .as_deref()
                 .is_none_or(|id| meta.project_id.as_deref() == Some(id))
         }));
-        let sections = match &self.drag {
-            Some(drag) => drag.preview(scope.as_deref(), sections),
-            None => sections,
-        };
-        let mut rows: Vec<ArrangeRow> = vec![ArrangeRow::Caption(
-            ThreadSection::Pinned,
-            sections.pinned.len(),
-        )];
-        if sections.pinned.is_empty() {
-            rows.push(ArrangeRow::PinnedEmpty);
-        }
+        let sections = self.arranged(scope.as_deref(), sections);
+        // The empty-Pinned row stays in the list, folding in and out with
+        // the last pinned thread.
+        let mut rows: Vec<ArrangeRow> = vec![
+            ArrangeRow::Caption(ThreadSection::Pinned, sections.pinned.len()),
+            ArrangeRow::PinnedEmpty(sections.pinned.is_empty()),
+        ];
         rows.extend(
             sections
                 .pinned
@@ -882,23 +1066,38 @@ impl SessionsSidebar {
                 .iter()
                 .map(|meta| ArrangeRow::Thread(Box::new((*meta).clone()))),
         );
+        let open = self.arrange_settled_expanded;
+        let settled_fold = transition(
+            ("arrange-settled", "fold"),
+            if open { 1. } else { 0. },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let mut folds = vec![1.; rows.len()];
         if !sections.settled.is_empty() {
             rows.push(ArrangeRow::Settled(sections.settled.len()));
-            if self.arrange_settled_expanded {
-                rows.extend(
-                    sections
-                        .settled
-                        .iter()
-                        .map(|meta| ArrangeRow::Thread(Box::new((*meta).clone()))),
-                );
+            folds.push(1.);
+            if open || settled_fold > 0. {
+                let count = sections.settled.len();
+                for (index, meta) in sections.settled.iter().enumerate() {
+                    let factor = fold_factor(settled_fold, index, count);
+                    if factor >= 0. {
+                        rows.push(ArrangeRow::Thread(Box::new((*meta).clone())));
+                        folds.push(factor);
+                    }
+                }
             }
         }
+        self.arrange_settled_fold = settled_fold;
         let keys: Vec<String> = rows.iter().map(ArrangeRow::key).collect();
         if keys != self.arrange_row_keys {
-            replace_list_rows(
+            replace_gliding_rows(
                 &self.arrange_list_state,
+                &self.arrange_flip,
                 |index| self.arrange_row_keys.get(index).cloned(),
                 keys.iter().cloned(),
+                window,
             );
             self.arrange_row_keys = keys;
         }
@@ -910,6 +1109,7 @@ impl SessionsSidebar {
             .map(|project| (project.id, project.name))
             .collect();
         let rows = Rc::new(rows);
+        let flip = self.arrange_flip.clone();
         v_flex()
             .size_full()
             .child(
@@ -935,19 +1135,29 @@ impl SessionsSidebar {
                     .id("arrange-thread-list")
                     .flex_1()
                     .min_h_0()
-                    .on_drop(cx.listener(|this, _: &DraggedThread, window, cx| {
-                        this.drop_thread(window, cx)
+                    .on_drop(
+                        cx.listener(|this, _: &AnyDrag, window, cx| this.drop_thread(window, cx)),
+                    )
+                    .on_drag_move(cx.listener(|this, event: &DragMoveEvent<AnyDrag>, _, cx| {
+                        this.drag_auto_scroll(event, cx)
                     }))
-                    .on_drag_move(cx.listener(
-                        |this, event: &DragMoveEvent<DraggedThread>, _, cx| {
-                            this.drag_auto_scroll(event, cx)
-                        },
-                    ))
                     .child(
                         list(
                             self.arrange_list_state.clone(),
-                            cx.processor(move |this, index: usize, _, cx| {
-                                this.render_arrange_row(&rows[index], &projects, cx)
+                            cx.processor(move |this, index: usize, window, cx| {
+                                let factor = folds.get(index).copied().unwrap_or(1.);
+                                let key =
+                                    SharedString::from(format!("arrange-{}", rows[index].key()));
+                                let folded = this.fold_row(
+                                    SharedString::from(format!("{key}-fold")),
+                                    factor,
+                                    window,
+                                    cx,
+                                    |this, window, cx| {
+                                        this.render_arrange_row(&rows[index], &projects, window, cx)
+                                    },
+                                );
+                                flip.row(index, key, folded)
                             }),
                         )
                         .size_full(),
@@ -960,6 +1170,7 @@ impl SessionsSidebar {
         &self,
         row: &ArrangeRow,
         projects: &HashMap<String, String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let scope = self.arrange_scope.clone();
@@ -967,12 +1178,22 @@ impl SessionsSidebar {
             .drag
             .as_ref()
             .and_then(|drag| drag.target(scope.as_deref()));
-        let caption_color = |section| {
-            if target == Some(section) {
-                cx.theme().primary
-            } else {
-                cx.theme().muted_foreground
-            }
+        // A caption lights up as a drag takes its section as the target.
+        let mut caption_color = |section: ThreadSection| {
+            transition(
+                (
+                    SharedString::from(format!("arrange-caption-{section:?}")),
+                    "color",
+                ),
+                if target == Some(section) {
+                    cx.theme().primary
+                } else {
+                    cx.theme().muted_foreground
+                },
+                gpui_base::motion::Transition::new(GLIDE),
+                window,
+                cx,
+            )
         };
         match row {
             ArrangeRow::Caption(section, count) => {
@@ -980,22 +1201,36 @@ impl SessionsSidebar {
                     ThreadSection::Pinned => crate::tr!("sidebar.pinned_count", count = count),
                     _ => crate::tr!("sidebar.active_count", count = count),
                 };
+                let color = caption_color(*section);
                 let caption = crate::material::list_caption(label.into_owned().into(), true, cx)
-                    .text_color(caption_color(*section));
-                self.drop_zone(caption, DropZone::Start(*section), scope, 0., cx)
+                    .text_color(color);
+                self.drop_zone(caption, DropZone::Start(*section), scope, cx)
                     .into_any_element()
             }
-            ArrangeRow::PinnedEmpty => self
-                .drop_zone(
-                    crate::material::empty_row(crate::tr!("sidebar.arrange_pinned_empty"), cx),
+            ArrangeRow::PinnedEmpty(empty) => {
+                let Some(shown) = crate::motion::shown(
+                    "arrange-pinned-empty",
+                    empty.then_some(()),
+                    SHOW,
+                    window,
+                    cx,
+                ) else {
+                    return div().into_any_element();
+                };
+                let row =
+                    crate::material::empty_row(crate::tr!("sidebar.arrange_pinned_empty"), cx)
+                        .debug_selector(|| "arrange-pinned-empty".into());
+                self.drop_zone(
+                    div().w_full().child(shown.fold(row)),
                     DropZone::Start(ThreadSection::Pinned),
                     scope,
-                    0.,
                     cx,
                 )
-                .into_any_element(),
+                .into_any_element()
+            }
             ArrangeRow::Settled(count) => {
                 let expanded = self.arrange_settled_expanded;
+                let color = caption_color(ThreadSection::Settled);
                 // The compact sidebar's settled disclosure, at a touch
                 // section bar's height and inset.
                 let header = crate::material::accessible_clickable(
@@ -1013,46 +1248,30 @@ impl SessionsSidebar {
                 .px(px(COMPACT_PAGE_INSET))
                 .items_center()
                 .text_caption(cx)
-                .text_color(caption_color(ThreadSection::Settled))
+                .text_color(color)
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.arrange_settled_expanded = !this.arrange_settled_expanded;
                     cx.notify();
                 }))
-                .child(
-                    collapse_chevron(!expanded, cx)
-                        .text_color(caption_color(ThreadSection::Settled)),
-                )
+                .child(collapse_chevron(self.arrange_settled_fold, cx).text_color(color))
                 .child(crate::tr!("sidebar.settled_count", count = count));
-                self.drop_zone(
-                    div().w_full().child(header),
-                    DropZone::Settled,
-                    scope,
-                    0.,
-                    cx,
-                )
-                .into_any_element()
+                self.drop_zone(div().w_full().child(header), DropZone::Settled, scope, cx)
+                    .into_any_element()
             }
             ArrangeRow::Thread(meta) => {
                 let zone = DropZone::Row {
                     id: meta.id.clone(),
                     section: thread_section(meta),
                 };
-                let dragged = self
-                    .drag
-                    .as_ref()
-                    .is_some_and(|drag| drag.session_id == meta.id);
-                let element = if dragged {
+                // While carried, the row keeps its place, hidden under its
+                // ghost.
+                let row = self.render_arrange_thread(meta, projects, cx);
+                let element =
                     div()
                         .w_full()
-                        .child(Self::render_drag_gap(crate::material::LIST_ROW_MIN_HEIGHT))
-                } else {
-                    div()
-                        .w_full()
-                        .child(self.render_arrange_thread(meta, projects, cx))
-                };
-                self.drop_zone(element, zone, scope, 0., cx)
-                    .into_any_element()
+                        .child(drag_ghost::slot(thread_slot(&meta.id), row, window, cx));
+                self.drop_zone(element, zone, scope, cx).into_any_element()
             }
         }
     }
@@ -1098,7 +1317,10 @@ impl SessionsSidebar {
                 .size(px(20.))
                 .text_color(cx.theme().muted_foreground),
         );
-        let handle = match self.dragged_thread(meta, &state, cx) {
+        let handle = match self
+            .dragged_thread(meta, &state, cx)
+            .filter(|dragged| dragged.arranges)
+        {
             Some(dragged) => Self::drag_source(handle, dragged, cx),
             None => handle,
         };
@@ -1145,7 +1367,8 @@ impl SessionsSidebar {
 
 enum ArrangeRow {
     Caption(ThreadSection, usize),
-    PinnedEmpty,
+    /// Whether Pinned is empty: the row folds in and out with it.
+    PinnedEmpty(bool),
     Thread(Box<SessionMeta>),
     Settled(usize),
 }
@@ -1154,7 +1377,7 @@ impl ArrangeRow {
     fn key(&self) -> String {
         match self {
             Self::Caption(section, _) => format!("caption-{section:?}"),
-            Self::PinnedEmpty => "pinned-empty".into(),
+            Self::PinnedEmpty(_) => "pinned-empty".into(),
             Self::Thread(meta) => format!("thread-{}", meta.id),
             Self::Settled(_) => "settled".into(),
         }

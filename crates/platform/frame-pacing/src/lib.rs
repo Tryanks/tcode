@@ -30,7 +30,7 @@ impl FramePacer {
         std::mem::take(&mut self.pending) || self.active(now)
     }
 
-    pub fn active(&self, now: Instant) -> bool {
+    fn active(&self, now: Instant) -> bool {
         self.touching || self.active_until.is_some_and(|until| now < until)
     }
 

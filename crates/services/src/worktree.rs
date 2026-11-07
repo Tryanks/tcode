@@ -415,7 +415,7 @@ fn tree_is_clean(cwd: &Path) -> Result<bool, MergeBackError> {
 
 /// A data dir's worktrees live inside it: its sweep can only tell which ones
 /// its own threads use or keep.
-fn worktrees_root(data_dir: &Path) -> PathBuf {
+pub fn worktrees_root(data_dir: &Path) -> PathBuf {
     data_dir.join("worktrees")
 }
 

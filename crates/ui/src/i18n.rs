@@ -11,9 +11,11 @@ rust_i18n::i18n!("../../locales", fallback = "en");
 // translation table used by the application.
 const _: &str = include_str!("../../../locales/en.yml");
 const _: &str = include_str!("../../../locales/zh-CN.yml");
+const _: &str = include_str!("../../../locales/ja.yml");
 
 pub const LANGUAGE_ENGLISH: &str = "en";
 pub const LANGUAGE_SIMPLIFIED_CHINESE: &str = "zh-CN";
+pub const LANGUAGE_JAPANESE: &str = "ja";
 
 thread_local! {
     /// Mobile supplies the user's first configured language through its native
@@ -26,10 +28,12 @@ pub fn resolve_locale(override_locale: Option<&str>, system_locale: Option<&str>
     match override_locale {
         Some(LANGUAGE_ENGLISH) => LANGUAGE_ENGLISH,
         Some(LANGUAGE_SIMPLIFIED_CHINESE) => LANGUAGE_SIMPLIFIED_CHINESE,
-        _ if system_locale.is_some_and(|locale| locale.to_ascii_lowercase().starts_with("zh")) => {
-            LANGUAGE_SIMPLIFIED_CHINESE
-        }
-        _ => LANGUAGE_ENGLISH,
+        Some(LANGUAGE_JAPANESE) => LANGUAGE_JAPANESE,
+        _ => match system_locale.map(str::to_ascii_lowercase) {
+            Some(locale) if locale.starts_with("zh") => LANGUAGE_SIMPLIFIED_CHINESE,
+            Some(locale) if locale.starts_with("ja") => LANGUAGE_JAPANESE,
+            _ => LANGUAGE_ENGLISH,
+        },
     }
 }
 
@@ -51,6 +55,88 @@ fn system_locale() -> Option<String> {
     PLATFORM_SYSTEM_LOCALE
         .with(|locale| locale.borrow().clone())
         .or_else(sys_locale::get_locale)
+}
+
+/// The system families that draw Han characters in the forms the current
+/// language reads, tried before the platform's own fallback.
+///
+/// A platform's own fallback picks Han glyph forms by the *system* language
+/// (CoreText's cascade, DirectWrite's user locale, cosmic-text's locale), and
+/// would draw a Japanese UI's kanji in Chinese forms on a Chinese or English
+/// system; the UI language decides instead. English names nothing and leaves
+/// CJK text to the system language, the best guess at what the user writes,
+/// except on Android, whose fallback has no script preferences and would
+/// otherwise reach for arbitrary serif faces. gpui-base has no locale-aware
+/// font selection; this is it until it does.
+pub(crate) fn cjk_fallback_families() -> &'static [&'static str] {
+    let locale = rust_i18n::locale();
+    if &*locale == LANGUAGE_JAPANESE {
+        cjk_families::JAPANESE
+    } else if &*locale == LANGUAGE_SIMPLIFIED_CHINESE || cfg!(target_os = "android") {
+        cjk_families::CHINESE
+    } else {
+        &[]
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod cjk_families {
+    pub(super) const JAPANESE: &[&str] = &["Hiragino Sans"];
+    pub(super) const CHINESE: &[&str] = &["PingFang SC"];
+}
+
+#[cfg(target_os = "windows")]
+mod cjk_families {
+    pub(super) const JAPANESE: &[&str] = &["Yu Gothic UI", "Meiryo UI"];
+    pub(super) const CHINESE: &[&str] = &["Microsoft YaHei UI"];
+}
+
+/// The browser draws only glyphs the bundled fonts lack (Noto Sans SC covers
+/// Han and kana), taking these as a CSS font-family list.
+#[cfg(target_family = "wasm")]
+mod cjk_families {
+    pub(super) const JAPANESE: &[&str] = &[
+        "Hiragino Sans",
+        "Yu Gothic UI",
+        "Meiryo UI",
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+    ];
+    pub(super) const CHINESE: &[&str] = &[];
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "windows",
+    target_family = "wasm"
+)))]
+mod cjk_families {
+    pub(super) const JAPANESE: &[&str] =
+        &["Noto Sans CJK JP", "Noto Sans JP", "Source Han Sans JP"];
+    pub(super) const CHINESE: &[&str] = &["Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC"];
+}
+
+/// [`cjk_fallback_families`] as the fallbacks of a font.
+pub(crate) fn cjk_font_fallbacks() -> Option<gpui::FontFallbacks> {
+    let families = cjk_fallback_families();
+    (!families.is_empty()).then(|| {
+        gpui::FontFallbacks::from_fonts(families.iter().map(|&family| family.into()).collect())
+    })
+}
+
+/// The items of a list read inside a sentence, joined as the current language
+/// writes one ("a, b" in English, "a、b" in Chinese and Japanese).
+pub(crate) fn join_list<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> String {
+    let separator = crate::tr!("list.separator");
+    let mut list = String::new();
+    for (index, item) in items.into_iter().enumerate() {
+        if index > 0 {
+            list.push_str(&separator);
+        }
+        list.push_str(item.as_ref());
+    }
+    list
 }
 
 /// Set the process-global translation locale.
@@ -94,6 +180,22 @@ pub(crate) fn translate_english(key: &str, english: &str) -> Cow<'static, str> {
         .find(|(_, source)| source.as_deref() == Some(english))
         .and_then(|(key, _)| _rust_i18n_try_translate(locale.as_ref(), &key))
         .unwrap_or_else(|| Cow::Owned(english.to_owned()))
+}
+
+/// A provider option's name in the current locale (the descriptor label, never
+/// its id or values), looked up by the English name under `harness_options`.
+pub(crate) fn translate_option_name(english: &str) -> String {
+    let slug: String = english
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    translate_english(&format!("harness_options.{slug}"), english).into_owned()
 }
 
 pub(crate) fn translate_permission_description(key: &str, english: &str) -> String {
@@ -205,7 +307,9 @@ mod tests {
     fn locale_keys_match() {
         let en = keys(include_str!("../../../locales/en.yml"));
         let zh = keys(include_str!("../../../locales/zh-CN.yml"));
+        let ja = keys(include_str!("../../../locales/ja.yml"));
         assert_eq!(en, zh, "English and zh-CN locale keys differ");
+        assert_eq!(en, ja, "English and ja locale keys differ");
     }
 
     #[test]
@@ -257,11 +361,11 @@ mod tests {
         for (english, expected) in [
             (
                 "Profile my-team: workspace sandbox, asks on request, reviewed by you.",
-                "配置 my-team：工作区沙箱，按请求询问，由你审批。",
+                "配置档 my-team：工作区沙箱，按请求询问，由你审批。",
             ),
             (
                 "external sandbox, uses granular approval rules, reviewed by auto-review.",
-                "外部沙箱，使用细分审批规则，由自动审查员审批。",
+                "外部沙箱，使用细分审批规则，由自动审查（auto-review）审批。",
             ),
             (
                 "read-only sandbox, asks for untrusted actions, reviewed by you.",
@@ -269,7 +373,7 @@ mod tests {
             ),
             (
                 "full access, never asks for approval, reviewed by auto-review.",
-                "完全访问，从不请求审批，由自动审查员审批。",
+                "完全访问，从不请求审批，由自动审查（auto-review）审批。",
             ),
         ] {
             assert_eq!(
@@ -294,6 +398,9 @@ mod tests {
                 LANGUAGE_SIMPLIFIED_CHINESE,
             ),
             ("zh-Hans-CN", None, LANGUAGE_SIMPLIFIED_CHINESE),
+            ("ja-JP", None, LANGUAGE_JAPANESE),
+            ("ja-JP", Some(LANGUAGE_ENGLISH), LANGUAGE_ENGLISH),
+            ("en-US", Some(LANGUAGE_JAPANESE), LANGUAGE_JAPANESE),
             ("en-US", Some("unsupported"), LANGUAGE_ENGLISH),
         ] {
             set_platform_system_locale(Some(platform));

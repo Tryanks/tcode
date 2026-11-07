@@ -1,13 +1,20 @@
 use android_activity::AndroidAppWaker;
 use gpui::{PlatformDispatcher, Priority, RunnableVariant};
 use parking_lot::{Condvar, Mutex};
-use std::{collections::VecDeque, sync::Arc, thread, time::Duration};
+use std::{
+    cmp::Ordering,
+    collections::{BinaryHeap, VecDeque},
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 const MIN_BACKGROUND_THREADS: usize = 2;
 
 pub(crate) struct AndroidDispatcher {
     main_queue: Mutex<RunnableQueues>,
     background_queue: Arc<SharedQueue>,
+    timers: Arc<TimerQueue>,
     main_thread: thread::ThreadId,
     waker: AndroidAppWaker,
     _workers: Vec<thread::JoinHandle<()>>,
@@ -63,6 +70,77 @@ impl SharedQueue {
     }
 }
 
+struct Timer {
+    due: Instant,
+    seq: u64,
+    runnable: RunnableVariant,
+}
+
+impl PartialEq for Timer {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for Timer {}
+
+impl PartialOrd for Timer {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Timer {
+    /// Reversed, so the max-heap's top is the earliest deadline, and the
+    /// earliest-armed timer among equal deadlines.
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .due
+            .cmp(&self.due)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+
+#[derive(Default)]
+struct TimerHeap {
+    timers: BinaryHeap<Timer>,
+    next_seq: u64,
+}
+
+#[derive(Default)]
+struct TimerQueue {
+    heap: Mutex<TimerHeap>,
+    changed: Condvar,
+}
+
+impl TimerQueue {
+    fn push(&self, due: Instant, runnable: RunnableVariant) {
+        let mut heap = self.heap.lock();
+        let seq = heap.next_seq;
+        heap.next_seq += 1;
+        heap.timers.push(Timer { due, seq, runnable });
+        // Only a new earliest deadline shortens the timer thread's wait.
+        if heap.timers.peek().is_some_and(|first| first.seq == seq) {
+            self.changed.notify_one();
+        }
+    }
+
+    fn pop_due(&self) -> RunnableVariant {
+        let mut heap = self.heap.lock();
+        loop {
+            match heap.timers.peek().map(|first| first.due) {
+                Some(due) if due <= Instant::now() => {
+                    return heap.timers.pop().expect("peeked timer").runnable;
+                }
+                Some(due) => {
+                    self.changed.wait_until(&mut heap, due);
+                }
+                None => self.changed.wait(&mut heap),
+            }
+        }
+    }
+}
+
 impl AndroidDispatcher {
     pub(crate) fn new(waker: AndroidAppWaker) -> Arc<Self> {
         let background_queue = Arc::new(SharedQueue::default());
@@ -86,9 +164,24 @@ impl AndroidDispatcher {
             })
             .collect();
 
+        let timers = Arc::new(TimerQueue::default());
+        thread::Builder::new()
+            .name("gpui-timer".into())
+            .spawn({
+                let timers = timers.clone();
+                move || {
+                    loop {
+                        // Run outside the lock: a timer may arm another.
+                        timers.pop_due().run();
+                    }
+                }
+            })
+            .expect("failed to spawn GPUI timer thread");
+
         Arc::new(Self {
             main_queue: Mutex::new(RunnableQueues::default()),
             background_queue,
+            timers,
             main_thread: thread::current().id(),
             waker,
             _workers: workers,
@@ -121,13 +214,13 @@ impl PlatformDispatcher for AndroidDispatcher {
     }
 
     fn dispatch_after(&self, duration: Duration, runnable: RunnableVariant) {
-        thread::Builder::new()
-            .name("gpui-timer".into())
-            .spawn(move || {
-                thread::sleep(duration);
-                runnable.run();
-            })
-            .expect("failed to spawn GPUI timer thread");
+        let now = Instant::now();
+        // A duration past the clock's range (such as `Duration::MAX`) never
+        // comes due; dropping its runnable instead would resolve the timer.
+        let due = now
+            .checked_add(duration)
+            .unwrap_or_else(|| now + Duration::from_secs(100 * 365 * 24 * 60 * 60));
+        self.timers.push(due, runnable);
     }
 
     fn spawn_realtime(&self, callback: Box<dyn FnOnce() + Send>) {

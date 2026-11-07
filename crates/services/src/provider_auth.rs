@@ -23,8 +23,9 @@ pub struct ClaudeAuthStatus {
 /// Map `claude auth status --json` onto the card's auth line.
 ///
 /// Labels are `Claude API Key` or `Claude <plan> Subscription`, with the plan
-/// normalized to Max / Max 5x / Max 20x / Pro / Team / Enterprise / Free.
-pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
+/// normalized to Claude's plan names: Free / Pro / Max / Ultra / Team /
+/// Enterprise.
+pub fn parse_claude_auth(json: &str, plan_name: Option<&str>) -> Option<ProviderAuth> {
     let status: ClaudeAuthStatus = serde_json::from_str(json).ok()?;
     if !status.logged_in {
         return Some(ProviderAuth {
@@ -44,10 +45,13 @@ pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
     let label = if is_api_key {
         Some("Claude API Key".to_string())
     } else {
-        status
-            .subscription_type
-            .as_deref()
-            .and_then(normalize_claude_plan)
+        plan_name
+            .or_else(|| {
+                status
+                    .subscription_type
+                    .as_deref()
+                    .and_then(normalize_claude_plan)
+            })
             .map(|plan| format!("Claude {plan} Subscription"))
     };
     Some(ProviderAuth {
@@ -57,7 +61,29 @@ pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
     })
 }
 
-/// Normalize Claude's `subscriptionType` to its display plan name.
+/// The plan name Claude Code shows for the signed-in account, which it keeps
+/// as `oauthAccount.planDisplayName` in its account file (`.claude.json`):
+/// unlike `subscriptionType`, it tells Max from Ultra.
+pub fn claude_plan_name(account_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(account_json).ok()?;
+    value
+        .pointer("/oauthAccount/planDisplayName")?
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+/// [`claude_plan_name`] of the account a Claude Code child launched with
+/// `launch_env` signs in as.
+pub fn claude_account_plan_name(launch_env: &agent::LaunchEnv) -> Option<String> {
+    let path = agent::claude::account_file(launch_env)?;
+    claude_plan_name(&std::fs::read_to_string(path).ok()?)
+}
+
+/// Normalize Claude's `subscriptionType` to its display plan name. Claude
+/// Code reports `max` for both the 5x and the 20x tier, which claude.com now
+/// sells as Max and Ultra; only the 20x tier's own id can name Ultra.
 fn normalize_claude_plan(raw: &str) -> Option<&'static str> {
     match raw
         .trim()
@@ -65,9 +91,8 @@ fn normalize_claude_plan(raw: &str) -> Option<&'static str> {
         .replace(['-', ' '], "_")
         .as_str()
     {
-        "max" => Some("Max"),
-        "max_5x" | "max5x" => Some("Max 5x"),
-        "max_20x" | "max20x" => Some("Max 20x"),
+        "max" | "max_5x" | "max5x" => Some("Max"),
+        "ultra" | "max_20x" | "max20x" => Some("Ultra"),
         "pro" => Some("Pro"),
         "team" => Some("Team"),
         "enterprise" => Some("Enterprise"),
@@ -168,25 +193,53 @@ fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Parse the shared `auth.json` shape used by pi and OpenCode. Each top-level
-/// key names an upstream provider whose object carries a non-empty `type`.
+/// Parse pi's `auth.json`. Each top-level key names an upstream provider whose
+/// object carries a non-empty `type`.
 ///
-/// An empty or unreadable credential set remains indeterminate because either
+/// An empty or unreadable credential set remains indeterminate because the
 /// CLI may also authenticate through environment variables.
 pub fn parse_aggregator_auth(json: &str) -> Option<ProviderAuth> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     let object = value.as_object()?;
-    let mut providers: Vec<_> = object
-        .iter()
-        .filter_map(|(provider, credential)| {
-            credential
-                .as_object()?
-                .get("type")
-                .and_then(|value| value.as_str())
-                .filter(|kind| !kind.trim().is_empty())
-                .map(|_| provider.as_str())
-        })
-        .collect();
+    upstream_providers_auth(
+        object
+            .iter()
+            .filter_map(|(provider, credential)| {
+                credential
+                    .as_object()?
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .filter(|kind| !kind.trim().is_empty())
+                    .map(|_| provider.as_str())
+            })
+            .collect(),
+    )
+}
+
+/// Parse `opencode auth list --format json`: the integrations OpenCode knows,
+/// each with the connections (stored credentials or environment) it uses.
+///
+/// None connected remains indeterminate: OpenCode's own free models need no
+/// sign-in.
+pub fn parse_opencode_auth(json: &str) -> Option<ProviderAuth> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    upstream_providers_auth(
+        value
+            .as_array()?
+            .iter()
+            .filter(|integration| {
+                integration
+                    .get("connections")
+                    .and_then(|connections| connections.as_array())
+                    .is_some_and(|connections| !connections.is_empty())
+            })
+            .filter_map(|integration| integration.get("id")?.as_str())
+            .collect(),
+    )
+}
+
+/// Signed in to the listed upstream providers, labelled by the first three.
+fn upstream_providers_auth(mut providers: Vec<&str>) -> Option<ProviderAuth> {
     if providers.is_empty() {
         return None;
     }
@@ -213,6 +266,7 @@ mod tests {
         let auth = parse_claude_auth(
             r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty",
                 "email":"dev@example.com","orgId":"x","orgName":"y","subscriptionType":"max"}"#,
+            None,
         )
         .unwrap();
         assert_eq!(auth.status, AuthStatus::Authenticated);
@@ -221,8 +275,8 @@ mod tests {
 
         // Plan normalization.
         for (raw, expected) in [
-            ("max_20x", "Claude Max 20x Subscription"),
-            ("max_5x", "Claude Max 5x Subscription"),
+            ("max_20x", "Claude Ultra Subscription"),
+            ("max_5x", "Claude Max Subscription"),
             ("pro", "Claude Pro Subscription"),
             ("team", "Claude Team Subscription"),
             ("enterprise", "Claude Enterprise Subscription"),
@@ -230,22 +284,48 @@ mod tests {
         ] {
             let json = format!(r#"{{"loggedIn":true,"subscriptionType":"{raw}"}}"#);
             assert_eq!(
-                parse_claude_auth(&json).unwrap().label.as_deref(),
+                parse_claude_auth(&json, None).unwrap().label.as_deref(),
                 Some(expected)
             );
         }
 
+        // Claude Code reports `max` for Ultra too; the plan name it keeps in
+        // its account file names the plan.
+        assert_eq!(
+            parse_claude_auth(
+                r#"{"loggedIn":true,"subscriptionType":"max"}"#,
+                Some("Ultra")
+            )
+            .unwrap()
+            .label
+            .as_deref(),
+            Some("Claude Ultra Subscription")
+        );
+        // The account file's shape, as claude 2.1.318 writes it.
+        assert_eq!(
+            claude_plan_name(
+                r#"{"oauthAccount":{"billingType":"google_play_subscription","organizationType":"claude_max",
+                    "organizationRateLimitTier":"default_claude_max_20x","planDisplayName":"Ultra"}}"#
+            )
+            .as_deref(),
+            Some("Ultra")
+        );
+        assert_eq!(claude_plan_name(r#"{"oauthAccount":{}}"#), None);
+
         // API-key logins.
-        let auth =
-            parse_claude_auth(r#"{"loggedIn":true,"authMethod":"apiKey","email":null}"#).unwrap();
+        let auth = parse_claude_auth(
+            r#"{"loggedIn":true,"authMethod":"apiKey","email":null}"#,
+            None,
+        )
+        .unwrap();
         assert_eq!(auth.label.as_deref(), Some("Claude API Key"));
 
         // Signed out.
-        let auth = parse_claude_auth(r#"{"loggedIn":false}"#).unwrap();
+        let auth = parse_claude_auth(r#"{"loggedIn":false}"#, None).unwrap();
         assert_eq!(auth.status, AuthStatus::Unauthenticated);
 
         // Garbage in → nothing claimed.
-        assert!(parse_claude_auth("not json").is_none());
+        assert!(parse_claude_auth("not json", None).is_none());
     }
 
     #[test]
@@ -309,5 +389,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(auth.label.as_deref(), Some("alpha, beta, delta +2"));
+    }
+
+    #[test]
+    fn parses_opencode_auth_list_json() {
+        // Recorded from `opencode auth list --standalone --format json` (2.2.5).
+        let auth = parse_opencode_auth(
+            r#"[{"id":"openai","name":"OpenAI","connections":[{"type":"credential","id":"cred_1742dd55a001aae39XldzS80se","label":"OAuth","method":"oauth"}]}]"#,
+        )
+        .unwrap();
+        assert_eq!(auth.status, AuthStatus::Authenticated);
+        assert_eq!(auth.label.as_deref(), Some("openai"));
+
+        assert!(
+            parse_opencode_auth(r#"[{"id":"anthropic","name":"Anthropic","connections":[]}]"#)
+                .is_none()
+        );
     }
 }

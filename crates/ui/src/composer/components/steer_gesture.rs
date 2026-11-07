@@ -8,6 +8,12 @@ use super::super::*;
 use gpui::{Bounds, Pixels, Point, TouchDragEvent, TouchPhase, canvas, deferred};
 use gpui_base::Positioner;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 const CHOICE_GAP: Pixels = px(8.);
 
 pub(in super::super) struct SteerGesture {
@@ -68,133 +74,34 @@ impl Composer {
         .absolute()
         .inset_0()
         .into_any_element();
+        // The choices rise in as they are revealed; the release that ends
+        // the gesture acts on the one chosen, and they go with it.
+        let choices = self.steer_gesture.as_ref().map(|gesture| Choices {
+            bounds: gesture.bounds,
+            armed: gesture.armed(),
+            queues: gesture.queues(),
+            revealed: gesture.revealed,
+        });
         div()
             .absolute()
             .inset_0()
             .child(touch)
-            .when_some(
-                self.steer_gesture
-                    .as_ref()
-                    .filter(|gesture| gesture.revealed),
-                |el, gesture| el.child(self.render_steer_choices(gesture, cx)),
-            )
+            .child(crate::motion::Sampled::new(move |window, cx| {
+                let revealed = crate::motion::shown(
+                    "steer-choices",
+                    choices.filter(|choices| choices.revealed).map(|_| ()),
+                    SHOW,
+                    window,
+                    cx,
+                );
+                match (choices.filter(|choices| choices.revealed), revealed) {
+                    (Some(choices), Some(shown)) => {
+                        render_steer_choices(choices, shown.progress(), window, cx)
+                    }
+                    _ => gpui::Empty.into_any_element(),
+                }
+            }))
             .into_any_element()
-    }
-
-    fn render_steer_choices(&self, gesture: &SteerGesture, cx: &Context<Self>) -> AnyElement {
-        let choices = v_flex()
-            .gap(CHOICE_GAP)
-            .children([true, false].map(|steer| {
-                let id = if steer {
-                    "steer-gesture-steer"
-                } else {
-                    "steer-gesture-queue"
-                };
-                let selected = if steer {
-                    gesture.armed()
-                } else {
-                    gesture.queues()
-                };
-                let label = crate::tr!(if steer {
-                    "mobile.steer"
-                } else {
-                    "mobile.queue"
-                });
-                let hint = crate::tr!(match (steer, selected) {
-                    (true, true) => "mobile.release_to_steer",
-                    (false, true) => "mobile.release_to_queue",
-                    (true, false) => "mobile.steer",
-                    (false, false) => "mobile.queue",
-                });
-                let content = div()
-                    .relative()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .when(selected, |el| {
-                                el.debug_selector(move || format!("{id}-selected"))
-                            })
-                            .size(px(40.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(if selected {
-                                cx.theme().primary
-                            } else {
-                                cx.theme().border
-                            })
-                            .bg(if selected {
-                                cx.theme().primary
-                            } else {
-                                cx.theme().popover
-                            })
-                            .text_color(if selected {
-                                cx.theme().primary_foreground
-                            } else {
-                                cx.theme().foreground
-                            })
-                            .shadow_lg()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Icon::new(IconName::ArrowUp).size(px(18.))),
-                    )
-                    .child(
-                        crate::material::overlay_contour(div(), cx)
-                            .absolute()
-                            .right(px(52.))
-                            .px(cx.theme().tokens.spacing.sm)
-                            .py(cx.theme().tokens.spacing.xs)
-                            .rounded(crate::material::radius_chip(cx))
-                            .whitespace_nowrap()
-                            .text_token(&cx.theme().tokens.typography.xs)
-                            .text_color(if selected {
-                                cx.theme().primary
-                            } else {
-                                cx.theme().foreground
-                            })
-                            .child(hint),
-                    )
-                    .into_any_element();
-                let content = if steer {
-                    // Base supplies no default popup motion. Use the composer's
-                    // existing 150ms entrance with Base's enter easing; GPUI owns
-                    // frame scheduling and reduced motion.
-                    div()
-                        .size_full()
-                        .child(content)
-                        .with_animation(
-                            "steer-choice-pop-in",
-                            Animation::new(Duration::from_millis(150))
-                                .with_easing(gpui_base::animation::ease_out_cubic),
-                            |el, progress| {
-                                el.relative()
-                                    .top(px(52.) * (1. - progress))
-                                    .opacity(progress)
-                            },
-                        )
-                        .into_any_element()
-                } else {
-                    content
-                };
-                crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
-                    .debug_selector(move || id.into())
-                    .relative()
-                    .w(gesture.bounds.size.width)
-                    .h(gesture.bounds.size.height)
-                    .occlude()
-                    .child(content)
-                    .into_any_element()
-            }));
-        deferred(
-            Positioner::corner(Anchor::BottomRight, gesture.bounds.bottom_right())
-                .margin(px(0.))
-                .child(choices),
-        )
-        .with_priority(gpui_base::POPUP_PRIORITY)
-        .into_any_element()
     }
 
     fn begin_steer_gesture(
@@ -265,4 +172,124 @@ impl Composer {
             self.submit(&input, steer, window, cx);
         }
     }
+}
+
+/// What the chooser shows of a gesture.
+#[derive(Clone, Copy)]
+struct Choices {
+    bounds: Bounds<Pixels>,
+    armed: bool,
+    queues: bool,
+    revealed: bool,
+}
+
+/// The two choices over the button, `progress` of the way in: Steer rises
+/// into its place above Queue as both fade in, and the one the finger is on
+/// fills as it crosses into it.
+fn render_steer_choices(
+    gesture: Choices,
+    progress: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let choices = v_flex()
+        .gap(CHOICE_GAP)
+        .children([true, false].map(|steer| {
+            let id = if steer {
+                "steer-gesture-steer"
+            } else {
+                "steer-gesture-queue"
+            };
+            let selected = if steer { gesture.armed } else { gesture.queues };
+            let label = crate::tr!(if steer {
+                "mobile.steer"
+            } else {
+                "mobile.queue"
+            });
+            let hint = crate::tr!(match (steer, selected) {
+                (true, true) => "mobile.release_to_steer",
+                (false, true) => "mobile.release_to_queue",
+                (true, false) => "mobile.steer",
+                (false, false) => "mobile.queue",
+            });
+            let glide = |part: &'static str, color: Hsla, window: &mut Window, cx: &mut App| {
+                gpui_base::motion::transition(
+                    (id, part),
+                    color,
+                    gpui_base::motion::Transition::new(GLIDE),
+                    window,
+                    cx,
+                )
+            };
+            let theme = cx.theme().clone();
+            let pick = |on: Hsla, off: Hsla| if selected { on } else { off };
+            let border = glide("border", pick(theme.primary, theme.border), window, cx);
+            let fill = glide("fill", pick(theme.primary, theme.popover), window, cx);
+            let glyph = glide(
+                "glyph",
+                pick(theme.primary_foreground, theme.foreground),
+                window,
+                cx,
+            );
+            let hint_color = glide("hint", pick(theme.primary, theme.foreground), window, cx);
+            let content = div()
+                .relative()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .when(selected, |el| {
+                            el.debug_selector(move || format!("{id}-selected"))
+                        })
+                        .size(px(40.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(border)
+                        .bg(fill)
+                        .text_color(glyph)
+                        .shadow_lg()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(Icon::new(IconName::ArrowUp).size(px(18.))),
+                )
+                .child(
+                    crate::material::overlay_contour(div(), cx)
+                        .absolute()
+                        .right(px(52.))
+                        .px(cx.theme().tokens.spacing.sm)
+                        .py(cx.theme().tokens.spacing.xs)
+                        .rounded(crate::material::radius_chip(cx))
+                        .whitespace_nowrap()
+                        .text_token(&cx.theme().tokens.typography.xs)
+                        .text_color(hint_color)
+                        .child(hint),
+                )
+                .into_any_element();
+            // Steer rises from over the button into its place; both fade in.
+            let content = div()
+                .relative()
+                .size_full()
+                .when(steer, |el| el.top((px(52.) * (1. - progress)).max(px(0.))))
+                .opacity(progress)
+                .child(content)
+                .into_any_element();
+            crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
+                .debug_selector(move || id.into())
+                .relative()
+                .w(gesture.bounds.size.width)
+                .h(gesture.bounds.size.height)
+                .occlude()
+                .child(content)
+                .into_any_element()
+        }));
+    deferred(
+        Positioner::corner(Anchor::BottomRight, gesture.bounds.bottom_right())
+            .margin(px(0.))
+            .child(choices),
+    )
+    .with_priority(gpui_base::POPUP_PRIORITY)
+    .into_any_element()
 }

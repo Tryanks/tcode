@@ -17,6 +17,22 @@ struct Queue {
     subscriptions: VecDeque<(String, String)>,
     count: usize,
     bytes: usize,
+    /// A line was refused since the adapter last took one.
+    refused: bool,
+    /// Told once the adapter takes a line after a refusal.
+    space: Option<Sender<()>>,
+}
+
+impl Queue {
+    fn credit(&mut self, line: &str) {
+        self.count -= 1;
+        self.bytes -= line.len();
+        if std::mem::take(&mut self.refused)
+            && let Some(space) = &self.space
+        {
+            let _ = space.try_send(());
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -114,6 +130,7 @@ impl Outgoing {
         } else {
             if queue.count >= MAX_LINES || line.len() > MAX_BYTES.saturating_sub(queue.bytes) {
                 log::error!("outgoing queue full; rejecting new non-subscription line");
+                queue.refused = true;
                 return Err(async_channel::TrySendError::Full(line));
             }
             queue.count += 1;
@@ -149,6 +166,14 @@ impl Outgoing {
             let _ = sender.try_send(wake);
         }
     }
+
+    /// Signal `space` when the adapter takes a line after one was refused.
+    /// A plain channel has no adapter queue to watch and never signals.
+    pub fn on_space(&self, space: Sender<()>) {
+        if let Some(queue) = &self.queue {
+            queue.lock().unwrap().space = Some(space);
+        }
+    }
 }
 
 impl OutgoingReceiver {
@@ -179,8 +204,7 @@ impl OutgoingReceiver {
         let lines = std::mem::take(&mut queue.lines);
         for line in lines {
             if retained_write(&line) {
-                queue.count -= 1;
-                queue.bytes -= line.len();
+                queue.credit(&line);
             } else {
                 queue.lines.push_back(line);
             }
@@ -189,9 +213,7 @@ impl OutgoingReceiver {
 
     pub fn sent(&self, line: &str) {
         if subscription_key(line).is_none() {
-            let mut queue = self.queue.lock().unwrap();
-            queue.count -= 1;
-            queue.bytes -= line.len();
+            self.queue.lock().unwrap().credit(line);
         }
     }
     pub fn close(&self) -> bool {

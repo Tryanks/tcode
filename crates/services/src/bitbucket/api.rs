@@ -3,7 +3,7 @@
 //! Reads of a public repository need neither; writes do.
 
 use crate::{
-    forge::{ForgeError, ForgeErrorKind},
+    forge::{ForgeError, ForgeErrorKind, account},
     settings::SettingsStore,
 };
 use serde_json::Value;
@@ -15,7 +15,7 @@ use std::{
 };
 use tcode_core::{
     pull_request::HostKind,
-    settings::{CredentialSource, HostSettings},
+    settings::{CredentialSource, HostProblem, HostSettings, TokenCheck},
 };
 
 /// Bitbucket Cloud's one web host, which settings and keys name it by.
@@ -233,10 +233,58 @@ impl Api {
         self.store.token(HostKind::Bitbucket, HOST).is_some()
     }
 
-    /// Whether Bitbucket has answered a request sent with `credential`, a saved access token.
-    pub(super) fn verified(&self, credential: &Credential) -> bool {
-        self.store
-            .credential_verified(HostKind::Bitbucket, HOST, &credential.verification)
+    /// What Bitbucket's last answer to `credential` says: its account, and any problem.
+    pub(super) fn assessed(
+        &self,
+        credential: &Credential,
+    ) -> (Option<HostProblem>, Option<String>) {
+        account::assessed(
+            &self.store,
+            HostKind::Bitbucket,
+            HOST,
+            &credential.source,
+            &credential.verification,
+        )
+    }
+
+    /// Whose the credential is. An access token belongs to a repository, project or
+    /// workspace, so Bitbucket may refuse to name an account for one however good it is.
+    fn whose_credential(&self, credential: &Credential) -> account::Whose {
+        let answer = account::ask(
+            &self.agent,
+            &format!("{API}/user"),
+            &credential.authorization,
+            &[],
+        )?;
+        if credential.bearer() && matches!(answer.status, 401 | 403) {
+            return Err(TokenCheck::Unconfirmed);
+        }
+        let body = answer.accepted()?;
+        Ok((
+            account::account(&body, "nickname", "display_name"),
+            Vec::new(),
+        ))
+    }
+
+    /// Whose `token` is: an API token sent with the account's `email`, or an access token.
+    pub(super) fn whose(&self, token: &str, email: Option<&str>) -> account::Whose {
+        let credential = Credential::new(token, email, CredentialSource::SavedBearer)
+            .ok_or(TokenCheck::Rejected { status: 401 })?;
+        self.whose_credential(&credential)
+    }
+
+    /// Learns whose the credential in use is, when that is not yet known.
+    pub(super) fn identify(&self) {
+        if let Ok(Some(credential)) = self.credential(HOST) {
+            account::identify(
+                &self.store,
+                HostKind::Bitbucket,
+                HOST,
+                &credential.source,
+                &credential.verification,
+                || self.whose_credential(&credential),
+            );
+        }
     }
 
     pub(super) fn forget(&self) {
@@ -413,17 +461,15 @@ impl Api {
                 .lock()
                 .unwrap()
                 .succeeded(HOST, &fingerprint, lease);
-            if let Some(credential) = credential
-                .as_ref()
-                .filter(|credential| credential.source == CredentialSource::SavedBearer)
-                && let Err(error) = self.store.record_verification(
+            if let Some(credential) = &credential {
+                account::record(
+                    &self.store,
                     HostKind::Bitbucket,
                     HOST,
+                    &credential.source,
                     &credential.verification,
                     true,
-                )
-            {
-                log::warn!("failed to save credential verification: {error}");
+                );
             }
             return Ok(Response {
                 status,
@@ -433,15 +479,18 @@ impl Api {
         }
         Err(match status {
             401 => {
-                if let Some(credential) = credential.as_ref()
-                    && let Err(error) = self.store.record_verification(
+                // An access token may be refused the account it reads as and still work.
+                if let Some(credential) = credential.as_ref().filter(|credential| {
+                    !(credential.bearer() && request.path.starts_with("/user"))
+                }) {
+                    account::record(
+                        &self.store,
                         HostKind::Bitbucket,
                         HOST,
+                        &credential.source,
                         &credential.verification,
                         false,
-                    )
-                {
-                    log::warn!("failed to clear credential verification: {error}");
+                    );
                 }
                 self.forget();
                 error(

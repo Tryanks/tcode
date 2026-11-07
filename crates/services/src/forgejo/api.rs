@@ -2,7 +2,7 @@
 //! repository need none; writes do.
 
 use crate::{
-    forge::{ForgeError, ForgeErrorKind},
+    forge::{ForgeError, ForgeErrorKind, account},
     settings::SettingsStore,
 };
 use std::{
@@ -14,7 +14,7 @@ use std::{
 };
 use tcode_core::{
     pull_request::HostKind,
-    settings::{CredentialSource, HostSettings},
+    settings::{CredentialSource, HostProblem, HostSettings, TokenCheck},
 };
 
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
@@ -68,8 +68,22 @@ impl Server {
 #[derive(Clone)]
 pub(super) struct Credential {
     token: String,
+    verification: String,
     pub(super) source: CredentialSource,
 }
+
+impl Credential {
+    fn new(token: String, source: CredentialSource) -> Self {
+        Self {
+            verification: crate::settings::credential_fingerprint(&token, None),
+            token,
+            source,
+        }
+    }
+}
+
+/// Forgejo and Gitea share one token store, so either kind names a server's checks.
+const KIND: HostKind = HostKind::Forgejo;
 
 #[derive(Debug)]
 pub(super) struct Response {
@@ -138,7 +152,7 @@ pub(super) struct Api {
     store: SettingsStore,
     environment: BTreeMap<String, String>,
     hosts: RwLock<BTreeMap<String, HostSettings>>,
-    agent: ureq::Agent,
+    pub(super) agent: ureq::Agent,
     tokens: Mutex<HashMap<String, Cached<Option<Credential>>>>,
     servers: Mutex<HashMap<String, Cached<Server>>>,
     rate_limits: Mutex<crate::forge::RateLimits>,
@@ -197,18 +211,15 @@ impl Api {
             .map(|choice| choice.kind)
             .unwrap_or(HostKind::Forgejo);
         if let Some(token) = self.store.token(kind, authority).and_then(nonempty) {
-            return Ok(Some(Credential {
-                token,
-                source: CredentialSource::Saved,
-            }));
+            return Ok(Some(Credential::new(token, CredentialSource::Saved)));
         }
         if let Some(token) = self.environment_token(authority) {
-            return Ok(Some(Credential {
+            return Ok(Some(Credential::new(
                 token,
-                source: CredentialSource::Env {
+                CredentialSource::Env {
                     name: ENV_TOKEN.into(),
                 },
-            }));
+            )));
         }
         let mut tokens = self.tokens.lock().unwrap();
         tokens.retain(|_, cached| cached.expires > Instant::now());
@@ -217,10 +228,8 @@ impl Api {
         }
         let found = self.tea_token(authority);
         let ttl = if found.is_some() { 300 } else { 10 };
-        let value = found.map(|token| Credential {
-            token,
-            source: CredentialSource::Cli { tool: "tea".into() },
-        });
+        let value =
+            found.map(|token| Credential::new(token, CredentialSource::Cli { tool: "tea".into() }));
         tokens.insert(
             authority.to_owned(),
             Cached {
@@ -240,6 +249,64 @@ impl Api {
             .token(kind, authority)
             .and_then(nonempty)
             .is_some()
+    }
+
+    /// What the server's last answer to `credential` says: its account, and any problem.
+    pub(super) fn assessed(
+        &self,
+        authority: &str,
+        credential: &Credential,
+    ) -> (Option<HostProblem>, Option<String>) {
+        account::assessed(
+            &self.store,
+            KIND,
+            authority,
+            &credential.source,
+            &credential.verification,
+        )
+    }
+
+    /// Whose `token` is on the server. Gitea refuses a token without `read:user` the account
+    /// with a 403 naming the scopes it lacks.
+    pub(super) fn whose(&self, authority: &str, token: &str) -> account::Whose {
+        let answer = account::ask(
+            &self.agent,
+            &format!("https://{authority}/api/v1/user"),
+            &format!("token {token}"),
+            &[],
+        )?;
+        if answer.status == 403
+            && let Some(scopes) = answer.body["message"]
+                .as_str()
+                .filter(|message| message.contains("scope"))
+                .and_then(|message| message.split_once('[')?.1.split_once(']'))
+                .map(|(scopes, _)| {
+                    scopes
+                        .split([',', ' '])
+                        .filter(|scope| !scope.is_empty())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|scopes| !scopes.is_empty())
+        {
+            return Err(TokenCheck::MissingScopes { scopes });
+        }
+        let body = answer.accepted()?;
+        Ok((account::account(&body, "login", "full_name"), Vec::new()))
+    }
+
+    /// Learns whose the token in use is, when that is not yet known.
+    pub(super) fn identify(&self, authority: &str) {
+        if let Ok(Some(credential)) = self.credential(authority) {
+            account::identify(
+                &self.store,
+                KIND,
+                authority,
+                &credential.source,
+                &credential.verification,
+                || self.whose(authority, &credential.token),
+            );
+        }
     }
 
     fn environment_token(&self, authority: &str) -> Option<String> {
@@ -345,7 +412,7 @@ impl Api {
         let credential = self.credential(authority)?;
         let fingerprint = credential.as_ref().map_or_else(
             || "anonymous".to_owned(),
-            |credential| crate::settings::credential_fingerprint(&credential.token, None),
+            |credential| credential.verification.clone(),
         );
         let lease = self
             .rate_limits
@@ -440,6 +507,16 @@ impl Api {
                 .lock()
                 .unwrap()
                 .succeeded(authority, &fingerprint, lease);
+            if let Some(credential) = &credential {
+                account::record(
+                    &self.store,
+                    KIND,
+                    authority,
+                    &credential.source,
+                    &credential.verification,
+                    true,
+                );
+            }
             return Ok(Response { body, truncated });
         }
         let message = serde_json::from_slice::<serde_json::Value>(&body)
@@ -447,6 +524,16 @@ impl Api {
             .and_then(|value| value["message"].as_str().map(str::to_owned));
         Err(match status {
             401 => {
+                if let Some(credential) = &credential {
+                    account::record(
+                        &self.store,
+                        KIND,
+                        authority,
+                        &credential.source,
+                        &credential.verification,
+                        false,
+                    );
+                }
                 self.forget(authority);
                 error(
                     ForgeErrorKind::Unauthorized,

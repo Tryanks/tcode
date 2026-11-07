@@ -226,6 +226,9 @@ impl AppState {
         self.resume_pull_request_watches(target_id, cx);
 
         let default_window = self.default_context_window(target_id);
+        let rewinding = self
+            .resident(target_id)
+            .is_some_and(|active| self.rewind_requests.contains_key(&active.meta.id));
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
@@ -243,9 +246,17 @@ impl AppState {
             message.author = cx.author.clone();
             message.origin = cx.origin.unwrap_or(message.origin);
         }
+        // The first message after a rewind goes ahead of the messages the
+        // rewind held, which follow it.
+        if std::mem::take(&mut active.queue_held)
+            && let Some(message) = active.queue.pop()
+        {
+            active.queue.insert(0, message);
+        }
 
         let model_changed = active.model_changed_while_live();
-        let restart_deferred = active.settings_restart_deferred();
+        // A restart would drop the rewind's answer.
+        let restart_deferred = active.settings_restart_deferred() || rewinding;
         if active.launch_settings_changed_while_live() {
             if restart_deferred {
                 log::info!(
@@ -334,9 +345,28 @@ impl AppState {
     /// backend change it is.
     pub(super) fn provider_label(&self, provider: ProviderKind, profile: Option<&str>) -> String {
         match profile {
-            Some(id) => self.settings.profile_display_name(id),
+            Some(id) => self.profile_display_name(id),
             None => provider.display_name().to_string(),
         }
+    }
+
+    /// The name a thread's Harness goes by in what the user reads: an ACP
+    /// agent's own, else the product's with its account.
+    pub(super) fn thread_harness_name(&self, session_id: &str) -> String {
+        let Some(meta) = self.find_meta(session_id) else {
+            return "Harness".to_string();
+        };
+        meta.acp_agent_id
+            .as_deref()
+            .and_then(|id| self.settings.acp_agent(id))
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| {
+                self.profile_display_name(
+                    meta.profile_id
+                        .as_deref()
+                        .unwrap_or(Settings::builtin_profile_id(meta.provider)),
+                )
+            })
     }
 
     /// Shutting a provider down drops its event pump, so a turn still running
@@ -408,7 +438,7 @@ impl AppState {
         };
         active.shutdown_to_idle();
         active.meta.resume_cursor = None;
-        active.meta.pending_fork = false;
+        active.meta.pending_fork = None;
         let Some(transcript) = self.record_relay(target_id, pending, &text, cx) else {
             return;
         };
@@ -448,6 +478,7 @@ impl AppState {
     ) -> Option<String> {
         let active = self.resident_mut(target_id)?;
         let moved_from = active.meta.moved_from.take();
+        active.meta.session_transfer_from = None;
         let mut transcript = render_relay_transcript(
             &active.timeline,
             moved_from.as_deref().unwrap_or(&active.meta.cwd),
@@ -478,26 +509,44 @@ impl AppState {
         Some(transcript)
     }
 
-    /// Give the first turn of a moved thread's fresh provider session the conversation so
-    /// far; a thread with nothing worth handing over just starts over there.
-    fn hand_off_moved_conversation(&mut self, target_id: &str, cx: &mut HostCx) {
+    /// Give the first turn of a fresh provider session the conversation so far, when the
+    /// thread moved or its native session could not be carried to its new account; a
+    /// thread with nothing worth handing over just starts over there.
+    fn hand_off_conversation(&mut self, target_id: &str, cx: &mut HostCx) {
+        if self
+            .resident(target_id)
+            .and_then(ActiveSession::handoff_message)
+            .is_none()
+        {
+            return;
+        }
+        // The turn a provider that died left open is closed first, since closing it
+        // dispatches the next message, which then carries the handoff itself.
+        self.close_abandoned_turn(target_id, cx);
         let Some(active) = self.resident(target_id) else {
             return;
         };
-        let Some((message_id, text)) = active.moved_handoff_message() else {
+        let Some((message_id, text)) = active.handoff_message() else {
             return;
         };
         if !has_meaningful_history(&active.timeline) {
             let active = self.resident_mut(target_id).unwrap();
             active.meta.moved_from = None;
+            active.meta.session_transfer_from = None;
             let meta = active.meta.clone();
             self.persist_meta(&meta, cx);
             return;
         }
+        let from_profile = match &active.meta.session_transfer_from {
+            Some(home) if active.meta.moved_from.is_none() => {
+                (!Settings::is_builtin_profile_id(home)).then(|| home.clone())
+            }
+            _ => active.meta.profile_id.clone(),
+        };
         let from = PendingRelay {
             from_provider: active.meta.provider,
             from_model: active.meta.model.clone(),
-            from_profile: active.meta.profile_id.clone(),
+            from_profile,
         };
         let transcript = self.record_relay(target_id, from, &text, cx);
         if let Some(message) = self
@@ -519,10 +568,15 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return Ok(false);
         };
-        if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
+        // A message sent while a rewind is made goes to the conversation the
+        // rewind leaves.
+        if active.turn_in_flight
+            || !matches!(active.runtime, Runtime::Live(_))
+            || self.rewind_requests.contains_key(&active.meta.id)
+        {
             return Ok(false);
         }
-        self.hand_off_moved_conversation(target_id, cx);
+        self.hand_off_conversation(target_id, cx);
         self.resident_mut(target_id)
             .ok_or(())?
             .dispatch_next_pending()
@@ -545,7 +599,6 @@ impl AppState {
         self.record_user_message(
             session_id,
             &message.text,
-            message.context_len,
             &message.attachments,
             message.delivery_key.as_deref(),
             cx,
@@ -563,14 +616,7 @@ impl AppState {
         if let Some(window) = message.context_window_changed {
             self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
         }
-        // `/orchestrate` stores its provider-only guidance as a prefix and
-        // records the byte boundary in `context_len`. Titles should describe
-        // the user's request, not that hidden orchestration configuration.
-        let title_source = message
-            .context_len
-            .and_then(|len| message.text.get(len..))
-            .unwrap_or(&message.text);
-        self.maybe_generate_title(session_id, title_source, &message.attachments, cx);
+        self.maybe_generate_title(session_id, &message.text, &message.attachments, cx);
     }
 
     /// A parked session finished a turn: keep working through its queue, then
@@ -580,7 +626,8 @@ impl AppState {
             return;
         };
         parked.turn_in_flight = false;
-        if !parked.queue.is_empty() && parked.launch_settings_changed_while_live() {
+        let waiting = !parked.queue.is_empty() && !parked.queue_held;
+        if waiting && parked.launch_settings_changed_while_live() {
             if parked.background_task_count > 0 {
                 log::info!(
                     "parked session {session_id}: deferring settings restart for {} background task(s)",
@@ -592,7 +639,7 @@ impl AppState {
             self.ensure_session_started(session_id, cx);
             return;
         }
-        if parked.queue.is_empty() {
+        if !waiting {
             if parked.cwd_changed_while_live() && parked.background_task_count == 0 {
                 parked.shutdown_to_idle();
             }
@@ -624,7 +671,6 @@ impl AppState {
         &mut self,
         session_id: &str,
         text: &str,
-        context_len: Option<usize>,
         attachments: &[Attachment],
         delivery_key: Option<&str>,
         cx: &mut HostCx,
@@ -639,7 +685,7 @@ impl AppState {
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: text.to_owned(),
-                context_len,
+                context_len: None,
                 attachments: attachment_paths(attachments),
             },
         });
@@ -731,11 +777,6 @@ impl AppState {
                 let Some(active) = self.resident_mut(target_id) else {
                     return;
                 };
-                // A steered orchestrate turn joins a turn already in flight and is
-                // logged via `record_steer_request`, which carries no split, so it
-                // renders as a plain bubble. Drop any staged split rather than let
-                // it attach to a later queued message.
-                active.pending_context_len = None;
                 active.pending_steers.push(PendingSteer {
                     request_id: request_id.clone(),
                     text,
@@ -845,6 +886,7 @@ impl AppState {
             active.interrupt_requested = true;
         }
         self.cancel_computer_use_feedback(target_id);
+        self.withdraw_foreground_prompts(target_id);
         Ok(())
     }
 

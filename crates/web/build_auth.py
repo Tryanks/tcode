@@ -4,7 +4,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
 translations = {}
-for language in ("en", "zh-CN"):
+for language in ("en", "zh-CN", "ja"):
     block = (root / "locales" / f"{language}.yml").read_text().split("\nweb_auth:\n", 1)[1]
     entries = {}
     for line in block.splitlines():

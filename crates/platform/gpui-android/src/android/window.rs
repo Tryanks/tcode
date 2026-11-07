@@ -145,8 +145,9 @@ impl AndroidWindow {
             },
             None,
         )?;
+        host::attach_surface(&surface.window);
 
-        Ok(Self(Rc::new(AndroidWindowInner {
+        let window = Self(Rc::new(AndroidWindowInner {
             display,
             gpu_context,
             state: RefCell::new(WindowState {
@@ -173,14 +174,17 @@ impl AndroidWindow {
             keyboard_tap: Cell::new(None),
             touch_gestures: RefCell::default(),
             input_sync: RefCell::new(Default::default()),
-        })))
+        }));
+        // The forced first frame draws only once a frame runs.
+        host::request_frame();
+        Ok(window)
     }
 
     pub(crate) fn set_surface(&self, native_window: Option<NativeWindow>) {
         let mut state = self.0.state.borrow_mut();
         match native_window {
             Some(native_window) => {
-                let surface = NativeSurface::new(native_window);
+                let surface = NativeSurface::new(native_window.clone());
                 let physical_size = surface.physical_size();
                 let config = WgpuSurfaceConfig {
                     size: physical_size,
@@ -201,6 +205,7 @@ impl AndroidWindow {
                 }
                 state.native_surface = Some(surface);
                 drop(state);
+                host::attach_surface(&native_window);
                 self.resize_from_native_window();
                 self.schedule_frame();
                 self.0.forced_frame_requested.set(true);
@@ -208,6 +213,7 @@ impl AndroidWindow {
             None => {
                 self.0.pacing.borrow_mut().suspend();
                 host::pause_frames();
+                host::detach_surface();
                 state.renderer.unconfigure_surface();
                 state.native_surface = None;
                 drop(state);
@@ -439,7 +445,9 @@ impl AndroidWindow {
             host::HostEvent::Back
             | host::HostEvent::ScrollCapture(_)
             | host::HostEvent::Frame
-            | host::HostEvent::RefreshRate(_) => {}
+            | host::HostEvent::RefreshRate(_)
+            | host::HostEvent::ThermalStatus(_)
+            | host::HostEvent::PowerSaveMode(_) => {}
         }
     }
 
@@ -682,11 +690,12 @@ impl AndroidWindow {
             host::pause_frames();
             return;
         }
-        let require_presentation = force || self.0.pacing.borrow().active(now);
         let callback = self.0.callbacks.borrow_mut().request_frame.take();
         if let Some(mut callback) = callback {
+            // Grace ticks keep the Choreographer and frame-rate vote without
+            // re-presenting an unchanged scene; GPUI itself keeps presenting
+            // after high-rate input.
             callback(RequestFrameOptions {
-                require_presentation,
                 force_render: force,
                 signal_source: FrameRequestSource::NativeCallback,
                 ..Default::default()

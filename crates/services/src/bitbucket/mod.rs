@@ -28,7 +28,7 @@ use tcode_core::{
     },
     pull_request_watch::{CheckStatus, PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{CredentialSource, HostProblem, HostSettings, HostStatus},
+    settings::{CredentialSource, HostProblem, HostSettings, HostStatus, TokenCheck},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState,
@@ -552,18 +552,16 @@ impl Forge for Bitbucket {
         let source = credential
             .as_ref()
             .map(|credential| credential.source.clone());
+        let (assessed, login) = credential
+            .as_ref()
+            .map(|credential| self.api.assessed(credential))
+            .unwrap_or_default();
         let problem = match &credential {
             None => enabled.then(|| HostProblem::NoCredential {
                 tools_missing: Vec::new(),
             }),
-            Some(credential)
-                if enabled
-                    && credential.source == CredentialSource::SavedBearer
-                    && !self.api.verified(credential) =>
-            {
-                Some(HostProblem::Unverified)
-            }
-            Some(_) => None,
+            Some(_) if !enabled => None,
+            Some(_) => assessed,
         };
         BTreeMap::from([(
             HOST.to_owned(),
@@ -588,6 +586,7 @@ impl Forge for Bitbucket {
                     "https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/".into(),
                 ),
                 token_scopes: Vec::new(),
+                login,
             },
         )])
     }
@@ -597,6 +596,14 @@ impl Forge for Bitbucket {
     fn forget_credential(&self, _: &str) {
         self.api.forget();
         self.summaries.lock().unwrap().clear();
+    }
+
+    fn check_token(&self, _: &str, token: &str, email: Option<&str>) -> TokenCheck {
+        crate::forge::account::check(self.api.whose(token, email))
+    }
+
+    fn identify(&self, _: &str) {
+        self.api.identify();
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
@@ -869,6 +876,36 @@ mod tests {
                 Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
                     .unwrap()
                     .agent = agent;
+                host
+            },
+        );
+    }
+
+    #[test]
+    fn tokens_are_checked_before_saving_and_accounts_learned() {
+        crate::forge::verification_tests::token_checks(
+            HostKind::Bitbucket,
+            HOST,
+            crate::forge::verification_tests::CurrentUser {
+                path: "/2.0/user",
+                body: br#"{"nickname":"lin","display_name":"Lin Chen"}"#,
+                account: tcode_core::settings::HostAccount {
+                    login: "lin".into(),
+                    name: Some("Lin Chen".into()),
+                },
+                then: &[],
+                environment: &[
+                    (api::ENV_TOKEN, "environment-token"),
+                    (api::ENV_EMAIL, "lin@example.com"),
+                ],
+                email: Some("lin@example.com"),
+            },
+            |store, builder, environment| {
+                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+                let mut host = Bitbucket::new(store, environment, viewed);
+                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
+                    .unwrap()
+                    .agent = builder.build();
                 host
             },
         );

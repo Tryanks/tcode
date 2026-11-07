@@ -31,7 +31,7 @@ use tcode_core::{
     },
     pull_request_watch::{CheckStatus, PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{CredentialSource, HostProblem, HostSettings, HostStatus},
+    settings::{CredentialSource, HostProblem, HostSettings, HostStatus, TokenCheck},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestActionState,
@@ -692,6 +692,10 @@ impl Forge for Azure {
                 let source = credential
                     .as_ref()
                     .map(|credential| credential.source.clone());
+                let (assessed, login) = credential
+                    .as_ref()
+                    .map(|credential| self.api.assessed(&host, credential))
+                    .unwrap_or_default();
                 let problem = match &credential {
                     None if !enabled => None,
                     None if az => Some(HostProblem::NotSignedIn {
@@ -701,14 +705,8 @@ impl Forge for Azure {
                     None => Some(HostProblem::NoCredential {
                         tools_missing: vec!["az".into()],
                     }),
-                    Some(credential)
-                        if enabled
-                            && credential.source == CredentialSource::Saved
-                            && !self.api.verified(&host, credential) =>
-                    {
-                        Some(HostProblem::Unverified)
-                    }
-                    Some(_) => None,
+                    Some(_) if !enabled => None,
+                    Some(_) => assessed,
                 };
                 (
                     host.clone(),
@@ -733,6 +731,7 @@ impl Forge for Azure {
                             "Code (Read & write)".into(),
                             "Pull Request Threads (Read & manage)".into(),
                         ],
+                        login,
                     },
                 )
             })
@@ -741,6 +740,14 @@ impl Forge for Azure {
 
     fn forget_credential(&self, host: &str) {
         self.api.forget(host);
+    }
+
+    fn check_token(&self, host: &str, token: &str, _: Option<&str>) -> TokenCheck {
+        crate::forge::account::check(self.api.whose(host, token))
+    }
+
+    fn identify(&self, host: &str) {
+        self.api.identify(host);
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
@@ -1044,6 +1051,36 @@ mod tests {
                 Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
                     .unwrap()
                     .agent = agent;
+                host
+            },
+        );
+    }
+
+    #[test]
+    fn tokens_are_checked_before_saving_and_accounts_learned() {
+        crate::forge::verification_tests::token_checks(
+            HostKind::Azure,
+            "dev.azure.com/fabrikam",
+            crate::forge::verification_tests::CurrentUser {
+                path: "/fabrikam/_apis/connectionData",
+                body: br#"{"authenticatedUser":{"id":"u1","providerDisplayName":"Lin Chen","properties":{"Account":{"$type":"System.String","$value":"lin@fabrikam.test"}}}}"#,
+                account: tcode_core::settings::HostAccount {
+                    login: "lin@fabrikam.test".into(),
+                    name: Some("Lin Chen".into()),
+                },
+                then: &[],
+                environment: &[
+                    (api::ENV_TOKEN, "environment-token"),
+                    (api::ENV_ORGANIZATION, "fabrikam"),
+                ],
+                email: None,
+            },
+            |store, builder, environment| {
+                let viewed = Arc::new(ViewedMarks::new(store.data_file("viewed-marks.json")));
+                let mut host = Azure::new(store, environment, viewed);
+                Arc::get_mut(&mut Arc::get_mut(&mut host).unwrap().api)
+                    .unwrap()
+                    .agent = builder.build();
                 host
             },
         );

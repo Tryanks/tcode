@@ -631,8 +631,10 @@ Windows, Linux and Android embedded previews use the connected machine's network
 all HTTP and HTTPS traffic. `http://localhost:5173/app` opens the dev server on
 the machine, even when it listens only on loopback. The URL stays unchanged in
 the address bar, redirects, scripts and `preview_status`. No dev-server port
-needs to be exposed. Open-in-system-browser still opens on this device and
-cannot use the embedded preview's routing.
+needs to be exposed. The dev-server picks list the machine's own listeners,
+not this device's, and a pick opens through the same routing.
+Open-in-system-browser still opens on this device and cannot use the embedded
+preview's routing.
 
 Preview traffic rides the attachment's own Traverse connection: each browser
 connection becomes one tunnel that names its `host:port`, and the machine
@@ -843,23 +845,29 @@ does not. A network change reported by the device ends the current wait
 early and tries again at once.
 
 A connection attempt has 20 seconds to find a path and complete the handshake.
-Once connected, both ends send QUIC keep-alives every 10 seconds and drop a
-connection with no packets for 30 seconds. On top of that the device sends an
-application ping after 10 seconds without a message from the machine and
-reconnects if nothing arrives within another 20 seconds. Browsers send the
+Once connected, both ends keep every path alive with QUIC keep-alives (iroh
+sends one on each path every 5 seconds) and drop a connection with no packets
+for 30 seconds; that is what notices a dead link. On top of that the device
+sends an application ping after 60 seconds without a message from the machine,
+which proves the machine's host still answers, and reconnects if nothing
+arrives within another 20 seconds. Browsers send the
 application ping after 15 seconds of silence with the same 20-second reply
 budget; browser timers may be delayed in background tabs, and making the page
 visible or coming online wakes reconnection.
 
-Native foreground cancels pending backoff. After at least 10 s in the background
-the app reconnects outright and replays subscriptions from applied cursors;
-after a shorter absence it probes once with the application ping. Foreground
-and Active from the same return do not issue duplicate probes. On Android, the
-system's default-network callback (a change of transport or validation, not a
-signal-strength update) and every resume, and on iOS every return to the
-foreground, additionally tell the device endpoint to rebind its paths and probe
-every live connection at once, so a stale link does not wait for the idle
-timer. The desktop relies on the timers alone.
+Native foreground cancels pending backoff. Once the app has been in the
+background for 10 s its link is parked: the connection closes and nothing
+dials, pings or backs off until the app returns, since that return reconnects
+outright anyway and replays subscriptions from applied cursors. After a shorter
+absence the return probes once with the application ping. Foreground and Active
+from the same return do not issue duplicate probes. A change of the device's own
+addresses, as iroh's network monitor sees it, probes every live connection at
+once, so a stale link does not wait for the idle timer. Android has no such
+monitor for native code: there the system's default-network callback (another
+network, a change of transport, validation or addresses, not a signal-strength
+update) and a resume that finds a different network than the callback last
+reported, and on iOS every return to the foreground, also tell the device
+endpoint to rebind its paths.
 
 Outgoing commands and queries are bounded to 256 lines and 8 MiB per attachment,
 including lines held for retry. A full queue rejects the new line with
@@ -954,8 +962,10 @@ outbox until Ack, including across reconnects, attachment changes and client
 relaunch. Native clients atomically replace an `outbox-<encoded machine id>.json`
 file beside `hosts.json`, with private file permissions; browsers use the
 origin's `tcode.outbox.<machine id>` localStorage entry. Clearing client data
-clears these pending writes. An admission storage error is a real failure, not a
-successful send.
+clears these pending writes. A write goes on the wire only once it is saved, so a
+write that cannot be saved is a real failure, not a successful send. Terminal
+input and the terminal drawer's height are not retained: they are sent as they
+happen, held in memory across a reconnect, and never saved for a relaunch.
 
 After hello and subscription replay, every unacknowledged write is sent in queue
 order without waiting for the previous Ack; the stream and the host preserve that
@@ -976,7 +986,7 @@ supplies, so one device's cache cannot be shared with or spoofed by another.
 If a connected retained command has no Ack for 30 seconds, the client logs a
 stalled acknowledgement and forces reconnect. The pending command remains in the
 outbox. The request deadlines and liveness constants live together in
-`crates/client/src/heartbeat.rs`: native idle probe at 10 seconds, browser idle
+`crates/client/src/heartbeat.rs`: native idle probe at 60 seconds, browser idle
 probe at 15 seconds, a 20-second liveness reply budget, a 15-second query
 timeout and the 30-second command timeout.
 
@@ -1017,7 +1027,8 @@ nothing else:
   type while it hosts — desktop and headless alike, whatever its Traverse sources
   — with its bound UDP port and a TXT record `v=1`, `id=<machine id>`,
   `name=<machine name>`; loopback is never advertised, and the record
-  follows the machine's interfaces as they change. The device keeps only the
+  follows the machine's interfaces when iroh's network monitor sees their
+  addresses change. The device keeps only the
   instance whose `id` is the machine it wants. This is a standard
   advertisement, so `dns-sd -B _tcode._udp` on macOS or Android's
   `NsdManager` list it too; on iOS the app browses through the system's

@@ -1,6 +1,7 @@
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::clock::Clock;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 use crate::{
     icon::{Icon, IconName},
@@ -14,9 +15,16 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
+fn retry_countdown(left_ms: u64) -> SharedString {
+    crate::tr!("chat.capacity_retry.countdown", seconds = left_ms / 1000)
+        .into_owned()
+        .into()
+}
+
 pub(crate) enum LimitResume {
     Retry {
-        remaining_secs: Option<u64>,
+        /// When the host retries on its own (unix seconds), if it does.
+        retry_at: Option<u64>,
         on_retry: ClickHandler,
         on_cancel: ClickHandler,
     },
@@ -24,7 +32,8 @@ pub(crate) enum LimitResume {
     Offer { on_schedule: ClickHandler },
     /// A resume is queued for the reset: live countdown plus cancel.
     Scheduled {
-        remaining_secs: u64,
+        /// When the queued resume is sent (unix seconds).
+        resets_at: u64,
         on_cancel: ClickHandler,
     },
     /// The reset has passed and nothing followed the error (the scheduled
@@ -40,10 +49,12 @@ pub(crate) fn error_card(
     copied: bool,
     resume: Option<LimitResume>,
     on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let danger = cx.theme().danger;
     let copy = Button::new(SharedString::from(format!("copy-error:{id}")))
+        .motion(motion)
         .ghost()
         .xsmall()
         .icon(if copied {
@@ -59,7 +70,7 @@ pub(crate) fn error_card(
         .on_click(on_copy);
     let resume_row = resume.map(|resume| match resume {
         LimitResume::Retry {
-            remaining_secs,
+            retry_at,
             on_retry,
             on_cancel,
         } => h_flex()
@@ -67,19 +78,27 @@ pub(crate) fn error_card(
             .items_center()
             .child(
                 Button::new(SharedString::from(format!("retry-turn:{id}")))
+                    .motion(motion)
                     .outline()
                     .xsmall()
-                    .label(match remaining_secs {
-                        Some(seconds) => {
-                            crate::tr!("chat.capacity_retry.countdown", seconds = seconds)
-                        }
-                        None => crate::tr!("chat.capacity_retry.retry"),
+                    .map(|button| match retry_at {
+                        Some(retry_at) => button
+                            .aria_label(retry_countdown(
+                                retry_at.saturating_sub(crate::time::now_secs()) * 1000,
+                            ))
+                            .child(Clock::until(
+                                SharedString::from(format!("retry-countdown:{id}")),
+                                retry_at,
+                                retry_countdown,
+                            )),
+                        None => button.label(crate::tr!("chat.capacity_retry.retry")),
                     })
                     .on_click(on_retry),
             )
-            .when(remaining_secs.is_some(), |row| {
+            .when(retry_at.is_some(), |row| {
                 row.child(
                     Button::new(SharedString::from(format!("cancel-retry:{id}")))
+                        .motion(motion)
                         .ghost()
                         .xsmall()
                         .label(crate::tr!("chat.limit_resume.cancel"))
@@ -92,6 +111,7 @@ pub(crate) fn error_card(
             .items_center()
             .child(
                 Button::new(SharedString::from(format!("schedule-limit-resume:{id}")))
+                    .motion(motion)
                     .outline()
                     .xsmall()
                     .icon(IconName::ArrowUp)
@@ -104,6 +124,7 @@ pub(crate) fn error_card(
             .items_center()
             .child(
                 Button::new(SharedString::from(format!("continue-limit-resume:{id}")))
+                    .motion(motion)
                     .outline()
                     .xsmall()
                     .icon(IconName::ArrowUp)
@@ -112,7 +133,7 @@ pub(crate) fn error_card(
             )
             .into_any_element(),
         LimitResume::Scheduled {
-            remaining_secs,
+            resets_at,
             on_cancel,
         } => h_flex()
             .gap_2()
@@ -121,14 +142,23 @@ pub(crate) fn error_card(
                 div()
                     .text_secondary(false, cx)
                     .text_color(cx.theme().danger_foreground)
-                    .child(crate::tr!(
-                        "chat.limit_resume.resumes_in",
-                        countdown = crate::time::format_countdown(remaining_secs)
+                    .child(Clock::until(
+                        SharedString::from(format!("limit-resume-countdown:{id}")),
+                        resets_at,
+                        |left| {
+                            crate::tr!(
+                                "chat.limit_resume.resumes_in",
+                                countdown = crate::time::format_countdown(left / 1000)
+                            )
+                            .into_owned()
+                            .into()
+                        },
                     )),
             )
             .child(div().flex_1())
             .child(
                 Button::new(SharedString::from(format!("cancel-limit-resume:{id}")))
+                    .motion(motion)
                     .ghost()
                     .xsmall()
                     .icon(IconName::Close)

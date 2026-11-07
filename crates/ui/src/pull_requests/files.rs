@@ -1,6 +1,7 @@
 //! The Files view: a pull request's changed files drawn by the diff list, from the host's
 //! files read and never from the local checkout.
 
+use crate::widgets::TooltipTrigger as _;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -45,6 +46,18 @@ use crate::{
     },
 };
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// A Files view toggle; the phone's overflow menu addresses them by action.
 #[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_pull_requests, no_json)]
@@ -68,8 +81,17 @@ enum Viewed {
     Unknown,
 }
 
+/// The file column's width beside the diff.
+const FILE_COLUMN_WIDTH: gpui::Pixels = px(280.);
 /// A column of files beside the diff once it has this much room.
 const FILE_COLUMN_MIN_WIDTH: f32 = 720.;
+
+/// A row of the card of comments the diff does not draw.
+#[derive(Clone, PartialEq)]
+pub(super) enum OffDiffRow {
+    Pending(tcode_core::pull_request::PullRequestReviewDraftComment),
+    Thread(PullRequestReviewThread),
+}
 
 impl PullRequestView {
     fn head(&self) -> Option<String> {
@@ -176,15 +198,7 @@ impl PullRequestView {
             })
             .collect();
         page.files_view.rendering = true;
-        let theme = cx.theme().highlight_theme.clone();
-        let colors = DiffColors {
-            added_word_bg: cx.theme().success.opacity(0.30),
-            removed_word_bg: cx.theme().danger.opacity(0.28),
-        };
-        let whitespace = HighlightStyle {
-            color: Some(cx.theme().muted_foreground),
-            ..Default::default()
-        };
+        let (theme, colors, whitespace) = baked_colours(cx);
         let current = self.current.clone();
         cx.spawn(async move |this, cx| {
             let rendered = cx
@@ -307,15 +321,7 @@ impl PullRequestView {
 
     /// Redraws a file once its text arrived, then applies the expansion that asked for it.
     fn apply_text(&mut self, cx: &mut Context<Self>) {
-        let dark_theme = cx.theme().highlight_theme.clone();
-        let colors = DiffColors {
-            added_word_bg: cx.theme().success.opacity(0.30),
-            removed_word_bg: cx.theme().danger.opacity(0.28),
-        };
-        let whitespace = HighlightStyle {
-            color: Some(cx.theme().muted_foreground),
-            ..Default::default()
-        };
+        let (theme, colors, whitespace) = baked_colours(cx);
         let (ignore_ws, show_invisibles) = (self.ignore_ws, self.show_invisibles);
         let Some(page) = self.page_mut() else { return };
         let Some((path, start, direction)) = page.files_view.pending_expand.clone() else {
@@ -338,7 +344,7 @@ impl PullRequestView {
             Some(&(old.clone(), new.clone())),
             ignore_ws,
             show_invisibles,
-            &dark_theme,
+            &theme,
             &colors,
             &whitespace,
         );
@@ -454,16 +460,33 @@ impl PullRequestView {
         cx.notify();
     }
 
+    fn split(&self, cx: &App) -> bool {
+        self.store
+            .read(cx)
+            .diff_split_for(self.session().as_deref())
+    }
+
+    fn wrap(&self, cx: &App) -> bool {
+        self.store
+            .read(cx)
+            .diff_word_wrap_for(self.session().as_deref())
+    }
+
     fn apply_option(&mut self, option: FilesOption, window: &mut Window, cx: &mut Context<Self>) {
         match option {
             FilesOption::Split => {
-                let split = self.store.read(cx).diff_split();
-                self.store
-                    .update(cx, |store, cx| store.set_diff_split(!split, cx));
+                let session = self.session();
+                self.store.update(cx, |store, cx| {
+                    let split = store.diff_split_for(session.as_deref());
+                    store.set_diff_split_for(session.as_deref(), !split, cx)
+                });
             }
-            FilesOption::Wrap => self
-                .store
-                .update(cx, |store, cx| store.toggle_diff_wrap(cx)),
+            FilesOption::Wrap => {
+                let session = self.session();
+                self.store.update(cx, |store, cx| {
+                    store.toggle_diff_wrap_for(session.as_deref(), cx)
+                })
+            }
             FilesOption::Whitespace => self.ignore_ws = !self.ignore_ws,
             FilesOption::Invisibles => self.show_invisibles = !self.show_invisibles,
             FilesOption::CollapseAll => self.set_all_collapsed(true, cx),
@@ -502,7 +525,7 @@ impl PullRequestView {
 
     fn scroll_to(&mut self, file: usize, cx: &mut Context<Self>) {
         if let Some(list) = self.page().and_then(|page| page.files_view.list.as_ref()) {
-            list.scroll_to_file(file);
+            list.scroll_to_file(file, cx);
         }
         cx.notify();
     }
@@ -541,7 +564,17 @@ impl PullRequestView {
             .collect()
     }
 
-    fn off_diff(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The card of comments not drawn on a diff line, which folds in with its first and out
+    /// with its last, holding its label and rows as it leaves.
+    fn off_diff(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let card = self.off_diff_card(cx);
+        let open = self.page()?.files_view.off_diff_open;
+        let kept = crate::motion::shown("pr-off-diff-card", card, SHOW, window, cx)?;
+        let chevron = crate::widgets::Chevron::new("pr-off-diff-chevron", open);
+        Some(self.off_diff_body(kept, open, chevron, window, cx))
+    }
+
+    fn off_diff_card(&self, cx: &mut Context<Self>) -> Option<(String, Vec<OffDiffRow>)> {
         let page = self.page()?;
         let conversation = page.conversation.data.as_ref()?;
         let inline: Vec<_> = self
@@ -577,112 +610,156 @@ impl PullRequestView {
             crate::tr!("pull_requests.files.off_diff", count = count.to_string())
         }
         .into_owned();
-        let open = page.files_view.off_diff_open;
+        let rows = pending
+            .into_iter()
+            .map(OffDiffRow::Pending)
+            .chain(threads.into_iter().map(OffDiffRow::Thread))
+            .collect();
+        Some((label, rows))
+    }
+
+    /// A review thread's row in the card of comments not drawn on a diff line; the pointer over
+    /// it fills it gradually.
+    fn off_diff_thread_row(
+        &self,
+        thread: &PullRequestReviewThread,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         let xs = cx.theme().tokens.typography.xs;
-        Some(
-            // `card` insets its content, and these rows are full-bleed hover targets that
-            // carry the card inset themselves (`card_header_row`).
-            v_flex()
-                .flex_none()
-                .mx_2()
-                .mb_1()
-                .rounded(material::radius_card(cx))
-                .bg(cx.theme().muted)
-                .child(
-                    material::accessible_clickable(
-                        material::card_header_row(cx),
-                        "pr-off-diff",
-                        gpui::Role::Button,
-                        label.clone(),
-                        cx,
-                    )
-                    .aria_expanded(open)
-                    .text_token(&xs)
-                    .cursor_pointer()
-                    .child(
-                        Icon::new(if open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .text_color(muted),
-                    )
-                    .child(label)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(page) = this.page_mut() {
-                            page.files_view.off_diff_open = !page.files_view.off_diff_open;
-                        }
-                        cx.notify();
-                    })),
-                )
-                .child(
-                    gpui_base::Collapsible::new().open(open).content(
-                        v_flex()
-                            .id("pr-off-diff-rows")
-                            .max_h(px(240.))
-                            .overflow_y_scroll()
-                            .pb_1()
-                            .children(pending)
-                            .children(threads.into_iter().map(|thread| {
-                                let line = thread
-                                    .anchor
-                                    .as_ref()
-                                    .map(|anchor| format!("{}:{}", thread.path, anchor.end_line))
-                                    .unwrap_or_else(|| thread.path.clone());
-                                let excerpt = thread
-                                    .comments
-                                    .first()
-                                    .map(|comment| {
-                                        comment.body.lines().next().unwrap_or_default().to_owned()
-                                    })
-                                    .unwrap_or_default();
-                                let id = thread.id.clone();
-                                material::accessible_clickable(
-                                    material::card_header_row(cx),
-                                    SharedString::from(format!("pr-off-diff-{}", thread.id)),
-                                    gpui::Role::Button,
-                                    format!("{line} {excerpt}"),
-                                    cx,
-                                )
-                                .text_token(&xs)
-                                .cursor_pointer()
-                                .hover(|row| row.bg(cx.theme().list_hover))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .max_w(px(220.))
-                                        .overflow_hidden()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .child(crate::widgets::fade_text(line)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .text_color(muted)
-                                        .child(crate::widgets::fade_text(excerpt)),
-                                )
-                                .when(thread.outdated, |row| {
-                                    row.child(material::semantic_chip(
-                                        crate::tr!("pull_requests.conversation.outdated")
-                                            .into_owned(),
-                                        cx.theme().secondary,
-                                        muted,
-                                        cx,
-                                    ))
-                                })
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.show_thread(&id, cx);
-                                    },
-                                ))
-                            })),
-                    ),
-                )
-                .into_any_element(),
+        let line = thread
+            .anchor
+            .as_ref()
+            .map(|anchor| format!("{}:{}", thread.path, anchor.end_line))
+            .unwrap_or_else(|| thread.path.clone());
+        let excerpt = thread
+            .comments
+            .first()
+            .map(|comment| comment.body.lines().next().unwrap_or_default().to_owned())
+            .unwrap_or_default();
+        let id = thread.id.clone();
+        let row_id = SharedString::from(format!("pr-off-diff-{}", thread.id));
+        let (fill, on_hover) = crate::motion::hover_fill(
+            crate::motion::Clock::Element,
+            row_id.clone(),
+            cx.theme().list_hover.opacity(0.),
+            cx.theme().list_hover,
+            &crate::material::HOVER.into(),
+            window,
+            cx,
+        );
+        material::accessible_clickable(
+            material::card_header_row(cx),
+            row_id,
+            gpui::Role::Button,
+            format!("{line} {excerpt}"),
+            cx,
         )
+        .text_token(&xs)
+        .cursor_pointer()
+        .bg(fill)
+        .on_hover(on_hover)
+        .child(
+            div()
+                .flex_none()
+                .max_w(px(220.))
+                .overflow_hidden()
+                .font_family(cx.theme().mono_font_family.clone())
+                .child(crate::widgets::fade_text(line)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_color(muted)
+                .child(crate::widgets::fade_text(excerpt)),
+        )
+        .when(thread.outdated, |row| {
+            row.child(material::semantic_chip(
+                crate::tr!("pull_requests.conversation.outdated").into_owned(),
+                cx.theme().secondary,
+                muted,
+                cx,
+            ))
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.show_thread(&id, cx);
+        }))
+        .into_any_element()
+    }
+
+    fn off_diff_body(
+        &self,
+        kept: crate::motion::Shown<(String, Vec<OffDiffRow>)>,
+        open: bool,
+        chevron: crate::widgets::Chevron,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (label, rows) = kept.value.clone();
+        let muted = cx.theme().muted_foreground;
+        let xs = cx.theme().tokens.typography.xs;
+        // A comment the diff comes to draw, or one written off it, folds out of or into the
+        // card, and the rows below it move up or down as it does.
+        let rows = rows.into_iter().map(|row| {
+            let key = match &row {
+                OffDiffRow::Pending(comment) => format!("pending-{}", comment.id),
+                OffDiffRow::Thread(thread) => format!("thread-{}", thread.id),
+            };
+            (SharedString::from(key), row)
+        });
+        let rows = crate::motion::keyed(
+            "pr-off-diff-rows",
+            rows,
+            ROWS,
+            window,
+            cx,
+            |_, row, window, cx| match row {
+                OffDiffRow::Pending(comment) => self.off_diff_pending_row(comment, cx),
+                OffDiffRow::Thread(thread) => self.off_diff_thread_row(thread, window, cx),
+            },
+        );
+        // `card` insets its content, and these rows are full-bleed hover targets that
+        // carry the card inset themselves (`card_header_row`).
+        let card = v_flex()
+            .flex_none()
+            .mx_2()
+            .mb_1()
+            .rounded(material::radius_card(cx))
+            .bg(cx.theme().muted)
+            .child(
+                material::accessible_clickable(
+                    material::card_header_row(cx),
+                    "pr-off-diff",
+                    gpui::Role::Button,
+                    label.clone(),
+                    cx,
+                )
+                .aria_expanded(open)
+                .text_token(&xs)
+                .cursor_pointer()
+                .child(chevron.text_color(muted))
+                .child(label)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(page) = this.page_mut() {
+                        page.files_view.off_diff_open = !page.files_view.off_diff_open;
+                    }
+                    cx.notify();
+                })),
+            )
+            .child(
+                crate::widgets::Collapsible::new("pr-off-diff-body", open).content(
+                    v_flex()
+                        .id("pr-off-diff-rows")
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
+                        .pb_1()
+                        .child(rows.render(v_flex().w_full())),
+                ),
+            );
+        kept.fold(card)
     }
 
     fn viewed_box(
@@ -694,15 +771,13 @@ impl PullRequestView {
         let entry = self.files_of()?.get(file)?.clone();
         let compact = self.compact(cx);
         let state = self.viewed_state(&entry.path);
-        let read_only = self
-            .store
-            .read(cx)
-            .session_status()
-            .is_none_or(|status| status.conversation_read_only);
+        let read_only = self.read_only(cx);
         let path = entry.path.clone();
         if state == Viewed::Unknown {
             let unreadable = self.page().is_some_and(|page| page.viewed.error.is_some());
-            return Some(
+            return Some(settle_viewed(
+                file,
+                false,
                 div()
                     .id(SharedString::from(format!("pr-viewed-unknown-{file}")))
                     .flex_none()
@@ -710,7 +785,7 @@ impl PullRequestView {
                         Icon::new(IconName::CircleQuestionMark)
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .tooltip(move |window, cx| {
+                    .with_tooltip(move |_, _| {
                         Tooltip::new(
                             crate::tr!(if unreadable {
                                 "pull_requests.files.viewed_unreadable"
@@ -719,10 +794,10 @@ impl PullRequestView {
                             })
                             .into_owned(),
                         )
-                        .build(window, cx)
                     })
                     .into_any_element(),
-            );
+                cx,
+            ));
         }
         let checked = state == Viewed::Marked;
         let tooltip = if read_only {
@@ -747,7 +822,9 @@ impl PullRequestView {
         if labelled && !compact {
             checkbox = checkbox.label(crate::tr!("pull_requests.files.viewed"));
         }
-        Some(
+        Some(settle_viewed(
+            file,
+            true,
             div()
                 .id(SharedString::from(format!("pr-viewed-box-{file}")))
                 .flex_none()
@@ -758,9 +835,10 @@ impl PullRequestView {
                 .when(compact, |cell| cell.size(px(material::TOUCH_TARGET)))
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(checkbox)
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
                 .into_any_element(),
-        )
+            cx,
+        ))
     }
 
     /// "%{count} files", with a "+" while pages remain.
@@ -777,7 +855,12 @@ impl PullRequestView {
         .into_owned()
     }
 
-    fn toolbar(&self, wide_column: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn toolbar(
+        &self,
+        wide_column: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let compact = self.compact(cx);
         let page = self.page();
         let files = page.and_then(|page| page.files.data.as_ref());
@@ -832,11 +915,25 @@ impl PullRequestView {
                 .id("pr-viewed-counter")
                 .flex_none()
                 .text_secondary(compact, cx)
-                .child(counter)
-                .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                .child(crate::motion::Sampled::new(move |window, cx| {
+                    crate::motion::cross_fade(
+                        "pr-viewed-count",
+                        counter,
+                        CHANGE,
+                        window,
+                        cx,
+                        |text, _, _| {
+                            div()
+                                .whitespace_nowrap()
+                                .child(text.clone())
+                                .into_any_element()
+                        },
+                    )
+                }))
+                .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
         });
-        let split = self.store.read(cx).diff_split();
-        let wrap = self.store.read(cx).diff_word_wrap();
+        let split = self.split(cx);
+        let wrap = self.wrap(cx);
         let all_collapsed = files.is_some_and(|files| {
             !files.files.is_empty() && files.files.iter().all(|file| self.collapsed(&file.path))
         });
@@ -875,11 +972,27 @@ impl PullRequestView {
                 crate::tr!("diff.toggle_invisibles").into_owned(),
             ),
         ];
+        // The file jump widens in as the file column narrows away, and back, on the view's
+        // clock as the column's is; the bar's gap after it goes with it.
+        let gap = cx.theme().tokens.spacing.xs;
+        let file_jump = self
+            .motion
+            .shown(
+                "file-jump",
+                (!wide_column).then_some(count_label),
+                SHOW,
+                window,
+                cx,
+            )
+            .map(|shown| {
+                div()
+                    .flex_none()
+                    .mr(-gap * (1. - shown.progress()))
+                    .child(shown.fold_across(self.file_jump(shown.value.clone(), cx)))
+            });
         let mut toolbar = material::bar("pr-files-toolbar", material::Bar::Toolbar, compact, cx)
             .items_center()
-            .when(!wide_column, |toolbar| {
-                toolbar.child(self.file_jump(count_label, cx))
-            })
+            .children(file_jump)
             .children(viewed_counter)
             .children(self.review_entry(cx))
             .child(div().flex_1());
@@ -1018,7 +1131,7 @@ impl PullRequestView {
         let top = self
             .page()
             .and_then(|page| page.files_view.list.as_ref())
-            .and_then(|list| list.top_file(self.store.read(cx).diff_split()));
+            .and_then(|list| list.top_file(self.split(cx)));
         let muted = cx.theme().muted_foreground;
         let (directory, name) = match file.path.rsplit_once('/') {
             Some((directory, name)) => (format!("{directory}/"), name.to_owned()),
@@ -1036,7 +1149,8 @@ impl PullRequestView {
             .as_ref()
             .map(|previous| format!("{previous} → {}", file.path))
             .unwrap_or_else(|| file.path.clone());
-        material::selectable_row(
+        // The fill follows the scroll from one file to the next, gliding.
+        material::selectable_row_gliding(
             material::accessible_clickable(
                 h_flex(),
                 SharedString::from(format!("pr-file-row-{in_popover}-{index}")),
@@ -1044,6 +1158,8 @@ impl PullRequestView {
                 file.path.clone(),
                 cx,
             ),
+            &self.motion,
+            SharedString::from(format!("pr-file-fill-{in_popover}-{index}")),
             top == Some(index) && !in_popover,
             compact,
             cx,
@@ -1095,7 +1211,7 @@ impl PullRequestView {
             self.viewed_box(index, false, cx)
                 .filter(|_| !in_popover || compact),
         )
-        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .with_tooltip(move |_, _| Tooltip::new(tooltip.clone()))
         .on_click(cx.listener(move |this, _, window, cx| {
             this.scroll_to(index, cx);
             if in_popover {
@@ -1167,7 +1283,7 @@ impl PullRequestView {
         let count = self.count_label();
         v_flex()
             .flex_none()
-            .w(px(280.))
+            .w(FILE_COLUMN_WIDTH)
             .h_full()
             .border_r_1()
             .border_color(cx.theme().border)
@@ -1184,6 +1300,14 @@ impl PullRequestView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let loading = self
+            .page()
+            .is_some_and(|page| page.files.data.is_none() && page.files.error.is_none());
+        let body = self.files_body(window, cx);
+        self.settle_body("files", loading, body, window, cx)
+    }
+
+    fn files_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_list(cx);
         self.apply_text(cx);
         if let Some(failure) = self
@@ -1214,14 +1338,14 @@ impl PullRequestView {
             return material::empty_state(
                 Icon::new(IconName::File),
                 crate::tr!("pull_requests.files.empty_title").into_owned(),
-                crate::tr!("pull_requests.files.empty_desc").into_owned(),
+                String::new(),
                 cx,
             )
             .into_any_element();
         }
         // The next page is read as the reader nears the end of what is drawn.
-        let split = self.store.read(cx).diff_split();
-        let wrap = self.store.read(cx).diff_word_wrap();
+        let split = self.split(cx);
+        let wrap = self.wrap(cx);
         let near_end = page
             .files_view
             .list
@@ -1242,37 +1366,84 @@ impl PullRequestView {
         let wide = !compact
             && f32::from(window.viewport_size().width) >= FILE_COLUMN_MIN_WIDTH
             && self.file_column;
-        let partial = (files.next_cursor.is_none() && !files.complete).then(|| {
-            let listed = files.files.len();
-            let text = if files.changed_files > listed as u64 {
-                crate::tr!(
-                    "pull_requests.files.partial",
-                    shown = listed.to_string(),
-                    total = files.changed_files.to_string(),
-                    host_name = self.host_name(cx)
-                )
-            } else {
-                crate::tr!("pull_requests.files.partial_unknown")
-            }
-            .into_owned();
-            div().mx_2().mb_1().child(render_notice(text, cx))
+        let partial = crate::motion::shown(
+            "pr-files-partial",
+            (files.next_cursor.is_none() && !files.complete).then(|| {
+                let listed = files.files.len();
+                if files.changed_files > listed as u64 {
+                    crate::tr!(
+                        "pull_requests.files.partial",
+                        shown = listed.to_string(),
+                        total = files.changed_files.to_string(),
+                        host_name = self.host_name(cx),
+                        pr = self.noun(cx).pr
+                    )
+                } else {
+                    crate::tr!("pull_requests.files.partial_unknown", pr = self.noun(cx).pr)
+                }
+                .into_owned()
+            }),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|kept| {
+            kept.fold(
+                div()
+                    .mx_2()
+                    .mb_1()
+                    .child(render_notice(kept.value.clone(), cx)),
+            )
         });
         // Keep the paging footer until prepared rows are appended, so the old
         // list cannot clamp to a larger viewport before the new page exists.
         let footer = (page.files_view.page_loading
             || (page.files_view.rendering && page.files_view.list.is_some())
             || page.files_view.page_error.is_some())
-        .then(|| {
-            let failed = page.files_view.page_error.is_some();
-            material::bar("pr-files-footer", material::Bar::Toolbar, compact, cx)
-                .items_center()
-                .text_secondary(compact, cx)
-                .when(!failed, |row| {
-                    row.child(crate::widgets::spinner::Spinner::new())
+        .then(|| page.files_view.page_error.is_some());
+        let listed = page.files_view.list.is_some();
+        // The footer comes and goes, and its loading and failed lines cross-fade.
+        let footer =
+            crate::motion::shown("pr-files-footer", footer, SHOW, window, cx).map(|kept| {
+                let failed = kept.value;
+                let failing = gpui_base::motion::transition(
+                    "pr-files-footer-failed",
+                    if failed { 1. } else { 0. },
+                    gpui_base::motion::Transition::new(GLIDE),
+                    window,
+                    cx,
+                );
+                let loading_line = || {
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(crate::widgets::spinner::Spinner::new())
                         .child(crate::tr!("pull_requests.files.loading_more"))
-                })
-                .when(failed, |row| {
-                    row.child(crate::tr!("pull_requests.files.rest_failed"))
+                };
+                let bar = material::bar("pr-files-footer", material::Bar::Toolbar, compact, cx)
+                    .items_center()
+                    .text_secondary(compact, cx)
+                    .when(failed && failing < 1., |row| {
+                        row.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .px(cx.theme().tokens.spacing.sm)
+                                .opacity(1. - failing)
+                                .child(loading_line()),
+                        )
+                    })
+                    .when(!failed, |row| {
+                        row.child(loading_line().opacity(1. - failing))
+                    })
+                    .when(failed, |row| {
+                        row.child(
+                            div()
+                                .opacity(failing)
+                                .child(crate::tr!("pull_requests.files.rest_failed")),
+                        )
                         .child(
                             Button::new("pr-files-rest-retry")
                                 .outline()
@@ -1285,14 +1456,17 @@ impl PullRequestView {
                                     cx.notify();
                                 })),
                         )
-                })
-        });
-        let body = if page.files_view.list.is_some() {
+                    });
+                kept.fold(bar)
+            });
+        // The list is built in the background after the read; it cross-fades over the skeleton.
+        let body = if listed {
             render_list(self, "pr-files-body", split, wrap, window, cx)
         } else {
             material::loading_skeleton(cx)
         };
-        let off_diff = self.off_diff(cx);
+        let body = self.settle_body("files-list", !listed, body, window, cx);
+        let off_diff = self.off_diff(window, cx);
         let content = v_flex()
             .flex_1()
             .min_w_0()
@@ -1307,19 +1481,39 @@ impl PullRequestView {
                     .child(body),
             )
             .children(footer);
-        let review_bar = self.review_bar(cx);
+        let review_bar = self.review_bar(window, cx);
+        // The file column widens in beside the diff and narrows away, laid out at its own width
+        // and clipped meanwhile, so its rows do not reflow; one on its way out takes no input.
+        let column = self.motion.transition(
+            "file-column",
+            if wide { 1f32 } else { 0. },
+            GLIDE,
+            window,
+            cx,
+        );
+        let column = (column > 0.).then(|| {
+            div()
+                .relative()
+                .flex_none()
+                .h_full()
+                .w(FILE_COLUMN_WIDTH * column)
+                .overflow_hidden()
+                .opacity(column)
+                .child(self.file_column(window, cx))
+                .when(!wide, |column| column.child(crate::motion::shield()))
+        });
         v_flex()
             .size_full()
             .min_h_0()
             .on_action(cx.listener(Self::on_option))
-            .child(self.toolbar(wide, cx))
+            .child(self.toolbar(wide, window, cx))
             .children(review_bar)
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .when(wide, |row| row.child(self.file_column(window, cx)))
+                    .children(column)
                     .child(content),
             )
             .into_any_element()
@@ -1479,19 +1673,14 @@ impl DiffListHost for PullRequestView {
     fn header_leading(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let path = self.files_of()?.get(file)?.path.clone();
         let collapsed = self.collapsed(&path);
+        let muted = cx.theme().muted_foreground;
+        let id = SharedString::from(format!("pr-file-chevron-{file}"));
         Some(
             div()
-                .id(SharedString::from(format!("pr-file-chevron-{file}")))
+                .id(id.clone())
                 .flex_none()
-                .child(
-                    Icon::new(if collapsed {
-                        IconName::ChevronRight
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .text_color(cx.theme().muted_foreground),
-                )
-                .tooltip(move |window, cx| {
+                .child(crate::widgets::Chevron::new(id, !collapsed).text_color(muted))
+                .with_tooltip(move |_, _| {
                     Tooltip::new(
                         crate::tr!(if collapsed {
                             "pull_requests.files.expand_file"
@@ -1500,7 +1689,6 @@ impl DiffListHost for PullRequestView {
                         })
                         .into_owned(),
                     )
-                    .build(window, cx)
                 })
                 .into_any_element(),
         )
@@ -1508,13 +1696,27 @@ impl DiffListHost for PullRequestView {
 
     fn header_note(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let path = &self.files_of()?.get(file)?.path;
-        (self.viewed_state(path) == Viewed::Changed).then(|| {
-            div()
-                .text_secondary(false, cx)
-                .text_color(cx.theme().warning)
-                .child(crate::tr!("pull_requests.files.changed_since_viewed"))
-                .into_any_element()
-        })
+        let changed = self.viewed_state(path) == Viewed::Changed;
+        let text = div()
+            .text_secondary(false, cx)
+            .text_color(cx.theme().warning);
+        Some(
+            crate::motion::Sampled::new(move |window, cx| {
+                crate::motion::shown(
+                    gpui::ElementId::from((gpui::ElementId::from(file), "pr-changed-since-viewed")),
+                    changed.then_some(()),
+                    SHOW,
+                    window,
+                    cx,
+                )
+                .map(|kept| {
+                    kept.fade(text.child(crate::tr!("pull_requests.files.changed_since_viewed")))
+                })
+                // Out of flow, so an absent note takes no gap in the header.
+                .unwrap_or_else(|| div().absolute().into_any_element())
+            })
+            .into_any_element(),
+        )
     }
 
     fn header_trailing(&self, file: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1603,6 +1805,30 @@ impl DiffListHost for PullRequestView {
     }
 }
 
+/// The colours a rendered file bakes into its text, from the shown mode's
+/// palette at rest: the file is kept until the mode changes again, so
+/// colours sampled while the theme glides would stay.
+fn baked_colours(
+    cx: &App,
+) -> (
+    std::sync::Arc<crate::highlight::HighlightTheme>,
+    DiffColors,
+    HighlightStyle,
+) {
+    let theme = crate::theme::palette(cx.theme().mode, cx);
+    (
+        theme.highlight_theme.clone(),
+        DiffColors {
+            added_word_bg: theme.success.opacity(0.30),
+            removed_word_bg: theme.danger.opacity(0.28),
+        },
+        HighlightStyle {
+            color: Some(theme.muted_foreground),
+            ..Default::default()
+        },
+    )
+}
+
 /// One file of the pull request through the diff renderer: the hunks alone until its text at
 /// the head has been read, then the whole file.
 fn render(
@@ -1639,4 +1865,41 @@ fn render(
         rendered.removed = file.deletions;
     }
     rendered
+}
+
+/// The viewed box once the host says whether the file was viewed, faded in over the
+/// question mark that held its place.
+fn settle_viewed(file: usize, known: bool, cell: AnyElement, cx: &App) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    crate::motion::Sampled::new(move |window, cx| {
+        let unknown = gpui_base::motion::transition(
+            gpui::ElementId::from((gpui::ElementId::from(file), "pr-viewed-known")),
+            if known { 0. } else { 1. },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .opacity(if known { 1. - unknown } else { 1. })
+                    .child(cell),
+            )
+            .when(known && unknown > 0., |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(unknown)
+                        .child(Icon::new(IconName::CircleQuestionMark).text_color(muted)),
+                )
+            })
+            .into_any_element()
+    })
+    .into_any_element()
 }

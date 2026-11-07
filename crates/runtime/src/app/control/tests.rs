@@ -26,6 +26,7 @@ fn caller(project: &str, grant: ControlGrant) -> Caller {
         thread_id: "caller".into(),
         project_id: Some(project.into()),
         grant,
+        subagent: false,
         ancestors: Vec::new(),
     }
 }
@@ -120,10 +121,13 @@ fn control_tools_follow_the_grant_and_the_setting() {
     );
     cx.run_until_parked();
     let expected = |grant: &ControlGrant| -> Vec<String> {
-        let mut names: Vec<String> = control_mcp::tool_descriptions(grant)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
+        let mut names: Vec<String> = control_mcp::tool_descriptions(&control_mcp::ThreadAccess {
+            grant: grant.clone(),
+            subagent: false,
+        })
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
         names.sort();
         names
     };
@@ -341,12 +345,6 @@ fn control_calls_outside_the_grant_are_refused_with_the_reason() {
         tiers: ControlTier::ALL.into_iter().collect(),
         categories: ControlCategory::ALL.into_iter().collect(),
     };
-    assert!(
-        control_mcp::tool_descriptions(&every_category)
-            .iter()
-            .all(|(name, _)| !name.contains("approv")),
-        "approvals are never a tool"
-    );
     state.read(|state| {
         for patch in [
             SettingsPatch::ControlEnabled(false),
@@ -1024,7 +1022,7 @@ fn patch_settings_applies_allowed_patches_only() {
             state.settings.auto_settle_after_days,
             before.auto_settle_after_days
         );
-        assert_eq!(state.settings.orchestrate, before.orchestrate);
+        assert_eq!(state.settings.subagents, before.subagents);
 
         let wrap = !state.settings.word_wrap_diffs;
         call(

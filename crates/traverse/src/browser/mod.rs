@@ -45,12 +45,17 @@ pub type StaticBundle = &'static [(&'static str, &'static [u8])];
 pub type HostingHandler =
     Arc<dyn Fn(HostingAction) -> Result<HostingState, ProtocolError> + Send + Sync>;
 
+/// A new stream of the Traverse host's hosting changes, for a browser that
+/// follows them; see [`crate::host::TraverseHost::hosting_events`].
+pub type HostingEvents = Arc<dyn Fn() -> async_channel::Receiver<HostingState> + Send + Sync>;
+
 pub struct BrowserConfig {
     pub listen: SocketAddr,
     pub host_name: String,
     pub data_dir: PathBuf,
     pub static_bundle: Option<StaticBundle>,
     pub hosting: Option<HostingHandler>,
+    pub hosting_events: Option<HostingEvents>,
 }
 
 /// Connections admitted at once, counting those still reading their request.
@@ -102,11 +107,15 @@ struct Shared {
     auth: Mutex<AuthStore>,
     static_bundle: Option<StaticBundle>,
     hosting: Option<HostingHandler>,
+    hosting_events: Option<HostingEvents>,
     /// Closed to end every connection.
     shutdown: async_channel::Receiver<()>,
     connections: AtomicUsize,
     /// Sockets open per browser device, for the hosting list.
     live: Mutex<HashMap<uuid::Uuid, usize>>,
+    /// Marked when the browser devices in the hosting list change: one
+    /// logs in, renames itself, connects, disconnects or is revoked.
+    devices_changed: tokio::sync::watch::Sender<()>,
 }
 
 pub struct BrowserServer {
@@ -172,9 +181,11 @@ pub fn serve(mux: HostMux, config: BrowserConfig) -> io::Result<BrowserServer> {
         auth: Mutex::new(auth),
         static_bundle: config.static_bundle,
         hosting: config.hosting,
+        hosting_events: config.hosting_events,
         shutdown: shutdown_rx.clone(),
         connections: AtomicUsize::new(0),
         live: Mutex::new(HashMap::new()),
+        devices_changed: tokio::sync::watch::Sender::new(()),
     });
     let accept_shared = shared.clone();
     let accept = runtime().spawn(async move {
@@ -368,6 +379,7 @@ where
         } else if auth.verify_password(&request.password) {
             let details = request.device.details();
             let token = auth.issue_token(request.device.device_id, details)?;
+            shared.devices_changed.send_replace(());
             Ok(("200 OK", serde_json::json!({"host_id":auth.host_id,"host_name":auth.host_name,"token":token})))
         } else {
             Ok(("403 Forbidden", serde_json::json!({"error":"invalid password or temporarily locked"})))
@@ -449,6 +461,7 @@ struct Live {
 impl Live {
     fn new(shared: Arc<Shared>, device: uuid::Uuid) -> Self {
         *shared.live.lock().unwrap().entry(device).or_default() += 1;
+        shared.devices_changed.send_replace(());
         Self { shared, device }
     }
 }
@@ -462,6 +475,7 @@ impl Drop for Live {
                 live.remove(&self.device);
             }
         }
+        self.shared.devices_changed.send_replace(());
     }
 }
 
@@ -541,6 +555,7 @@ where
         {
             log::warn!("could not record the connecting device's details: {error}");
         }
+        shared.devices_changed.send_replace(());
     }
     let hello_ok = {
         let auth = shared.auth.lock().unwrap();
@@ -564,16 +579,19 @@ where
     let scope = auth::hex_hash(token.as_bytes());
     let relay = async {
         let mut unanswered_pings = 0_u8;
+        let mut following: Option<Following> = None;
         loop {
             enum Input {
                 WebSocket(Option<Result<Message, tokio_tungstenite::tungstenite::Error>>),
                 Host(Result<String, async_channel::RecvError>),
+                Hosting,
                 Ping,
                 Shutdown,
             }
             let input = tokio::select! {
                 message = websocket.next() => Input::WebSocket(message),
                 line = connection.from_host.recv() => Input::Host(line),
+                () = Following::changed(&mut following) => Input::Hosting,
                 _ = tokio::time::sleep(PING_INTERVAL) => Input::Ping,
                 _ = shared.shutdown.recv() => Input::Shutdown,
             };
@@ -589,22 +607,7 @@ where
                         let _ = websocket.close(None).await;
                         break;
                     };
-                    if let Ok(tcode_protocol::ClientMessage {
-                        principal: _,
-                        id,
-                        key: _,
-                        payload:
-                            tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
-                                action,
-                            }),
-                    }) = serde_json::from_value(value.clone())
-                    {
-                        let reply = tcode_protocol::HostMessage::QueryResult {
-                            id,
-                            result: shared
-                                .hosting(action)
-                                .map(tcode_protocol::QueryResponse::Hosting),
-                        };
+                    if let Some(reply) = answer(&shared, &value, &mut following) {
                         websocket
                             .send(Message::Text(
                                 serde_json::to_string(&reply)
@@ -642,6 +645,27 @@ where
                     .await
                     .map_err(io::Error::other)?,
                 Input::Host(Err(_)) => break,
+                Input::Hosting => {
+                    let Some(follow) = following.as_mut() else {
+                        continue;
+                    };
+                    let Ok(state) = shared.hosting(HostingAction::State) else {
+                        continue;
+                    };
+                    if crate::host::same_hosting(&follow.last, &state) {
+                        continue;
+                    }
+                    follow.last = state.clone();
+                    let event = crate::host::hosting_event(None, state);
+                    websocket
+                        .send(Message::Text(
+                            serde_json::to_string(&event)
+                                .map_err(io::Error::other)?
+                                .into(),
+                        ))
+                        .await
+                        .map_err(io::Error::other)?;
+                }
                 Input::Ping => {
                     if unanswered_pings >= 2 {
                         let _ = websocket.close(None).await;
@@ -669,6 +693,88 @@ where
     result
 }
 
+/// The reply to a line this listener answers itself rather than the host:
+/// the hosting query, and following the hosting state.
+fn answer(
+    shared: &Shared,
+    line: &serde_json::Value,
+    following: &mut Option<Following>,
+) -> Option<tcode_protocol::HostMessage> {
+    use tcode_protocol::{ClientMessage, ClientPayload, HostMessage, Subscription, Topic};
+    let ClientMessage { id, payload, .. } = serde_json::from_value(line.clone()).ok()?;
+    match payload {
+        ClientPayload::Query(tcode_protocol::Query::Hosting { action }) => {
+            Some(HostMessage::QueryResult {
+                id,
+                result: shared
+                    .hosting(action)
+                    .map(tcode_protocol::QueryResponse::Hosting),
+            })
+        }
+        ClientPayload::Subscribe(Subscription {
+            topic: Topic::Hosting,
+            ..
+        }) => {
+            let native = shared.hosting_events.as_ref().map(|events| events());
+            let devices = shared.devices_changed.subscribe();
+            let state = shared.hosting(HostingAction::State);
+            *following = state.as_ref().ok().map(|state| Following {
+                native,
+                devices,
+                last: state.clone(),
+            });
+            Some(crate::host::hosting_reply(id, state))
+        }
+        ClientPayload::Unsubscribe(Subscription {
+            topic: Topic::Hosting,
+            ..
+        }) => {
+            *following = None;
+            Some(HostMessage::Ack {
+                id,
+                result: Ok(tcode_protocol::CommandResponse::Unit),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// A browser's hosting subscription: the Traverse host's changes, and this
+/// listener's own browser devices'.
+struct Following {
+    native: Option<async_channel::Receiver<HostingState>>,
+    devices: tokio::sync::watch::Receiver<()>,
+    /// What the browser was last sent.
+    last: HostingState,
+}
+
+impl Following {
+    /// Resolves when what the hosting list shows may have changed; never
+    /// without a subscription.
+    async fn changed(following: &mut Option<Self>) {
+        let Some(Self {
+            native, devices, ..
+        }) = following
+        else {
+            return std::future::pending().await;
+        };
+        let native = async {
+            match native {
+                Some(native) if native.recv().await.is_ok() => {}
+                _ => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            () = native => {}
+            changed = devices.changed() => {
+                if changed.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+}
+
 async fn receive_hello<S>(websocket: &mut WebSocketStream<S>) -> Option<serde_json::Value>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -692,7 +798,10 @@ impl Shared {
                 Ok(device) => {
                     let revoked = self.auth.lock().unwrap().revoke(device);
                     match revoked {
-                        Ok(true) => HostingAction::State,
+                        Ok(true) => {
+                            self.devices_changed.send_replace(());
+                            HostingAction::State
+                        }
                         Ok(false) => HostingAction::RevokeDevice(id),
                         Err(error) => {
                             log::error!("could not persist the revocation: {error}");

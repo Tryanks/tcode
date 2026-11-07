@@ -20,6 +20,9 @@ use gpui_base::{h_flex, v_flex};
 use crate::store::WorkspaceStore;
 use tcode_protocol::CommandResponse;
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Whether this build can put up a directory picker at all.
 const NATIVE_DIRECTORY_PICKER: bool = cfg!(feature = "native-dialogs");
 
@@ -249,7 +252,7 @@ impl ChangeProjectRootDialog {
 }
 
 impl Render for ChangeProjectRootDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let can_browse = self.can_browse(cx);
         let path_hint = self
             .store
@@ -313,21 +316,39 @@ impl Render for ChangeProjectRootDialog {
                             .child(crate::tr!("sidebar.change_project_root_move_help")),
                     ),
             )
-            .when(self.busy, |column| {
-                column.child(
-                    div()
-                        .text_secondary(false, cx)
-                        .child(crate::tr!("sidebar.change_project_root_working")),
+            .children(
+                crate::motion::shown(
+                    "change-project-root-working",
+                    self.busy.then_some(()),
+                    SHOW,
+                    window,
+                    cx,
                 )
-            })
-            .when_some(self.error.clone(), |column, error| {
-                column.child(
-                    div()
-                        .text_secondary(false, cx)
-                        .text_color(cx.theme().danger)
-                        .child(error),
+                .map(|working| {
+                    working.fold(
+                        div()
+                            .text_secondary(false, cx)
+                            .child(crate::tr!("sidebar.change_project_root_working")),
+                    )
+                }),
+            )
+            .children(
+                crate::motion::shown(
+                    "change-project-root-error",
+                    self.error.clone(),
+                    SHOW,
+                    window,
+                    cx,
                 )
-            })
+                .map(|error| {
+                    error.fold(
+                        div()
+                            .text_secondary(false, cx)
+                            .text_color(cx.theme().danger)
+                            .child(error.value.clone()),
+                    )
+                }),
+            )
     }
 }
 

@@ -29,6 +29,10 @@ pub enum Destination {
     /// *that a detail is open* is navigation and belongs here.
     SettingsSection,
     SettingsThreadRules,
+    /// One Git platform, managed on a phone's page pushed over Git Platforms.
+    SettingsSourceControlHost,
+    /// One harness's settings, a page on a compact window.
+    SettingsHarness,
     /// The phone's page for pinning, settling and reordering threads by handle.
     ArrangeThreads,
 }
@@ -82,6 +86,8 @@ impl NavigationSnapshot {
                 Destination::Settings
                     | Destination::SettingsSection
                     | Destination::SettingsThreadRules
+                    | Destination::SettingsSourceControlHost
+                    | Destination::SettingsHarness
                     | Destination::ArrangeThreads
                     | Destination::Pair
                     // A cold start reads the pull request afresh from its thread.
@@ -125,7 +131,11 @@ impl Destination {
     pub fn route(self) -> Route {
         match self {
             Self::Hosts | Self::Pair => Route::Hosts,
-            Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => Route::Settings,
+            Self::Settings
+            | Self::SettingsSection
+            | Self::SettingsThreadRules
+            | Self::SettingsSourceControlHost
+            | Self::SettingsHarness => Route::Settings,
             Self::Threads
             | Self::Thread
             | Self::Panel
@@ -146,7 +156,11 @@ impl Destination {
             Self::Thread => "mobile.thread",
             Self::Panel => "chat.panels",
             Self::PullRequest => "pull_requests.title",
-            Self::Settings | Self::SettingsSection | Self::SettingsThreadRules => "settings.title",
+            Self::Settings
+            | Self::SettingsSection
+            | Self::SettingsThreadRules
+            | Self::SettingsSourceControlHost
+            | Self::SettingsHarness => "settings.title",
         })
         .into_owned()
         .into()
@@ -162,7 +176,12 @@ pub struct WindowState {
     /// Where the window has been, oldest first. Never empty: `history[0]` is
     /// [`Destination::Hosts`], the root the platform's Back gesture falls off.
     history: Vec<Destination>,
+    /// Whether the palette is open. A closed palette stays on screen while it
+    /// leaves (see [`Self::palette_mounted`]).
     pub palette_open: bool,
+    /// Closed, with the palette's presence not yet gone; the palette clears
+    /// it ([`Self::palette_left`]).
+    palette_leaving: bool,
     /// Whether the palette focuses its search input when it opens. A tap on
     /// the search pill wants the keyboard; the mobile "+" button lists
     /// projects to tap and must not raise it.
@@ -179,6 +198,7 @@ impl WindowState {
             compact: false,
             history: vec![Destination::Hosts],
             palette_open: false,
+            palette_leaving: false,
             palette_focuses_query: true,
             sidebar_collapsed,
             quit_prompt_epoch: 0,
@@ -248,6 +268,33 @@ impl WindowState {
         cx.notify();
     }
 
+    /// Stand a thread's page on the topmost thread page, in place of what
+    /// stood on it: the thread beneath stays a page to come back to.
+    /// [`Self::go`] does nothing on a thread page, where this is the point.
+    pub(crate) fn stack_thread(&mut self, cx: &mut Context<Self>) {
+        if let Some(at) = self.thread_page_at() {
+            self.history.truncate(at + 1);
+            self.history.push(Destination::Thread);
+            cx.notify();
+        }
+    }
+
+    /// Take out the `count` topmost thread pages; what stands on them stays.
+    pub(crate) fn unstack_threads(&mut self, count: usize, cx: &mut Context<Self>) {
+        for _ in 0..count {
+            if let Some(at) = self.thread_page_at() {
+                self.history.remove(at);
+                cx.notify();
+            }
+        }
+    }
+
+    fn thread_page_at(&self) -> Option<usize> {
+        self.history
+            .iter()
+            .rposition(|destination| *destination == Destination::Thread)
+    }
+
     /// Leave the pairing page for the Machines page it was opened over. Wide,
     /// [`Self::back`] leaves the whole Hosts route, Pair included.
     pub fn close_pair(&mut self, cx: &mut Context<Self>) {
@@ -300,13 +347,6 @@ impl WindowState {
         cx.notify();
     }
 
-    /// "Show me this thread." It is a navigation intent, not a layout decision:
-    /// every width emits it and the shell decides how to present it — a wide
-    /// window already shows the thread beside the list, a compact one pushes it.
-    pub fn open_thread(&mut self, cx: &mut Context<Self>) {
-        cx.emit(OpenThread);
-    }
-
     /// Sidebar-driven conversation navigation replaces the wide Hosts visit
     /// with Chat. Compact keeps the visit on its stack so Back still returns
     /// through every page exactly as it did before.
@@ -338,7 +378,9 @@ impl WindowState {
 
     /// Switch to the settings route (closes the palette).
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        // Settings replaces the window the palette would leave over.
         self.palette_open = false;
+        self.palette_leaving = false;
         self.go(Destination::Settings, cx);
     }
 
@@ -351,43 +393,72 @@ impl WindowState {
     }
 
     pub fn open_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = true;
-        self.palette_focuses_query = true;
-        cx.notify();
+        self.show_palette(true, cx);
     }
 
     /// Open the palette as a list to tap through, leaving the search input
     /// unfocused so no software keyboard comes up.
     pub fn open_palette_without_keyboard(&mut self, cx: &mut Context<Self>) {
+        self.show_palette(false, cx);
+    }
+
+    fn show_palette(&mut self, focuses_query: bool, cx: &mut Context<Self>) {
         self.palette_open = true;
-        self.palette_focuses_query = false;
+        self.palette_leaving = false;
+        self.palette_focuses_query = focuses_query;
         cx.notify();
     }
 
+    /// Whether the palette is on screen: open, or still leaving after a
+    /// close. Its host keeps it mounted meanwhile. A wide window draws the
+    /// palette only on the Chat route, so on any other a leaving palette is
+    /// gone.
+    pub fn palette_mounted(&self) -> bool {
+        self.palette_open || (self.palette_leaving && (self.compact || self.route() == Route::Chat))
+    }
+
+    /// Whether a closed palette is still leaving.
+    pub(crate) fn palette_leaving(&self) -> bool {
+        self.palette_leaving
+    }
+
+    /// The palette leaves mounted and inert until its presence is gone
+    /// ([`Self::palette_left`]), then unmounts.
     pub fn close_palette(&mut self, cx: &mut Context<Self>) {
+        if !self.palette_open {
+            return;
+        }
         self.palette_open = false;
+        self.palette_leaving = true;
         cx.notify();
+    }
+
+    /// The closed palette's presence is gone.
+    pub(crate) fn palette_left(&mut self, cx: &mut Context<Self>) {
+        if self.palette_leaving {
+            self.palette_leaving = false;
+            cx.notify();
+        }
     }
 
     pub fn toggle_palette(&mut self, cx: &mut Context<Self>) {
-        self.palette_open = !self.palette_open;
-        cx.notify();
+        if self.palette_open {
+            self.close_palette(cx);
+        } else {
+            self.open_palette(cx);
+        }
     }
 }
 
 /// The top-level window surface: the chat workspace, the hosts list or
 /// settings. Derived from [`WindowState::destination`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Route {
     #[default]
     Chat,
     Hosts,
     Settings,
 }
-
-#[derive(Clone, Copy)]
-pub struct OpenThread;
-impl EventEmitter<OpenThread> for WindowState {}
 
 #[derive(Clone, Copy)]
 pub(crate) struct OpenPanel(pub NavigationPanel);

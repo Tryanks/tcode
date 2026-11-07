@@ -15,6 +15,12 @@ pub const MAX_EDGE_PX: u32 = 2048;
 /// across the internet (tunnel or relay). Adjustable on the device.
 pub const DEFAULT_REMOTE_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Largest non-image file a client uploads to the host. Files are carried in
+/// chunks, so this bounds the host's disk and a phone's memory, not the wire.
+pub const MAX_UPLOAD_BYTES: u64 = 256 * 1024 * 1024;
+/// Bytes of an upload carried by one protocol message.
+pub const UPLOAD_CHUNK_BYTES: usize = 512 * 1024;
+
 /// Whether `ext` is safe to append to a generated attachment file name.
 pub fn is_safe_extension(ext: &str) -> bool {
     !ext.is_empty() && ext.len() <= 8 && ext.bytes().all(|byte| byte.is_ascii_alphanumeric())
@@ -40,6 +46,26 @@ pub fn mime_from_path(path: &Path) -> String {
     .to_string()
 }
 
+/// Whether a file of this type goes to the model as an image; anything else
+/// reaches it as a path in the message text.
+pub fn is_image_attachment(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/bmp"
+    )
+}
+
+/// The message text with attached files' paths appended, one per line. This
+/// is exactly what the model reads and the timeline shows.
+pub fn text_with_file_paths(text: &str, paths: &[String]) -> String {
+    let paths = paths.join("\n");
+    match (text.is_empty(), paths.is_empty()) {
+        (_, true) => text.to_string(),
+        (true, false) => paths,
+        (false, false) => format!("{text}\n\n{paths}"),
+    }
+}
+
 /// A rejected attachment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachError {
@@ -55,10 +81,7 @@ pub fn validate_attachment(
     size: u64,
     current_count: usize,
 ) -> Result<(), AttachError> {
-    if !matches!(
-        mime,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/bmp"
-    ) {
+    if !is_image_attachment(mime) {
         return Err(AttachError::UnsupportedType {
             name: name.to_string(),
         });

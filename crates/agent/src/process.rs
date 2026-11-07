@@ -25,7 +25,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// the pipes whoever runs the parent reads from. A child spawned with
 /// `Stdio::inherit` still gets them: std hands it an inheritable duplicate.
 /// No-op elsewhere.
-pub fn keep_own_stdio_from_children() {
+fn keep_own_stdio_from_children() {
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle as _;
@@ -51,18 +51,64 @@ pub fn keep_own_stdio_from_children() {
 }
 
 /// A blocking `std::process::Command` with the console suppressed.
-pub(crate) fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+///
+/// On Windows a package manager's `.cmd` shim is started as what it runs
+/// (see `cmd_shim`), so its arguments never pass through `cmd.exe`.
+pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     keep_own_stdio_from_children();
-    #[cfg_attr(not(windows), allow(unused_mut))]
+    let program = program.as_ref();
+    let shim = if cfg!(windows) {
+        crate::cmd_shim::launch(std::path::Path::new(program))
+    } else {
+        None
+    };
     // Approved constructor: this is the helper every other site must use.
     #[allow(clippy::disallowed_methods)]
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = std::process::Command::new(
+        shim.as_ref()
+            .map_or(program, |shim| shim.program.as_os_str()),
+    );
+    if let Some(shim) = shim {
+        cmd.args(shim.args);
+        if let Some(node_path) = shim.node_path {
+            cmd.env("NODE_PATH", node_path);
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// Refuses an argument holding a line break for a Windows batch file, which
+/// `cmd.exe` would cut short there; std refuses it too, in words that name
+/// neither the program nor a way out.
+pub(crate) fn refuse_batch_line_breaks<'a>(
+    program: &std::ffi::OsStr,
+    mut args: impl Iterator<Item = &'a std::ffi::OsStr>,
+) -> Result<(), AgentError> {
+    let program = std::path::Path::new(program);
+    let batch = program
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        });
+    if cfg!(windows)
+        && batch
+        && args.any(|arg| {
+            arg.as_encoded_bytes()
+                .iter()
+                .any(|byte| matches!(byte, b'\r' | b'\n'))
+        })
+    {
+        return Err(AgentError::BatchLineBreak {
+            program: program.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 /// An async (`smol`) command with the console suppressed. `async_process`

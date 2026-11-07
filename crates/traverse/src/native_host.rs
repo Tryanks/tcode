@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, PickedImage, Transport};
+use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, PickedFile, Transport};
 use tcode_client::pairing::{PairInvite, PairedHost};
 
 use crate::{
@@ -16,7 +16,8 @@ use crate::{
 };
 
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<String, String>>;
-type ImagePicker = dyn Fn(usize) -> HostFuture<'static, Result<Vec<PickedImage>, String>>;
+type ImagePicker = dyn Fn(usize) -> HostFuture<'static, Result<Vec<PickedFile>, String>>;
+type FilePicker = dyn Fn() -> HostFuture<'static, Result<Vec<PickedFile>, String>>;
 type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
 type MulticastLock = dyn Fn(bool) + Send + Sync;
 
@@ -24,12 +25,14 @@ type MulticastLock = dyn Fn(bool) + Send + Sync;
 /// transport policy.
 pub struct NativeClientHost {
     speech: Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>>,
+    notifier: Option<std::rc::Rc<dyn tcode_client::host::SystemNotifier>>,
     words: Option<std::rc::Rc<dyn tcode_client::words::WordSegmenter>>,
     data_dir: PathBuf,
     default_device_name: String,
     platform: Option<String>,
     qr_scanner: Option<Box<QrScanner>>,
     image_picker: Option<Box<ImagePicker>>,
+    file_picker: Option<Box<FilePicker>>,
     editor: Option<Box<EditorOpener>>,
     multicast_lock: Option<Arc<MulticastLock>>,
     system_browser: Option<Arc<SystemBrowser>>,
@@ -42,12 +45,14 @@ impl NativeClientHost {
     pub fn new(data_dir: PathBuf, device_name: impl Into<String>) -> Self {
         Self {
             speech: None,
+            notifier: None,
             words: None,
             data_dir,
             default_device_name: device_name.into(),
             platform: default_device_platform(),
             qr_scanner: None,
             image_picker: None,
+            file_picker: None,
             editor: None,
             multicast_lock: None,
             system_browser: None,
@@ -119,6 +124,14 @@ impl NativeClientHost {
         self
     }
 
+    pub fn with_system_notifier(
+        mut self,
+        notifier: impl tcode_client::host::SystemNotifier + 'static,
+    ) -> Self {
+        self.notifier = Some(std::rc::Rc::new(notifier));
+        self
+    }
+
     pub fn with_speech_recognizer(
         mut self,
         recognizer: impl tcode_client::speech::SpeechRecognizer + 'static,
@@ -130,9 +143,18 @@ impl NativeClientHost {
     /// The platform's own media picker; see [`ClientHost::pick_images`].
     pub fn with_image_picker(
         mut self,
-        picker: impl Fn(usize) -> HostFuture<'static, Result<Vec<PickedImage>, String>> + 'static,
+        picker: impl Fn(usize) -> HostFuture<'static, Result<Vec<PickedFile>, String>> + 'static,
     ) -> Self {
         self.image_picker = Some(Box::new(picker));
+        self
+    }
+
+    /// The platform's own file picker; see [`ClientHost::pick_files`].
+    pub fn with_file_picker(
+        mut self,
+        picker: impl Fn() -> HostFuture<'static, Result<Vec<PickedFile>, String>> + 'static,
+    ) -> Self {
+        self.file_picker = Some(Box::new(picker));
         self
     }
 
@@ -185,6 +207,10 @@ impl NativeClientHost {
 }
 
 impl ClientHost for NativeClientHost {
+    fn system_notifier(&self) -> Option<std::rc::Rc<dyn tcode_client::host::SystemNotifier>> {
+        self.notifier.clone()
+    }
+
     fn speech_recognizer(&self) -> Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>> {
         self.speech.clone()
     }
@@ -230,6 +256,10 @@ impl ClientHost for NativeClientHost {
                 .get("remote_attachment_limit_mib")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|limit| u32::try_from(limit).ok()),
+            right_panel_width: prefs
+                .get("right_panel_width")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|width| u32::try_from(width).ok()),
         }
     }
 
@@ -241,6 +271,7 @@ impl ClientHost for NativeClientHost {
         prefs["navigation"] = serde_json::json!(preferences.navigation);
         prefs["remote_attachment_limit_mib"] =
             serde_json::json!(preferences.remote_attachment_limit_mib);
+        prefs["right_panel_width"] = serde_json::json!(preferences.right_panel_width);
         self.write_prefs(&prefs);
     }
 
@@ -382,10 +413,21 @@ impl ClientHost for NativeClientHost {
         self.image_picker.is_some()
     }
 
-    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedImage>, String>> {
+    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
         self.image_picker.as_ref().map_or_else(
             || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
             |picker| picker(limit),
+        )
+    }
+
+    fn supports_file_picker(&self) -> bool {
+        self.file_picker.is_some()
+    }
+
+    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
+        self.file_picker.as_ref().map_or_else(
+            || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
+            |picker| picker(),
         )
     }
 }
@@ -798,6 +840,7 @@ mod tests {
             device_name: Some("Renamed".into()),
             navigation: Some(serde_json::json!({"history": ["hosts", "threads"]})),
             remote_attachment_limit_mib: Some(4),
+            right_panel_width: Some(480),
         });
 
         let saved: serde_json::Value =
@@ -812,6 +855,8 @@ mod tests {
         assert!(saved["language"].is_null());
         assert_eq!(saved["remote_attachment_limit_mib"], 4);
         assert_eq!(host.load_preferences().remote_attachment_limit_mib, Some(4));
+        assert_eq!(saved["right_panel_width"], 480);
+        assert_eq!(host.load_preferences().right_panel_width, Some(480));
 
         host.set_last_host_id(Some("next-host"));
         assert_eq!(host.last_host_id().as_deref(), Some("next-host"));

@@ -21,7 +21,7 @@ use tcode_core::{
     },
     pull_request_watch::{PullRequestRemark, PullRequestWatchRead},
     session::ReviewSide,
-    settings::{HostSettings, HostStatus},
+    settings::{HostSettings, HostStatus, TokenCheck},
 };
 use tcode_protocol::{
     PullRequestAction, PullRequestActionResult as Outcome, PullRequestCapabilities,
@@ -92,6 +92,14 @@ impl Forge for GitHub {
 
     fn forget_credential(&self, host: &str) {
         self.api.credentials().invalidate(host);
+    }
+
+    fn check_token(&self, host: &str, token: &str, _: Option<&str>) -> TokenCheck {
+        crate::forge::account::check(self.api.whose(host, token))
+    }
+
+    fn identify(&self, host: &str) {
+        self.api.identify(host);
     }
 
     fn pull_request_url(&self, url: &str) -> Option<(PullRequestKey, String)> {
@@ -320,6 +328,29 @@ mod tests {
         assert_eq!(
             ForgeError::from(GitHubError::Credential(CredentialError::Disabled)).rejection(),
             Rejection::HostDisabled
+        );
+    }
+
+    #[test]
+    fn tokens_are_checked_before_saving_and_accounts_learned() {
+        crate::forge::verification_tests::token_checks(
+            tcode_core::pull_request::HostKind::Github,
+            "github.com",
+            crate::forge::verification_tests::CurrentUser {
+                path: "/user",
+                body: br#"{"id":1,"login":"lin","name":"Lin Chen"}"#,
+                account: tcode_core::settings::HostAccount {
+                    login: "lin".into(),
+                    name: Some("Lin Chen".into()),
+                },
+                then: &[],
+                environment: &[("GH_TOKEN", "environment-token")],
+                email: None,
+            },
+            |store, builder, environment| {
+                let credentials = crate::github::Credentials::new(store, environment);
+                GitHub::new(GitHubApi::new(credentials, builder))
+            },
         );
     }
 }

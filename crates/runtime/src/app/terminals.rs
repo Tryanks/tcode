@@ -179,94 +179,37 @@ impl AppState {
         self.schedule_terminal_projection(terminal_id, cx);
     }
 
-    pub(super) fn restore_terminal_workspace(&mut self, active: &mut ActiveSession) -> bool {
+    /// Give a conversation coming back on screen the terminals it left
+    /// running, drawer and all. Without a running shell there is nothing to
+    /// come back to, so it starts with the drawer closed.
+    pub(super) fn restore_terminal_workspace(&mut self, active: &mut ActiveSession) {
         let destination = conversation_destination(active);
-        let Some(workspace) = self.terminal_workspaces.remove(&destination) else {
-            return false;
-        };
-        active.terminal_workspace = workspace;
-        true
+        if let Some(workspace) = self
+            .terminal_workspaces
+            .remove(&destination)
+            .filter(TerminalWorkspace::in_use)
+        {
+            active.terminal_workspace = workspace;
+        }
     }
 
     pub(super) fn park_terminal_workspace(&mut self, active: &mut ActiveSession) {
-        let destination = conversation_destination(active);
         let workspace = std::mem::take(&mut active.terminal_workspace);
-        self.terminal_workspaces.insert(destination, workspace);
-    }
-
-    pub(super) fn terminal_preferences_for(
-        &self,
-        active: &ActiveSession,
-    ) -> Option<TerminalPreferences> {
-        self.terminal_preferences
-            .get(&conversation_destination(active).preference_key())
-            .copied()
-    }
-
-    pub(super) fn write_terminal_preferences(&mut self, cx: &mut HostCx) {
-        match serde_json::to_vec_pretty(&self.terminal_preferences) {
-            Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteTerminalUi(bytes), cx),
-            Err(error) => log::warn!("failed to encode terminal UI state: {error}"),
+        if workspace.in_use() {
+            self.terminal_workspaces
+                .insert(conversation_destination(active), workspace);
         }
     }
 
-    pub(super) fn terminal_prefs_mut(
-        &mut self,
-        key: String,
-        count: usize,
-    ) -> &mut TerminalPreferences {
-        self.terminal_preferences
-            .entry(key)
-            .or_insert(TerminalPreferences {
-                open: false,
-                height: 240.,
-                count,
-            })
-    }
-
-    pub(super) fn reopen_persisted_terminals(
-        &mut self,
-        target_id: &str,
-        preferences: Option<TerminalPreferences>,
-        cx: &mut HostCx,
-    ) {
-        if !preferences.is_some_and(|preferences| preferences.open) {
-            return;
-        }
-        self.open_terminal_panel(target_id, cx);
-        let count = preferences
-            .map(|preferences| preferences.count.clamp(1, MAX_TERMINALS_PER_SESSION))
-            .unwrap_or(1);
-        for _ in 1..count {
-            self.new_terminal(target_id, cx);
-        }
-    }
-
-    pub(super) fn persist_terminal_resource_count(&mut self, target_id: &str, cx: &mut HostCx) {
-        if let Some(active) = self.resident(target_id) {
-            let key = conversation_destination(active).preference_key();
-            let count = active.terminal_workspace.terminals.len();
-            self.terminal_prefs_mut(key, count).count = count;
-        }
-        self.write_terminal_preferences(cx);
-    }
-
-    pub fn set_terminal_height(&mut self, target_id: &str, height: f32, cx: &mut HostCx) {
-        if let Some((key, count)) = self.resident(target_id).map(|active| {
-            (
-                conversation_destination(active).preference_key(),
-                active.terminal_workspace.terminals.len(),
-            )
-        }) {
-            self.terminal_prefs_mut(key, count).height = height;
-            self.write_terminal_preferences(cx);
+    pub fn set_terminal_height(&mut self, target_id: &str, height: f32, _cx: &mut HostCx) {
+        if let Some(active) = self.resident_mut(target_id) {
+            active.terminal_workspace.height = height;
         }
     }
 
     pub(crate) fn terminal_panel_open(&self, target_id: &str) -> bool {
         self.resident(target_id)
-            .and_then(|active| self.terminal_preferences_for(active))
-            .is_some_and(|preferences| preferences.open)
+            .is_some_and(|active| active.terminal_workspace.open)
     }
 
     pub fn toggle_terminal_panel(&mut self, target_id: &str, cx: &mut HostCx) {
@@ -425,7 +368,6 @@ impl AppState {
                         }
                     });
                 }
-                state.persist_terminal_resource_count(&session_id, cx);
             });
         });
     }
@@ -435,50 +377,35 @@ impl AppState {
     }
 
     pub(crate) fn open_terminal_panel(&mut self, target_id: &str, cx: &mut HostCx) {
-        let Some((session_id, cwd, destination, count, terminals_empty)) =
-            self.resident(target_id).map(|active| {
-                (
-                    active.meta.id.clone(),
-                    active.meta.cwd.clone(),
-                    conversation_destination(active),
-                    active.terminal_workspace.terminals.len(),
-                    active.terminal_workspace.terminals.is_empty(),
-                )
-            })
-        else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
-        let key = destination.preference_key();
-        self.terminal_prefs_mut(key, count).open = true;
-        self.write_terminal_preferences(cx);
-        if terminals_empty {
-            let already_pending =
-                self.pending_terminal_spawns
-                    .get(&session_id)
-                    .is_some_and(|spawns| {
-                        spawns
-                            .values()
-                            .any(|action| matches!(action, TerminalSpawnAction::Open))
-                    });
-            if !already_pending {
-                self.schedule_terminal_spawn(session_id, cwd, TerminalSpawnAction::Open, cx);
-            }
+        active.terminal_workspace.open = true;
+        if !active.terminal_workspace.terminals.is_empty() {
+            return;
+        }
+        let session_id = active.meta.id.clone();
+        let cwd = active.meta.cwd.clone();
+        let already_pending = self
+            .pending_terminal_spawns
+            .get(&session_id)
+            .is_some_and(|spawns| {
+                spawns
+                    .values()
+                    .any(|action| matches!(action, TerminalSpawnAction::Open))
+            });
+        if !already_pending {
+            self.schedule_terminal_spawn(session_id, cwd, TerminalSpawnAction::Open, cx);
         }
     }
 
-    pub fn close_terminal_panel(&mut self, target_id: &str, cx: &mut HostCx) {
-        let session_id = self
-            .resident(target_id)
-            .map(|active| active.meta.id.clone());
-        if let Some(session_id) = session_id.as_deref() {
-            self.cancel_pending_terminal_spawns(session_id);
-        }
-        if let Some(active) = self.resident(target_id) {
-            let key = conversation_destination(active).preference_key();
-            let count = active.terminal_workspace.terminals.len();
-            self.terminal_prefs_mut(key, count).open = false;
-            self.write_terminal_preferences(cx);
-        }
+    pub fn close_terminal_panel(&mut self, target_id: &str, _cx: &mut HostCx) {
+        let Some(active) = self.resident_mut(target_id) else {
+            return;
+        };
+        active.terminal_workspace.open = false;
+        let session_id = active.meta.id.clone();
+        self.cancel_pending_terminal_spawns(&session_id);
     }
 
     pub fn restart_terminal(&mut self, target_id: &str, cx: &mut HostCx) {
@@ -561,16 +488,11 @@ impl AppState {
         }
     }
 
-    pub fn close_terminal(&mut self, target_id: &str, terminal_id: u64, cx: &mut HostCx) {
-        let session_id = self
-            .resident(target_id)
-            .map(|active| active.meta.id.clone());
-        if let Some(session_id) = session_id.as_deref() {
-            self.cancel_pending_terminal_spawns(session_id);
-        }
+    pub fn close_terminal(&mut self, target_id: &str, terminal_id: u64, _cx: &mut HostCx) {
         let Some(active) = self.resident_mut(target_id) else {
             return;
         };
+        let session_id = active.meta.id.clone();
         let workspace = &mut active.terminal_workspace;
         workspace.terminals.retain(|entry| entry.id != terminal_id);
         workspace
@@ -579,11 +501,11 @@ impl AppState {
         if workspace.active_id == Some(terminal_id) {
             workspace.active_id = workspace.terminals.last().map(|entry| entry.id);
         }
-        let empty = workspace.terminals.is_empty();
-        self.persist_terminal_resource_count(target_id, cx);
-        if empty {
-            self.close_terminal_panel(target_id, cx);
+        if workspace.terminals.is_empty() {
+            workspace.open = false;
+            workspace.height = crate::terminal::DEFAULT_TERMINAL_HEIGHT;
         }
+        self.cancel_pending_terminal_spawns(&session_id);
     }
 
     pub fn split_terminal(

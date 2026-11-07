@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use crate::icon::{Icon, IconName};
 use crate::material::{Bar, TOUCH_TARGET, bar_height};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
@@ -15,7 +14,10 @@ use gpui_base::{h_flex, v_flex};
 
 use tcode_core::session::{TimelineEntry, TurnMeta};
 
-use super::super::model::RowPart;
+use super::super::timeline::rows::RowPart;
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 pub(crate) type WorkLogArgs<'a> = (
     usize,
@@ -36,6 +38,11 @@ pub(crate) struct WorkLogData {
     pub(crate) expanded: bool,
     pub(crate) running: bool,
     pub(crate) rows: Vec<AnyElement>,
+    /// The timeline's hover, which the header's fill follows.
+    pub(crate) hover: crate::motion::ListHover,
+    /// The chat's motion, which keeps the chevron's turn and the state's
+    /// cross-fade.
+    pub(crate) motion: crate::motion::owned::Owned,
 }
 
 /// One work log as a naked disclosure: a hugging header row, then the trace
@@ -55,21 +62,23 @@ pub(crate) fn work_log(
         expanded,
         running,
         rows,
+        hover,
+        motion,
     } = data;
     let muted = cx.theme().muted_foreground;
+    let key = format!("worklog-header-{index}-{segment_id}");
+    let radius = crate::material::radius_button(cx);
+    let fill = hover.layer(key.clone(), cx.theme().accent, radius);
     // Not a `Button`: on a touch layout the label wraps, and `Button` lays its
     // content out on one line.
     let header = crate::material::accessible_clickable(
         h_flex(),
-        SharedString::from(format!("worklog-header-{index}-{segment_id}")),
+        SharedString::from(key.clone()),
         Role::Button,
         capsule_label.clone(),
         cx,
     )
-    .debug_selector({
-        let selector = format!("worklog-header-{index}-{segment_id}");
-        move || selector
-    })
+    .debug_selector(move || key)
     .aria_expanded(expanded)
     .self_start()
     .h(px(bar_height(Bar::Section, false)))
@@ -78,43 +87,30 @@ pub(crate) fn work_log(
     .px_1p5()
     .gap_1p5()
     .items_center()
-    .rounded(crate::material::radius_button(cx))
+    .relative()
+    .rounded(radius)
     .text_body(false, cx)
     .text_color(muted)
     .cursor_pointer()
-    .hover(|row| row.bg(cx.theme().accent))
     .on_click(on_toggle)
-    .child(Icon::new(chevron(expanded)).text_color(muted))
-    .child(capsule_label)
-    .when(running, |row| {
-        row.child(Spinner::new().color(cx.theme().primary))
-    })
-    .when(!running, |row| {
-        // A settled run needs no badge; only a bad ending is called out.
-        let failure = match outcome {
-            TurnStatus::Completed => None,
-            TurnStatus::Failed => Some(crate::tr!("chat.work_log_failed")),
-            TurnStatus::Interrupted => Some(crate::tr!("chat.work_log_interrupted")),
-        };
-        row.when_some(failure, |row, label| {
-            row.child(crate::material::semantic_chip(
-                label,
-                cx.theme().danger.opacity(0.12),
-                cx.theme().danger,
-                cx,
-            ))
-        })
-        .child(
-            div()
-                .flex_none()
-                .text_meta_mono(false, cx)
-                // Baseline compensation: flex can't baseline-align text boxes,
-                // and the smaller digits sit visibly high beside the label.
-                .relative()
-                .top(px(1.))
-                .child(duration),
+    .child(fill)
+    .child(
+        crate::widgets::Chevron::new(
+            SharedString::from(format!("worklog-chevron-{index}-{segment_id}")),
+            expanded,
         )
-    });
+        .owned(&motion)
+        .text_color(muted),
+    )
+    .child(capsule_label)
+    .child(settled_state(
+        &motion,
+        SharedString::from(format!("worklog-state-{index}-{segment_id}")),
+        running,
+        outcome,
+        duration,
+        cx,
+    ));
 
     v_flex()
         .w_full()
@@ -134,10 +130,53 @@ pub(crate) fn work_log_body(rows: Vec<AnyElement>) -> Div {
     v_flex().w_full().gap_1().pl(px(22.)).children(rows)
 }
 
-fn chevron(open: bool) -> IconName {
-    if open {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
-    }
+/// The spinner while the run goes on; once it settles, how long it took and,
+/// only for a bad ending, a chip saying so. One cross-fades into the other.
+fn settled_state(
+    motion: &crate::motion::owned::Owned,
+    id: SharedString,
+    running: bool,
+    outcome: TurnStatus,
+    duration: String,
+    cx: &App,
+) -> AnyElement {
+    let primary = cx.theme().primary;
+    let danger = cx.theme().danger;
+    let motion = motion.clone();
+    crate::motion::Sampled::new(move |window, cx| {
+        motion.cross_fade_part(id, running, CHANGE, window, cx, move |running, _, cx| {
+            if *running {
+                return Spinner::new().color(primary).into_any_element();
+            }
+            // A settled run needs no badge; only a bad ending is called out.
+            let failure = match outcome {
+                TurnStatus::Completed => None,
+                TurnStatus::Failed => Some(crate::tr!("chat.work_log_failed")),
+                TurnStatus::Interrupted => Some(crate::tr!("chat.work_log_interrupted")),
+            };
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .when_some(failure, |row, label| {
+                    row.child(crate::material::semantic_chip(
+                        label,
+                        danger.opacity(0.12),
+                        danger,
+                        cx,
+                    ))
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .text_meta_mono(false, cx)
+                        // Baseline compensation: flex can't baseline-align text boxes,
+                        // and the smaller digits sit visibly high beside the label.
+                        .relative()
+                        .top(px(1.))
+                        .child(duration.clone()),
+                )
+                .into_any_element()
+        })
+    })
+    .into_any_element()
 }

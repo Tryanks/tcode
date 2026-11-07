@@ -11,7 +11,7 @@ pub mod params;
 mod tools;
 
 pub use params::*;
-pub use tools::{INSTRUCTIONS, tool_descriptions};
+pub use tools::{instructions, tool_descriptions};
 
 /// One call of a `tcode_control` tool, with its parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,8 @@ pub enum ControlOp {
     CancelNotify(CancelNotifyParams),
     Reference(ReferenceParams),
     RespondInput(RespondInputParams),
+    RespondApproval(RespondApprovalParams),
+    ReportResult(ReportResultParams),
     Terminal(TerminalParams),
     DeleteThreads(DeleteThreadsParams),
     Rewind(RewindParams),
@@ -56,22 +58,43 @@ pub enum ControlOp {
 pub enum ToolRequirement {
     Tier(ControlTier),
     Category(ControlCategory),
+    /// `report_result`: offered to a subagent, whatever its grant, for its one channel to the
+    /// thread that started it.
+    Subagent,
     /// `request_grant`: offered whatever the grant, it only asks the user.
     Always,
 }
 
+/// What decides which tools a thread is offered: its grant, and whether another thread
+/// started it as a subagent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadAccess {
+    pub grant: ControlGrant,
+    pub subagent: bool,
+}
+
+impl ThreadAccess {
+    pub fn none() -> Self {
+        Self {
+            grant: ControlGrant::none(),
+            subagent: false,
+        }
+    }
+}
+
 impl ToolRequirement {
-    pub fn allowed_by(self, grant: &ControlGrant) -> bool {
+    pub fn allowed_by(self, access: &ThreadAccess) -> bool {
         match self {
-            Self::Tier(tier) => grant.allows_tier(tier),
-            Self::Category(category) => grant.allows_category(category),
+            Self::Tier(tier) => access.grant.allows_tier(tier),
+            Self::Category(category) => access.grant.allows_category(category),
+            Self::Subagent => access.subagent,
             Self::Always => true,
         }
     }
 }
 
 /// Tool name → requirement.
-pub const TOOLS: [(&str, ToolRequirement); 33] = [
+pub const TOOLS: [(&str, ToolRequirement); 35] = [
     ("list_projects", ToolRequirement::Tier(ControlTier::Observe)),
     ("list_threads", ToolRequirement::Tier(ControlTier::Observe)),
     ("get_thread", ToolRequirement::Tier(ControlTier::Observe)),
@@ -124,10 +147,14 @@ pub const TOOLS: [(&str, ToolRequirement); 33] = [
     ("move_thread", ToolRequirement::Tier(ControlTier::Operate)),
     ("notify_when", ToolRequirement::Tier(ControlTier::Operate)),
     ("cancel_notify", ToolRequirement::Tier(ControlTier::Operate)),
+    // Answering your own subagent needs no category; any other thread needs answer_input,
+    // which the host checks per target.
+    ("respond_input", ToolRequirement::Tier(ControlTier::Operate)),
     (
-        "respond_input",
-        ToolRequirement::Category(ControlCategory::AnswerInput),
+        "respond_approval",
+        ToolRequirement::Tier(ControlTier::Operate),
     ),
+    ("report_result", ToolRequirement::Subagent),
     (
         "terminal",
         ToolRequirement::Category(ControlCategory::Terminal),
@@ -185,6 +212,8 @@ impl ControlOp {
             Self::CancelNotify(_) => "cancel_notify",
             Self::Reference(_) => "reference",
             Self::RespondInput(_) => "respond_input",
+            Self::RespondApproval(_) => "respond_approval",
+            Self::ReportResult(_) => "report_result",
             Self::Terminal(_) => "terminal",
             Self::DeleteThreads(_) => "delete_threads",
             Self::Rewind(_) => "rewind",
@@ -265,6 +294,7 @@ impl ControlOp {
             Self::NotifyWhen(p) => p.thread_ids.iter().map(String::as_str).collect(),
             Self::Reference(p) => vec![p.thread_id.as_str()],
             Self::RespondInput(p) => vec![p.thread_id.as_str()],
+            Self::RespondApproval(p) => vec![p.thread_id.as_str()],
             Self::Terminal(p) => vec![p.thread_id.as_str()],
             Self::DeleteThreads(p) => p.thread_ids.iter().map(String::as_str).collect(),
             Self::Rewind(p) => vec![p.thread_id.as_str()],
@@ -280,6 +310,7 @@ impl ControlOp {
             | Self::CreateProject(_)
             | Self::CancelNotify(_)
             | Self::PatchSettings(_)
+            | Self::ReportResult(_)
             | Self::RequestGrant(_) => Vec::new(),
         }
     }
@@ -311,9 +342,9 @@ pub struct BrokerRequest {
 pub type Broker = mcp_host::Broker<BrokerRequest>;
 pub type TokenRegistry = mcp_host::TokenRegistry<tools::Service>;
 
-/// Answers a thread id with its current effective grant; `None` for a thread the host
-/// does not know, which gets `request_grant` alone.
-pub type GrantResolver = Arc<dyn Fn(&str) -> Option<ControlGrant> + Send + Sync>;
+/// Answers a thread id with its current access; `None` for a thread the host does not know,
+/// which gets `request_grant` alone.
+pub type GrantResolver = Arc<dyn Fn(&str) -> Option<ThreadAccess> + Send + Sync>;
 
 /// Tool names with the descriptions a connection listed them with.
 pub type ListedTools = Vec<(String, String)>;
@@ -332,11 +363,11 @@ impl GrantSource {
         *self.resolver.lock().unwrap() = Some(resolver);
     }
 
-    pub fn resolve(&self, thread_id: &str) -> ControlGrant {
+    pub fn resolve(&self, thread_id: &str) -> ThreadAccess {
         let resolver = self.resolver.lock().unwrap().clone();
         resolver
             .and_then(|resolve| resolve(thread_id))
-            .unwrap_or_else(ControlGrant::none)
+            .unwrap_or_else(ThreadAccess::none)
     }
 
     /// The tools, with descriptions, the thread's latest connection listed; `None` before

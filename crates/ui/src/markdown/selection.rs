@@ -104,6 +104,14 @@ struct Touch {
     dragging: Option<(SelectionEdge, Point<Pixels>)>,
 }
 
+/// A selection being made on a document by a held pointer or finger began,
+/// or ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionGesture {
+    Began,
+    Ended,
+}
+
 /// One selection over the entries of a document.
 pub struct SelectionDocument {
     anchor: Option<DocPoint>,
@@ -135,6 +143,8 @@ struct Participant {
     bounds: Bounds<Pixels>,
     state: WeakEntity<MarkdownState>,
 }
+
+impl gpui::EventEmitter<SelectionGesture> for SelectionDocument {}
 
 impl SelectionDocument {
     pub(crate) fn new(entries: EntryNodes) -> Self {
@@ -195,10 +205,41 @@ impl SelectionDocument {
         }
         self.anchor = None;
         self.focus = None;
-        self.gesture = None;
+        self.set_gesture(None, cx);
         self.unit = None;
         self.touch = Touch::default();
         self.changed(cx);
+    }
+
+    /// The document's entries moved `by` places (entries came or went
+    /// before them): the selection moves with its text, and goes when the
+    /// entry an end is in went.
+    pub(crate) fn move_entries(&mut self, by: i64, cx: &mut Context<Self>) {
+        if by == 0 || (self.anchor.is_none() && self.gesture.is_none() && self.unit.is_none()) {
+            return;
+        }
+        let mut gone = false;
+        let mut shift = |point: &mut DocPoint| match point.entry.checked_add_signed(by) {
+            Some(entry) => point.entry = entry,
+            None => gone = true,
+        };
+        let unit = self
+            .unit
+            .as_mut()
+            .into_iter()
+            .flat_map(|(_, start, end)| [start, end]);
+        for point in [&mut self.anchor, &mut self.focus, &mut self.gesture]
+            .into_iter()
+            .flatten()
+            .chain(unit)
+        {
+            shift(point);
+        }
+        if gone {
+            self.clear(cx);
+        } else {
+            self.changed(cx);
+        }
     }
 
     /// Select everything entry `entry` holds.
@@ -210,7 +251,7 @@ impl SelectionDocument {
         else {
             return;
         };
-        self.gesture = None;
+        self.set_gesture(None, cx);
         self.unit = None;
         self.set(
             DocPoint {
@@ -375,7 +416,7 @@ impl SelectionDocument {
     fn press(&mut self, point: DocPoint, extend: bool, cx: &mut Context<Self>) {
         self.touch = Touch::default();
         if extend && let Some(unit) = self.unit.clone() {
-            self.gesture = Some(point.clone());
+            self.set_gesture(Some(point.clone()), cx);
             self.extend_unit(unit, point, cx);
             return;
         }
@@ -384,7 +425,7 @@ impl SelectionDocument {
             Some(anchor) if extend => anchor.clone(),
             _ => point.clone(),
         };
-        self.gesture = Some(anchor.clone());
+        self.set_gesture(Some(anchor.clone()), cx);
         self.set(anchor, point, cx);
     }
 
@@ -392,7 +433,7 @@ impl SelectionDocument {
     /// `point`. Whether there was one.
     fn select_unit(&mut self, unit: Unit, point: &DocPoint, cx: &mut Context<Self>) -> bool {
         self.touch = Touch::default();
-        self.gesture = None;
+        self.set_gesture(None, cx);
         let Some((start, end)) = self.unit_at(unit, point, cx) else {
             self.unit = None;
             return false;
@@ -404,8 +445,9 @@ impl SelectionDocument {
 
     /// Keep the click that selected a unit going: until its button is
     /// released, a drag extends the selection by that unit.
-    fn hold_unit(&mut self) {
-        self.gesture = self.unit.as_ref().map(|(_, start, _)| start.clone());
+    fn hold_unit(&mut self, cx: &mut Context<Self>) {
+        let start = self.unit.as_ref().map(|(_, start, _)| start.clone());
+        self.set_gesture(start, cx);
     }
 
     /// The selection from the far end of the held `unit` to the edge of the
@@ -441,9 +483,22 @@ impl SelectionDocument {
 
     /// End the pointer's gesture. A click that selected nothing keeps its
     /// place, which a shift-click extends from.
-    fn release(&mut self) {
-        self.gesture = None;
+    fn release(&mut self, cx: &mut Context<Self>) {
+        self.set_gesture(None, cx);
         self.auto_scroll = None;
+    }
+
+    /// Hold the pointer's gesture from `gesture`, or end it.
+    fn set_gesture(&mut self, gesture: Option<DocPoint>, cx: &mut Context<Self>) {
+        let (held, was_held) = (gesture.is_some(), self.gesture.is_some());
+        self.gesture = gesture;
+        if held != was_held {
+            cx.emit(if held {
+                SelectionGesture::Began
+            } else {
+                SelectionGesture::Ended
+            });
+        }
     }
 
     /// The view the selection starts in, which takes the focus so the
@@ -816,7 +871,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 if let Some(point) = document.read(cx).char_at(event.position, cx) {
                     document.update(cx, |document, cx| {
                         if document.select_unit(unit, &point, cx) {
-                            document.hold_unit();
+                            document.hold_unit(cx);
                         }
                     });
                     focus_selection(&document, window, cx);
@@ -839,7 +894,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 return;
             }
             if event.pressed_button != Some(MouseButton::Left) || cx.has_active_drag() {
-                document.update(cx, |document, _| document.release());
+                document.update(cx, |document, cx| document.release(cx));
                 return;
             }
             follow(&document, event.position, window, cx);
@@ -854,7 +909,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
             {
                 return;
             }
-            document.update(cx, |document, _| document.release());
+            document.update(cx, |document, cx| document.release(cx));
             focus_selection(&document, window, cx);
         }
     });
@@ -881,7 +936,8 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 // The finger then moves the far end, from the word's start.
                 document.update(cx, |document, cx| {
                     if document.select_unit(Unit::Word, &point, cx) {
-                        document.gesture = document.span().map(|(start, _)| start.clone());
+                        let start = document.span().map(|(start, _)| start.clone());
+                        document.set_gesture(start, cx);
                     }
                     document.touch.active = document.has_selection();
                 });
@@ -906,7 +962,7 @@ fn listen(document: &Entity<SelectionDocument>, hitbox: Hitbox, window: &mut Win
                 }
                 _ => {
                     document.update(cx, |document, cx| {
-                        document.gesture = None;
+                        document.set_gesture(None, cx);
                         document.touch.menu_open = true;
                         document.changed(cx);
                     });
@@ -1229,12 +1285,20 @@ mod tests {
             "expected downward auto-scroll, got {scrolled:?}"
         );
 
-        // The release stops it.
-        cx.simulate_mouse_up(
-            point(px(5.), bottom - px(8.)),
-            MouseButton::Left,
-            Modifiers::default(),
+        // Past the window's bottom it keeps scrolling, faster.
+        let outside = point(px(5.), bottom + px(60.));
+        cx.simulate_mouse_move(outside, Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(48));
+        cx.run_until_parked();
+        let faster = deltas(cx)[scrolled.len()..].to_vec();
+        assert!(
+            !faster.is_empty() && faster.iter().all(|delta| *delta < scrolled[0]),
+            "expected faster auto-scroll than {scrolled:?}, got {faster:?}"
         );
+
+        // The release, there too, stops it.
+        cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
         draw(cx);
         let settled = deltas(cx).len();
         cx.executor().advance_clock(Duration::from_millis(64));

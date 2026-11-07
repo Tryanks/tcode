@@ -20,14 +20,26 @@ use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::progress::Progress;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
 use tcode_protocol::{CommandResponse, ExternalImportState, ExternalThread, RecentDir, SourceTool};
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a row drawn here takes to fold in or out, or to move to a new place.
+const ROWS: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
@@ -321,39 +333,86 @@ impl AddProjectDialog {
         .detach();
     }
 
-    fn render_recent(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        match &self.recent {
-            RecentState::Loading => v_flex()
-                .child(crate::material::empty_row(
-                    crate::tr!("sidebar.recent_loading"),
+    fn render_recent(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let state = crate::motion::CrossFade::new(
+            "recent-directories-state",
+            match &self.recent {
+                RecentState::Loading => 0,
+                RecentState::Failed(_) => 1,
+                RecentState::Ready(recent) if recent.is_empty() => 2,
+                RecentState::Ready(_) => 3,
+            },
+            4,
+            CHANGE,
+            window,
+            cx,
+        );
+        let mut layers = Vec::new();
+        if state.shows(0) {
+            layers.push((
+                0,
+                v_flex()
+                    .child(crate::material::empty_row(
+                        crate::tr!("sidebar.recent_loading"),
+                        cx,
+                    ))
+                    .child(Progress::new("recent-directories-loading").loading(true))
+                    .into_any_element(),
+            ));
+        }
+        if let RecentState::Failed(error) = &self.recent {
+            layers.push((
+                1,
+                crate::material::empty_row(
+                    crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned(),
                     cx,
-                ))
-                .child(Progress::new("recent-directories-loading").loading(true))
+                )
+                .text_color(cx.theme().danger)
                 .into_any_element(),
-            RecentState::Failed(error) => crate::material::empty_row(
-                crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned(),
-                cx,
-            )
-            .text_color(cx.theme().danger)
-            .into_any_element(),
-            RecentState::Ready(recent) if recent.is_empty() => {
+            ));
+        }
+        if state.shows(2) {
+            layers.push((
+                2,
                 crate::material::empty_row(crate::tr!("sidebar.recent_empty"), cx)
-                    .into_any_element()
-            }
-            RecentState::Ready(recent) => {
+                    .into_any_element(),
+            ));
+        }
+        if let RecentState::Ready(recent) = &self.recent
+            && !recent.is_empty()
+        {
+            layers.push((3, {
                 // Keep the viewport and the flex column separate. Putting the
                 // max height on the column itself lets flexbox shrink every row
                 // until there is no overflow left for the wheel to scroll.
-                let mut rows = v_flex().w_full().gap_1();
-                for (index, recent) in recent.iter().take(RECENT_LIMIT).enumerate() {
-                    let selected = recent.clone();
-                    let name = directory_name(&recent.path);
-                    let accessible_name =
-                        crate::tr!("sidebar.open_recent", name = name.clone()).into_owned();
-                    let path = recent.path.display().to_string();
-                    let ago = humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
-                    let counts = tool_counts(&recent.threads);
-                    rows = rows.child(
+                // A directory that arrives or goes folds in or out where it
+                // is, the others gliding to their places.
+                let items = recent
+                    .iter()
+                    .take(RECENT_LIMIT)
+                    .enumerate()
+                    .map(|(index, recent)| {
+                        (
+                            SharedString::from(recent.path.display().to_string()),
+                            (index, recent.clone()),
+                        )
+                    });
+                let rows = crate::motion::keyed(
+                    "recent-directory-rows",
+                    items,
+                    ROWS,
+                    window,
+                    cx,
+                    |_, (index, recent), _, cx| {
+                        let index = *index;
+                        let selected = recent.clone();
+                        let name = directory_name(&recent.path);
+                        let accessible_name =
+                            crate::tr!("sidebar.open_recent", name = name.clone()).into_owned();
+                        let path = recent.path.display().to_string();
+                        let ago =
+                            humanize_ago(now_secs().saturating_sub(recent.last_active_ms / 1000));
+                        let counts = tool_counts(&recent.threads);
                         crate::material::panel_row(
                             format!("recent-directory-{index}"),
                             accessible_name.into(),
@@ -394,13 +453,22 @@ impl AddProjectDialog {
                                         .child(crate::widgets::fade_text(path)),
                                 )
                                 .child(div().text_secondary(false, cx).child(counts)),
-                        ),
-                    );
-                }
+                        )
+                        .into_any_element()
+                    },
+                )
+                .render(v_flex().w_full().gap_1());
                 let visible_rows = recent.len().min(RECENT_LIMIT) as f32;
-                let viewport_height = fit_viewport(
-                    (visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT),
-                    window.viewport_size().height - px(RECENT_VIEWPORT_CHROME),
+                // The viewport grows and shrinks to its rows, gliding.
+                let viewport_height = gpui_base::motion::transition(
+                    "recent-directory-viewport",
+                    fit_viewport(
+                        (visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT),
+                        window.viewport_size().height - px(RECENT_VIEWPORT_CHROME),
+                    ),
+                    gpui_base::motion::Transition::new(GLIDE),
+                    window,
+                    cx,
                 );
                 div()
                     .id("recent-directory-list")
@@ -409,8 +477,9 @@ impl AddProjectDialog {
                     .overflow_y_scrollbar()
                     .child(div().size_full().child(rows))
                     .into_any_element()
-            }
+            }));
         }
+        state.render(layers).w_full().into_any_element()
     }
 }
 
@@ -484,14 +553,23 @@ impl Render for AddProjectDialog {
                     .when_some(path_hint, |column, hint| {
                         column.child(div().text_secondary(false, cx).child(hint))
                     })
-                    .when_some(self.error.clone(), |column, error| {
-                        column.child(
-                            div()
-                                .text_secondary(false, cx)
-                                .text_color(cx.theme().danger)
-                                .child(error),
+                    .children(
+                        crate::motion::shown(
+                            "add-project-error",
+                            self.error.clone(),
+                            SHOW,
+                            window,
+                            cx,
                         )
-                    }),
+                        .map(|error| {
+                            error.fold(
+                                div()
+                                    .text_secondary(false, cx)
+                                    .text_color(cx.theme().danger)
+                                    .child(error.value.clone()),
+                            )
+                        }),
+                    ),
             )
             .child(
                 v_flex()
@@ -543,7 +621,7 @@ impl ImportProgress {
 }
 
 impl Render for ImportProgress {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self
             .store
             .read(cx)
@@ -570,20 +648,38 @@ impl Render for ImportProgress {
         };
         let project_id = self.project_id.clone();
         let store = self.store.clone();
-        v_flex()
-            .gap_3()
-            .py_2()
-            .child(Progress::new("external-import-progress").value(percent))
-            .when_some(running, |column, (done, total, tool)| {
-                column.child(div().text_secondary(false, cx).child(crate::tr!(
-                    "sidebar.import_progress",
-                    done = done,
-                    total = total,
-                    tool = tool
-                )))
-            })
-            .when_some(summary, |column, (imported, skipped)| {
-                column
+        // The summary cross-fades over the last "n of N" line.
+        let outcome = crate::motion::CrossFade::new(
+            "external-import-outcome",
+            usize::from(summary.is_some()),
+            2,
+            CHANGE,
+            window,
+            cx,
+        );
+        let running = crate::motion::shown("external-import-running", running, SHOW, window, cx)
+            .map(|running| running.value)
+            .filter(|_| outcome.shows(0));
+        let mut layers = Vec::new();
+        if let Some((done, total, tool)) = running {
+            layers.push((
+                0,
+                div()
+                    .text_secondary(false, cx)
+                    .child(crate::tr!(
+                        "sidebar.import_progress",
+                        done = done,
+                        total = total,
+                        tool = tool
+                    ))
+                    .into_any_element(),
+            ));
+        }
+        if let Some((imported, skipped)) = summary {
+            layers.push((
+                1,
+                v_flex()
+                    .gap_3()
                     .child(div().text_title(cx).child(crate::tr!(
                         "sidebar.import_summary",
                         imported = imported,
@@ -602,6 +698,15 @@ impl Render for ImportProgress {
                                 }),
                         ),
                     )
+                    .into_any_element(),
+            ));
+        }
+        v_flex()
+            .gap_3()
+            .py_2()
+            .child(Progress::new("external-import-progress").value(percent))
+            .when(!layers.is_empty(), |column| {
+                column.child(outcome.render(layers).w_full())
             })
     }
 }
@@ -702,6 +807,7 @@ mod tests {
                 cx,
             )
         });
+        crate::store::tests::place_shown_threads(&store, cx);
         fn wait_until(
             cx: &mut TestAppContext,
             store: &Entity<WorkspaceStore>,
@@ -709,7 +815,7 @@ mod tests {
             description: &str,
             mut ready: impl FnMut(&TestAppContext) -> bool,
         ) {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let deadline = crate::store::tests::host_deadline();
             let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
             loop {
                 // Host replies arrive on an OS thread. Decode them here so ACKs
@@ -777,7 +883,7 @@ mod tests {
         // client never looked at it.
         type_and_open(cx, workspace.to_str().unwrap());
         wait_until(cx, &store, pump.as_mut(), "host project draft", |cx| {
-            store.read_with(cx, |store, _| store.active_session_id().is_some())
+            store.read_with(cx, |store, _| store.sole_thread().is_some())
         });
         assert_eq!(dialog.read_with(cx, |dialog, _| dialog.error.clone()), None);
         assert_eq!(

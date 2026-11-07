@@ -71,6 +71,28 @@ pub enum Query {
     RemoveUserFile {
         path: PathBuf,
     },
+    /// Reserve a host file for a file only the client can read, in the
+    /// scratch directory quick threads work in. The answer is the path the
+    /// message carries.
+    BeginUpload {
+        session_id: String,
+        name: String,
+        size: u64,
+    },
+    /// The next bytes of a reserved upload; `offset` must equal what has
+    /// arrived so far.
+    WriteUpload {
+        session_id: String,
+        path: PathBuf,
+        offset: u64,
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+    },
+    /// Drop a reserved upload, finished or not.
+    DiscardUpload {
+        session_id: String,
+        path: PathBuf,
+    },
     /// Render a stored thread into a transferable artifact. Rendering belongs to
     /// the host (it owns the event log); where the bytes land belongs to the
     /// client, so nothing is written here.
@@ -140,6 +162,16 @@ pub const STORED_OUTPUT_COLS: std::ops::RangeInclusive<u16> = 20..=400;
 /// trimmed, so a shorter output returns a shorter frame.
 pub const STORED_OUTPUT_ROWS: u16 = 16;
 
+/// How much of a finished command's output its frame holds: all of it, up to
+/// its last `STORED_OUTPUT_BYTES` and the `STORED_OUTPUT_HISTORY` rows of
+/// scrollback they make; what comes before, the frame counts in
+/// `lines_evicted`. A frame goes as one transport line, whose peers read
+/// 16 MiB at most, and each character is a JSON cell of about 13 bytes: this
+/// much dense output makes a frame of about 10 MiB (measured by the host's
+/// `a_frame_at_the_ceiling_fits_one_transport_line`).
+pub const STORED_OUTPUT_BYTES: usize = 768 * 1024;
+pub const STORED_OUTPUT_HISTORY: usize = 20_000;
+
 /// Largest export the host will put on one response frame. The transport writes
 /// a single WebSocket text frame per NDJSON line and peers read with
 /// tungstenite's 16 MiB frame cap, so the base64 payload (4/3 of the raw bytes)
@@ -173,6 +205,9 @@ pub enum QueryResponse {
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
     SavedAttachment(PathBuf),
     UserFileRemoved,
+    UploadBegun(PathBuf),
+    UploadWritten,
+    UploadDiscarded,
     /// A rendered thread export. `suggested_name` is already safe for a file
     /// name on any client OS; the client picks the destination.
     ThreadExport {

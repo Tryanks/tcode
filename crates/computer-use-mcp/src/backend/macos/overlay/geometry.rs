@@ -15,10 +15,6 @@ pub(super) fn ax_screen_to_appkit(point: (f64, f64), display: DisplayGeometry) -
     )
 }
 
-pub(super) fn is_finite_point(point: (f64, f64)) -> bool {
-    point.0.is_finite() && point.1.is_finite()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

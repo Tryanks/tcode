@@ -47,11 +47,14 @@ flowchart LR
 ```
 "#;
 
+const PLAN_MARKDOWN: &str = "# Plan: create hello.txt\n\n## Context\nA smoke test of the plan flow; nothing else in the directory changes.\n\n## Steps\n1. **Create the file**: write `hello.txt` with the content `hi`.\n2. **Verify**: run `cat hello.txt` and check that it prints `hi`.\n\n## Verification\n```sh\ncat hello.txt\n```";
 const NARRATION_MARKDOWN: &str = "f.txt contains two lines, \"a\" and \"b\". Now I'll run wc to get exact line, word, and byte counts.";
 
 struct Gallery {
     markdown: Entity<MarkdownState>,
     narration: Entity<MarkdownState>,
+    /// One per plan card: a Markdown state measures for the one width it draws at.
+    plans: [Entity<MarkdownState>; 2],
     started_at: u64,
     tabs: TabsState,
     options: Options,
@@ -96,6 +99,7 @@ impl Gallery {
     fn new(options: Options, cx: &mut Context<Self>) -> Self {
         let markdown = cx.new(|cx| MarkdownState::new(ASSISTANT_MARKDOWN, cx));
         let narration = cx.new(|cx| MarkdownState::new(NARRATION_MARKDOWN, cx));
+        let plans = [(); 2].map(|_| cx.new(|cx| MarkdownState::new(PLAN_MARKDOWN, cx)));
         let started_at = now_millis().saturating_sub(7_300);
         let tick = cx.spawn(async move |this, cx| {
             loop {
@@ -108,6 +112,7 @@ impl Gallery {
         Self {
             markdown,
             narration,
+            plans,
             started_at,
             tabs: TabsState {
                 selected: [0, 0, 0, 1, 1, 0, 0, 0, 2],
@@ -158,6 +163,14 @@ impl Render for Gallery {
         );
         let subagents = [
             subagent_entry("gallery-s05-subagent-running", ItemStatus::InProgress, None),
+            TimelineEntry {
+                background: true,
+                ..subagent_entry(
+                    "gallery-s05-subagent-background",
+                    ItemStatus::InProgress,
+                    None,
+                )
+            },
             subagent_entry(
                 "gallery-s05-subagent-completed",
                 ItemStatus::Completed,
@@ -187,6 +200,7 @@ impl Render for Gallery {
                     gallery_support::working_indicator(
                         "gallery-s01-working-animating",
                         self.started_at,
+                        window,
                         cx,
                     ),
                     cx,
@@ -292,13 +306,13 @@ impl Render for Gallery {
             ),
             section(
                 5,
-                "Subagent capsule",
+                "Subagent window",
                 state_row(
                     subagents
                         .iter()
-                        .zip(["RUNNING", "COMPLETED", "FAILED"])
+                        .zip(["RUNNING", "BACKGROUND", "COMPLETED", "FAILED"])
                         .map(|(entry, label)| {
-                            state_card(label, gallery_support::subagent(entry, cx), cx)
+                            state_card(label, gallery_support::activity(entry, false, cx), cx)
                         })
                         .collect(),
                 ),
@@ -342,6 +356,28 @@ impl Render for Gallery {
                             "gallery-s07-assistant-summarized",
                             self.narration.clone(),
                             true,
+                            cwd,
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    state_card(
+                        "PLAN · AWAITING DECISION",
+                        gallery_support::plan(
+                            "gallery-s07-plan-deciding",
+                            self.plans[0].clone(),
+                            true,
+                            cwd,
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    state_card(
+                        "PLAN · DECIDED",
+                        gallery_support::plan(
+                            "gallery-s07-plan-decided",
+                            self.plans[1].clone(),
+                            false,
                             cwd,
                             cx,
                         ),
@@ -547,7 +583,7 @@ impl Gallery {
                     TabItem::new(("gallery-terminal", ix), label)
                         .selected(selected[4] == ix)
                         .on_click(pick(4, ix, cx))
-                        .trailing(
+                        .trailing(move |_, cx| {
                             h_flex()
                                 .gap_1()
                                 .children((ix == 2).then(|| {
@@ -560,8 +596,9 @@ impl Gallery {
                                         .xsmall()
                                         .icon(IconName::Close)
                                         .tooltip("Close terminal"),
-                                ),
-                        )
+                                )
+                                .into_any_element()
+                        })
                 })
                 .collect::<Vec<_>>();
         let merge = ["Merge commit", "Squash and merge", "Rebase and merge"]
@@ -712,6 +749,8 @@ fn entry(id: &str, content: ItemContent) -> TimelineEntry {
         id: id.into(),
         content: EntryContent::Item(content),
         ts: None,
+        finished_ts: None,
+        background: false,
         turn: 0,
     }
 }

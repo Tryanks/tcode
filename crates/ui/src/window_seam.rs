@@ -13,6 +13,9 @@
 
 use gpui::{App, Edges, Global, Pixels, Window, px};
 
+/// How long content takes to follow a change of the window's insets.
+const INSETS: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The layout breakpoint for a mobile build: below this much usable content
 /// width the shell uses its compact layout, at or above it the wide split. A
 /// desktop build never consults it — see [`window_is_compact`].
@@ -24,6 +27,9 @@ pub(crate) const COMPACT_BREAKPOINT: f32 = 900.;
 /// covers the home indicator does not need it counted a second time — that is
 /// what `WindowInsets::effective()` computes for the window. Backgrounds still
 /// paint edge to edge; only interactive content is constrained, and only once.
+///
+/// Each value is where the system's edges end up; what lays content out
+/// against them moves there with [`content_insets_gliding`].
 pub(crate) fn content_insets(window: &Window) -> Edges<Pixels> {
     let viewport = window.viewport_size();
     let visible = window.fully_visible_bounds();
@@ -32,6 +38,94 @@ pub(crate) fn content_insets(window: &Window) -> Edges<Pixels> {
         right: viewport.width - visible.right(),
         bottom: viewport.height - visible.bottom(),
         left: visible.origin.x,
+    }
+}
+
+/// [`content_insets`] as the surface `id` lays its content out against them:
+/// each edge glides to a new value (a software keyboard sliding up or down,
+/// a rotation) over [`INSETS`], and lands at once with motion reduced.
+/// The glide is kept by `owner` for a surface drawn under a new parent as
+/// the window turns compact or wide, in element state otherwise.
+///
+/// Gap: the platform moves its keyboard on its own curve and duration, but
+/// GPUI's `WindowInsets` carries only where the keyboard ends up — the iOS
+/// host reads just the end frame of `keyboardWillChangeFrame`, and Android's
+/// insets listener reports end states — so the content cannot ride the
+/// keyboard's own curve and takes gpui-base's default ease out instead. Once
+/// GPUI hands over the keyboard's animation, the insets follow it here.
+pub(crate) fn content_insets_gliding(
+    id: &'static str,
+    owner: Option<&crate::motion::owned::Owned>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Edges<Pixels> {
+    let target = content_insets(window);
+    glide_insets(id, owner, target, window, cx)
+}
+
+/// [`content_insets_gliding`] for a surface that runs along the window's
+/// `sides`, and is inset from none of the others. A side it starts or stops
+/// running along, as a sidebar beside it collapses or comes back, glides in
+/// or out with the rest.
+pub(crate) fn insets_along(
+    id: &'static str,
+    sides: Edges<bool>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Edges<Pixels> {
+    let seam = content_insets(window);
+    let along = |runs: bool, inset: Pixels| if runs { inset } else { Pixels::ZERO };
+    let target = Edges {
+        top: along(sides.top, seam.top),
+        right: along(sides.right, seam.right),
+        bottom: along(sides.bottom, seam.bottom),
+        left: along(sides.left, seam.left),
+    };
+    glide_insets(id, None, target, window, cx)
+}
+
+/// `surface`, which runs along the window's `sides`, with its content inset
+/// from the seam there: its own background still reaches the window's edges,
+/// under a status bar, a home indicator, a side cutout or a keyboard, so what
+/// the system covers shows the surface it covers, never a band of another
+/// colour.
+pub(crate) fn inset_from_seam<E: gpui::Styled>(
+    surface: E,
+    id: &'static str,
+    sides: Edges<bool>,
+    window: &mut Window,
+    cx: &mut App,
+) -> E {
+    let inset = insets_along(id, sides, window, cx);
+    surface
+        .pt(inset.top)
+        .pb(inset.bottom)
+        .pl(inset.left)
+        .pr(inset.right)
+}
+
+fn glide_insets(
+    id: &'static str,
+    owner: Option<&crate::motion::owned::Owned>,
+    target: Edges<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Edges<Pixels> {
+    let clock = crate::motion::Clock::from(owner);
+    let mut edge = |name: &'static str, value: Pixels| {
+        clock.transition(
+            gpui::ElementId::NamedChild(std::sync::Arc::new(id.into()), name.into()),
+            value,
+            &crate::motion::Curve::new(INSETS),
+            window,
+            cx,
+        )
+    };
+    Edges {
+        top: edge("top", target.top),
+        right: edge("right", target.right),
+        bottom: edge("bottom", target.bottom),
+        left: edge("left", target.left),
     }
 }
 

@@ -18,6 +18,7 @@ pub(crate) mod parse;
 mod render;
 mod selection;
 mod state;
+mod stream_fade;
 mod utils;
 mod view;
 
@@ -27,7 +28,7 @@ use gpui_base::input::SelectAll;
 pub use link_target::OpenThreadAnchor;
 #[cfg(test)]
 pub(crate) use parse::parse;
-pub use selection::{SelectionArea, SelectionDocument};
+pub use selection::{SelectionArea, SelectionDocument, SelectionGesture};
 pub use state::{ImageResolver, MarkdownState};
 pub use view::{MarkdownView, MenuExtension};
 

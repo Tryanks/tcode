@@ -29,8 +29,8 @@
 //! - `act_ui` reports `worked` / `didnt` / `unknown` per step, stops at the
 //!   first failure, and never treats event delivery alone as semantic success
 //!   when an `expect` was given. Each step reports its `delivery` (`ax`,
-//!   `background_pid`, `foreground_hid`, `none`) and the transaction its
-//!   `activation` (`none`, `background`, `foreground`).
+//!   `background_pid`, `window_message`, `foreground_hid`, `none`) and the
+//!   transaction its `activation` (`none`, `background`, `foreground`).
 //! - Model-visible text is capped; oversized results return a preview plus a
 //!   continuation ref for `read_text`.
 //! - A window of at least 20,000 square points whose outline exposes fewer
@@ -42,11 +42,21 @@
 //! - macOS tries AX actions before synthesizing input, posts events to the
 //!   target process without stealing focus, and relies on optional private
 //!   routing APIs, so delivery never implies the application changed.
-//!   `allow_foreground_fallback` (default off) lets only `type_text` and
-//!   `keypress` retry through foreground activation; pointer actions never do.
-//!   `show_agent_cursor` (default on) drives the action overlay in
-//!   `backend::macos::overlay`, visible only while no other application
-//!   window covers the action point on the target window.
+//!   When background key delivery cannot start for `type_text`, `keypress`
+//!   or `set_text`'s keyboard replacement, the step is typed with the target
+//!   app in front only if the user's remembered choice allows it or they
+//!   allow it when asked (`foreground`); that step posts no pointer events,
+//!   and pointer actions never come to the front.
+//! - Windows tries UI Automation patterns first and otherwise posts window
+//!   messages to the target's own windows (`backend::windows::input`, which
+//!   names what posted messages cannot reach); it never activates a window
+//!   except through UI Automation focus.
+//! - No action moves the user's pointer: `clippy.toml` refuses the global
+//!   input APIs outside that one macOS foreground keyboard step. `show_agent_cursor`
+//!   (default on) draws the agent cursor (`backend::cursor`, drawn by each
+//!   platform's overlay); the cursor and everything it draws, ripples
+//!   included, are visible only while no other application's window covers
+//!   the action point on the target window.
 //! - macOS needs Accessibility (`AXIsProcessTrusted`) and, for screenshots,
 //!   Screen Recording (`CGPreflightScreenCaptureAccess`); `permissions`
 //!   checks and requests them, and Screen Recording grants that need a
@@ -61,6 +71,7 @@
 pub mod backend;
 pub mod config;
 mod feedback;
+pub mod foreground;
 pub mod outline;
 pub mod permissions;
 pub mod state;
@@ -75,6 +86,8 @@ pub struct ComputerUseMcpServer {
     pub url: String,
     /// Per-session tokens and feedback cancellation controls.
     pub tokens: TokenRegistry,
+    /// The questions calls ask the user, for the host to show in their threads.
+    pub foreground_asks: foreground::ForegroundAsks,
 }
 
 /// Diagnostic entry for `tcode --cu-smoke`: exercises the platform backend
@@ -129,20 +142,28 @@ pub fn start(host: &mut mcp_host::Host) -> ComputerUseMcpServer {
     let url = host.url("/computer-use");
     let sessions = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let feedback = sessions.clone();
+    let (asks, foreground_asks) = tokio::sync::mpsc::unbounded_channel();
     let services = mcp_host::TokenRegistry::new(move |scope| {
         let mut sessions = feedback.lock().unwrap();
         let session = sessions
             .get(&scope)
             .and_then(std::sync::Weak::upgrade)
             .unwrap_or_else(feedback::FeedbackSession::new);
-        sessions.insert(scope, std::sync::Arc::downgrade(&session));
-        tools::service(session)
+        sessions.insert(scope.clone(), std::sync::Arc::downgrade(&session));
+        tools::service(
+            session,
+            Some(foreground::ForegroundAsker::new(scope, asks.clone())),
+        )
     });
     let tokens = TokenRegistry { services, sessions };
     host.mount(mcp_host::route("/computer-use", &tokens.services));
 
     log::info!("computer-use-mcp: serving at {url}");
-    ComputerUseMcpServer { url, tokens }
+    ComputerUseMcpServer {
+        url,
+        tokens,
+        foreground_asks,
+    }
 }
 
 /// Uses the shared authenticated registry; weak feedback controls do not keep a
@@ -236,13 +257,16 @@ mod feedback_lifecycle_tests {
     fn mcp_cancellation_invalidates_pending_feedback_before_the_handler_resumes() {
         let session = feedback::FeedbackSession::new();
         let cancellation = tokio_util::sync::CancellationToken::new();
-        let mut success = session.begin(None);
+        let answered = tokio_util::sync::CancellationToken::new();
+        let mut success = session.begin(Some(answered.clone()));
         let published_success = success.ticket();
         success.complete();
         drop(success);
+        // rmcp cancels a request's token as it sends that request's response.
+        answered.cancel();
         assert!(
             published_success.is_current(),
-            "successful actions retain their bounded tail"
+            "successful actions retain their bounded tail after the response"
         );
         let cancelled = session.begin(Some(cancellation.clone()));
         let pending = cancelled.ticket();

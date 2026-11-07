@@ -326,8 +326,8 @@ fn phase_line(
             key,
             done = progress.threads_done,
             total = progress.threads_total,
-            bytes = tcode_ui::format_size(progress.bytes_done as usize),
-            total_bytes = tcode_ui::format_size(progress.bytes_total as usize),
+            bytes = tcode_ui::format_size(progress.bytes_done),
+            total_bytes = tcode_ui::format_size(progress.bytes_total),
             path = data_dir
         )
         .into_owned()

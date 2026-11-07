@@ -247,6 +247,7 @@ impl GitHubApi {
             },
         )?;
         let identity: Identity = response.json()?;
+        self.credentials.recognized(&credential, &identity.login);
         self.identities.lock().unwrap().insert(
             credential.fingerprint.clone(),
             CachedIdentity {
@@ -255,6 +256,52 @@ impl GitHubApi {
             },
         );
         Ok((credential, identity))
+    }
+
+    /// Whose `token` is on the host, and which of the scopes Tcode needs a classic token
+    /// lacks. A fine-grained token names no scopes, so none are missing.
+    pub fn whose(&self, host: &str, token: &str) -> crate::forge::account::Whose {
+        use tcode_core::settings::TokenCheck;
+        let host = normalize_host(host).map_err(|_| TokenCheck::Unreachable { status: None })?;
+        let answer = crate::forge::account::ask(
+            &self.agent,
+            &format!("{}/user", api_root(&host)),
+            &format!("Bearer {}", token.trim()),
+            &[("X-GitHub-Api-Version", "2022-11-28")],
+        )?;
+        let scopes = answer.header("x-oauth-scopes").map(|scopes| {
+            scopes
+                .split(',')
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        let body = answer.accepted()?;
+        let missing = scopes
+            .map(|scopes| {
+                let has = |scope: &str| scopes.iter().any(|held| held == scope);
+                let mut missing = Vec::new();
+                if !has("repo") {
+                    missing.push("repo".to_owned());
+                }
+                if !has("read:org") && !has("write:org") && !has("admin:org") {
+                    missing.push("read:org".to_owned());
+                }
+                missing
+            })
+            .unwrap_or_default();
+        Ok((
+            crate::forge::account::account(&body, "login", "name"),
+            missing,
+        ))
+    }
+
+    /// Learns whose the saved or environment token in use is, when that is not yet known.
+    pub fn identify(&self, host: &str) {
+        if let Ok(credential) = self.credentials.get(host) {
+            self.credentials
+                .identify(&credential, || self.whose(host, &credential.token));
+        }
     }
 
     fn execute(
@@ -292,13 +339,7 @@ impl GitHubApi {
         let host = host.as_str();
         let public = host == "github.com";
         let residency = host.ends_with(".ghe.com");
-        let root = if public {
-            "https://api.github.com".to_owned()
-        } else if residency {
-            format!("https://api.{host}")
-        } else {
-            format!("https://{host}/api/v3")
-        };
+        let root = api_root(host);
         let url = if graphql.is_some() && !public && !residency {
             format!("https://{host}/api/graphql")
         } else {
@@ -440,6 +481,9 @@ impl GitHubApi {
             return Err(GitHubError::RateLimited { status, retry_at });
         }
         if status == 401 {
+            if let Some(credential) = &credential {
+                self.credentials.record(credential, false);
+            }
             self.credentials.invalidate(host);
             return Err(GitHubError::Unauthorized);
         }
@@ -460,6 +504,9 @@ impl GitHubApi {
             || input.answers.contains(&status)
         {
             self.ledger.lock().unwrap().succeeded(host, scope, lease);
+            if let Some(credential) = &credential {
+                self.credentials.record(credential, true);
+            }
             if graphql.is_some() && truncated {
                 return Err(GitHubError::BodyTooLarge);
             }
@@ -497,5 +544,17 @@ impl GitHubApi {
             }
         }
         Err(GitHubError::Response { status, messages })
+    }
+}
+
+/// Where the host's REST API is: api.github.com for github.com, `api.` before a data-residency
+/// host, and `/api/v3` on an Enterprise Server.
+fn api_root(host: &str) -> String {
+    if host == "github.com" {
+        "https://api.github.com".to_owned()
+    } else if host.ends_with(".ghe.com") {
+        format!("https://api.{host}")
+    } else {
+        format!("https://{host}/api/v3")
     }
 }

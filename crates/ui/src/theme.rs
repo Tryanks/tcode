@@ -2,12 +2,16 @@ use std::{collections::HashMap, sync::Arc, sync::LazyLock};
 
 use gpui::{App, Global, Hsla, Rgba, SharedString, Window, WindowAppearance, px};
 use gpui_base::{
-    ColorTokens, PlotTheme, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarStyles,
-    ScrollbarTheme, SemanticThemeTokens, ThemeAppearance, TypographyTokens,
+    ColorTokens, RadiusTokens, ScrollbarMode, ScrollbarMotion, ScrollbarStyles, ScrollbarTheme,
+    SemanticThemeTokens, ThemeAppearance, TypographyTokens,
 };
 use serde::Deserialize;
 
 pub use crate::highlight::HighlightTheme;
+pub use glide::glide_mode;
+pub(crate) use glide::mix;
+
+mod glide;
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 
@@ -59,6 +63,10 @@ pub struct Theme {
     pub list_active: Hsla,
     pub list_hover: Hsla,
     pub mode: ThemeMode,
+    /// How far this palette is from the light theme toward the dark one: 0
+    /// or 1 at rest, in between while the theme glides from one mode to the
+    /// other. See [`Theme::by_mode`].
+    pub darkness: f32,
     pub mono_font_family: SharedString,
     pub muted: Hsla,
     pub muted_foreground: Hsla,
@@ -112,6 +120,13 @@ impl Theme {
     pub fn theme_name(&self) -> &SharedString {
         &self.theme_name
     }
+
+    /// A colour the code picks by mode rather than reading from a token:
+    /// `light` in the light theme, `dark` in the dark one, and the mix the
+    /// palette has reached while the theme glides between them.
+    pub(crate) fn by_mode(&self, light: Hsla, dark: Hsla) -> Hsla {
+        glide::mix(light, dark, self.darkness)
+    }
 }
 
 impl Global for Theme {}
@@ -153,8 +168,9 @@ struct ThemeConfig {
     mode: String,
     #[serde(rename = "font.family")]
     font_family: String,
-    #[serde(rename = "mono_font.family")]
-    mono_font_family: String,
+    /// Absent, the platform's monospace family gpui-base defaults to.
+    #[serde(rename = "mono_font.family", default)]
+    mono_font_family: Option<String>,
     radius: f32,
     #[serde(rename = "radius.lg")]
     radius_lg: f32,
@@ -184,6 +200,11 @@ impl TryFrom<ThemeConfig> for Theme {
     type Error = String;
 
     fn try_from(config: ThemeConfig) -> Result<Self, Self::Error> {
+        let mono: SharedString = config
+            .mono_font_family
+            .clone()
+            .map(Into::into)
+            .unwrap_or_else(|| TypographyTokens::default().mono);
         let mode = match config.mode.as_str() {
             "light" => ThemeMode::Light,
             "dark" => ThemeMode::Dark,
@@ -215,43 +236,43 @@ impl TryFrom<ThemeConfig> for Theme {
         let popover = color("popover.background")?;
         let danger = color("danger.background")?;
         let danger_foreground = color("danger.foreground")?;
-        let tokens = SemanticThemeTokens {
-            colors: ColorTokens {
-                selection: primary.alpha(0.3),
-                background,
-                foreground,
-                surface: popover,
-                surface_foreground: foreground,
-                primary,
-                primary_foreground,
-                secondary,
-                secondary_foreground: foreground,
-                muted,
-                muted_foreground,
-                accent,
-                accent_foreground: foreground,
-                destructive: danger,
-                destructive_foreground: danger_foreground,
-                border,
-                input,
-                ring,
-            },
-            // The scale gpui-kit derives from the same two theme-file keys.
-            radius: RadiusTokens {
-                sm: px(config.radius / 2.),
-                md: px(config.radius),
-                lg: px(config.radius_lg),
-                xl: px(config.radius * 2.),
-                ..Default::default()
-            },
-            // Sizes and line heights are gpui-base's scale on purpose.
-            typography: TypographyTokens {
-                sans: config.font_family.clone().into(),
-                mono: config.mono_font_family.clone().into(),
-                ..Default::default()
-            },
-            ..Default::default()
+        let mut colors = if mode.is_dark() {
+            ColorTokens::dark()
+        } else {
+            ColorTokens::light()
         };
+        colors.selection = primary.alpha(0.3);
+        colors.background = background;
+        colors.foreground = foreground;
+        colors.surface = popover;
+        colors.surface_foreground = foreground;
+        colors.primary = primary;
+        colors.primary_foreground = primary_foreground;
+        colors.secondary = secondary;
+        colors.secondary_foreground = foreground;
+        colors.muted = muted;
+        colors.muted_foreground = muted_foreground;
+        colors.accent = accent;
+        colors.accent_foreground = foreground;
+        colors.destructive = danger;
+        colors.destructive_foreground = danger_foreground;
+        colors.border = border;
+        colors.input = input;
+        colors.ring = ring;
+        // The scale gpui-kit derives from the same two theme-file keys.
+        let mut radius = RadiusTokens::default();
+        radius.sm = px(config.radius / 2.);
+        radius.md = px(config.radius);
+        radius.lg = px(config.radius_lg);
+        radius.xl = px(config.radius * 2.);
+        // Sizes and line heights are gpui-base's scale on purpose.
+        let mut typography = TypographyTokens::default();
+        typography.sans = config.font_family.clone().into();
+        typography.mono = mono.clone();
+        let mut tokens = SemanticThemeTokens::default();
+        tokens.colors = colors;
+        tokens.radius = radius;
+        tokens.typography = typography;
 
         Ok(Self {
             accent,
@@ -274,7 +295,8 @@ impl TryFrom<ThemeConfig> for Theme {
             list_active: color("list.active.background")?,
             list_hover: color("list.hover.background")?,
             mode,
-            mono_font_family: config.mono_font_family.into(),
+            darkness: if mode.is_dark() { 1. } else { 0. },
+            mono_font_family: mono,
             muted,
             muted_foreground,
             popover,
@@ -313,6 +335,7 @@ pub fn init(cx: &mut App) {
 pub fn init_with_json(theme_json: &str, cx: &mut App) {
     gpui_base::init(cx);
     crate::overlay::init(cx);
+    crate::motion::drag_ghost::init(cx);
     crate::widgets::menu::init(cx);
     let themes = parse_theme_file(theme_json).expect("embedded themes/tcode.json must be valid");
 
@@ -320,45 +343,63 @@ pub fn init_with_json(theme_json: &str, cx: &mut App) {
     change_mode(ThemeMode::Light, None, cx);
 }
 
+/// Switch to `mode` at once. A glide under way stops where it is replaced.
 pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
-    let theme = match mode {
-        ThemeMode::Light => cx.global::<Themes>().light.clone(),
-        ThemeMode::Dark => cx.global::<Themes>().dark.clone(),
-    };
-    let radius = theme.tokens.radius;
-    let base_theme = gpui_base::Theme {
-        appearance: match mode {
-            ThemeMode::Light => ThemeAppearance::Light,
-            ThemeMode::Dark => ThemeAppearance::Dark,
-        },
-        tokens: theme.tokens.clone(),
-        scrollbar: ScrollbarTheme::new()
-            .with_mode(if cx.should_auto_hide_scrollbars() {
-                ScrollbarMode::Scrolling
-            } else {
-                ScrollbarMode::Hover
-            })
-            .with_styles(
-                ScrollbarStyles::default()
-                    .track(|style| style.bg(theme.scrollbar))
-                    .track_hover(|style| style.bg(theme.scrollbar))
-                    .track_active(|style| style.bg(theme.scrollbar).border_color(theme.border))
-                    .thumb(|style| style.bg(theme.scrollbar_thumb).radius(radius.full))
-                    .thumb_hover(|style| style.bg(theme.scrollbar_thumb_hover).radius(radius.full))
-                    .thumb_active(|style| {
-                        style.bg(theme.scrollbar_thumb_hover).radius(radius.full)
-                    }),
-            ),
-        resizable: ResizableTheme::default(),
-        plot: PlotTheme::default(),
-    };
-    cx.set_global(base_theme);
-    cx.set_global(theme);
+    glide::stop(cx);
+    install(themes(mode, cx), cx);
     #[cfg(target_os = "macos")]
     crate::macos_backdrop::sync_appearance(mode, cx);
     if let Some(window) = window {
         window.refresh();
     }
+}
+
+/// The parsed theme for `mode`.
+fn themes(mode: ThemeMode, cx: &App) -> Theme {
+    palette(mode, cx).clone()
+}
+
+/// `mode`'s palette at rest: the one a glide toward `mode` ends on.
+pub(crate) fn palette(mode: ThemeMode, cx: &App) -> &Theme {
+    match mode {
+        ThemeMode::Light => &cx.global::<Themes>().light,
+        ThemeMode::Dark => &cx.global::<Themes>().dark,
+    }
+}
+
+/// Make `theme` the one every view reads: Tcode's own and gpui-base's, built
+/// from it.
+fn install(theme: Theme, cx: &mut App) {
+    let look = crate::widgets::scrollbar::Look::of(&theme);
+    let mut base_theme = gpui_base::Theme::default();
+    base_theme.appearance = match theme.mode {
+        ThemeMode::Light => ThemeAppearance::Light,
+        ThemeMode::Dark => ThemeAppearance::Dark,
+    };
+    base_theme.tokens = theme.tokens.clone();
+    base_theme.scrollbar = ScrollbarTheme::new()
+        .with_mode(if cx.should_auto_hide_scrollbars() {
+            ScrollbarMode::Scrolling
+        } else {
+            ScrollbarMode::Hover
+        })
+        .with_motion(
+            ScrollbarMotion::default()
+                .with_enter(crate::widgets::scrollbar::MOTION)
+                .with_exit(crate::widgets::scrollbar::MOTION)
+                .with_expand(crate::widgets::scrollbar::MOTION),
+        )
+        .with_styles(
+            ScrollbarStyles::default()
+                .track(|style| style.bg(look.track))
+                .track_hover(|style| style.bg(look.track))
+                .track_active(|style| style.bg(look.track).border_color(theme.border))
+                .thumb(|style| style.bg(look.thumb).radius(look.radius))
+                .thumb_hover(|style| style.bg(look.thumb_hover).radius(look.radius))
+                .thumb_active(|style| style.bg(look.thumb_hover).radius(look.radius)),
+        );
+    cx.set_global(base_theme);
+    cx.set_global(theme);
 }
 
 pub fn sync_system_appearance(window: Option<&mut Window>, cx: &mut App) {

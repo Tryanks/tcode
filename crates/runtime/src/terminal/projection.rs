@@ -128,13 +128,28 @@ impl TerminalProjection {
         let rows = snapshot.screen_lines.min(u16::MAX as usize) as u16;
         let resized = (cols, rows) != (self.frame.cols, self.frame.rows);
 
+        let scrolled = snapshot.lines_evicted + snapshot.history_size as u64;
+        let appended = scrolled.saturating_sub(self.scrolled) as usize;
+        // Rows that scrolled off moved the screen up by as many, so the
+        // subscriber moves its rows and only what that leaves different is
+        // sent. Damage is relative to the rows before the move.
+        let shift = if resized {
+            0
+        } else {
+            appended.min(snapshot.screen_lines)
+        };
+        let blank = TerminalRow::default();
         let mut rows_replaced = Vec::new();
         for row in 0..snapshot.screen_lines {
-            if !resized && !snapshot.row_damage.get(row).copied().unwrap_or(true) {
+            if !resized && shift == 0 && !snapshot.row_damage.get(row).copied().unwrap_or(true) {
                 continue;
             }
             let projected = projector.visible_row(&snapshot, row);
-            let unchanged = self.frame.visible.get(row).is_some_and(|current| {
+            let current = match self.frame.visible.get(row + shift) {
+                None if shift > 0 => Some(&blank),
+                current => current,
+            };
+            let unchanged = current.is_some_and(|current| {
                 same_row(current, &self.frame.styles, &projected, projector.styles())
             });
             if unchanged {
@@ -145,9 +160,6 @@ impl TerminalProjection {
                 row: projected,
             });
         }
-
-        let scrolled = snapshot.lines_evicted + snapshot.history_size as u64;
-        let appended = scrolled.saturating_sub(self.scrolled) as usize;
         let history = if republish {
             self.history_deadline = None;
             // ponytail: the whole ring goes back on the wire. Diffing reflowed
@@ -189,6 +201,7 @@ impl TerminalProjection {
             cursor,
             lines_evicted: snapshot.lines_evicted,
             styles: projector.into_styles(),
+            scrolled: shift.min(u16::MAX as usize) as u16,
             rows_replaced,
             history,
             title,
@@ -198,6 +211,7 @@ impl TerminalProjection {
             clipboard: self.clipboard.take(),
         };
         let changed = resized
+            || delta.scrolled != 0
             || !delta.rows_replaced.is_empty()
             || delta.history.is_some()
             || delta.title.is_some()
@@ -241,7 +255,7 @@ impl TerminalProjection {
 }
 
 /// Compare two rows whose style ids come from different tables.
-fn same_row(
+pub(super) fn same_row(
     current: &TerminalRow,
     current_styles: &[TerminalStyle],
     projected: &TerminalRow,

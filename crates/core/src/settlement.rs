@@ -132,8 +132,8 @@ impl AgentExecution {
     }
 }
 
-/// What a dispatched child owes its lead. Every message the lead sends a child
-/// (the dispatch brief, each `send`) opens one expectation; the child's
+/// What a subagent owes its lead. Every message the lead sends it (the
+/// `start_thread` message, each queued or steered `send_message`) opens one expectation; the child's
 /// `report_result` call closes it. The child's own turns, wake-ups and
 /// background work never reach the lead on their own.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

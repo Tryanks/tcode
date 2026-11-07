@@ -2,9 +2,34 @@
 # console-suppressing helpers in `crates/services/src/process.rs` and
 # `crates/agent/src/process.rs`; blocking work goes through
 # `Host::unblock` in `crates/runtime/src/host.rs` or the agent crate's
-# `process::unblock`. Each approved site carries an explicit allow.
+# `process::unblock`. Computer use acts on its target application, never on
+# the user's own pointer or keyboard focus, so global input is refused too.
+# Each approved site carries an explicit allow.
 disallowed-methods = [
     { path = "std::process::Command::new", reason = "use services::process::command or agent's process::command so Windows never flashes a console" },
     { path = "smol::process::Command::new", reason = "use services::process::async_command or agent's process::async_command so Windows never flashes a console" },
+    { path = "gpui::StatefulInteractiveElement::tooltip", reason = "use tcode_ui::widgets::TooltipTrigger::with_tooltip so the tooltip shows through the window's tooltip layer and can leave" },
+    { path = "gpui::InteractiveText::tooltip", reason = "track the text's parts with widgets::tooltip::track_parts so the tooltip shows through the window's tooltip layer and can leave" },
+    { path = "gpui::Image::use_render_image", reason = "GPUI keeps the decode for the session; read and draw images through store::images, which holds them within a budget" },
+    { path = "gpui::Image::get_render_image", reason = "GPUI keeps the decode for the session; read and draw images through store::images, which holds them within a budget" },
+    { path = "gpui::Window::use_asset", reason = "GPUI keeps every asset for the session; read and draw images through store::images, which holds them within a budget" },
     { path = "smol::unblock", reason = "use Host::unblock or the agent crate's process::unblock so blocking work is scheduled in one place" },
+    { path = "core_graphics::event::CGEvent::post", reason = "a global tap moves the user's pointer and types into whatever has focus; post to the target with CGEvent::post_to_pid" },
+    { path = "core_graphics::display::CGDisplay::warp_mouse_cursor_position", reason = "moves the user's pointer; computer use shows its own agent cursor" },
+    { path = "core_graphics::display::CGDisplay::move_cursor_to_point", reason = "moves the user's pointer; computer use shows its own agent cursor" },
+    { path = "windows::Win32::UI::WindowsAndMessaging::SetCursorPos", reason = "moves the user's pointer; computer use posts window messages to its target and shows its own agent cursor" },
+    { path = "windows::Win32::UI::Input::KeyboardAndMouse::SendInput", reason = "global input moves the user's pointer and types into whatever has focus; post window messages to the target" },
+    { path = "windows::Win32::UI::Input::KeyboardAndMouse::mouse_event", reason = "global input moves the user's pointer; post window messages to the target" },
+    { path = "windows::Win32::UI::Input::KeyboardAndMouse::keybd_event", reason = "global input types into whatever has focus; post window messages to the target" },
+    { path = "uiautomation::UIElement::click", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::hold_click", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::double_click", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::right_click", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::send_keys", reason = "types into whatever has focus through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::hold_send_keys", reason = "types into whatever has focus through SendInput; post window messages to the target" },
+    { path = "uiautomation::UIElement::send_text", reason = "types into whatever has focus through SendInput; post window messages to the target" },
+]
+disallowed-types = [
+    { path = "uiautomation::inputs::Mouse", reason = "moves the user's pointer through SendInput; post window messages to the target" },
+    { path = "uiautomation::inputs::Keyboard", reason = "types into whatever has focus through SendInput; post window messages to the target" },
 ]

@@ -5,10 +5,14 @@ use tcode_protocol::AgentStatus;
 pub(crate) struct DomainDiff {
     subscriptions: HashSet<Topic>,
     index: IndexSnapshot,
-    summary_revisions: [u64; 7],
+    summary_revisions: [u64; 8],
+    /// Residents borrowed one at a time from this revision on have not been
+    /// projected into the summaries yet.
+    residents_seen: u64,
     space_indexes: HashMap<String, IndexSnapshot>,
     settings: Settings,
     providers: Option<ProvidersStatus>,
+    providers_revisions: [u64; 3],
     git_status: HashMap<String, GitStatusStatus>,
     session_statuses: HashMap<String, SessionStatus>,
     session_plans: HashMap<String, SessionPlan>,
@@ -28,12 +32,14 @@ impl DomainDiff {
                 }
             },
             summary_revisions: state.index_summary_revisions(),
+            residents_seen: revisioned::upcoming_revision(),
             space_indexes: HashMap::new(),
             settings: state.settings_snapshot(),
             providers: state
                 .subscriptions
                 .contains(&Topic::Providers)
                 .then(|| state.providers_status_snapshot()),
+            providers_revisions: state.providers_revisions(),
             git_status: HashMap::new(),
             session_statuses: state.subscribed_session_status_snapshots(),
             session_plans: state.subscribed_session_plan_snapshots(),
@@ -41,6 +47,7 @@ impl DomainDiff {
     }
 
     pub(crate) fn emit_changes(&mut self, state: &mut AppState, cx: &mut HostCx) {
+        let residents_seen = revisioned::upcoming_revision();
         if self.index.projects != state.projects {
             state.space_archives_revision = None;
         }
@@ -49,6 +56,11 @@ impl DomainDiff {
         let summary_revisions = state.index_summary_revisions();
         let sessions_changed = self.summary_revisions[0] != summary_revisions[0];
         let summary_changed = self.summary_revisions != summary_revisions || settings_changed;
+        let residents_touched = state
+            .residents
+            .touched_since(self.residents_seen)
+            .next()
+            .is_some();
         if state.subscriptions.contains(&Topic::Index) {
             if !self.subscriptions.contains(&Topic::Index) {
                 self.index = state.index_snapshot();
@@ -65,7 +77,9 @@ impl DomainDiff {
                         emit_replacement(Topic::Index, event, cx);
                     }
                     self.index = index;
-                } else if summary_changed {
+                } else if summary_changed
+                    || (residents_touched && !self.update_touched_activity(state, cx))
+                {
                     let summary = state.build_index_summary();
                     for event in index_summary_changes(&self.index.summary, &summary) {
                         emit_replacement(Topic::Index, event, cx);
@@ -123,6 +137,7 @@ impl DomainDiff {
                     })))
             {
                 if summary_changed
+                    || residents_touched
                     || old.summary.archived_revision
                         != state
                             .space_archives
@@ -162,21 +177,49 @@ impl DomainDiff {
             self.settings = settings;
         }
 
+        let providers_revisions = state.providers_revisions();
         if state.subscriptions.contains(&Topic::Providers) {
-            let providers = state.providers_status_snapshot();
-            if self.providers.as_ref() != Some(&providers) {
-                if self.providers.is_some() {
-                    emit_replacement(
-                        Topic::Providers,
-                        ServerEvent::ProvidersReplaced(providers.clone()),
-                        cx,
-                    );
+            let stale = self.providers.as_ref().is_none_or(|last| {
+                settings_changed
+                    || self.providers_revisions != providers_revisions
+                    || last.acp_registry_loading != state.acp_registry_loading
+                    || last.acp_registry_error != state.acp_registry_error
+                    || last.acp_installing != state.acp_installing
+            });
+            if stale {
+                let providers = state.providers_status_snapshot();
+                if let Some(previous) = self.providers.as_mut()
+                    && *previous != providers
+                {
+                    previous
+                        .provider_usage
+                        .clone_from(&providers.provider_usage);
+                    previous
+                        .usage_checking
+                        .clone_from(&providers.usage_checking);
+                    let event = if *previous == providers {
+                        ServerEvent::ProviderUsageChanged {
+                            provider_usage: providers.provider_usage.clone(),
+                            usage_checking: providers.usage_checking.clone(),
+                        }
+                    } else {
+                        ServerEvent::ProvidersReplaced(providers.clone())
+                    };
+                    emit_replacement(Topic::Providers, event, cx);
                 }
                 self.providers = Some(providers);
+            } else {
+                #[cfg(debug_assertions)]
+                assert_eq!(
+                    self.providers.as_ref(),
+                    Some(&state.providers_status_snapshot()),
+                    "provider status inputs changed without a revision"
+                );
             }
         } else {
             self.providers = None;
         }
+        self.providers_revisions = providers_revisions;
 
         let git_status: HashMap<_, _> = state
             .subscriptions
@@ -261,7 +304,46 @@ impl DomainDiff {
         }
         self.session_plans = session_plans;
         self.summary_revisions = summary_revisions;
+        self.residents_seen = residents_seen;
         self.subscriptions.clone_from(&state.subscriptions);
+    }
+
+    /// Bring the index summary up to date when only residents borrowed one
+    /// at a time moved: their activity and their ancestors' (whom a child
+    /// holds) is all such a change can reach. `false` when a touched thread
+    /// is not an unarchived stored one, which only a full rebuild places.
+    fn update_touched_activity(&mut self, state: &AppState, cx: &mut HostCx) -> bool {
+        let Some(activity) =
+            state.touched_activity(state.residents.touched_since(self.residents_seen))
+        else {
+            return false;
+        };
+        let upserts: HashMap<_, _> = activity
+            .into_iter()
+            .filter(|(id, activity)| self.index.summary.activity.get(id) != Some(activity))
+            .collect();
+        if !upserts.is_empty() {
+            self.index.summary.activity.extend(
+                upserts
+                    .iter()
+                    .map(|(id, activity)| (id.clone(), activity.clone())),
+            );
+            emit_replacement(
+                Topic::Index,
+                ServerEvent::IndexActivitiesChanged {
+                    upserts,
+                    removed: Vec::new(),
+                },
+                cx,
+            );
+        }
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            self.index.summary,
+            state.build_index_summary(),
+            "a resident borrowed alone moved the index summary beyond its activity"
+        );
+        true
     }
 }
 
@@ -278,7 +360,7 @@ fn index_changes(old: &IndexSnapshot, new: &IndexSnapshot) -> Vec<ServerEvent> {
     let new_sessions: HashSet<_> = new.sessions.iter().map(|m| m.id.as_str()).collect();
     for meta in &new.sessions {
         if old_sessions.get(meta.id.as_str()) != Some(&meta) {
-            events.push(ServerEvent::IndexUpsertSession(meta.clone()));
+            events.push(ServerEvent::IndexUpsertSession(Box::new(meta.clone())));
         }
     }
     for meta in &old.sessions {
@@ -423,7 +505,7 @@ impl<'a> ActivityProjection<'a> {
         } else if resident.is_some_and(|session| {
             session.turn_in_flight
                 || session.delivery_in_flight.is_some()
-                || !session.queue.is_empty()
+                || (!session.queue.is_empty() && !session.queue_stranded())
                 || session.preparing_worktree
                 || matches!(session.runtime, Runtime::Starting { .. })
         }) {
@@ -458,18 +540,20 @@ impl<'a> ActivityProjection<'a> {
         let (approvals, input) = resident.map_or((&[][..], None), |session| {
             self.state.open_requests(&meta.id, session)
         });
-        SessionActivity {
-            working: resident.is_some_and(|session| {
-                session.preparing_worktree
-                    || matches!(session.runtime, Runtime::Starting { .. })
-                    || session.turn_in_flight
-                    || session.delivery_in_flight.is_some()
-                    || (meta.native_subagent.is_some() && session.timeline.turn_running)
-                    || session
+        let working = resident.is_some_and(|session| {
+            session.preparing_worktree
+                || matches!(session.runtime, Runtime::Starting { .. })
+                || session.turn_in_flight
+                || session.delivery_in_flight.is_some()
+                || (meta.native_subagent.is_some() && session.timeline.turn_running)
+                || (!session.queue_stranded()
+                    && session
                         .queue
                         .iter()
-                        .any(|message| message.origin == MessageOrigin::Human)
-            }),
+                        .any(|message| message.origin == MessageOrigin::Human))
+        });
+        SessionActivity {
+            working,
             turn_running: resident.is_some_and(|session| {
                 session.turn_in_flight && session.timeline.turn_retry.is_none()
             }),
@@ -479,7 +563,8 @@ impl<'a> ActivityProjection<'a> {
                     && tcode_core::pull_request::watched(&meta.pull_requests)
                         .next()
                         .is_some()),
-            waiting_for_approval: !approvals.is_empty(),
+            waiting_for_approval: !approvals.is_empty()
+                || self.state.open_foreground_prompt(&meta.id).is_some(),
             waiting_for_input: input.is_some(),
             failed: self
                 .state
@@ -489,12 +574,56 @@ impl<'a> ActivityProjection<'a> {
             unread: self.state.session_unread(meta),
             fork: AppState::session_fork_availability(meta, resident),
             agent: self.agent_status(meta),
+            // A log left with its turn open by a host that died folds to a
+            // running timeline nothing is running.
+            latest_activity: resident
+                .filter(|_| working)
+                .and_then(|session| session.timeline.latest_activity()),
         }
     }
 }
 
 impl AppState {
-    fn index_summary_revisions(&self) -> [u64; 7] {
+    /// Every input of [`AppState::providers_status_snapshot`] apart from
+    /// the settings and the ACP flags, which are compared by value.
+    fn providers_revisions(&self) -> [u64; 3] {
+        [
+            self.providers.revision(),
+            self.acp_registry.revision(),
+            self.plugin_catalogs.revision(),
+        ]
+    }
+
+    /// The activity entries of `touched` threads and their ancestors, or
+    /// `None` when one of them is not an unarchived stored thread.
+    fn touched_activity<'a>(
+        &self,
+        touched: impl Iterator<Item = &'a str>,
+    ) -> Option<HashMap<String, SessionActivity>> {
+        let projection = ActivityProjection::new(self);
+        let mut activity = HashMap::new();
+        for id in touched {
+            let mut next = Some(id);
+            while let Some(id) = next {
+                if activity.contains_key(id) {
+                    break;
+                }
+                let meta = self.sessions.by_id(id)?;
+                if meta.archived_at.is_some() {
+                    return None;
+                }
+                let resident = self.resident(id);
+                activity.insert(
+                    id.to_owned(),
+                    projection.session_activity(resident.map_or(meta, |s| &s.meta), resident),
+                );
+                next = meta.parent_session_id.as_deref();
+            }
+        }
+        Some(activity)
+    }
+
+    fn index_summary_revisions(&self) -> [u64; 8] {
         [
             self.sessions.revision(),
             self.residents.live.revision(),
@@ -502,6 +631,7 @@ impl AppState {
             self.thread_activity.revision(),
             self.title_generating.revision(),
             self.approvals.revision(),
+            self.foreground_prompts.revision(),
             self.archived_revision,
         ]
     }
@@ -788,7 +918,7 @@ impl AppState {
                         }
                         tcode_protocol::ScopedProviderChoice {
                             provider: kind,
-                            name: self.settings.profile_display_name(&profile.id),
+                            name: self.profile_display_name(&profile.id),
                             profile_id: Some(profile.id),
                             models,
                         }
@@ -862,6 +992,7 @@ impl AppState {
             self.provider_plugin_catalogs(),
         );
         self.flag_shared_credentials(&mut status.provider_snapshots);
+        status.harnesses = self.harness_descriptions();
         status
     }
 
@@ -921,7 +1052,21 @@ impl AppState {
             Topic::SessionEvents { .. } => return None,
             Topic::CommandOutput { .. } => return None,
             Topic::RuntimeEvents => return None,
-            Topic::Preview => return None,
+            Topic::Preview { client } => {
+                ServerEvent::PreviewRenderingReplaced(self.preview_rendering_snapshot(client))
+            }
+            Topic::PreviewSession { session_id } => {
+                ServerEvent::PreviewSessionReplaced(self.preview_session_snapshot(session_id))
+            }
+            Topic::DevServers { session_id } => {
+                ServerEvent::DevServersReplaced(self.dev_servers_snapshot(session_id)?)
+            }
+            // The transport that owns hosting answers it.
+            Topic::Hosting => return None,
+            Topic::StorageMigration => {
+                ServerEvent::StorageMigrationReplaced(self.storage_migration.clone())
+            }
+            Topic::DiskUsage => ServerEvent::DiskUsageReplaced(self.disk_usage.clone()),
             // Retained latest-run status, so a client that subscribes after a
             // fast completion still recovers the outcome. `None` means no run
             // has ever started for this project.
@@ -988,6 +1133,7 @@ impl AppState {
         Some(SessionPlan {
             session_id: session_id.to_string(),
             steps: timeline.plan_steps.clone(),
+            explanation: timeline.plan_explanation.clone(),
         })
     }
 
@@ -1086,7 +1232,6 @@ impl AppState {
                 )
             })
         });
-        let terminal_preferences = self.terminal_preferences_for(session);
         let (approvals, user_input) = self.open_requests(session_id, session);
         // The provider reports the window it was launched with; a selection
         // made since then caps the meter until the restart that applies it.
@@ -1142,10 +1287,8 @@ impl AppState {
             active_terminal_id: session.terminal_workspace.active_id,
             terminal_splits: session.terminal_workspace.splits.clone(),
             terminal_contexts: session.terminal_workspace.contexts.clone(),
-            terminal_open: terminal_preferences.is_some_and(|preferences| preferences.open),
-            terminal_height: terminal_preferences
-                .map(|preferences| preferences.height.clamp(120., 600.))
-                .unwrap_or(240.),
+            terminal_open: session.terminal_workspace.open,
+            terminal_height: session.terminal_workspace.height.clamp(120., 600.),
             delivery_in_flight: session.delivery_in_flight,
             activity: activity.session_activity(meta, Some(session)),
             stopping: session.interrupt_requested,
@@ -1153,7 +1296,9 @@ impl AppState {
                 .then(|| session.timeline.turn_retry.clone())
                 .flatten(),
             goal: session.timeline.goal.clone(),
-            native_rewind_blocked: self.native_rewind_blocked(session),
+            rewind: self.rewind_status(session),
+            fork_at: self.fork_status(session),
+            queue_held: session.queue_held && !session.queue.is_empty(),
             checkout_blocked: Self::checkout_blocked(session),
             conversation_read_only: Self::conversation_read_only(meta),
             terminal_limit_reached: self.terminal_limit_reached(session),
@@ -1167,6 +1312,7 @@ impl AppState {
                 .then(|| session.timeline.running_turn())
                 .flatten(),
             pending_approvals: approvals.to_vec(),
+            foreground_prompt: self.open_foreground_prompt(&meta.id),
             pending_user_input: user_input.cloned(),
             steering_supported: session.can_steer(),
             provider_option_descriptors,
@@ -1180,11 +1326,6 @@ impl AppState {
             worktree: meta.worktree.clone(),
             preparing_worktree: session.preparing_worktree,
             relay_confirmation,
-            native_rewind_pending: self.pending_native_rewinds.contains_key(session_id),
-            // The one-shot value is transferred to the client as a dedicated
-            // serialized event; availability is client-replica state after
-            // that point, not a host-side consuming read.
-            native_rewind_prefill_available: false,
             model_pending_restart: session.model_changed_while_live(),
             options_pending_restart: session.options_changed_while_live(),
             injected_tools: self.injected_tools(session),

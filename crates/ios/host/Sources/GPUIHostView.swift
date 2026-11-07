@@ -58,10 +58,42 @@ final class GPUIHostViewController: UIViewController {
 
         started = true
         gpui_ios_init()
+        Self.reportThermalState()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(thermalStateChanged),
+            name: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil
+        )
+        Self.reportLowPowerMode()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(powerStateChanged),
+            name: .NSProcessInfoPowerStateDidChange,
+            object: nil
+        )
         tcode_ios_start()
 
         updateScreen()
         wakeFrames()
+    }
+
+    // Posted on an arbitrary thread; GPUI reads the state on the main thread.
+    @objc private func thermalStateChanged() {
+        DispatchQueue.main.async { Self.reportThermalState() }
+    }
+
+    private static func reportThermalState() {
+        gpui_ios_thermal_state_changed(UInt8(ProcessInfo.processInfo.thermalState.rawValue))
+    }
+
+    // Posted on an arbitrary thread, as the thermal state is.
+    @objc private func powerStateChanged() {
+        DispatchQueue.main.async { Self.reportLowPowerMode() }
+    }
+
+    private static func reportLowPowerMode() {
+        gpui_ios_low_power_mode_changed(ProcessInfo.processInfo.isLowPowerModeEnabled ? 1 : 0)
     }
 
     func updateScreen() {

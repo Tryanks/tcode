@@ -1,12 +1,15 @@
 //! CoreText-backed shaping and glyph rasterization.
 //!
-//! CoreText performs language-aware fallback, so a run styled with the iOS
-//! system UI font automatically uses PingFang for Simplified Chinese glyphs.
+//! CoreText falls back by the system's preferred languages. A font's
+//! `fallbacks` go first, as on GPUI's macOS backend, so the app can choose the
+//! forms its own language reads.
 
 use anyhow::{Result, anyhow};
 use core_foundation::{
+    array::{CFArray, CFArrayRef},
     attributed_string::CFMutableAttributedString,
-    base::{CFRange, TCFType},
+    base::{CFRange, CFType, TCFType},
+    dictionary::CFDictionary,
     number::CFNumber,
     string::CFString,
 };
@@ -17,9 +20,11 @@ use core_graphics::{
     geometry::CGPoint,
 };
 use core_text::{
-    font::CTFont,
+    font::{CTFont, CTFontRef, cascade_list_for_languages},
     font_descriptor::{
-        SymbolicTraitAccessors, kCTFontSlantTrait, kCTFontWeightTrait, kCTFontWidthTrait,
+        CTFontDescriptor, CTFontDescriptorRef, SymbolicTraitAccessors, kCTFontCascadeListAttribute,
+        kCTFontFamilyNameAttribute, kCTFontSlantTrait, kCTFontTraitsAttribute, kCTFontWeightTrait,
+        kCTFontWidthTrait,
     },
     line::CTLine,
     string_attributes::kCTFontAttributeName,
@@ -123,7 +128,7 @@ impl PlatformTextSystem for IosTextSystem {
         let candidates = if let Some(ids) = lock.ids_by_key.get(&key) {
             ids.clone()
         } else {
-            let ids = lock.load_family(&font.family)?;
+            let ids = lock.load_family(&font.family, font.fallbacks.as_ref())?;
             lock.ids_by_key.insert(key, ids.clone());
             ids
         };
@@ -222,7 +227,11 @@ impl TextSystemState {
         Ok(())
     }
 
-    fn load_family(&mut self, requested: &str) -> Result<SmallVec<[FontId; 4]>> {
+    fn load_family(
+        &mut self,
+        requested: &str,
+        fallbacks: Option<&FontFallbacks>,
+    ) -> Result<SmallVec<[FontId; 4]>> {
         let requested = gpui::font_name_with_fallbacks(requested, ".AppleSystemUIFont");
         let family = self
             .memory_source
@@ -233,9 +242,14 @@ impl TextSystemState {
 
         let mut result = SmallVec::new();
         for handle in family.fonts() {
-            let font = handle.load()?;
+            let mut font = handle.load()?;
             if font.glyph_for_char('m').is_none() {
                 continue;
+            }
+            if let Some(fallbacks) = fallbacks
+                && !fallbacks.fallback_list().is_empty()
+            {
+                font = with_cascade(&font, fallbacks.fallback_list());
             }
             let id = FontId(self.fonts.len());
             if let Some(name) = font.postscript_name() {
@@ -485,6 +499,89 @@ impl<'a> StringIndexConverter<'a> {
         }
         self.utf8 = self.text.len();
     }
+}
+
+unsafe extern "C" {
+    fn CTFontCreateCopyWithAttributes(
+        font: CTFontRef,
+        size: CGFloat,
+        matrix: *const core_graphics::geometry::CGAffineTransform,
+        attributes: CTFontDescriptorRef,
+    ) -> CTFontRef;
+    fn CFLocaleCopyPreferredLanguages() -> CFArrayRef;
+}
+
+/// `font` cascading to `families`, each at its weight and slant, before the
+/// system's own cascade for the preferred languages: a cascade list replaces
+/// the default one rather than extending it.
+fn with_cascade(font: &FontKitFont, families: &[String]) -> FontKitFont {
+    // SAFETY: Both core-text versions wrap the same retained CTFontRef.
+    let native =
+        unsafe { CTFont::wrap_under_get_rule(font.native_font().as_concrete_TypeRef().cast()) };
+    // SAFETY: CoreText exports this process-lifetime `CFStringRef` key.
+    let weight = unsafe { trait_number(&native.all_traits(), kCTFontWeightTrait) }.unwrap_or(0.0);
+    let slant = if native.symbolic_traits().is_italic() {
+        1.0
+    } else {
+        0.0
+    };
+    let traits = CFDictionary::from_CFType_pairs(&[
+        (
+            unsafe { CFString::wrap_under_get_rule(kCTFontWeightTrait) },
+            CFNumber::from(weight).as_CFType(),
+        ),
+        (
+            unsafe { CFString::wrap_under_get_rule(kCTFontSlantTrait) },
+            CFNumber::from(slant).as_CFType(),
+        ),
+    ]);
+    let mut cascade: Vec<CTFontDescriptor> = families
+        .iter()
+        .map(|family| {
+            core_text::font_descriptor::new_from_attributes(&CFDictionary::from_CFType_pairs(&[
+                (
+                    unsafe { CFString::wrap_under_get_rule(kCTFontFamilyNameAttribute) },
+                    CFString::new(family).as_CFType(),
+                ),
+                (
+                    unsafe { CFString::wrap_under_get_rule(kCTFontTraitsAttribute) },
+                    traits.as_CFType(),
+                ),
+            ]))
+        })
+        .collect();
+    let languages: CFArray<CFString> =
+        unsafe { CFArray::wrap_under_create_rule(CFLocaleCopyPreferredLanguages()) };
+    cascade.extend(
+        cascade_list_for_languages(&native, &languages)
+            .iter()
+            .map(|descriptor| descriptor.clone()),
+    );
+    let descriptor =
+        core_text::font_descriptor::new_from_attributes(
+            &CFDictionary::<CFString, CFType>::from_CFType_pairs(&[(
+                unsafe { CFString::wrap_under_get_rule(kCTFontCascadeListAttribute) },
+                CFArray::from_CFTypes(&cascade).as_CFType(),
+            )]),
+        );
+    // SAFETY: the copy follows the create rule, so the wrapper owns it.
+    let cascaded = unsafe {
+        CTFont::wrap_under_create_rule(CTFontCreateCopyWithAttributes(
+            native.as_concrete_TypeRef(),
+            0.0,
+            std::ptr::null(),
+            descriptor.as_concrete_TypeRef(),
+        ))
+    };
+    // SAFETY: font-kit uses core-text 21, which wraps the same CTFontRef as
+    // core-text 22. The get rule retains it before `cascaded` is dropped.
+    let cascaded = unsafe {
+        font_kit::loaders::core_text::NativeFont::wrap_under_get_rule(
+            cascaded.as_concrete_TypeRef().cast(),
+        )
+    };
+    // SAFETY: `cascaded` is a retained CoreText font.
+    unsafe { FontKitFont::from_native_font(&cascaded) }
 }
 
 fn font_kit_font(font: &core_graphics::font::CGFont) -> FontKitFont {

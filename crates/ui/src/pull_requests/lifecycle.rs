@@ -3,6 +3,7 @@
 //! request fresh before a merge or a branch update and answers every write; nothing here
 //! retries one.
 
+use crate::widgets::TooltipTrigger as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -38,6 +39,15 @@ use crate::{
     },
     window_state::{Destination, WindowState},
 };
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub(super) enum Lifecycle {
@@ -112,11 +122,14 @@ pub(super) struct Offer {
     pub(super) stack: Option<super::stack::StackOffer>,
     /// A write is in flight, or one went unanswered and GitHub has not been read since.
     pub(super) busy: bool,
+    /// What its host calls a pull request.
+    pub(super) noun: super::Noun,
 }
 
 impl Offer {
     /// `None` until the link or its stack says what state the pull request is in. The host's
     /// action state, read fresh, speaks over the link's snapshot where it has a word.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         key: &PullRequestKey,
         links: &[ThreadPullRequestLink],
@@ -125,6 +138,7 @@ impl Offer {
         chosen: Option<PullRequestMergeMethod>,
         project_default: Option<PullRequestMergeMethod>,
         busy: bool,
+        noun: super::Noun,
     ) -> Option<Self> {
         let link = links.iter().find(|link| link.key == *key && link.visible());
         let snapshot = link.and_then(|link| link.snapshot.as_ref());
@@ -166,6 +180,7 @@ impl Offer {
             method,
             stack: super::stack::StackOffer::new(key, links, operations),
             busy,
+            noun,
         })
     }
 
@@ -260,7 +275,7 @@ impl Offer {
                 .is_none_or(|stack| stack.operation_here().is_none());
         let write = |menu: PopupMenu, label: &str, icon: IconName, kind: Lifecycle| {
             menu.menu_with_icon_and_enable(
-                crate::tr!(label).into_owned(),
+                crate::tr!(label, pr = &self.noun.pr).into_owned(),
                 icon,
                 self.item(kind),
                 free,
@@ -566,6 +581,7 @@ impl Target {
             chosen,
             project_default,
             false,
+            super::Noun::at(workspace, &key.host),
         )?;
         let snapshot = links
             .iter()
@@ -602,7 +618,7 @@ impl Target {
     fn takes_messages(&self, cx: &App) -> bool {
         let workspace = self.store.read(cx);
         workspace
-            .session_status()
+            .session_status_for(Some(&self.session), cx)
             .is_some_and(|status| !status.conversation_read_only)
             && workspace
                 .thread_meta(&self.session)
@@ -663,19 +679,26 @@ impl Target {
                         .detach();
                 }
             },
-            Lifecycle::Revert => self.confirm(
-                crate::tr!(
-                    "pull_requests.actions.revert_title",
-                    number = number.clone()
-                ),
-                crate::tr!("pull_requests.actions.revert_desc", number = number),
-                crate::tr!("pull_requests.actions.revert_confirm"),
-                ButtonVariant::Primary,
-                PullRequestAction::Revert,
-                kind,
-                window,
-                cx,
-            ),
+            Lifecycle::Revert => {
+                let pr = self.offer.noun.pr.clone();
+                self.confirm(
+                    crate::tr!(
+                        "pull_requests.actions.revert_title",
+                        number = number.clone()
+                    ),
+                    crate::tr!(
+                        "pull_requests.actions.revert_desc",
+                        number = number,
+                        pr = &pr
+                    ),
+                    crate::tr!("pull_requests.actions.revert_confirm", pr = &pr),
+                    ButtonVariant::Primary,
+                    PullRequestAction::Revert,
+                    kind,
+                    window,
+                    cx,
+                )
+            }
             Lifecycle::UpdateRebase => {
                 let Some(head) = self.offer.action.as_ref().map(|a| a.head.clone()) else {
                     return;
@@ -731,12 +754,7 @@ impl Target {
             if failing.is_empty() {
                 crate::tr!("pull_requests.actions.ask_checks_unnamed", number = number).into_owned()
             } else {
-                let mut names = failing
-                    .iter()
-                    .take(5)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let mut names = crate::i18n::join_list(failing.iter().take(5));
                 if failing.len() > 5 {
                     names.push(' ');
                     names.push_str(&crate::tr!(
@@ -786,10 +804,14 @@ impl Target {
                 host_name = self.host_name.clone()
             ),
         };
+        let confirm = crate::tr!(
+            "pull_requests.actions.close_confirm",
+            pr = &self.offer.noun.pr
+        );
         self.confirm(
             crate::tr!("pull_requests.actions.close_title", number = number),
             description,
-            crate::tr!("pull_requests.actions.close_confirm"),
+            confirm,
             ButtonVariant::Danger,
             PullRequestAction::Close,
             kind,
@@ -1231,7 +1253,7 @@ impl MergeDialog {
 }
 
 impl Render for MergeDialog {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let target = &self.target;
         let key = &target.offer.key;
         let number = key.number.to_string();
@@ -1274,19 +1296,27 @@ impl Render for MergeDialog {
                     ),
                     cx,
                 ))
-                .child(
-                    self.fact(
-                        "pull_requests.merge.head",
-                        match &head {
-                            Some(head) => div()
-                                .font_family(mono.clone())
-                                .child(short(head))
-                                .into_any_element(),
-                            None => Spinner::new().into_any_element(),
-                        },
+                .child(self.fact(
+                    "pull_requests.merge.head",
+                    // The head cross-fades over the spinner that held its place.
+                    crate::motion::cross_fade(
+                        "pr-merge-head",
+                        head.clone(),
+                        CHANGE,
+                        window,
                         cx,
+                        |head, _, cx| {
+                            match head {
+                                Some(head) => div()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(short(head))
+                                    .into_any_element(),
+                                None => Spinner::new().into_any_element(),
+                            }
+                        },
                     ),
-                );
+                    cx,
+                ));
         let view = cx.entity();
         let compact = target.window_state.read(cx).compact;
         let method = match (state, self.method) {
@@ -1320,34 +1350,72 @@ impl Render for MergeDialog {
             (Some(_), None) => div().into_any_element(),
             (None, _) => Spinner::new().into_any_element(),
         };
+        // The methods cross-fade over the spinner as the action state arrives.
+        let reading = gpui_base::motion::transition(
+            "pr-merge-reading",
+            if state.is_none() { 1. } else { 0. },
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let method = div()
+            .relative()
+            .child(
+                div()
+                    .opacity(if state.is_none() { 1. } else { 1. - reading })
+                    .child(method),
+            )
+            .when(state.is_some() && reading > 0., |slot| {
+                slot.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .opacity(reading)
+                        .child(Spinner::new()),
+                )
+            });
         let default_box = self
             .method
             .filter(|method| state.is_some() && Some(*method) != target.project_default)
             .zip(target.project.clone())
-            .map(|(method, (_, project))| {
+            .map(|(method, (_, project))| (method, project));
+        let make_default = self.make_default;
+        let default_box = crate::motion::shown("pr-merge-default", default_box, SHOW, window, cx)
+            .map(|shown| {
+                let (method, project) = shown.value.clone();
                 let view = view.clone();
-                Checkbox::new("pr-merge-default")
-                    .label(
-                        crate::tr!(
-                            "pull_requests.merge.make_default",
-                            method = segment_label(method),
-                            project = project
+                shown.fold(
+                    Checkbox::new("pr-merge-default")
+                        .label(
+                            crate::tr!(
+                                "pull_requests.merge.make_default",
+                                method = segment_label(method),
+                                project = project
+                            )
+                            .into_owned(),
                         )
-                        .into_owned(),
-                    )
-                    .checked(self.make_default)
-                    .disabled(self.sending)
-                    .on_click(move |checked, _, cx| {
-                        let checked = *checked;
-                        view.update(cx, |dialog, cx| {
-                            dialog.make_default = checked;
-                            cx.notify();
-                        })
-                    })
+                        .checked(make_default)
+                        .disabled(self.sending)
+                        .on_click(move |checked, _, cx| {
+                            let checked = *checked;
+                            view.update(cx, |dialog, cx| {
+                                dialog.make_default = checked;
+                                cx.notify();
+                            })
+                        }),
+                )
             });
-        let credits =
-            self.credits_shown().then(|| {
-                let view = view.clone();
+        let credits = crate::motion::shown(
+            "pr-merge-credits",
+            self.credits_shown().then_some(()),
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let view = view.clone();
+            shown.fold(
                 v_flex()
                     .gap_0p5()
                     .child(
@@ -1365,9 +1433,10 @@ impl Render for MergeDialog {
                     )
                     .child(div().text_secondary(compact, cx).child(
                         crate::tr!("pull_requests.merge.remove_credits_caption").into_owned(),
-                    ))
-            });
-        let note = |icon: IconName, color, text: String| {
+                    )),
+            )
+        });
+        let note = |icon: SharedString, color, text: String, cx: &App| {
             h_flex()
                 .gap_1p5()
                 .items_start()
@@ -1377,14 +1446,15 @@ impl Render for MergeDialog {
                     // Centres the font-sized icon on the first line's taller line box.
                     div()
                         .pt(cx.theme().tokens.spacing.xxs)
-                        .child(Icon::new(icon).text_color(color)),
+                        .child(Icon::empty().path(icon).text_color(color)),
                 )
                 .child(div().flex_1().min_w_0().child(text))
         };
-        let mut notes = Vec::new();
+        let mut notes: Vec<(&'static str, IconName, gpui::Hsla, String)> = Vec::new();
         if let Some(state) = state {
             if state.merge_queue {
-                notes.push(note(
+                notes.push((
+                    "queue",
                     IconName::ListOrdered,
                     cx.theme().info,
                     crate::tr!("pull_requests.merge.queue_note", number = number.clone())
@@ -1393,7 +1463,8 @@ impl Render for MergeDialog {
             } else if self.auto
                 && let Some(method) = self.method
             {
-                notes.push(note(
+                notes.push((
+                    "auto",
                     IconName::GitMerge,
                     cx.theme().info,
                     crate::tr!(
@@ -1407,7 +1478,8 @@ impl Render for MergeDialog {
             }
             let failing = state.failing_checks.len();
             if failing > 0 {
-                notes.push(note(
+                notes.push((
+                    "failing",
                     IconName::CircleX,
                     cx.theme().danger,
                     if failing == 1 {
@@ -1422,7 +1494,8 @@ impl Render for MergeDialog {
                 ));
             }
             if state.pending_checks > 0 {
-                notes.push(note(
+                notes.push((
+                    "running",
                     IconName::CircleDashed,
                     cx.theme().warning,
                     if state.pending_checks == 1 {
@@ -1437,14 +1510,16 @@ impl Render for MergeDialog {
                 ));
             }
             if state.merge_state == PullRequestMergeState::Blocked {
-                notes.push(note(
+                notes.push((
+                    "blocked",
                     IconName::MessageSquareWarning,
                     cx.theme().danger,
                     crate::tr!("pull_requests.actions.blocked").into_owned(),
                 ));
             }
             if let Some(behind) = state.behind_by.filter(|behind| *behind > 0) {
-                notes.push(note(
+                notes.push((
+                    "behind",
                     IconName::ArrowUpDown,
                     muted,
                     crate::tr!(
@@ -1456,8 +1531,42 @@ impl Render for MergeDialog {
                 ));
             }
         }
-        let failure = match &self.state {
-            Some(Err(reason)) => Some(
+        // Each note fades in and out on its own as the state is read and the method changes.
+        let notes: Vec<AnyElement> = ["queue", "auto", "failing", "running", "blocked", "behind"]
+            .into_iter()
+            .filter_map(|kind| {
+                let current = notes.iter().find(|(key, ..)| *key == kind);
+                let shown = crate::motion::shown(
+                    SharedString::from(format!("pr-merge-note-{kind}")),
+                    current.map(|(_, icon, color, text)| {
+                        (
+                            crate::icon::IconNamed::path(icon.clone()),
+                            *color,
+                            text.clone(),
+                        )
+                    }),
+                    SHOW,
+                    window,
+                    cx,
+                )?;
+                let (icon, color, text) = shown.value.clone();
+                Some(shown.fold(note(icon, color, text, cx)))
+            })
+            .collect();
+        let retry = cx.listener(|this, _, _, cx| this.load(cx));
+        let failure = crate::motion::shown(
+            "pr-merge-failure",
+            match &self.state {
+                Some(Err(reason)) => Some(reason.clone()),
+                _ => None,
+            },
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let reason = shown.value.clone();
+            shown.fold(
                 v_flex()
                     .gap_1()
                     .text_secondary(compact, cx)
@@ -1471,13 +1580,19 @@ impl Render for MergeDialog {
                             .outline()
                             .xsmall()
                             .label(crate::tr!("pull_requests.detail.retry"))
-                            .on_click(cx.listener(|this, _, _, cx| this.load(cx))),
+                            .on_click(retry),
                     ),
-            ),
-            _ => None,
-        };
+            )
+        });
         let ready = state.is_some() && self.method.is_some();
-        v_flex()
+        // The dialog's height glides as what it read takes the place of what it showed meanwhile.
+        let read = match &self.state {
+            None => 0,
+            Some(Ok(_)) => 1,
+            Some(Err(_)) => 2,
+        };
+        let glide = crate::motion::GlideState::keyed("pr-merge-height", window, cx);
+        let content = v_flex()
             .gap_3()
             .child(facts)
             .child(
@@ -1517,7 +1632,8 @@ impl Render for MergeDialog {
                             .label(self.confirm_label())
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     ),
-            )
+            );
+        crate::motion::SizeGlide::new(&glide, content).on_change(read)
     }
 }
 
@@ -1592,9 +1708,7 @@ pub(super) fn primary_element(
             .child(label);
         match tooltip {
             Some(tooltip) => chip
-                .tooltip(move |window, cx| {
-                    crate::widgets::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-                })
+                .with_tooltip(move |_, _| crate::widgets::tooltip::Tooltip::new(tooltip.clone()))
                 .into_any_element(),
             None => chip.into_any_element(),
         }
@@ -1625,7 +1739,7 @@ pub(super) fn primary_element(
             button.small()
         }
     };
-    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    use gpui::InteractiveElement as _;
     match primary {
         Primary::ResolveConflicts | Primary::FixChecks => {
             let terms = super::host_terms(target.store.read(cx), &key.host);

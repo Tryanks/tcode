@@ -1,5 +1,5 @@
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::io::{self, Read, Write};
+use std::path::{Component, Path, PathBuf};
 
 pub fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let file = std::fs::File::open(path)?;
@@ -30,6 +30,59 @@ pub fn attachment_dir(data_root: &Path, session_id: &str) -> PathBuf {
 /// may only save attachments below it.
 pub fn attachments_root(data_root: &Path) -> PathBuf {
     data_root.join("attachments")
+}
+
+/// The folder under a day's scratch directory that holds uploaded files.
+const UPLOADS_DIR: &str = "uploads";
+
+/// A client's file name as one safe path component; the client's own folders
+/// mean nothing on the host.
+fn upload_file_name(name: &str) -> String {
+    let name: String = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| {
+            !character.is_control() && !matches!(character, ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
+        .collect();
+    let name = name.trim();
+    if name.is_empty() || name == "." || name == ".." {
+        return "file".to_string();
+    }
+    // Most filesystems stop at 255 bytes; the tail carries the extension.
+    let mut start = name.len().saturating_sub(MAX_UPLOAD_NAME_BYTES);
+    while !name.is_char_boundary(start) {
+        start += 1;
+    }
+    name[start..].to_string()
+}
+
+const MAX_UPLOAD_NAME_BYTES: usize = 200;
+
+/// Write `bytes` at `offset` of a reserved upload, returning its new length.
+/// Only the next bytes in order are taken, so a chunk can never overwrite or
+/// leave a hole in what already arrived.
+pub fn append_upload(path: &Path, offset: u64, bytes: &[u8]) -> io::Result<u64> {
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    let length = file.metadata()?.len();
+    if length != offset {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("upload is at byte {length}, not {offset}"),
+        ));
+    }
+    file.write_all(bytes)?;
+    Ok(length + bytes.len() as u64)
+}
+
+/// Remove a reserved upload and the folder made for it.
+pub fn discard_upload(path: &Path) -> io::Result<()> {
+    let folder = path
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    std::fs::remove_dir_all(folder)
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +145,70 @@ impl UserDirectories {
         let daily = root.join(chrono::Local::now().date_naive().to_string());
         create_directory(&daily)?;
         Ok((root, daily))
+    }
+
+    /// Reserve an empty host file for an upload to `session_id`, in today's
+    /// scratch directory, which is also where quick threads work. Every
+    /// upload has a folder of its own so it keeps the name the user gave it.
+    pub fn reserve_upload(&self, session_id: &str, name: &str) -> io::Result<PathBuf> {
+        let (_, daily) = self.scratch_directory()?;
+        let folder = daily
+            .join(UPLOADS_DIR)
+            .join(session_id)
+            .join(uuid::Uuid::new_v4().to_string());
+        create_directory(&folder)?;
+        let path = folder.join(upload_file_name(name));
+        std::fs::File::create_new(&path)?;
+        Ok(path)
+    }
+
+    /// Whether `path` is a file [`Self::reserve_upload`] made for `session_id`.
+    pub fn is_upload_of(&self, session_id: &str, path: &Path) -> bool {
+        let Ok(root) = self.scratch_root() else {
+            return false;
+        };
+        let Ok(tail) = path.strip_prefix(root) else {
+            return false;
+        };
+        let parts: Vec<_> = tail.components().collect();
+        matches!(
+            parts.as_slice(),
+            [
+                Component::Normal(_),
+                Component::Normal(uploads),
+                Component::Normal(session),
+                Component::Normal(_),
+                Component::Normal(_),
+            ] if *uploads == UPLOADS_DIR && *session == session_id
+        )
+    }
+
+    /// Remove every day's uploads of `session_ids`. The day folders stay:
+    /// quick threads work in them.
+    pub fn remove_thread_uploads(&self, session_ids: &[String]) -> io::Result<()> {
+        let root = self.scratch_root()?;
+        let days = match std::fs::read_dir(&root) {
+            Ok(days) => days,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for day in days {
+            let day = day?;
+            if !day.file_type()?.is_dir() {
+                continue;
+            }
+            let uploads = day.path().join(UPLOADS_DIR);
+            for session_id in session_ids {
+                match std::fs::remove_dir_all(uploads.join(session_id)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            // Fails while another thread still has uploads here.
+            let _ = std::fs::remove_dir(&uploads);
+        }
+        Ok(())
     }
 }
 

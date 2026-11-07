@@ -1,21 +1,23 @@
 use crate::scroll::ScrollableElement as _;
 use std::borrow::Cow;
 
-use crate::icon::{Icon, IconName};
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::{
     AnyElement, App, ClickEvent, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
+    ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
+    div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{Link, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 
 use tcode_core::notice::{CallbackEvent, HostNotice, OrchestrateCallback};
 
 use super::super::model::one_line;
+
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 
 const DISCLOSURE_CARD_MAX_HEIGHT: f32 = 320.;
 
@@ -57,14 +59,19 @@ pub(crate) fn callback_event_label(callback: &OrchestrateCallback) -> Cow<'stati
 }
 
 /// `on_open` opens the child the callback reports on, while it still exists.
-/// `event` follows the child's title and does not fade with it.
+/// `event` follows the child's title and does not fade with it. The link to
+/// the child underlines under the pointer as `hover`, the timeline's,
+/// follows it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn callback_row(
     key: &str,
     event: SharedString,
     callback: &OrchestrateCallback,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    on_open: Option<super::subagent::ClickHandler>,
+    on_open: Option<super::changed_files::ClickHandler>,
+    hover: crate::motion::ListHover,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let body = if callback.body.trim().is_empty() {
@@ -72,31 +79,56 @@ pub(crate) fn callback_row(
     } else {
         callback.body.clone()
     };
-    let open = on_open.map(|on_open| {
-        let ring = crate::material::focus_ring(cx);
-        Link::new(SharedString::from(format!("callback-open-{key}")))
-            .accessibility_label(SharedString::from(crate::tr!("agents.open").into_owned()))
-            .on_activate(on_open)
-            .flex_none()
-            .text_token(&cx.theme().tokens.typography.xs)
-            .text_color(cx.theme().primary)
-            .cursor_pointer()
-            .hover(|link| link.underline())
-            .focus_visible(move |style| style.shadow(vec![ring]))
-            .child(crate::tr!("agents.open_child"))
-            .into_any_element()
-    });
     let title = one_line(&callback.title).into();
     disclosure_with(
         key,
         title,
         Some(event),
-        &body,
+        body,
         expanded,
         on_toggle,
-        open,
+        Some((on_open, hover)),
+        motion,
         cx,
     )
+}
+
+/// The link to a callback's child, its underline fading in at the list's
+/// hover `reveal`. Once the child has gone the link is leaving, and takes no
+/// activation. Not gpui-base's `Link`: it keeps its focus handle to itself,
+/// so its keyboard focus ring could only switch at once; the clickable's
+/// fades.
+fn open_child_link(
+    key: &str,
+    on_open: Option<super::changed_files::ClickHandler>,
+    hover: &crate::motion::ListHover,
+    reveal: f32,
+    cx: &App,
+) -> AnyElement {
+    let id = SharedString::from(format!("callback-open-{key}"));
+    let primary = cx.theme().primary;
+    crate::material::accessible_clickable(
+        div(),
+        id.clone(),
+        Role::Link,
+        SharedString::from(crate::tr!("agents.open").into_owned()),
+        cx,
+    )
+    .relative()
+    .child(hover.hitbox(id))
+    .when(reveal > 0., |link| {
+        link.underline()
+            .text_decoration_color(primary.opacity(reveal))
+    })
+    .when_some(on_open, |link, on_open| {
+        link.cursor_pointer()
+            .on_click(move |event, window, cx| on_open(event, window, cx))
+    })
+    .flex_none()
+    .text_token(&cx.theme().tokens.typography.xs)
+    .text_color(primary)
+    .child(crate::tr!("agents.open_child"))
+    .into_any_element()
 }
 
 /// A centered disclosure notification with a height-capped verbatim body: the
@@ -109,73 +141,126 @@ pub(crate) fn disclosure(
     full_text: &str,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
-    disclosure_with(key, label, None, full_text, expanded, on_toggle, None, cx)
+    disclosure_with(
+        key,
+        label,
+        None,
+        full_text.to_string(),
+        expanded,
+        on_toggle,
+        None,
+        motion,
+        cx,
+    )
 }
 
+/// `open` is a callback's link to its child, `None` in it once the child
+/// has gone, and the hover it follows.
 #[allow(clippy::too_many_arguments)]
 fn disclosure_with(
     key: &str,
     label: SharedString,
     suffix: Option<SharedString>,
-    full_text: &str,
+    full_text: String,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    trailing: Option<AnyElement>,
+    open: Option<(
+        Option<super::changed_files::ClickHandler>,
+        crate::motion::ListHover,
+    )>,
+    motion: &crate::motion::owned::Owned,
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    // The label is a child rather than `.label()`: the divider grammar keeps it
-    // muted, and `Button` paints its label in the variant's foreground.
-    let toggle = Button::new(SharedString::from(format!("disclosure-{key}")))
-        .ghost()
-        .small()
-        .aria_label(match &suffix {
-            Some(suffix) => format!("{label} {suffix}").into(),
-            None => label.clone(),
-        })
-        .aria_expanded(expanded)
-        // A long notice (a `[control]` message is one) truncates inside the row instead of
-        // spilling past both edges of the centered divider.
-        .max_w_full()
-        .overflow_hidden()
-        .text_token(&cx.theme().tokens.typography.xs)
-        .icon(Icon::new(chevron(expanded)).text_color(muted))
-        .child(
-            h_flex()
-                .min_w_0()
-                .gap_1()
-                .text_color(muted)
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(crate::widgets::fade_text(label)),
+    let key = key.to_owned();
+    let motion = motion.clone();
+    crate::motion::Sampled::new(move |window, cx| {
+        // The label is a child rather than `.label()`: the divider grammar keeps it
+        // muted, and `Button` paints its label in the variant's foreground.
+        let toggle = Button::new(SharedString::from(format!("disclosure-{key}")))
+            .motion(&motion)
+            .ghost()
+            .small()
+            .aria_label(match &suffix {
+                Some(suffix) => format!("{label} {suffix}").into(),
+                None => label.clone(),
+            })
+            .aria_expanded(expanded)
+            // A long notice (a `[control]` message is one) truncates inside the row instead of
+            // spilling past both edges of the centered divider.
+            .max_w_full()
+            .overflow_hidden()
+            .text_token(&cx.theme().tokens.typography.xs)
+            .icon(
+                crate::widgets::Chevron::owned_icon(
+                    &motion,
+                    SharedString::from(format!("disclosure-chevron-{key}")),
+                    expanded,
+                    window,
+                    cx,
                 )
-                .children(suffix.map(|suffix| div().flex_none().child(suffix))),
-        )
-        .on_click(on_toggle)
-        .debug_selector({
-            let selector = format!("disclosure-{key}");
-            move || selector
+                .text_color(muted),
+            )
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_1()
+                    .text_color(muted)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(label)),
+                    )
+                    .children(suffix.map(|suffix| div().flex_none().child(suffix))),
+            )
+            .on_click(on_toggle)
+            .debug_selector({
+                let selector = format!("disclosure-{key}");
+                move || selector
+            });
+        let open = open.and_then(|(on_open, hover)| {
+            let shown = motion.shown(
+                format!("callback-open-shown-{key}"),
+                on_open.is_some().then_some(()),
+                SHOW,
+                window,
+                cx,
+            )?;
+            let reveal = hover.reveal(&format!("callback-open-{key}"), window, cx);
+            Some(shown.fade(open_child_link(&key, on_open, &hover, reveal, cx)))
         });
 
-    let row = h_flex()
-        .w_full()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .child(super::dividers::divider_stub(cx))
-        .child(toggle)
-        .children(trailing)
-        .child(super::dividers::divider_stub(cx));
+        let row = h_flex()
+            .w_full()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .child(super::dividers::divider_stub(cx))
+            .child(toggle)
+            .children(open)
+            .child(super::dividers::divider_stub(cx));
 
-    let mut block = v_flex().w_full().gap_1().child(row);
-    if expanded {
-        block = block.child(disclosure_body(key, full_text, cx));
-    }
-    block.into_any_element()
+        let body = motion
+            .shown(
+                format!("disclosure-fold-{key}"),
+                expanded.then_some(()),
+                SHOW,
+                window,
+                cx,
+            )
+            .map(|fold| fold.fold(disclosure_body(&key, &full_text, cx)));
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(row)
+            .children(body)
+            .into_any_element()
+    })
+    .into_any_element()
 }
 
 pub(crate) fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
@@ -209,13 +294,5 @@ fn localized_callback_state(state: &str) -> Cow<'static, str> {
         "unreported" => crate::tr!("chat.orchestrate_state_unreported"),
         "failed" => crate::tr!("chat.orchestrate_state_failed"),
         other => Cow::Owned(other.to_string()),
-    }
-}
-
-fn chevron(open: bool) -> IconName {
-    if open {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
     }
 }

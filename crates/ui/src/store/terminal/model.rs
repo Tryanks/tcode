@@ -95,6 +95,9 @@ pub struct TerminalModel {
     damage: Vec<bool>,
     /// Set when the whole grid must be re-laid out (resize, scroll, selection).
     full_damage: bool,
+    /// Rows the screen moved up since the renderer last read it; `damage`
+    /// is already relative to where they moved.
+    scrolled: usize,
     bell: bool,
     clipboard: Option<TerminalClipboard>,
     /// Shown until the host reports a title.
@@ -110,6 +113,7 @@ impl TerminalModel {
             selection: None,
             damage: Vec::new(),
             full_damage: true,
+            scrolled: 0,
             bell: false,
             clipboard: None,
             fallback_title,
@@ -138,6 +142,9 @@ impl TerminalModel {
             self.display_offset = 0;
             self.selection = None;
         } else {
+            let scrolled = usize::from(delta.scrolled).min(self.damage.len());
+            self.damage.drain(..scrolled);
+            self.scrolled += scrolled;
             self.damage.resize(usize::from(self.frame.rows), true);
             for update in &delta.rows_replaced {
                 if let Some(damaged) = self.damage.get_mut(usize::from(update.index)) {
@@ -162,7 +169,9 @@ impl TerminalModel {
             self.display_offset = (self.display_offset + appended).min(capped);
             self.full_damage = true;
         }
-        if evicted > 0 {
+        // Scrolled back, the rows shown are read from the scrollback, which
+        // the screen's moves do not describe.
+        if self.display_offset > 0 && (evicted > 0 || delta.scrolled > 0) {
             self.full_damage = true;
         }
         self.bell |= delta.bell;
@@ -236,9 +245,16 @@ impl TerminalModel {
         self.full_damage
     }
 
+    /// The rows the screen moved up since the renderer last read it: what
+    /// it laid out for a row now belongs this many rows higher.
+    pub fn scrolled_rows(&self) -> usize {
+        self.scrolled
+    }
+
     /// Called by the renderer once it has consumed the current damage.
     pub fn clear_damage(&mut self) {
         self.full_damage = false;
+        self.scrolled = 0;
         self.damage.iter_mut().for_each(|damaged| *damaged = false);
     }
 

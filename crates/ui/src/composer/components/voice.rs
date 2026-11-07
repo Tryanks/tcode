@@ -4,6 +4,12 @@ use super::super::*;
 use client::{DictationEvent as SpeechEvent, SpeechState, SpeechStatus};
 use gpui::SharedString;
 
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 mod client;
 
 pub(in super::super) struct Voice {
@@ -23,8 +29,11 @@ struct Insertion {
 }
 
 fn speech_locale() -> &'static str {
-    if rust_i18n::locale().starts_with("zh") {
+    let locale = rust_i18n::locale();
+    if locale.starts_with("zh") {
         "zh-CN"
+    } else if locale.starts_with("ja") {
+        "ja-JP"
     } else {
         "en-US"
     }
@@ -47,6 +56,15 @@ impl Voice {
             }),
         );
         subscriptions.push(cx.observe(&state, |_, _, cx| cx.notify()));
+        // A permission granted or revoked in System Settings shows once the
+        // user comes back to Tcode.
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.voice
+                    .state
+                    .update(cx, |state, cx| state.refresh_permission(cx));
+            }
+        }));
         subscriptions.push(cx.on_release(|this, cx| {
             this.voice.insertion = None;
             this.voice.state.update(cx, |state, cx| state.cancel(cx));
@@ -93,32 +111,62 @@ impl Composer {
         }
         .into_owned()
         .into();
-        let color = if status == SpeechStatus::Recording {
-            cx.theme().danger
-        } else {
-            cx.theme().muted_foreground
-        };
+        let recording = status == SpeechStatus::Recording;
+        let level = state.level();
+        // The glyph turns red and gains a halo while it records, the halo
+        // following the voice's level smoothly rather than each raw reading;
+        // a spinner cross-fades in while it connects or stops.
+        let mark = crate::motion::Sampled::new(move |window, cx| {
+            let theme = cx.theme().clone();
+            let color = gpui_base::motion::transition(
+                "voice-mic-color",
+                if recording {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                },
+                gpui_base::motion::Transition::new(GLIDE),
+                window,
+                cx,
+            );
+            let halo = gpui_base::motion::spring(
+                "voice-mic-halo",
+                if recording { 0.08 + level * 0.42 } else { 0. },
+                gpui_base::motion::Spring::new(GLIDE).with_epsilon(0.25),
+                window,
+                cx,
+            );
+            crate::motion::cross_fade_part(
+                "voice-mic-mark",
+                preparing,
+                CHANGE,
+                window,
+                cx,
+                move |preparing, _, cx| {
+                    if *preparing {
+                        return Spinner::new().color(color).into_any_element();
+                    }
+                    div()
+                        .relative()
+                        .child(
+                            div()
+                                .absolute()
+                                .inset(-cx.theme().tokens.spacing.xxs)
+                                .rounded_full()
+                                .bg(cx.theme().danger.opacity(halo.max(0.))),
+                        )
+                        .child(Icon::empty().path("icons/mic.svg").text_color(color))
+                        .into_any_element()
+                },
+            )
+        });
         Some(
             Button::new("voice-mic")
                 .ghost()
                 .chip()
                 .disabled(!available)
                 .tooltip(tooltip)
-                .child(if preparing {
-                    Spinner::new().color(color).into_any_element()
-                } else {
-                    let icon = Icon::empty().path("icons/mic.svg").text_color(color);
-                    if status == SpeechStatus::Recording {
-                        div()
-                            .rounded_full()
-                            .p(cx.theme().tokens.spacing.xxs)
-                            .bg(cx.theme().danger.opacity(0.08 + state.level() * 0.42))
-                            .child(icon)
-                            .into_any_element()
-                    } else {
-                        icon.into_any_element()
-                    }
-                })
+                .child(mark)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.voice.state.update(cx, |state, cx| state.toggle(cx));
                 }))
@@ -320,18 +368,19 @@ mod tests {
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        store.update(cx, |store, _| store.select_session(session_id.clone()));
+        store.update(cx, |store, cx| store.show_alone(session_id.clone(), cx));
         driver.wait_until(cx, &store, "selected conversation", |cx| {
-            store.read_with(cx, |store, _| {
-                store.baseline_ready() && !store.chat_loading()
+            store.read_with(cx, |store, cx| {
+                store.baseline_ready()
+                    && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
         store.update(cx, |store, cx| {
-            store.set_session_replica_for_test(session_id, timeline, cx);
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let sink = Rc::new(RefCell::new(None::<async_channel::Sender<PlatformEvent>>));
         let (composer, cx) = cx.add_window_view(|window, cx| {
-            let composer = Composer::new(store.clone(), window, cx);
+            let composer = Composer::new(store.clone(), Some(session_id), window, cx);
             composer.voice.state.update(cx, |state, cx| {
                 *state = SpeechState::new(cx).recognizer(Rc::new(Recognizer(sink.clone())));
             });

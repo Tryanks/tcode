@@ -19,7 +19,7 @@ use jni::{
     objects::{JIntArray, JObject, JString, JValue},
     refs::Global,
 };
-use tcode_client::host::{HostFuture, PickedImage};
+use tcode_client::host::{HostFuture, PickedFile};
 use tcode_traverse::NativeClientHost;
 
 const RESULT_OK: i32 = 0;
@@ -39,7 +39,7 @@ enum BridgeEvent {
     /// One image the picker returned; more may follow before `ImagesPicked`.
     ImagePicked {
         request_id: u64,
-        image: PickedImage,
+        image: PickedFile,
     },
     ImagesPicked {
         request_id: u64,
@@ -51,8 +51,8 @@ enum BridgeEvent {
 
 /// A picker request in flight: what arrived so far and who awaits it.
 struct PickRequest {
-    images: Vec<PickedImage>,
-    done: async_channel::Sender<Result<Vec<PickedImage>, String>>,
+    images: Vec<PickedFile>,
+    done: async_channel::Sender<Result<Vec<PickedFile>, String>>,
 }
 
 #[derive(Clone)]
@@ -172,6 +172,24 @@ impl JavaBridge {
         }));
     }
 
+    fn pick_files(&self, request_id: u64) {
+        let object = self.object.clone();
+        self.app.run_on_java_main_thread(Box::new(move || {
+            if let Err(error) = object.with_env(|env, activity| {
+                env.call_method(
+                    activity,
+                    jni_str!("gpuiPickFiles"),
+                    jni_sig!("(J)V"),
+                    &[JValue::Long(request_id as i64)],
+                )?;
+                Ok(())
+            }) {
+                log::error!("Android file picker JNI call failed: {error}");
+                deliver_images_picked(request_id, 2, Some(error));
+            }
+        }));
+    }
+
     fn pick_images(&self, request_id: u64, limit: usize) {
         let object = self.object.clone();
         self.app.run_on_java_main_thread(Box::new(move || {
@@ -251,6 +269,8 @@ pub(crate) fn native_host(
     let pending = callbacks.clone();
     let picks = Rc::new(RefCell::new(HashMap::<u64, PickRequest>::new()));
     let pending_picks = picks.clone();
+    let file_picks = picks.clone();
+    let file_picker = bridge.clone();
     let multicast = bridge.object.clone();
     let camera = bridge.clone();
     let picker = bridge.clone();
@@ -283,7 +303,7 @@ pub(crate) fn native_host(
             })
         })
         .with_image_picker(
-            move |limit| -> HostFuture<'static, Result<Vec<PickedImage>, String>> {
+            move |limit| -> HostFuture<'static, Result<Vec<PickedFile>, String>> {
                 let (done, receiver) = async_channel::bounded(1);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
                 picks.borrow_mut().insert(
@@ -294,6 +314,26 @@ pub(crate) fn native_host(
                     },
                 );
                 picker.pick_images(request_id, limit);
+                Box::pin(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .unwrap_or_else(|error| Err(error.to_string()))
+                })
+            },
+        )
+        .with_file_picker(
+            move || -> HostFuture<'static, Result<Vec<PickedFile>, String>> {
+                let (done, receiver) = async_channel::bounded(1);
+                let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                file_picks.borrow_mut().insert(
+                    request_id,
+                    PickRequest {
+                        images: Vec::new(),
+                        done,
+                    },
+                );
+                file_picker.pick_files(request_id);
                 Box::pin(async move {
                     receiver
                         .recv()
@@ -377,7 +417,7 @@ fn send_event(event: BridgeEvent, dropped: &str) {
     }
 }
 
-pub(crate) fn deliver_image_picked(request_id: u64, image: PickedImage) {
+pub(crate) fn deliver_image_picked(request_id: u64, image: PickedFile) {
     send_event(
         BridgeEvent::ImagePicked { request_id, image },
         "picked image",

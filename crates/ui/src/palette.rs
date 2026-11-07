@@ -1,7 +1,7 @@
 //! Command palette with action, thread-title and message-content search.
 //!
 //! Rendered by [`crate::AppShell`] as a full-window overlay only while
-//! [`crate::WindowState::palette_open`] is set. Sources:
+//! [`crate::WindowState::palette_mounted`] holds. Sources:
 //! - Threads: fuzzy match over session titles (enter opens the thread).
 //! - Messages: debounced full-text search over persisted conversation events.
 //! - Actions: "New thread…" per project, "Open settings", "Toggle theme",
@@ -11,6 +11,9 @@
 
 use std::rc::Rc;
 use std::time::Duration;
+
+/// How long a result takes to come into the list as the query changes.
+const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
 
 use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
@@ -26,12 +29,15 @@ use gpui::{
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
-use crate::provider_card::provider_glyph;
+use crate::provider_card::profile_glyph;
 use crate::settings::ThemeMode;
 use crate::settings_page::apply_theme;
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How far below the window's top the desktop palette hangs. See the host's
 /// note in [`CommandPalette`]'s render on why it does not use `overlay::Dialog`.
@@ -91,6 +97,8 @@ enum Action {
         session_id: String,
         turn: Option<usize>,
     },
+    /// A pane command or layout, which the shell answers.
+    Pane(Rc<dyn gpui::Action>),
 }
 
 /// One rendered palette row.
@@ -100,8 +108,9 @@ struct Item {
     label: String,
     /// Optional muted subtitle (e.g. a thread's project).
     subtitle: Option<String>,
-    /// Thread rows carry their provider glyph + last-activity time (right side).
-    provider: Option<ProviderKind>,
+    /// Thread rows carry the glyph of the provider and profile they run on +
+    /// last-activity time (right side).
+    provider: Option<(ProviderKind, Option<String>)>,
     updated_at: Option<u64>,
     action: Action,
 }
@@ -135,8 +144,23 @@ pub struct CommandPalette {
     search_generation: u64,
     results: Option<Rc<Results>>,
     list_state: ListState,
+    /// The rows a search of the messages brought, by index, folding in
+    /// below what the query listed.
+    arrived: crate::motion::list_rows::ListRows<(), ()>,
+    /// The next rebuild brings the messages' hits for the query shown.
+    hits_arrived: bool,
+    /// Moving the selection scrolls it into view gradually.
+    list_scroll: crate::motion::ListScroll,
+    /// Whether [`Self::open`] has run since the palette last showed closed:
+    /// the host opens it on mount, and a palette reopened while it leaves is
+    /// still mounted, so it opens itself.
+    opened: bool,
     _search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+    /// The card's move between the centred card and the bottom sheet when
+    /// the window turns compact or wide, which draws the palette under
+    /// another parent.
+    motion: crate::motion::owned::Owned,
 }
 
 impl CommandPalette {
@@ -150,10 +174,7 @@ impl CommandPalette {
 
         let subscriptions = vec![
             cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
-                if matches!(
-                    change.topic,
-                    TopicKind::Index | TopicKind::Settings | TopicKind::ActiveSession
-                ) {
+                if matches!(change.topic, TopicKind::Index | TopicKind::Settings) {
                     this.invalidate_results(false, cx);
                 }
             }),
@@ -181,10 +202,15 @@ impl CommandPalette {
             focus_handle: cx.focus_handle(),
             selected: 0,
             outside_dismissal: crate::overlay::OutsideDismissal::default(),
+            motion: Default::default(),
             content_hits: Vec::new(),
             search_generation: 0,
             results: None,
             list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            arrived: crate::motion::list_rows::ListRows::over(ARRIVE),
+            hits_arrived: false,
+            list_scroll: Default::default(),
+            opened: false,
             _search_task: None,
             _subscriptions: subscriptions,
         }
@@ -206,6 +232,7 @@ impl CommandPalette {
         self.selected = 0;
         self.content_hits.clear();
         self.invalidate_results(true, cx);
+        self.opened = true;
     }
 
     #[cfg(test)]
@@ -254,6 +281,7 @@ impl CommandPalette {
             return;
         }
         self.content_hits = hits;
+        self.hits_arrived = true;
         self.invalidate_results(false, cx);
     }
 
@@ -262,18 +290,19 @@ impl CommandPalette {
     fn invalidate_results(&mut self, scroll_to_top: bool, cx: &mut Context<Self>) {
         self.results = None;
         if scroll_to_top {
+            self.list_scroll.cancel();
             self.list_state.scroll_to(gpui::ListOffset::default());
         }
         cx.notify();
     }
 
-    fn results(&mut self, cx: &Context<Self>) -> Rc<Results> {
+    fn results(&mut self, window: &Window, cx: &Context<Self>) -> Rc<Results> {
         if let Some(results) = &self.results {
             return results.clone();
         }
         let mut rows = Vec::new();
         let mut items = Vec::new();
-        for group in self.groups(cx) {
+        for group in self.groups(window, cx) {
             rows.push(Row::Caption(group.label));
             for item in group.items {
                 rows.push(Row::Item(items.len()));
@@ -281,6 +310,21 @@ impl CommandPalette {
             }
         }
         let top = self.list_state.logical_scroll_top();
+        let old_len = self.list_state.item_count();
+        // The messages' hits come after the rows a keystroke listed, and
+        // fold in under them; a keystroke replaces the rows at once.
+        self.arrived.clear();
+        if std::mem::take(&mut self.hits_arrived) && !cx.reduce_motion() {
+            let at = cx.background_executor().now();
+            for index in old_len..rows.len() {
+                self.arrived.arrive(
+                    index as u64,
+                    crate::motion::list_rows::Arrival::Appended,
+                    (),
+                    at,
+                );
+            }
+        }
         self.list_state
             .splice(0..self.list_state.item_count(), rows.len());
         if top.item_ix < rows.len() {
@@ -298,7 +342,7 @@ impl CommandPalette {
 
     /// Build the grouped result list for the current query. A leading `>`
     /// restricts results to Actions.
-    fn groups(&self, cx: &Context<Self>) -> Vec<Group> {
+    fn groups(&self, window: &Window, cx: &Context<Self>) -> Vec<Group> {
         let raw = self.query.read(cx).value().to_string();
         let actions_only = raw.trim_start().starts_with('>');
         // Strip the `>` prefix so the remainder still fuzzy-matches action labels.
@@ -379,6 +423,103 @@ impl CommandPalette {
                 Action::OpenPreview,
             );
         }
+        let pane = |action: Box<dyn gpui::Action>| Action::Pane(action.into());
+        if let Some(panes) = crate::shell::pane_controls(window, cx) {
+            use crate::panes::{
+                CloseOtherPanes, ClosePane, FocusPane, MoveThreadToPane, SplitDown, SplitRight,
+                SwapPane, ZoomPane,
+            };
+            if panes.split_right {
+                push_action(
+                    crate::tr!("panes.split_right").into_owned(),
+                    IconName::Columns2,
+                    pane(Box::new(SplitRight)),
+                );
+            }
+            if panes.split_down {
+                push_action(
+                    crate::tr!("panes.split_down").into_owned(),
+                    IconName::Rows2,
+                    pane(Box::new(SplitDown)),
+                );
+            }
+            if panes.close {
+                push_action(
+                    crate::tr!("panes.close").into_owned(),
+                    IconName::Close,
+                    pane(Box::new(ClosePane)),
+                );
+            }
+            if panes.close_others {
+                push_action(
+                    crate::tr!("panes.close_others").into_owned(),
+                    IconName::Close,
+                    pane(Box::new(CloseOtherPanes)),
+                );
+            }
+            if panes.zoom {
+                let (label, icon) = if panes.zoomed {
+                    (crate::tr!("panes.unzoom"), IconName::Minimize2)
+                } else {
+                    (crate::tr!("panes.zoom"), IconName::Maximize2)
+                };
+                push_action(label.into_owned(), icon, pane(Box::new(ZoomPane)));
+            }
+            if panes.zoom && !panes.zoomed {
+                let moves = [
+                    (
+                        crate::tr!("panes.focus_left"),
+                        IconName::ArrowLeft,
+                        FocusPane::Left,
+                    ),
+                    (
+                        crate::tr!("panes.focus_right"),
+                        IconName::ArrowRight,
+                        FocusPane::Right,
+                    ),
+                    (
+                        crate::tr!("panes.focus_up"),
+                        IconName::ArrowUp,
+                        FocusPane::Up,
+                    ),
+                    (
+                        crate::tr!("panes.focus_down"),
+                        IconName::ArrowDown,
+                        FocusPane::Down,
+                    ),
+                    (
+                        crate::tr!("panes.focus_next"),
+                        IconName::ChevronRight,
+                        FocusPane::Next,
+                    ),
+                    (
+                        crate::tr!("panes.focus_previous"),
+                        IconName::ChevronLeft,
+                        FocusPane::Previous,
+                    ),
+                ];
+                for (label, icon, action) in moves {
+                    push_action(label.into_owned(), icon, pane(Box::new(action)));
+                }
+            }
+            for side in panes.sides() {
+                let swap = SwapPane(side);
+                push_action(swap.label().into_owned(), side.icon(), pane(Box::new(swap)));
+            }
+            if panes.moves {
+                for side in panes.sides() {
+                    let to = MoveThreadToPane(side);
+                    push_action(to.label().into_owned(), side.icon(), pane(Box::new(to)));
+                }
+            }
+        }
+        for layout in crate::shell::pane_layouts(window, cx) {
+            push_action(
+                layout.label().into_owned(),
+                layout.icon(),
+                pane(Box::new(layout)),
+            );
+        }
         if store.scope().is_full() {
             push_action(
                 crate::tr!("palette.check_updates").into_owned(),
@@ -386,11 +527,8 @@ impl CommandPalette {
                 Action::CheckUpdates,
             );
         }
-        if let Some(session_id) = store.active_session_id()
-            && let Some(meta) = store
-                .sidebar_sessions()
-                .into_iter()
-                .find(|meta| meta.id == session_id)
+        if let Some(session_id) = crate::shell::current_thread(cx)
+            && let Some(meta) = store.thread_meta(&session_id)
         {
             if meta.worktree.is_some() {
                 push_action(
@@ -444,7 +582,7 @@ impl CommandPalette {
                                 icon: IconName::SquareTerminal,
                                 label: meta.title.clone(),
                                 subtitle: Some(crate::project_icon::label(&group.project)),
-                                provider: Some(meta.provider),
+                                provider: Some((meta.provider, meta.profile_id.clone())),
                                 updated_at: Some(meta.updated_at),
                                 action: Action::OpenThread {
                                     session_id: meta.id.clone(),
@@ -474,7 +612,7 @@ impl CommandPalette {
                             icon: IconName::Search,
                             label: hit.session_title.clone(),
                             subtitle: Some(hit.snippet.clone()),
-                            provider: meta.map(|meta| meta.provider),
+                            provider: meta.map(|meta| (meta.provider, meta.profile_id.clone())),
                             updated_at: meta.map(|meta| meta.updated_at),
                             action: Action::OpenThread {
                                 session_id: hit.session_id.clone(),
@@ -493,7 +631,7 @@ impl CommandPalette {
     }
 
     fn activate_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let results = self.results(cx);
+        let results = self.results(window, cx);
         if let Some(item) = results.items.get(self.selected) {
             self.activate(item.action.clone(), window, cx);
         }
@@ -510,17 +648,11 @@ impl CommandPalette {
                 self.store.update(cx, |store, cx| {
                     store.start_draft(project_id, cwd, cx);
                 });
-                // Draft selection arrives asynchronously and can reuse an
-                // already selected draft. Navigation is a separate intent.
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
             }
             Action::QuickChat => {
                 self.close(cx);
                 self.store
                     .update(cx, |store, cx| store.start_scratch_draft(cx));
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
             }
             Action::OpenSettings => {
                 // open_settings also clears palette_open.
@@ -540,18 +672,25 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleDiff => {
-                self.store
-                    .update(cx, |store, cx| store.toggle_diff_panel(cx));
+                if let Some(session_id) = crate::shell::current_thread(cx) {
+                    self.store.update(cx, |store, cx| {
+                        store.toggle_tab_panel_for(&session_id, tcode_core::ui::RightTab::Diff, cx)
+                    });
+                }
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                self.store
-                    .update(cx, |store, cx| store.toggle_terminal_panel(cx));
+                let session_id = crate::shell::current_thread(cx).unwrap_or_default();
+                self.store.update(cx, |store, cx| {
+                    store.toggle_terminal_panel_for(session_id, cx)
+                });
                 self.close(cx);
             }
             Action::OpenPreview => {
-                self.store
-                    .update(cx, |store, cx| store.open_preview_panel(cx));
+                let session_id = crate::shell::current_thread(cx);
+                self.store.update(cx, |store, cx| {
+                    store.open_preview_panel_for(session_id.as_deref(), cx)
+                });
                 self.close(cx);
             }
             Action::CheckUpdates => {
@@ -580,24 +719,26 @@ impl CommandPalette {
                     cx,
                 );
             }
+            Action::Pane(action) => {
+                self.close(cx);
+                crate::shell::select_current_pane(window, cx);
+                window.dispatch_action(action.boxed_clone(), cx);
+            }
             Action::OpenThread { session_id, turn } => {
                 self.store.update(cx, |store, cx| {
                     if let Some(turn) = turn {
-                        store.select_session_at_turn(session_id, turn);
-                        cx.notify();
+                        store.show_thread_at_turn(session_id, turn, cx);
                     } else {
-                        store.select_session(session_id);
+                        store.show_thread(session_id, cx);
                     }
                 });
                 self.close(cx);
-                self.window_state
-                    .update(cx, |state, cx| state.open_thread(cx));
             }
         }
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let results = self.results(cx);
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let results = self.results(window, cx);
         let total = results.items.len();
         let selected = match ev.keystroke.key.as_str() {
             "down" if total > 0 => (self.selected + 1).min(total - 1),
@@ -612,7 +753,7 @@ impl CommandPalette {
             .iter()
             .position(|row| matches!(row, Row::Item(index) if *index == selected))
         {
-            self.list_state.scroll_to_reveal_item(row);
+            self.list_scroll.reveal(&self.list_state, row, cx);
         }
         cx.notify();
     }
@@ -624,6 +765,7 @@ impl CommandPalette {
         row: &Row,
         items: &[Item],
         compact: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -642,6 +784,12 @@ impl CommandPalette {
         let item = &items[index];
         let is_sel = index == self.selected;
         let action = item.action.clone();
+        let key = match &item.action {
+            Action::Pane(action) => {
+                crate::widgets::kbd::Kbd::binding_for_action(action.as_ref(), None, window)
+            }
+            _ => None,
+        };
         // Every result takes the two-line row, so the list's uniform height
         // hint holds whether or not a result has a subtitle.
         let row = crate::material::selectable_row_two_line(
@@ -708,7 +856,7 @@ impl CommandPalette {
                             )
                         }),
                 )
-                .when_some(item.provider, |this, provider| {
+                .when_some(item.provider.clone(), |this, (provider, profile_id)| {
                     this.child(
                         h_flex()
                             .flex_none()
@@ -719,7 +867,20 @@ impl CommandPalette {
                                 let ago = now_secs().saturating_sub(at);
                                 this.child(div().child(humanize_ago(ago)))
                             })
-                            .child(provider_glyph(provider)),
+                            .child(profile_glyph(
+                                self.store.read(cx),
+                                provider,
+                                profile_id.as_deref(),
+                            )),
+                    )
+                })
+                .when_some(key, |this, key| {
+                    this.child(
+                        div()
+                            .flex_none()
+                            .debug_selector(move || format!("palette-row-{index}-key"))
+                            .text_secondary(compact, cx)
+                            .child(key.appearance(false)),
                     )
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -732,22 +893,59 @@ impl CommandPalette {
 
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = self.window_state.read(cx).compact;
-        let open = self.window_state.read(cx).palette_open;
-        let presence = gpui_base::motion::Presence::new("palette-presence", open)
-            .transition(gpui_base::motion::Transition::new(crate::edge_back::SETTLE))
-            .sample(window, cx);
-        if !open && (!compact || !presence.should_render() || presence.progress == 0.) {
+        let (compact, open, focus_query) = {
+            let state = self.window_state.read(cx);
+            (
+                state.compact,
+                state.palette_open,
+                state.palette_focuses_query,
+            )
+        };
+        if !open {
+            self.opened = false;
+            // A leaving palette takes no keys.
+            if self.focus_handle.contains_focused(window, cx) {
+                window.blur(cx);
+            }
+        } else if !self.opened {
+            self.open(focus_query, window, cx);
+        }
+        // The palette's own clock: the window turning compact or wide draws
+        // it under another parent, where an element's clock would bring an
+        // open palette in again from nothing.
+        let presence = self.motion.appear("presence", open, APPEAR, window, cx);
+        if !open && presence == 0. {
+            if self.window_state.read(cx).palette_leaving() {
+                // Its host unmounts it once the window says it has left.
+                let state = self.window_state.clone();
+                window.defer(cx, move |_, cx| {
+                    state.update(cx, |state, cx| state.palette_left(cx));
+                });
+            }
             return div().into_any_element();
         }
-        let results = self.results(cx);
+        let exiting = !open;
+        let results = self.results(window, cx);
+        // Rows are keyed by their index.
+        for row in self.arrived.settle(window, cx) {
+            let row = row as usize;
+            if row < results.rows.len() {
+                self.list_state.remeasure_items(row..row + 1);
+            }
+        }
+        self.list_scroll.step(&self.list_state, window, cx);
         let total = results.items.len();
         if total > 0 && self.selected >= total {
             self.selected = total - 1;
         }
         let muted = cx.theme().muted_foreground;
         let viewport = window.viewport_size();
-        let insets = crate::window_seam::content_insets(window);
+        let insets = crate::window_seam::content_insets_gliding(
+            "palette-seam",
+            Some(&self.motion),
+            window,
+            cx,
+        );
         // A sheet stops a window strip short of the top; the desktop card hangs
         // `DESKTOP_TOP_OFFSET` down and keeps a section gap clear below.
         let reserve = if compact {
@@ -757,6 +955,9 @@ impl Render for CommandPalette {
         };
         let available = (viewport.height - insets.top - insets.bottom - reserve).max(px(0.));
         let height = px(crate::overlay::DIALOG_LIST_HEIGHT).min(available);
+        // The sheet reaches the screen's bottom edge, under the home
+        // indicator and behind the keyboard; what it holds stays above them.
+        let pad = if compact { insets.bottom } else { px(0.) };
         let dismissal = self.outside_dismissal.clone();
 
         let body = if total == 0 {
@@ -785,8 +986,22 @@ impl Render for CommandPalette {
                     .child(
                         list(
                             self.list_state.clone(),
-                            cx.processor(move |this, ix: usize, _, cx| {
-                                this.render_row(&results.rows[ix], &results.items, compact, cx)
+                            cx.processor(move |this, ix: usize, window, cx| {
+                                let row = this.render_row(
+                                    &results.rows[ix],
+                                    &results.items,
+                                    compact,
+                                    window,
+                                    cx,
+                                );
+                                this.arrived.around(ix as u64, cx).draw(
+                                    "palette-row",
+                                    ix as u64,
+                                    crate::motion::list_rows::Glide::Rest,
+                                    row,
+                                    |_, _| div().into_any_element(),
+                                    window,
+                                )
                             }),
                         )
                         .size_full(),
@@ -802,13 +1017,30 @@ impl Render for CommandPalette {
             .into_any_element()
         };
 
-        let surface = v_flex().h(height).overflow_hidden();
+        // Turning compact or wide, the card glides from where and as large
+        // as the other form drew it to the sheet or the card.
+        let width = if compact {
+            viewport.width
+        } else {
+            crate::sizing::fit_viewport(640., viewport.width)
+        };
+        let glide = self.motion.glide_state("card-size");
+        let size = glide.toward(u64::from(compact), gpui::size(width, height + pad), cx);
+        // The card is placed against the window, and its host lays the
+        // palette out in a different place in each layout.
+        let reflow = self
+            .motion
+            .reflow("card-place", u64::from(compact))
+            .in_window();
+        // The card is laid out at exactly this size.
+        glide.painted_at(size, window);
+        let surface = v_flex().h(size.height).pb(pad).overflow_hidden();
         let card = if compact {
-            crate::material::sheet_contour(surface.w(viewport.width), cx)
+            crate::material::sheet_contour(surface.w(size.width), cx)
         } else {
             crate::material::overlay_contour(
                 surface
-                    .w(crate::sizing::fit_viewport(640., viewport.width))
+                    .w(size.width)
                     .rounded(crate::material::radius_overlay(cx)),
                 cx,
             )
@@ -877,9 +1109,9 @@ impl Render for CommandPalette {
             let progress = if open {
                 progress
             } else {
-                progress.max(1. - presence.progress)
+                progress.max(1. - presence)
             };
-            return gpui_base::Sheet::new(cx)
+            let sheet = gpui_base::Sheet::new(cx)
                 .focus_handle(self.focus_handle.clone())
                 .request_close(move |_, cx| {
                     dismissal.dismissed();
@@ -895,24 +1127,44 @@ impl Render for CommandPalette {
                     div()
                         .absolute()
                         .left_0()
-                        .bottom(
-                            insets.bottom
-                                - crate::edge_back::BackProgress::offset(progress, height),
-                        )
-                        .child(card),
-                )
-                .into_any_element();
+                        .bottom(-crate::edge_back::BackProgress::offset(
+                            progress,
+                            height + pad,
+                        ))
+                        .child(reflow.part("card", card)),
+                );
+            return reflow.render(sheet);
         }
-        gpui_base::Dialog::new(cx)
+        // A leaving palette keeps the open one's element tree and is inert:
+        // not topmost, no Escape, no backdrop press, and an occluding scrim
+        // and a shield over the card keep the pointer from it.
+        let card = card
+            .relative()
+            .top(crate::motion::lift(presence))
+            .opacity(presence)
+            .when(exiting, |card| {
+                card.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .on_scroll(|_, _, cx| cx.stop_propagation()),
+                )
+            });
+        let dialog = gpui_base::Dialog::new(cx)
+            .layer(0, !exiting)
+            .close_on_escape(!exiting)
+            .close_on_backdrop_press(!exiting)
             // gpui-base's backdrop parent dismisses but does not block; the scrim stops wheels without occluding it.
             .backdrop(
                 div()
                     .absolute()
                     .size_full()
-                    .bg(crate::material::scrim(1., cx))
+                    .bg(crate::material::scrim(presence, cx))
+                    .when(exiting, |scrim| scrim.occlude())
                     .on_scroll(|_, _, cx| cx.stop_propagation()),
             )
-            .popup(card)
+            .popup(reflow.part("card", card))
             // Enter belongs to the query input, which runs the selected item.
             .on_ok(|_, _, _| false)
             .request_close(move |_, _, cx| {
@@ -924,8 +1176,8 @@ impl Render for CommandPalette {
             .when(compact, |host| host.justify_end().pb(insets.bottom))
             .when(!compact, |host| {
                 host.justify_start().pt(insets.top + px(DESKTOP_TOP_OFFSET))
-            })
-            .into_any_element()
+            });
+        reflow.render(dialog)
     }
 }
 
@@ -950,7 +1202,13 @@ mod tests {
 
     impl PaletteHarness {
         fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-            let window_state = cx.new(|_| WindowState::new(false));
+            // A wide window draws the palette only on an attached
+            // workspace's Chat route.
+            let window_state = cx.new(|cx| {
+                let mut state = WindowState::new(false);
+                state.enter_workspace(cx);
+                state
+            });
             Self {
                 palette: cx.new(|cx| CommandPalette::new(store, window_state.clone(), window, cx)),
                 window_state,
@@ -961,7 +1219,7 @@ mod tests {
 
     impl Render for PaletteHarness {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let open = self.window_state.read(cx).palette_open;
+            let open = self.window_state.read(cx).palette_mounted();
             div()
                 .relative()
                 .size_full()
@@ -1059,10 +1317,10 @@ mod tests {
             query.read(cx).focus_handle(cx).focus(window, cx);
         });
 
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             palette.update(cx, |palette, cx| {
                 assert!(palette.query.read(cx).value().is_empty());
-                let items = &palette.results(cx).items;
+                let items = &palette.results(window, cx).items;
                 assert!(
                     items
                         .iter()
@@ -1097,8 +1355,8 @@ mod tests {
         for _ in 0..10 {
             dispatch_palette_key(&palette, cx, "down");
         }
-        cx.update(|_, cx| {
-            let total = palette.update(cx, |palette, cx| palette.results(cx).items.len());
+        cx.update(|window, cx| {
+            let total = palette.update(cx, |palette, cx| palette.results(window, cx).items.len());
             assert_eq!(palette.read(cx).selected, total - 1);
         });
 
@@ -1174,12 +1432,13 @@ mod tests {
             let harness = harness.read(cx);
             (harness.palette.clone(), harness.window_state.clone())
         });
+        let settle = crate::test_frames::draw_settled;
         let open = |cx: &mut VisualTestContext, focus_query: bool| {
             cx.update(|window, cx| {
                 window_state.update(cx, |state, cx| state.open_palette(cx));
                 palette.update(cx, |palette, cx| palette.open(focus_query, window, cx));
             });
-            cx.update(|window, cx| window.draw(cx).clear(cx));
+            settle(cx);
             assert!(cx.debug_bounds("palette-card").is_some());
         };
         let is_open = |cx: &mut VisualTestContext| {
@@ -1194,6 +1453,11 @@ mod tests {
         });
         cx.simulate_keystrokes("escape");
         assert!(!is_open(cx), "Escape reaches the dialog through the query");
+        assert!(
+            cx.debug_bounds("palette-card").is_some(),
+            "the palette leaves on screen"
+        );
+        settle(cx);
         assert!(cx.debug_bounds("palette-card").is_none());
 
         let page_scroll = harness.read_with(cx, |harness, _| harness.page_scroll.clone());
@@ -1222,6 +1486,8 @@ mod tests {
         assert!(is_open(cx), "the wheel leaves the palette open");
         cx.simulate_click(gpui::point(px(10.), px(10.)), gpui::Modifiers::default());
         assert!(!is_open(cx), "a backdrop press closes the palette");
+        settle(cx);
+        assert!(cx.debug_bounds("palette-card").is_none());
 
         drop(palette);
         driver.shutdown(cx, &workspace_store, &host);
@@ -1294,7 +1560,7 @@ mod tests {
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
             pump_link
-                .pump_with_timer(|| executor.timer(Duration::from_millis(25)))
+                .pump_with_timer(|delay| executor.timer(delay))
                 .await;
         });
         let store = cx.new(|cx| {
@@ -1308,7 +1574,7 @@ mod tests {
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        store.update(cx, |store, _| store.select_session("thread-0".into()));
+        store.update(cx, |store, cx| store.show_alone("thread-0".into(), cx));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         window_state.update(cx, |state, cx| state.open_palette(cx));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {
@@ -1337,7 +1603,9 @@ mod tests {
             });
             draw(cx);
         }
-        let last = palette.update(cx, |palette, cx| palette.results(cx).items.len() - 1);
+        let last = palette.update_in(cx, |palette, window, cx| {
+            palette.results(window, cx).items.len() - 1
+        });
         assert!(
             cx.debug_bounds(format!("palette-row-{last}").leak())
                 .is_some()
@@ -1348,6 +1616,11 @@ mod tests {
             dispatch_palette_key(&palette, cx, "down");
         }
         draw(cx);
+        assert!(
+            cx.debug_bounds("palette-row-5").is_none(),
+            "the list glides to the selection rather than jumping"
+        );
+        crate::test_frames::draw_settled(cx);
         assert!(
             cx.debug_bounds("palette-row-5").is_some(),
             "the keyboard selection scrolls into view"

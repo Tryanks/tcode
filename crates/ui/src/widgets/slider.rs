@@ -7,7 +7,9 @@ use gpui::{
 use gpui_base::motion::{Transition, transition};
 use gpui_base::slider::SliderState;
 use gpui_base::{SliderIndicator, SliderThumb, SliderTrack, StyledExt as _};
-use std::time::Duration;
+
+/// How long a value drawn here takes to glide to a new one.
+const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
 
 const TRACK_HEIGHT: f32 = 24.;
 const THUMB_SIZE: f32 = 28.;
@@ -80,9 +82,9 @@ impl RenderOnce for Slider {
             0
         };
         let entity_id = self.state.entity_id();
-        let glide = Transition::new(Duration::from_millis(300)).ease(ease_out_quint);
+        let settle = || Transition::new(GLIDE);
         let motion_id = |name: &'static str| ElementId::from((name, entity_id));
-        let filled = transition(motion_id("slider-fill"), target, glide, window, cx);
+        let filled = transition(motion_id("slider-fill"), target, settle(), window, cx);
         // Raised while hovered, and kept through a drag that leaves the thumb.
         let raised = window.use_keyed_state(("slider-thumb-raised", entity_id), cx, |_, _| false);
         let thumb_size = transition(
@@ -92,11 +94,18 @@ impl RenderOnce for Slider {
             } else {
                 THUMB_SIZE
             },
-            Transition::new(Duration::from_millis(150)).ease(ease_out_quint),
+            settle(),
             window,
             cx,
         );
 
+        let opacity = transition(
+            motion_id("slider-dim"),
+            if self.disabled { 0.6 } else { 1. },
+            settle(),
+            window,
+            cx,
+        );
         let theme = cx.theme();
         let fill = self.fill.unwrap_or(theme.primary);
         let foreground = theme.foreground;
@@ -109,7 +118,7 @@ impl RenderOnce for Slider {
                 .ml(px(-TICK_SIZE / 2.))
                 .size(px(TICK_SIZE))
                 .rounded_full()
-                .bg(if at <= target {
+                .bg(if at <= filled {
                     hsla(0., 0., 1., 0.3)
                 } else {
                     foreground.opacity(0.35)
@@ -133,7 +142,7 @@ impl RenderOnce for Slider {
             .w_full()
             .h(px(THUMB_SIZE))
             .refine_style(&self.style)
-            .when(self.disabled, |this| this.opacity(0.6))
+            .opacity(opacity)
             .child(
                 SliderTrack::new(&self.state)
                     .disabled(self.disabled)
@@ -215,8 +224,4 @@ impl RenderOnce for Slider {
                     ),
             )
     }
-}
-
-fn ease_out_quint(t: f32) -> f32 {
-    1. - (1. - t).powi(5)
 }

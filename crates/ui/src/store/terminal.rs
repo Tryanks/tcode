@@ -12,7 +12,9 @@ use tcode_protocol::{
     terminal::{TerminalClipboard, TerminalDelta, TerminalFrame, TerminalMode},
 };
 
-use super::WorkspaceStore;
+use gpui::{App, Entity};
+
+use super::{WorkspaceStore, thread::Revision};
 
 pub(crate) mod model;
 pub(crate) use model::{HyperlinkMatch, SelectionKind, SelectionSide, TerminalModel};
@@ -24,15 +26,33 @@ pub struct ClientTerminal {
     id: u64,
     host: HostLink,
     model: RefCell<TerminalModel>,
+    /// Moves on with every frame and delta: what draws the grid reads it.
+    grid: Entity<Revision>,
+    /// Moves on when the title or the exit changes: what draws its tab
+    /// reads it, so another tab's output draws no tab strip again.
+    label: Entity<Revision>,
 }
 
 impl ClientTerminal {
-    fn new(id: u64, host: HostLink) -> Self {
+    fn new(id: u64, host: HostLink, cx: &mut App) -> Self {
         Self {
             id,
             host,
             model: RefCell::new(TerminalModel::new(format!("Terminal {id}"))),
+            grid: Revision::new(cx),
+            label: Revision::new(cx),
         }
+    }
+
+    /// Read as a view drawing the terminal's grid: its output draws the view
+    /// again without the store being notified.
+    pub(crate) fn watch_grid(&self, cx: &App) {
+        Revision::watch(&self.grid, cx);
+    }
+
+    /// Read as a view drawing the terminal's tab.
+    pub(crate) fn watch_label(&self, cx: &App) {
+        Revision::watch(&self.label, cx);
     }
 
     pub(crate) fn model(&self) -> std::cell::Ref<'_, TerminalModel> {
@@ -214,35 +234,35 @@ impl WorkspaceStore {
         self.terminals.get(&id).cloned()
     }
 
-    pub(super) fn apply_terminal_frame(&mut self, id: u64, frame: &TerminalFrame) {
+    pub(super) fn apply_terminal_frame(&mut self, id: u64, frame: TerminalFrame, cx: &mut App) {
         if let Some(terminal) = self.terminals.get(&id) {
-            terminal.apply_frame(frame.clone());
+            terminal.apply_frame(frame);
+            Revision::bump(&terminal.grid, cx);
+            Revision::bump(&terminal.label, cx);
         }
     }
 
-    pub(super) fn apply_terminal_delta(&mut self, id: u64, delta: &TerminalDelta) {
+    pub(super) fn apply_terminal_delta(&mut self, id: u64, delta: &TerminalDelta, cx: &mut App) {
         if let Some(terminal) = self.terminals.get(&id) {
             terminal.apply_delta(delta);
+            Revision::bump(&terminal.grid, cx);
+            if delta.title.is_some() || delta.exit.is_some() {
+                Revision::bump(&terminal.label, cx);
+            }
         }
     }
 
-    pub(super) fn clear_terminal_topics(&mut self) {
-        for id in self.terminals.keys() {
-            let _ = self.host.unsubscribe(Subscription {
-                known_index: None,
-                topic: Topic::Terminal { terminal_id: *id },
-                after: None,
-            });
-        }
-        self.terminals.clear();
-    }
-
-    pub(super) fn sync_terminal_topics(&mut self) {
-        let ids: Vec<_> = self
-            .session_status_replica
-            .as_ref()
-            .map(|status| status.terminals.iter().map(|entry| entry.id).collect())
-            .unwrap_or_default();
+    /// Replicate the terminals of every open thread and no other.
+    pub(super) fn sync_terminal_topics(&mut self, cx: &mut App) {
+        let entries: Vec<_> = self
+            .threads
+            .values()
+            .filter(|thread| thread.open)
+            .filter_map(|thread| thread.status.as_ref())
+            .flat_map(|status| status.terminals.iter())
+            .map(|entry| (entry.id, entry.title.clone()))
+            .collect();
+        let ids: Vec<_> = entries.iter().map(|(id, _)| *id).collect();
         self.terminals.retain(|id, _| {
             if ids.contains(id) {
                 return true;
@@ -254,16 +274,14 @@ impl WorkspaceStore {
             });
             false
         });
-        if let Some(status) = &self.session_status_replica {
-            for entry in &status.terminals {
-                if let Some(terminal) = self.terminals.get(&entry.id) {
-                    terminal.model_mut().set_fallback_title(entry.title.clone());
-                }
+        for (id, title) in entries {
+            if let Some(terminal) = self.terminals.get(&id) {
+                terminal.model_mut().set_fallback_title(title);
             }
         }
         for id in ids {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.terminals.entry(id) {
-                entry.insert(Rc::new(ClientTerminal::new(id, self.host.clone())));
+                entry.insert(Rc::new(ClientTerminal::new(id, self.host.clone(), cx)));
                 let _ = self.host.subscribe(Subscription {
                     known_index: None,
                     topic: Topic::Terminal { terminal_id: id },

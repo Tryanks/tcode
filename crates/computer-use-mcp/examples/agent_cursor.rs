@@ -22,17 +22,23 @@ mod ffi;
 mod geometry;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
-#[path = "../src/backend/macos/overlay/motion.rs"]
+#[path = "../src/backend/cursor/motion.rs"]
 mod motion;
+#[cfg(target_os = "macos")]
+mod backend {
+    pub(crate) mod cursor {
+        pub(crate) use crate::motion;
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod overlay {
     use std::time::{Duration, Instant};
 
-    use super::{ffi, motion};
+    use super::ffi;
 
     use super::cursor::CursorUi;
-    use motion::{Effect, Waypoint};
+    use crate::backend::cursor::motion::{Effect, Waypoint};
 
     fn pump(cursor: &mut CursorUi, duration: Duration) {
         let end = Instant::now() + duration;
@@ -150,5 +156,5 @@ fn main() {
     #[cfg(target_os = "macos")]
     overlay::run();
     #[cfg(not(target_os = "macos"))]
-    println!("the agent cursor is macOS only");
+    println!("this demo drives the macOS overlay");
 }

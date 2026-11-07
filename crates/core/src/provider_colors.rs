@@ -1,4 +1,5 @@
-//! Per-provider colors for the sidebar thread tint.
+//! Per-provider colors: the sidebar's thread marks and every glyph that draws
+//! a specific provider profile.
 //!
 //! Built-in providers carry their brand color; everything the user adds (a
 //! custom profile, an ACP agent) draws from [`PROVIDER_COLOR_PALETTE`]. The

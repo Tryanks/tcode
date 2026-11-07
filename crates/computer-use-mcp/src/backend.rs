@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::outline::{Frame, UiNode};
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod cursor;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
@@ -169,6 +171,8 @@ pub enum ActionOutcome {
 pub enum Delivery {
     Ax,
     BackgroundPid,
+    /// Window messages posted to the target's own windows (Windows).
+    WindowMessage,
     ForegroundHid,
     #[default]
     None,
@@ -179,6 +183,17 @@ pub struct ActionResult {
     pub outcome: ActionOutcome,
     pub message: String,
     pub delivery: Delivery,
+    /// Set when keys could not be delivered in the background and could
+    /// reach the app only with it in front, which the caller decides.
+    #[serde(skip)]
+    pub foreground: Option<ForegroundNeed>,
+}
+
+/// Why a keyboard step needs the app in front: the background delivery
+/// that could not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundNeed {
+    pub background_error: String,
 }
 
 impl ActionResult {
@@ -187,6 +202,7 @@ impl ActionResult {
             outcome: ActionOutcome::Worked,
             message: message.into(),
             delivery,
+            foreground: None,
         }
     }
 
@@ -195,6 +211,19 @@ impl ActionResult {
             outcome: ActionOutcome::Didnt,
             message: message.into(),
             delivery,
+            foreground: None,
+        }
+    }
+
+    /// Keys that could not be delivered in the background; the step did not
+    /// happen unless the caller brings the app to the front.
+    pub fn needs_foreground(background_error: impl Into<String>) -> Self {
+        let background_error = background_error.into();
+        Self {
+            outcome: ActionOutcome::Didnt,
+            message: format!("background key delivery could not start: {background_error}"),
+            delivery: Delivery::None,
+            foreground: Some(ForegroundNeed { background_error }),
         }
     }
 
@@ -203,6 +232,7 @@ impl ActionResult {
             outcome: ActionOutcome::Unknown,
             message: message.into(),
             delivery,
+            foreground: None,
         }
     }
 }
@@ -251,14 +281,18 @@ pub use macos::{observe, perform_action};
 pub(crate) fn set_feedback_enabled(enabled: bool) {
     #[cfg(target_os = "macos")]
     macos::set_feedback_enabled(enabled);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    windows::set_feedback_enabled(enabled);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = enabled;
 }
 
 pub(crate) fn clear_feedback(owner: Option<u64>, action: Option<u64>) {
     #[cfg(target_os = "macos")]
     macos::clear_feedback(owner, action);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    windows::clear_feedback(owner, action);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = (owner, action);
 }
 #[cfg(target_os = "windows")]
@@ -275,10 +309,32 @@ pub(crate) fn perform_action_with_feedback(
     {
         macos::perform_action_with_feedback(root, request, Some(feedback), paced)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::perform_action_with_feedback(root, request, Some(feedback), paced)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (feedback, paced);
         perform_action(root, request)
+    }
+}
+
+/// Bring the target app to the front and deliver the keyboard step there,
+/// restoring the app the user was in. Only a step that reported a
+/// [`ForegroundNeed`] is retried this way; it never posts a pointer event.
+pub(crate) fn type_in_foreground(
+    root: &RootInfo,
+    request: &ActionRequest,
+) -> Result<(), BackendError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::type_in_foreground(root, request)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (root, request);
+        Err(BackendError::unsupported())
     }
 }
 
@@ -570,6 +626,7 @@ mod tests {
         for (delivery, expected) in [
             (Delivery::Ax, "ax"),
             (Delivery::BackgroundPid, "background_pid"),
+            (Delivery::WindowMessage, "window_message"),
             (Delivery::ForegroundHid, "foreground_hid"),
             (Delivery::None, "none"),
         ] {

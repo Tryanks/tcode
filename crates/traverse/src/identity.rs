@@ -268,9 +268,9 @@ impl HostIdentity {
 }
 
 /// `device.json`: this device's key and how it introduces itself. Cloning
-/// shares one identity; the client endpoint built on it is shared too. The
-/// endpoint's relays and lookups follow the machines in `hosts.json`; see
-/// [`DeviceIdentity::hosts_changed`].
+/// shares one identity; the client endpoint built on it is shared too, for
+/// as long as it is open. The endpoint's relays and lookups follow the
+/// machines in `hosts.json`; see [`DeviceIdentity::hosts_changed`].
 #[derive(Clone)]
 pub struct DeviceIdentity {
     inner: Arc<DeviceInner>,
@@ -281,7 +281,7 @@ pub(crate) struct DeviceInner {
     pub(crate) data_dir: PathBuf,
     details: Mutex<Details>,
     pub(crate) lan: Mutex<crate::lan::LanOptions>,
-    pub(crate) endpoint: tokio::sync::OnceCell<crate::client::ClientEndpoint>,
+    pub(crate) endpoint: crate::client::DeviceEndpoint,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -335,7 +335,7 @@ impl DeviceIdentity {
                 data_dir: data_dir.to_owned(),
                 details: Mutex::new(details),
                 lan: Mutex::new(crate::lan::LanOptions::default()),
-                endpoint: tokio::sync::OnceCell::new(),
+                endpoint: crate::client::DeviceEndpoint::default(),
             }),
         })
     }
@@ -382,7 +382,7 @@ impl DeviceIdentity {
     }
 
     /// How the LAN lookup observes the network; read when the endpoint
-    /// binds on first use, so a platform sets it before connecting.
+    /// binds, so a platform sets it before connecting.
     pub fn set_lan_options(&self, options: crate::lan::LanOptions) {
         *self.inner.lan.lock().unwrap() = options;
     }

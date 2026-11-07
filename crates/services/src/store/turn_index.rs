@@ -1,36 +1,29 @@
 use std::{collections::HashMap, io};
 
 use serde::{Deserialize, Serialize};
-use tcode_core::session::{StoredEvent, TURN_INDEX_FOLD_VERSION, TurnBoundaries, TurnSnapshots};
+use tcode_core::session::{
+    StoredEvent, TURN_INDEX_FOLD_VERSION, TurnBoundaries, TurnSnapshots, TurnStarts,
+};
 use turso::Connection;
 
-use super::db::{Db, blob, integer, text};
+use super::codec::{Encoder, Mode};
+use super::db::{Db, blob, integer};
+use super::rows::{self, Storage, Thread};
 use super::{SessionStore, decode_row, invalid_data};
 
 pub(super) fn create_tables(db: &Db, connection: &Connection) -> io::Result<()> {
-    db.execute(connection, "DROP TABLE IF EXISTS turn_index_v2", ())?;
-    db.execute(connection, "DROP TABLE IF EXISTS turn_index_entries_v2", ())?;
-    db.execute(connection, "CREATE TABLE IF NOT EXISTS event_log_revisions (session_id TEXT PRIMARY KEY, revision BLOB NOT NULL)", ())?;
-    let mut versioned = false;
-    db.query(connection, "PRAGMA table_info(turn_index)", (), |row| {
-        versioned |= text(row, 1)? == "fold_version";
-        Ok(())
-    })?;
-    if !versioned {
-        db.execute(connection, "DROP TABLE IF EXISTS turn_index", ())?;
-    }
     db.execute(
         connection,
         "CREATE TABLE IF NOT EXISTS turn_index (\
-        session_id TEXT PRIMARY KEY, fold_version INTEGER NOT NULL, \
+        thread INTEGER PRIMARY KEY, fold_version INTEGER NOT NULL, \
         turns INTEGER NOT NULL, starts BLOB NOT NULL, state BLOB NOT NULL)",
         (),
     )?;
     Ok(())
 }
 
-/// Turn count after replay, and every physical row that opened a turn.
-/// Rewinds remove turns but retain the starts of their ended lifetimes.
+/// Turn count after replay, and the rows that opened the turns it holds
+/// ([`TurnStarts`]): a rewind drops the starts of the turns it removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnIndex {
     pub turns: u64,
@@ -41,6 +34,8 @@ pub struct TurnIndex {
 struct State {
     boundaries: TurnBoundaries,
     snapshots: TurnSnapshots<u64>,
+    #[serde(default)]
+    starts: TurnStarts,
     undecodable: bool,
 }
 
@@ -51,24 +46,38 @@ pub(super) struct Pending {
     dirty: bool,
 }
 
+/// Where a partial copy of a log ends, by the row that opened a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloneBound {
+    /// Before that row.
+    BeforeTurn(usize),
+    /// After it, for a turn a rewind's divider opened: the rows before the
+    /// divider hold what the rewind took out.
+    ThroughTurnOpening(usize),
+}
+
 impl SessionStore {
     pub fn turn_index(&self, id: &str) -> io::Result<Option<TurnIndex>> {
-        self.run("read a turn index", |db| {
-            db.read(|db, connection| read(db, connection, id))
+        self.run("read a turn index", |st| {
+            st.read(|st, connection| match rows::thread(st, connection, id)? {
+                Some(thread) => read(st, connection, &thread),
+                None => Ok(None),
+            })
         })
     }
 
     pub fn threads_without_turn_index(&self) -> io::Result<Vec<String>> {
-        self.run("list threads without a turn index", |db| {
-            db.read(|db, connection| {
+        self.run("list threads without a turn index", |st| {
+            st.read(|st, connection| {
                 let mut ids = Vec::new();
-                db.query(
+                st.query(
                     connection,
                     "SELECT id FROM sessions WHERE id NOT IN \
-                    (SELECT session_id FROM turn_index WHERE fold_version = ?1)",
+                    (SELECT t.id FROM threads t JOIN turn_index i ON i.thread = t.key \
+                     WHERE i.fold_version = ?1)",
                     [i64::from(TURN_INDEX_FOLD_VERSION)],
                     |row| {
-                        ids.push(text(row, 0)?);
+                        ids.push(super::db::text(row, 0)?);
                         Ok(())
                     },
                 )?;
@@ -78,12 +87,16 @@ impl SessionStore {
     }
 }
 
-pub(super) fn read(db: &Db, connection: &Connection, id: &str) -> io::Result<Option<TurnIndex>> {
+pub(super) fn read(
+    st: &Storage,
+    connection: &Connection,
+    thread: &Thread,
+) -> io::Result<Option<TurnIndex>> {
     let mut index = None;
-    db.query(
+    st.query(
         connection,
-        "SELECT turns, starts FROM turn_index WHERE session_id = ?1 AND fold_version = ?2",
-        (id, i64::from(TURN_INDEX_FOLD_VERSION)),
+        "SELECT turns, starts FROM turn_index WHERE thread = ?1 AND fold_version = ?2",
+        (thread.key, i64::from(TURN_INDEX_FOLD_VERSION)),
         |row| {
             index = Some(TurnIndex {
                 turns: integer(row, 0)? as u64,
@@ -95,12 +108,12 @@ pub(super) fn read(db: &Db, connection: &Connection, id: &str) -> io::Result<Opt
     Ok(index)
 }
 
-fn load(db: &Db, connection: &Connection, id: &str) -> io::Result<Option<Pending>> {
+fn load(st: &Storage, connection: &Connection, key: i64) -> io::Result<Option<Pending>> {
     let mut pending = None;
-    db.query(
+    st.query(
         connection,
-        "SELECT turns, starts, state FROM turn_index WHERE session_id = ?1 AND fold_version = ?2",
-        (id, i64::from(TURN_INDEX_FOLD_VERSION)),
+        "SELECT turns, starts, state FROM turn_index WHERE thread = ?1 AND fold_version = ?2",
+        (key, i64::from(TURN_INDEX_FOLD_VERSION)),
         |row| {
             pending = Some(Pending {
                 index: TurnIndex {
@@ -117,15 +130,15 @@ fn load(db: &Db, connection: &Connection, id: &str) -> io::Result<Option<Pending
 }
 
 pub(super) fn save(
-    db: &Db,
+    st: &Storage,
     connection: &Connection,
-    id: &str,
+    key: i64,
     pending: &Pending,
 ) -> io::Result<()> {
-    db.execute(connection, "INSERT INTO turn_index (session_id, fold_version, turns, starts, state) \
-        VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (session_id) DO UPDATE SET \
+    st.execute(connection, "INSERT INTO turn_index (thread, fold_version, turns, starts, state) \
+        VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (thread) DO UPDATE SET \
         fold_version = excluded.fold_version, turns = excluded.turns, starts = excluded.starts, state = excluded.state",
-        (id, i64::from(TURN_INDEX_FOLD_VERSION), pending.index.turns as i64,
+        (key, i64::from(TURN_INDEX_FOLD_VERSION), pending.index.turns as i64,
          serde_json::to_vec(&pending.index.starts).map_err(invalid_data)?,
          serde_json::to_vec(&pending.state).map_err(invalid_data)?))?;
     Ok(())
@@ -138,8 +151,9 @@ impl Pending {
             &record.event,
             position,
         );
-        if change.opened {
-            self.index.starts.push(position);
+        if change.opened || change.rewind.is_some() || change.undone {
+            self.state.starts.apply(&change, position);
+            self.index.starts = self.state.starts.rows().to_vec();
         }
         self.index.turns = self.state.boundaries.len() as u64;
         self.dirty |= change.changed;
@@ -147,105 +161,136 @@ impl Pending {
     }
 }
 
-/// Called under the backfill's read snapshot, never under the writer lock.
-pub(super) fn candidate(db: &Db, connection: &Connection, id: &str) -> io::Result<Option<Pending>> {
-    if read(db, connection, id)?.is_some() {
+/// Costs a fold of the whole log: the backfill calls it under its read
+/// snapshot, and only a user's partial copy under the writer lock.
+pub(super) fn candidate(
+    st: &Storage,
+    connection: &Connection,
+    thread: &Thread,
+) -> io::Result<Option<Pending>> {
+    if read(st, connection, thread)?.is_some() {
         return Ok(None);
     }
     let mut pending = Pending::default();
-    db.query(
+    let codec = st.codec();
+    let mut decoder = codec.decoder();
+    rows::visit(
+        st,
         connection,
-        "SELECT position, line FROM events WHERE session_id = ?1 ORDER BY position",
-        [id],
-        |row| {
-            match decode_row(&blob(row, 1)?) {
+        thread,
+        0..u64::MAX,
+        false,
+        |position, row| {
+            match decode_row(&st.decode(&mut decoder, &row, Mode::Bare)?.bytes) {
                 Ok(Some(record)) => {
-                    pending.apply(integer(row, 0)? as u64, &record.stored);
+                    pending.apply(position, &record.stored);
                 }
                 Ok(None) => {}
                 Err(_) => pending.state.undecodable = true,
             }
-            Ok(())
+            Ok(true)
         },
     )?;
     Ok(Some(pending))
 }
 
-pub(super) type Batch = HashMap<String, Option<Pending>>;
+pub(super) type Batch = HashMap<i64, Option<Pending>>;
 
 pub(super) fn append(
-    db: &Db,
+    st: &Storage,
     connection: &Connection,
+    encoder: &mut Encoder<'_>,
     batch: &mut Batch,
-    id: &str,
+    thread: &Thread,
     position: u64,
     record: &StoredEvent,
 ) -> io::Result<()> {
-    if !batch.contains_key(id) {
-        let pending = load(db, connection, id)?.or_else(|| (position == 0).then(Pending::default));
-        batch.insert(id.to_owned(), pending);
+    if let std::collections::hash_map::Entry::Vacant(entry) = batch.entry(thread.key) {
+        entry.insert(
+            load(st, connection, thread.key)?.or_else(|| (position == 0).then(Pending::default)),
+        );
     }
-    if let Some(pending) = batch.get_mut(id).and_then(Option::as_mut) {
+    if let Some(pending) = batch.get_mut(&thread.key).and_then(Option::as_mut) {
         if let Some(superseded) = pending.apply(position, record) {
-            super::superseded::drop_row_diffs(db, connection, id, superseded)?;
+            super::compact::drop_row_diffs(st, connection, encoder, thread, superseded)?;
         }
         if position == 0 {
             pending.dirty = true;
         }
     } else if matches!(record.event, agent::AgentEvent::TurnChangesUpdated { .. }) {
-        super::superseded::forget_pass(db, connection, id)?;
+        rows::needs_compaction(st, connection, thread.key)?;
     }
     Ok(())
 }
 
-pub(super) fn flush(db: &Db, connection: &Connection, batch: &Batch) -> io::Result<()> {
-    for (id, pending) in batch {
+pub(super) fn flush(st: &Storage, connection: &Connection, batch: &Batch) -> io::Result<()> {
+    for (key, pending) in batch {
         if let Some(pending) = pending
             && pending.dirty
         {
-            save(db, connection, id, pending)?;
+            save(st, connection, *key, pending)?;
         }
     }
     Ok(())
 }
 
-pub(super) fn copy(db: &Db, connection: &Connection, src: &str, dst: &str) -> io::Result<()> {
-    forget(db, connection, dst)?;
-    db.execute(
-        connection,
-        "INSERT INTO turn_index (session_id, fold_version, turns, starts, state) \
-        SELECT ?2, fold_version, turns, starts, state FROM turn_index WHERE session_id = ?1",
-        (src, dst),
-    )?;
+pub(super) fn copy(
+    st: &Storage,
+    connection: &Connection,
+    src: Option<&Thread>,
+    dst: &Thread,
+) -> io::Result<()> {
+    forget(st, connection, dst)?;
+    if let Some(src) = src {
+        st.execute(
+            connection,
+            "INSERT INTO turn_index (thread, fold_version, turns, starts, state) \
+            SELECT ?2, fold_version, turns, starts, state FROM turn_index WHERE thread = ?1",
+            (src.key, dst.key),
+        )?;
+    }
     Ok(())
 }
 
-/// Replacement can keep the same row count; its identity must also match a
-/// backfill snapshot before publishing. Appends are detected by their end row.
-pub(super) fn revision(db: &Db, connection: &Connection, id: &str) -> io::Result<Vec<u8>> {
-    let mut revision = Vec::new();
-    db.query(
-        connection,
-        "SELECT revision FROM event_log_revisions WHERE session_id = ?1",
-        [id],
-        |row| {
-            revision = blob(row, 0)?;
-            Ok(())
-        },
-    )?;
-    Ok(revision)
+/// The position `bound` names in `thread`'s log.
+pub(super) fn bound_row(
+    st: &Storage,
+    connection: &Connection,
+    thread: &Thread,
+    bound: CloneBound,
+) -> io::Result<u64> {
+    let starts = match read(st, connection, thread)? {
+        Some(index) => index.starts,
+        None => candidate(st, connection, thread)?
+            .map(|pending| pending.index.starts)
+            .unwrap_or_default(),
+    };
+    let (CloneBound::BeforeTurn(turn) | CloneBound::ThroughTurnOpening(turn)) = bound;
+    let row = starts
+        .get(turn)
+        .copied()
+        .ok_or_else(|| io::Error::other(format!("{} has no turn {turn}", thread.key)))?;
+    Ok(match bound {
+        CloneBound::BeforeTurn(_) => row,
+        CloneBound::ThroughTurnOpening(_) => row + 1,
+    })
 }
 
-pub(super) fn replace_revision(db: &Db, connection: &Connection, id: &str) -> io::Result<()> {
-    db.execute(connection, "INSERT INTO event_log_revisions (session_id, revision) VALUES (?1, randomblob(16)) ON CONFLICT (session_id) DO UPDATE SET revision = excluded.revision", [id])?;
-    Ok(())
+/// Fold `thread`'s log into its index now. A partial copy cannot take the
+/// source's, and appends only follow an index that exists.
+pub(super) fn rebuild(st: &Storage, connection: &Connection, thread: &Thread) -> io::Result<()> {
+    forget(st, connection, thread)?;
+    match candidate(st, connection, thread)? {
+        Some(pending) => save(st, connection, thread.key, &pending),
+        None => Ok(()),
+    }
 }
 
-pub(super) fn forget(db: &Db, connection: &Connection, id: &str) -> io::Result<()> {
-    db.execute(
+pub(super) fn forget(st: &Storage, connection: &Connection, thread: &Thread) -> io::Result<()> {
+    st.execute(
         connection,
-        "DELETE FROM turn_index WHERE session_id = ?1",
-        [id],
+        "DELETE FROM turn_index WHERE thread = ?1",
+        [thread.key],
     )?;
     Ok(())
 }

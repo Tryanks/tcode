@@ -15,7 +15,7 @@ impl AppState {
             let cached_registry = host_cx.unblock(move || cached(&cache_dir)).await;
             host_cx.enqueue(move |state, _cx| {
                 if state.acp_registry_loading && state.acp_registry.is_none() {
-                    state.acp_registry = cached_registry;
+                    *state.acp_registry = cached_registry;
                 }
             });
             let result = host_cx.unblock(move || load(&data_dir)).await;
@@ -23,7 +23,7 @@ impl AppState {
                 state.acp_registry_loading = false;
                 match result {
                     Ok(registry) => {
-                        state.acp_registry = Some(registry);
+                        *state.acp_registry = Some(registry);
                         state.acp_registry_error = None;
                     }
                     Err(err) => {
@@ -66,6 +66,36 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Every harness as clients present it: the native ones, then each
+    /// installed ACP agent with the registry's newer version, if any.
+    pub(crate) fn harness_descriptions(&self) -> Vec<tcode_protocol::HarnessDescription> {
+        let registry = self.acp_marketplace();
+        let native = ProviderKind::NATIVE
+            .into_iter()
+            .map(tcode_protocol::HarnessDescription::native);
+        let agents = self.settings.acp_agents.values().map(|agent| {
+            let caps = ProviderKind::Acp.caps();
+            let newer = registry
+                .iter()
+                .find(|entry| entry.id == agent.id)
+                .map(|entry| entry.version.clone())
+                .filter(|latest| {
+                    provider_updates::parse_version(latest)
+                        .zip(provider_updates::parse_version(&agent.version))
+                        .is_some_and(|(latest, installed)| latest > installed)
+                });
+            tcode_protocol::HarnessDescription {
+                acp_agent_id: Some(agent.id.clone()),
+                launch_summary: Some(launch_summary(&agent.launch)),
+                launch_args: caps.launch_args,
+                mcp_servers: caps.mcp_servers,
+                registry_update: newer,
+                ..tcode_protocol::HarnessDescription::native(ProviderKind::Acp)
+            }
+        });
+        native.chain(agents).collect()
+    }
+
     /// Download + install one registry agent, with a progress toast.
     pub fn install_acp_agent(&mut self, id: String, cx: &mut HostCx) {
         let Some(agent) = self
@@ -96,7 +126,13 @@ impl AppState {
             host_cx.enqueue(move |state, cx| {
                 state.acp_installing.remove(&id);
                 match result {
-                    Ok(installed) => {
+                    Ok(mut installed) => {
+                        // An update keeps what the user set for the agent.
+                        if let Some(previous) = state.settings.acp_agents.get(&id) {
+                            installed.enabled = previous.enabled;
+                            installed.env = previous.env.clone();
+                            installed.launch_args = previous.launch_args.clone();
+                        }
                         state.settings.acp_agents.insert(id.clone(), installed);
                         state.persist_settings(cx);
                         emit_runtime(
@@ -145,7 +181,6 @@ impl AppState {
         name: String,
         command: String,
         args: Vec<String>,
-        env: Vec<(String, String)>,
         cx: &mut HostCx,
     ) {
         let name = name.trim().to_string();
@@ -161,7 +196,11 @@ impl AppState {
                 name,
                 version: String::new(),
                 icon: None,
-                launch: agent::AcpLaunch::Custom { command, args, env },
+                launch: agent::AcpLaunch::Custom {
+                    command,
+                    args,
+                    env: Vec::new(),
+                },
                 enabled: true,
                 env: Vec::new(),
                 launch_args: None,
@@ -175,10 +214,12 @@ impl AppState {
         if let Some(agent) = self.settings.acp_agents.get_mut(id) {
             match patch {
                 AcpAgentPatch::SetEnabled { enabled } => agent.enabled = enabled,
-                AcpAgentPatch::SetLaunchOptions { env, launch_args } => {
-                    agent.env = env;
-                    agent.launch_args = launch_args;
+                AcpAgentPatch::SetLaunchArgs { launch_args } => {
+                    agent.launch_args = launch_args
+                        .map(|args| args.trim().to_owned())
+                        .filter(|args| !args.is_empty());
                 }
+                AcpAgentPatch::SetEnv { env } => agent.env = named(env),
             }
             self.persist_settings(cx);
         }
@@ -276,4 +317,17 @@ pub(super) fn custom_acp_id(name: &str) -> String {
         })
         .collect();
     format!("custom:{}", slug.trim_matches('-'))
+}
+
+/// How an ACP agent is started, as one command line.
+fn launch_summary(launch: &agent::AcpLaunch) -> String {
+    let (command, args) = match launch {
+        agent::AcpLaunch::Npx { package, args, .. } => (format!("npx {package}"), args),
+        agent::AcpLaunch::Binary { command, args, .. } => (command.display().to_string(), args),
+        agent::AcpLaunch::Custom { command, args, .. } => (command.clone(), args),
+    };
+    std::iter::once(command)
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }

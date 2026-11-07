@@ -27,7 +27,7 @@ pub const ORCHESTRATE_FALLBACK_LABEL: &str =
 pub const ORCHESTRATE_OUTPUT_TAIL_LABEL: &str = "Final output tail (";
 
 /// Sent to a child that ended its turn owing a report, once per expectation.
-pub const CHILD_REPORT_REMINDER: &str = include_str!("../../../assets/orchestrate/reminder.md");
+pub const CHILD_REPORT_REMINDER: &str = include_str!("../../../assets/subagents/reminder.md");
 
 /// `[orchestrate] thread {child_id} ("{title}")`, which every callback opens with.
 pub fn callback_header(child_id: &str, title: &str) -> String {

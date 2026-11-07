@@ -7,14 +7,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::claude::{is_agent_tool, one_line_summary, spawned_subagent};
+use crate::claude::{
+    ToolItem, is_agent_tool, is_handback_note, one_line_summary, spawned_subagent,
+};
 use crate::{AgentEvent, ItemContent, ItemStatus, ThreadItem};
 
 enum ChildTool {
-    Tool {
-        name: String,
-        input: Value,
-    },
+    Call(ToolItem),
     /// An `Agent` call inside the subagent: a nested subagent whose own
     /// transcript arrives keyed by this tool_use id.
     Subagent {
@@ -123,23 +122,9 @@ impl TranscriptMapper {
                         events.push(AgentEvent::ItemStarted(self.nested_subagent(id, content)));
                         continue;
                     }
-                    self.tools.insert(
-                        id.to_owned(),
-                        ChildTool::Tool {
-                            name: name.clone(),
-                            input: input.clone(),
-                        },
-                    );
-                    events.push(AgentEvent::ItemStarted(self.item(
-                        id,
-                        ItemContent::ToolCall {
-                            image_reads: Vec::new(),
-                            name,
-                            input,
-                            output: None,
-                            status: ItemStatus::InProgress,
-                        },
-                    )));
+                    let (call, content) = ToolItem::started(name, input);
+                    self.tools.insert(id.to_owned(), ChildTool::Call(call));
+                    events.push(AgentEvent::ItemStarted(self.item(id, content)));
                 }
                 _ => {}
             }
@@ -185,41 +170,29 @@ impl TranscriptMapper {
             let Some(tool) = self.tools.remove(id) else {
                 continue;
             };
-            let failed = block
-                .get("is_error")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let output = content_text(block.get("content"));
-            let status = if failed {
-                ItemStatus::Failed
-            } else {
-                ItemStatus::Completed
-            };
             match tool {
-                ChildTool::Tool { name, input } => {
-                    let image_reads = if failed {
-                        Vec::new()
-                    } else {
-                        crate::tool_result_images(
-                            &name,
-                            block.get("content").unwrap_or(&Value::Null),
-                        )
-                    };
-                    events.push(AgentEvent::ItemCompleted(self.item(
-                        id,
-                        ItemContent::ToolCall {
-                            image_reads,
-                            name,
-                            input,
-                            output: Some(output),
-                            status,
-                        },
-                    )));
+                ChildTool::Call(call) => {
+                    let result = value
+                        .get("tool_use_result")
+                        .or_else(|| value.get("toolUseResult"));
+                    events.push(AgentEvent::ItemCompleted(
+                        self.item(id, call.finished(block, result)),
+                    ));
                 }
                 ChildTool::Subagent {
                     content,
                     background,
                 } => {
+                    let failed = block
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let output = content_text(block.get("content"));
+                    let status = if failed {
+                        ItemStatus::Failed
+                    } else {
+                        ItemStatus::Completed
+                    };
                     // A background launch only acknowledges the spawn; the
                     // nested subagent settles through its own task_notification.
                     if background || launch_acknowledged(value, &output) {
@@ -235,13 +208,15 @@ impl TranscriptMapper {
                     else {
                         continue;
                     };
+                    let summary = (!output.trim().is_empty() && !is_handback_note(&output))
+                        .then(|| one_line_summary(&output));
                     events.push(AgentEvent::ItemCompleted(self.nested_subagent(
                         id,
                         ItemContent::Subagent {
                             agent_type,
                             description,
                             status,
-                            summary: (!output.trim().is_empty()).then(|| one_line_summary(&output)),
+                            summary,
                             model,
                             effort,
                         },

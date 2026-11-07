@@ -37,6 +37,12 @@ use crate::{
     },
 };
 
+/// How long what is drawn here only some of the time takes to come in or go.
+const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a part drawn here takes to cross-fade to another of its states.
+const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// The Review sheet's client-local state: the verdict until the sheet closes, the summary being
 /// typed and its pending save.
 #[derive(Default)]
@@ -453,89 +459,94 @@ impl PullRequestView {
 
     /// Pending comments the diff does not draw: on files or lines not shown, and those whose lines
     /// changed when the draft moved to a new head.
-    pub(super) fn off_diff_pending(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn off_diff_pending(&self, cx: &App) -> Vec<PullRequestReviewDraftComment> {
         let Some(draft) = self.draft(cx) else {
             return Vec::new();
         };
         let drawn = self.stale_head(&draft).is_none()
             && self.files_head().as_deref() == Some(draft.head.as_str());
-        let muted = cx.theme().muted_foreground;
         draft
             .comments
             .iter()
             .filter(|comment| !comment.placed || !drawn || !self.pending_drawn(comment))
-            .map(|comment| {
-                let id = comment.id;
-                let removed = comment.clone();
-                material::card_header_row(cx)
-                    .id(SharedString::from(format!("pr-off-diff-pending-{id}")))
-                    .text_secondary(false, cx)
-                    .text_color(cx.theme().foreground)
-                    .child(material::semantic_chip(
-                        crate::tr!("pull_requests.review.pending").into_owned(),
-                        cx.theme().info.opacity(0.1),
-                        cx.theme().info,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(220.))
-                            .overflow_hidden()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .child(crate::widgets::fade_text(format!(
-                                "{}:{}",
-                                comment.path, comment.end_line
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_color(muted)
-                            .child(crate::widgets::fade_text(
-                                comment.body.lines().next().unwrap_or_default().to_owned(),
-                            )),
-                    )
-                    .when(!comment.placed, |row| {
-                        row.child(
-                            div()
-                                .flex_none()
-                                .text_color(cx.theme().warning)
-                                .child(crate::tr!("pull_requests.review.line_changed")),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("pr-pending-copy-{id}")))
-                                .ghost()
-                                .xsmall()
-                                .compact()
-                                .icon(IconName::Copy)
-                                .tooltip(crate::tr!("pull_requests.conversation.copy_text"))
-                                .on_click({
-                                    let text = comment.body.clone();
-                                    move |_, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            text.clone(),
-                                        ))
-                                    }
-                                }),
-                        )
-                    })
-                    .child(
-                        Button::new(SharedString::from(format!("pr-pending-off-remove-{id}")))
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(IconName::Trash)
-                            .tooltip(crate::tr!("pull_requests.review.remove_pending"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.remove_pending(&removed, window, cx)
-                            })),
-                    )
-                    .into_any_element()
-            })
+            .cloned()
             .collect()
+    }
+
+    /// A pending comment's row in the card of comments the diff does not draw.
+    pub(super) fn off_diff_pending_row(
+        &self,
+        comment: &PullRequestReviewDraftComment,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let id = comment.id;
+        let removed = comment.clone();
+        material::card_header_row(cx)
+            .id(SharedString::from(format!("pr-off-diff-pending-{id}")))
+            .text_secondary(false, cx)
+            .text_color(cx.theme().foreground)
+            .child(material::semantic_chip(
+                crate::tr!("pull_requests.review.pending").into_owned(),
+                cx.theme().info.opacity(0.1),
+                cx.theme().info,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(px(220.))
+                    .overflow_hidden()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .child(crate::widgets::fade_text(format!(
+                        "{}:{}",
+                        comment.path, comment.end_line
+                    ))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_color(muted)
+                    .child(crate::widgets::fade_text(
+                        comment.body.lines().next().unwrap_or_default().to_owned(),
+                    )),
+            )
+            .when(!comment.placed, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .text_color(cx.theme().warning)
+                        .child(crate::tr!("pull_requests.review.line_changed")),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("pr-pending-copy-{id}")))
+                        .ghost()
+                        .xsmall()
+                        .compact()
+                        .icon(IconName::Copy)
+                        .tooltip(crate::tr!("pull_requests.conversation.copy_text"))
+                        .on_click({
+                            let text = comment.body.clone();
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
+                            }
+                        }),
+                )
+            })
+            .child(
+                Button::new(SharedString::from(format!("pr-pending-off-remove-{id}")))
+                    .ghost()
+                    .xsmall()
+                    .compact()
+                    .icon(IconName::Trash)
+                    .tooltip(crate::tr!("pull_requests.review.remove_pending"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.remove_pending(&removed, window, cx)
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Whether the diff draws the comment's last line, as it would draw a thread there.
@@ -578,7 +589,10 @@ impl PullRequestView {
                 .label(crate::tr!("pull_requests.review.entry"))
                 .disabled(merged)
                 .when(merged, |button| {
-                    button.tooltip(crate::tr!("pull_requests.review.merged_disabled"))
+                    button.tooltip(crate::tr!(
+                        "pull_requests.review.merged_disabled",
+                        pr = self.noun(cx).pr
+                    ))
                 })
                 .on_click(cx.listener(|this, _, window, cx| this.open_review(window, cx)))
         });
@@ -586,10 +600,28 @@ impl PullRequestView {
     }
 
     /// The bar under the Files toolbar while a review is pending.
-    pub(super) fn review_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let draft = self.draft(cx)?;
+    pub(super) fn review_bar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let compact = self.compact(cx);
-        let count = draft.comments.len();
+        let number = self
+            .current
+            .as_ref()
+            .map(|(_, key)| key.number)
+            .unwrap_or_default();
+        let id = |part: &str| SharedString::from(format!("pr-review-bar-{number}-{part}"));
+        let draft = self.draft(cx);
+        let shown = draft.as_ref().map(|draft| {
+            let count = draft.comments.len();
+            let stale = self.stale_head(draft).is_some();
+            (count, stale)
+        });
+        // The bar grows open under the toolbar with the first pending comment and folds when the
+        // review is submitted or discarded, holding what it said while it goes.
+        let kept = crate::motion::shown(id("shown"), shown, SHOW, window, cx)?;
+        let (count, stale) = kept.value;
         let summary = if count == 1 {
             crate::tr!("pull_requests.review.bar_one").into_owned()
         } else if count == 0 {
@@ -597,58 +629,60 @@ impl PullRequestView {
         } else {
             crate::tr!("pull_requests.review.bar", count = count.to_string()).into_owned()
         };
-        let stale = self.stale_head(&draft).is_some();
+        let summary = crate::motion::cross_fade(
+            id("summary"),
+            summary,
+            CHANGE,
+            window,
+            cx,
+            |summary, _, _| crate::widgets::fade_text(summary.clone()).into_any_element(),
+        );
+        let stale = crate::motion::shown(id("stale"), stale.then_some(()), SHOW, window, cx);
         let finish = Button::new("pr-review-finish")
             .primary()
             .xsmall()
             .label(crate::tr!("pull_requests.review.finish"))
             .on_click(cx.listener(|this, _, window, cx| this.open_review(window, cx)));
-        Some(
-            material::bar_divider_below(
-                material::bar("pr-review-bar", material::Bar::Toolbar, compact, cx),
-                cx,
-            )
-            .aria_label(
-                crate::tr!("pull_requests.review.bar_label", count = count.to_string())
-                    .into_owned(),
-            )
-            .items_center()
-            .bg(cx.theme().muted)
-            .text_secondary(compact, cx)
-            .text_color(cx.theme().foreground)
-            .child(Icon::new(IconName::MessageSquare).text_color(cx.theme().muted_foreground))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(crate::widgets::fade_text(summary)),
-            )
-            .when(stale, |bar| {
-                bar.child(
+        let bar = material::bar_divider_below(
+            material::bar("pr-review-bar", material::Bar::Toolbar, compact, cx),
+            cx,
+        )
+        .aria_label(
+            crate::tr!("pull_requests.review.bar_label", count = count.to_string()).into_owned(),
+        )
+        .items_center()
+        .bg(cx.theme().muted)
+        .text_secondary(compact, cx)
+        .text_color(cx.theme().foreground)
+        .child(Icon::new(IconName::MessageSquare).text_color(cx.theme().muted_foreground))
+        .child(div().min_w_0().overflow_hidden().child(summary))
+        .when_some(stale, |bar, stale| {
+            bar.child(
+                stale.fade(
                     h_flex()
-                        .flex_none()
                         .gap_1()
                         .items_center()
                         .text_color(cx.theme().warning)
                         .child(Icon::new(IconName::TriangleAlert))
                         .child(crate::tr!("pull_requests.review.head_changed")),
-                )
-            })
-            .child(div().flex_1())
-            .when(!compact, |bar| {
-                bar.child(
-                    Button::new("pr-review-discard")
-                        .ghost()
-                        .xsmall()
-                        .label(crate::tr!("pull_requests.review.discard"))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.confirm_discard(window, cx)),
-                        ),
-                )
-            })
-            .child(self.review_popover(Some(finish), cx))
-            .into_any_element(),
-        )
+                ),
+            )
+        })
+        .child(div().flex_1())
+        .when(!compact && !kept.leaving(), |bar| {
+            bar.child(
+                Button::new("pr-review-discard")
+                    .ghost()
+                    .xsmall()
+                    .label(crate::tr!("pull_requests.review.discard"))
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_discard(window, cx))),
+            )
+        })
+        // The leaving bar has no review to finish: the sheet is the entry's again.
+        .when(!kept.leaving(), |bar| {
+            bar.child(self.review_popover(Some(finish), cx))
+        });
+        Some(kept.fold(bar))
     }
 
     /// The Review sheet around its trigger: anchored on a desktop, a bottom sheet on a phone.
@@ -1010,6 +1044,7 @@ impl PullRequestView {
                 .into_any_element()
         };
         let host_name = view.read(cx).host_name(cx);
+        let noun = view.read(cx).noun(cx);
         let stale_notice = stale.map(|(old, new)| {
             let move_view = view.clone();
             let mut actions = vec![
@@ -1131,11 +1166,11 @@ impl PullRequestView {
                     .compact(compact)
                     .choices(segments),
             )
-            .child(
-                div()
-                    .text_secondary(compact, cx)
-                    .child(crate::tr!(caption, host_name = host_name.clone())),
-            )
+            .child(div().text_secondary(compact, cx).child(crate::tr!(
+                caption,
+                host_name = host_name.clone(),
+                pr = noun.pr.clone()
+            )))
             .when(unplaced > 0, |sheet| {
                 sheet.child(
                     div()
@@ -1189,10 +1224,9 @@ impl PullRequestView {
     }
 
     /// The conversation's line above the composer while a review is pending.
-    pub(super) fn pending_review_line(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let draft = self.draft(cx)?;
-        let count = draft.comments.len();
-        Some(
+    /// The conversation's line for a pending review of `count` comments.
+    pub(super) fn pending_review_line(&self, count: usize, cx: &mut Context<Self>) -> AnyElement {
+        {
             h_flex()
                 .py_2()
                 .gap_2()
@@ -1218,8 +1252,8 @@ impl PullRequestView {
                             this.open_review(window, cx);
                         })),
                 )
-                .into_any_element(),
-        )
+                .into_any_element()
+        }
     }
 }
 

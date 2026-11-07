@@ -421,6 +421,8 @@ pub mod action {
     pub const CANCEL_NOTIFY: &str = "cancel_notify";
     /// Detail: the request id.
     pub const RESPOND_INPUT: &str = "respond_input";
+    /// Detail: the approval id.
+    pub const RESPOND_APPROVAL: &str = "respond_approval";
     pub const TERMINAL_OPEN: &str = "terminal_open";
     /// Detail: the terminal id.
     pub const TERMINAL_INPUT: &str = "terminal_input";
@@ -439,6 +441,8 @@ pub mod action {
     pub const SEND_STEERED: &str = "send_steered";
     pub const SEND_SCHEDULED: &str = "send_scheduled";
     pub const INTERRUPT: &str = "interrupt";
+    /// A subagent stopped by the thread that started it, its result undelivered.
+    pub const CANCEL: &str = "cancel";
     /// Detail: the turn id.
     pub const RETRY: &str = "retry";
     pub const COMPACT: &str = "compact";

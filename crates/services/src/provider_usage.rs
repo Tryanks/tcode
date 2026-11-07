@@ -166,24 +166,42 @@ pub async fn fetch_provider_usage(
     binary: Option<PathBuf>,
     launch_env: LaunchEnv,
 ) -> Option<ProviderUsage> {
-    let fetched_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let result = match provider {
-        ProviderKind::Codex => agent::codex::read_rate_limits(binary, launch_env)
-            .await
-            .map(|value| parse_codex_rate_limits(&value, fetched_at)),
-        ProviderKind::ClaudeCode => agent::claude::read_usage(binary, launch_env)
-            .await
-            .map(|value| parse_claude_usage(&value, fetched_at)),
+    let payload = match provider {
+        ProviderKind::Codex => agent::codex::read_rate_limits(binary, launch_env).await,
+        ProviderKind::ClaudeCode => agent::claude::read_usage(binary, launch_env).await,
         ProviderKind::Pi
         | ProviderKind::OpenCode
         | ProviderKind::Cursor
         | ProviderKind::Grok
         | ProviderKind::Acp => return None,
     };
-    Some(result.unwrap_or_else(|error| error_usage(fetched_at, error.to_string())))
+    usage_from_payload(provider, payload.map_err(|error| error.to_string()))
+}
+
+/// Normalize a usage payload in the harness's own shape, read by a
+/// short-lived process or asked of a running session
+/// (`SessionCommand::ReadAccountUsage`).
+pub fn usage_from_payload(
+    provider: ProviderKind,
+    payload: Result<Value, String>,
+) -> Option<ProviderUsage> {
+    let fetched_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let parse = match provider {
+        ProviderKind::Codex => parse_codex_rate_limits,
+        ProviderKind::ClaudeCode => parse_claude_usage,
+        ProviderKind::Pi
+        | ProviderKind::OpenCode
+        | ProviderKind::Cursor
+        | ProviderKind::Grok
+        | ProviderKind::Acp => return None,
+    };
+    Some(match payload {
+        Ok(value) => parse(&value, fetched_at),
+        Err(error) => error_usage(fetched_at, error),
+    })
 }
 
 #[cfg(test)]

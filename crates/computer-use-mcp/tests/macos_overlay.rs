@@ -37,11 +37,17 @@ fn main() {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[allow(dead_code)] // Only the native regression paths run here.
+#[path = "../src/backend/cursor/mod.rs"]
+mod cursor;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[allow(dead_code)] // Same production feedback owner; only native regression paths run here.
 #[path = "../src/feedback.rs"]
 mod feedback;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod backend {
+    pub(crate) use crate::cursor;
+
     pub(crate) fn clear_feedback(owner: Option<u64>, action: Option<u64>) {
         super::overlay::clear(owner, action);
     }

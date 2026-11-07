@@ -33,6 +33,9 @@ impl BackProgress {
 
 pub(crate) const SETTLE: Duration = Duration::from_millis(200);
 
+/// How far in from the screen's left edge a swipe inward is navigation's.
+pub(crate) const EDGE_WIDTH: Pixels = px(20.);
+
 pub(crate) fn settle(
     id: impl Into<gpui_base::motion::TransitionId>,
     progress: f32,

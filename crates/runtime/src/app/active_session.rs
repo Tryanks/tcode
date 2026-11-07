@@ -27,10 +27,6 @@ pub struct QueuedMessage {
     /// Per-turn settings captured with the user's send gesture. A later mode
     /// toggle must affect later messages, not rewrite work already in the FIFO.
     pub(super) options: TurnOptions,
-    /// Byte length of visible context folded into `text`, including orchestration
-    /// context and per-turn pull-request instructions. The recorded event uses
-    /// it to split the injected prefix from the user's own words.
-    pub(super) context_len: Option<usize>,
     /// Context-window selection changed while the provider was live.
     pub(super) context_window_changed: Option<u64>,
     /// Orchestration callbacks arriving during the same provider-start window
@@ -156,6 +152,9 @@ pub struct ActiveSession {
     /// previews a different provider. Consumed only by a confirmed send.
     pub(super) pending_relay: Option<PendingRelay>,
     pub(super) runtime: Runtime,
+    /// A rewind holds the queue until the user next sends a message, which
+    /// goes ahead of it.
+    pub(super) queue_held: bool,
     /// The model the live provider process was actually started with. When the
     /// user picks a different model we compare against this to decide whether a
     /// restart is needed before the next turn.
@@ -163,14 +162,11 @@ pub struct ActiveSession {
     /// The directory the live provider process was started in; a move to another
     /// directory restarts it before the next turn.
     pub(super) live_cwd: PathBuf,
+    /// The profile the live provider process was started with; a switch to
+    /// another account restarts it before the next turn.
+    pub(super) live_profile_id: Option<String>,
     pub(super) live_option_selections: Vec<OptionSelection>,
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
-    /// A transient "the next queued send carries an injected context prefix of
-    /// this many bytes" flag, set by [`AppState::orchestrate_turn`] right before
-    /// it hands the composed text to `steer`. It is a
-    /// per-send annotation, consumed by the next `push_queued`, and never
-    /// persisted on the session.
-    pub(super) pending_context_len: Option<usize>,
     /// Draft-only: run in the current checkout or a new dedicated
     /// worktree. Chosen in the checkout row before the first send; locked after.
     pub draft_workspace: WorkspaceMode,
@@ -239,7 +235,9 @@ pub(super) struct PendingRelay {
     pub(super) from_model: Option<String>,
     /// The provider profile the history was produced against (`None` = the
     /// built-in profile). Two profiles of one [`ProviderKind`] are distinct
-    /// backends with isolated homes, so a profile switch is a relay too.
+    /// backends with isolated homes, so a profile switch is a relay too,
+    /// unless both are accounts of a provider that carries the native session
+    /// between them (`SessionMeta::session_transfer_from`).
     pub(super) from_profile: Option<String>,
 }
 
@@ -250,6 +248,7 @@ impl ActiveSession {
         provider_commands: Vec<ProviderCommand>,
     ) -> Self {
         let live_cwd = meta.cwd.clone();
+        let live_profile_id = meta.profile_id.clone();
         Self {
             meta,
             timeline: Timeline::default(),
@@ -259,11 +258,12 @@ impl ActiveSession {
             draft_device_id: None,
             pending_relay: None,
             runtime: Runtime::Idle,
+            queue_held: false,
             live_model: None,
             live_cwd,
+            live_profile_id,
             live_option_selections: Vec::new(),
             confirmed_option_selections: Vec::new(),
-            pending_context_len: None,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -287,7 +287,8 @@ impl ActiveSession {
     pub(super) fn resume_cursor_for_fresh_provider(&mut self) {
         self.shutdown_to_idle();
         self.meta.resume_cursor = None;
-        self.meta.pending_fork = false;
+        self.meta.pending_fork = None;
+        self.meta.session_transfer_from = None;
         self.pending_relay = None;
     }
 
@@ -370,7 +371,7 @@ impl ActiveSession {
     pub(super) fn fully_idle(&self) -> bool {
         !self.turn_in_flight
             && self.delivery_in_flight.is_none()
-            && self.queue.is_empty()
+            && (self.queue.is_empty() || self.queue_held)
             && self.background_task_count == 0
     }
 
@@ -378,6 +379,30 @@ impl ActiveSession {
         self.model_changed_while_live()
             || self.options_changed_while_live()
             || self.cwd_changed_while_live()
+            || self.profile_changed_while_live()
+    }
+
+    /// Give up carrying the native session to the account the thread switched to (the copy
+    /// failed, or the provider closed before it resumed the copy): providers start fresh, and
+    /// the next message hands them the conversation from the account that holds it.
+    pub(super) fn fail_session_transfer(&mut self) {
+        self.meta.resume_cursor = None;
+        self.meta.pending_fork = None;
+    }
+
+    /// Whether the thread's native session stays behind in the profile
+    /// `session_transfer_from` names ([`Self::fail_session_transfer`]).
+    pub(super) fn session_transfer_failed(&self) -> bool {
+        self.meta.session_transfer_from.is_some() && self.meta.resume_cursor.is_none()
+    }
+
+    /// Whether the live provider runs under another profile than `meta.profile_id`
+    /// with no relay pending: the thread switched accounts and takes its native
+    /// session along. A relay keeps the old process until it is confirmed.
+    fn profile_changed_while_live(&self) -> bool {
+        matches!(self.runtime, Runtime::Live(_))
+            && self.pending_relay.is_none()
+            && self.live_profile_id != self.meta.profile_id
     }
 
     /// Whether the live provider runs in another directory than `meta.cwd`: the thread
@@ -398,7 +423,8 @@ impl ActiveSession {
 
     /// The queued message the next dispatch would send, if one could go now.
     fn next_dispatchable(&self) -> Option<&QueuedMessage> {
-        if self.turn_in_flight
+        if self.queue_held
+            || self.turn_in_flight
             || self.delivery_in_flight.is_some()
             || self.settings_restart_deferred()
             || !matches!(self.runtime, Runtime::Live(_))
@@ -412,10 +438,13 @@ impl ActiveSession {
     }
 
     /// The id and text of the message that opens the fresh provider session of a moved
-    /// thread, which carries the handoff; `None` until that session is live and a message
-    /// can go.
-    pub(super) fn moved_handoff_message(&self) -> Option<(u64, String)> {
-        if self.meta.moved_from.is_none() || self.cwd_changed_while_live() {
+    /// thread, or of one whose native session could not be carried to its new account,
+    /// which carries the handoff; `None` until that session is live and a message can go.
+    pub(super) fn handoff_message(&self) -> Option<(u64, String)> {
+        if (self.meta.moved_from.is_none() && !self.session_transfer_failed())
+            || self.cwd_changed_while_live()
+            || self.profile_changed_while_live()
+        {
             return None;
         }
         self.next_dispatchable()
@@ -475,6 +504,13 @@ impl ActiveSession {
             || self.delivery_in_flight.is_some()
             || !self.queue.is_empty()
             || self.background_task_count > 0
+    }
+
+    /// Whether the queue is all this thread has left: its start failed or its
+    /// provider died, so nothing is working on the unsent text, which waits for
+    /// the next start. A draft's scheduled send has yet to start at all.
+    pub(super) fn queue_stranded(&self) -> bool {
+        !self.draft && matches!(self.runtime, Runtime::Idle) && !self.queue.is_empty()
     }
 
     /// Whether a parent still has to wait for this thread: it has work, or its
@@ -550,13 +586,12 @@ impl ActiveSession {
             .map_err(|_| ())
     }
 
-    /// Append a message to the queue, consuming the staged context prefix.
+    /// Append a message to the queue.
     pub(super) fn push_queued(&mut self, text: String, attachments: Vec<Attachment>) -> u64 {
         self.idle_since = None;
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         let options = self.turn_options();
-        let context_len = std::mem::take(&mut self.pending_context_len);
         self.queue.push(QueuedMessage {
             delivery_key: None,
             author: None,
@@ -567,7 +602,6 @@ impl ActiveSession {
             attachments,
             not_before: None,
             options,
-            context_len,
             context_window_changed: None,
             kind: QueuedMessageKind::User,
         });
@@ -618,7 +652,6 @@ impl ActiveSession {
             attachments: Vec::new(),
             not_before: None,
             options,
-            context_len: None,
             context_window_changed: None,
             kind: QueuedMessageKind::OrchestrateCallback,
         });
@@ -641,7 +674,6 @@ impl ActiveSession {
             attachments: Vec::new(),
             not_before: None,
             options,
-            context_len: None,
             context_window_changed: None,
             kind,
         });

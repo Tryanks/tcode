@@ -13,7 +13,9 @@ pub use original::{OriginalMetadata, OriginalReply, OriginalRequest, OriginalTar
 mod preview;
 mod pull_request;
 mod query;
-pub use preview::{PreviewRequest, PreviewResponse};
+pub use preview::{
+    DevServer, PreviewClient, PreviewRequest, PreviewResponse, PreviewSession, PreviewTab,
+};
 pub use pull_request::{
     MAX_PULL_REQUEST_MEDIA_BYTES, PullRequestAction, PullRequestActionResult,
     PullRequestActionState, PullRequestActor, PullRequestCapabilities, PullRequestComment,
@@ -32,30 +34,33 @@ pub mod terminal;
 mod wire;
 
 pub use command::{
-    ChildSettlement, Command, CommandResponse, SettingsPatch, SettleChildrenResult,
+    ChildSettlement, Command, CommandResponse, ForkAt, SettingsPatch, SettleChildrenResult,
     TerminalSelection, ThreadExportFormat,
 };
 pub use event::{
-    AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry, ControlStatus,
-    EventEnvelope, ExternalImportState, ExternalImportStatus, ForkAvailability, GitActionRequest,
-    GitStatusStatus, IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions,
-    InjectedServer, InjectedTools, MergeWorktreeFailure, NoticeSeverity, PluginCatalogState,
+    AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry,
+    ControlStatus, DiskUsage, DiskUsagePart, DiskUsageState, EndpointDescription,
+    EndpointPresetDescription, EventEnvelope, ExternalImportState, ExternalImportStatus,
+    ForkAvailability, ForkStatus, GitActionRequest, GitStatusStatus, HarnessDescription,
+    IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer,
+    InjectedTools, MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState,
     PluginChallenge, PluginChallengeKind, PluginOperationTarget, PluginStaleReason,
-    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
-    ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
-    RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
-    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    ThreadReferenceStatus, Topic,
+    ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
+    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus,
+    RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId,
+    RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord,
+    SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus,
+    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, Topic,
 };
 pub use query::{
     DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
     GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
     MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
     PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
-    STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool, SpaceAction, SpaceInfo,
-    TraverseLookupState, TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus,
-    TraverseRelayStatus, TraverseSourceStatus,
+    STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
+    SessionSearchHit, SourceTool, SpaceAction, SpaceInfo, TraverseLookupState,
+    TraverseLookupStatus, TraverseManifestState, TraverseManifestStatus, TraverseRelayStatus,
+    TraverseSourceStatus,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -238,15 +243,114 @@ pub use wire::{
 // Version 23 (v0.3.4): the assistant_message item carries `summarized`, set
 // when the provider delivered a summary of the message rather than its text.
 //
-// Unreleased: the protocol adds the StartProviderLogin,
-// SubmitProviderLoginCode, CancelProviderLogin and LogoutProvider commands,
-// and a provider snapshot carries `login`, the sign-in the host runs for that
-// profile. The CreateAccountProfile command answers with the new ProfileId
-// response, CreateThirdPartyProfile carries `inherit_config`, the
-// ProfileConfig runtime error reports a profile's config directory that could
-// not be prepared or removed, and ProviderProbeDiagnostic adds
-// SharedCredentials.
-pub const PROTOCOL_VERSION: u32 = 23;
+// Version 24 (v0.4.0-rc.1): provider sign-in commands (StartProviderLogin,
+// SubmitProviderLoginCode, CancelProviderLogin, LogoutProvider) with a
+// provider snapshot's `login`, the ProfileId response to
+// CreateAccountProfile, CreateThirdPartyProfile's `inherit_config`, the
+// ProfileConfig runtime error and the SharedCredentials probe diagnostic;
+// the plan item kind with plan approvals, decision and timeline feedback,
+// and no per_prompt_system instruction channel; a command output frame's
+// scrolled-off history and lines_evicted; one snapshot answering an events
+// subscription to the end of the log; canonical tool_call items from every
+// provider (output, image_reads, Codex sleep and image_generation, Grok's
+// server/tool names) stored with item_version 1; a session plan's
+// explanation; and the item_backgrounded event.
+//
+// Version 25 (v0.4.0-rc.2): SessionMeta drops orchestrate_enabled and
+// result_max_chars and carries session_transfer_from; subagents start
+// through tcode_control; SessionActivity's latest_activity; favorite_models
+// rows {provider, profile_id, model} and ToggleFavoriteModel's provider and
+// profile_id; TerminalDelta's scrolled and the CommandOutputDelta push; the
+// Hosting topic with HostingReplaced instead of polling Query::Hosting;
+// TerminalInput and SetTerminalHeight without a delivery key; the
+// ProviderUsageChanged event; Settings' scroll_to_latest_on_send with the
+// ScrollToLatestOnSend patch; and the provider_batch_line_break runtime
+// error.
+//
+// Unreleased: the host holds each thread's preview (PreviewSession, its
+// renderer, tabs and user_acted_since_snapshot) on the new PreviewSession
+// topic with PreviewSessionReplaced; the Preview topic carries the
+// subscribing client (PreviewClient) and only the requests of the threads it
+// renders, with PreviewRenderingReplaced naming those threads; the protocol
+// adds the ShowPreviewHere, ReportPreviewTabs and ReportPreviewInput
+// commands; and a status request's reply carries userActedSinceSnapshot and
+// renderedOn. PreviewRequest's Click and Type take an optional selector and
+// an optional ref, and Scroll an optional ref; a snapshot's reply is the
+// page agent's outline (url, title, loading, generation, elements, outline,
+// omitted) instead of interactiveElements and visibleText; a status reply
+// adds generation and console. PreviewRequest::Screenshot is a
+// struct variant with an optional ref and full_page. The DevServers topic
+// carries the host's dev servers for one thread (DevServersReplaced with
+// DevServer port, pid, process and cwd). The settings_unreadable runtime
+// error. The StorageMigration topic carries the host's move of an older
+// build's threads into its storage (StorageMigrationReplaced with
+// StorageMigration moved, total and waiting_for_space, or null when none
+// runs). The DiskUsage topic carries the host's last disk-usage measurement
+// (DiskUsageReplaced with DiskUsageState last and measuring; DiskUsage
+// measured_at, tcode, providers; TcodeDiskUsage dir, conversations, images,
+// worktrees, other; ProviderDiskUsage provider, bytes, accounts;
+// AccountDiskUsage profile_id, dirs, bytes, parts; DiskUsagePart name,
+// bytes), and the MeasureDiskUsage command measures again. Settings drops
+// auto_open_task_panel with the AutoOpenTaskPanel patch. The host no longer
+// stops a turn on a model change: ServerEvent drops ModelFallbackBlocked and
+// FallbackReviewReady; Settings drops abort_on_model_fallback,
+// fallback_review_advisor and fallback_review with the AbortOnModelFallback,
+// FallbackReviewAdvisor, FallbackReviewProvider, FallbackReviewModel and
+// FallbackReviewProfileId patches; and the model_fallback_detected and
+// turn_blocked agent events are no longer emitted, only read from stored
+// logs. Orchestrate goes: the protocol drops the OrchestrateTurn command and
+// the OrchestrateDecisionModels and OrchestrateChildModels patches, and
+// Settings' orchestrate carries only child_approval and child_worktrees.
+// Code platforms: a source-control host's status carries login, the account
+// its token signs in as, and its problem may be rejected (status, at); the
+// protocol adds the VerifyHostToken command, which saves a token only when
+// the host takes it, and its TokenCheck response (accepted with an optional
+// account, rejected, missing_scopes, unreachable, unconfirmed).
+// Computer use asks before typing with an app in front: Settings'
+// computer_use drops allow_foreground_fallback for foreground_default and
+// foreground_apps (a stored true reads as allow), the
+// ComputerUseForegroundDefault and ComputerUseForegroundApp patches replace
+// ComputerUseAllowForegroundFallback, SessionStatus carries
+// foreground_prompt, and the protocol adds RespondForegroundPrompt.
+// Plugin management has no switches: Settings drops plugins with the
+// PluginManagementEnabled and PluginManagementProvider patches, and the host
+// keeps two catalogs per profile, one listed from outside any project and one
+// for the project last asked about, so ProvidersStatus.plugins may name a
+// profile twice, told apart by context_cwd; ProviderPluginEntry adds
+// latest_version and always_on, and PluginInstallation adds other_project.
+// Harness settings: ProvidersStatus carries `harnesses`, one HarnessDescription per
+// native harness and installed ACP agent; ProfileSettingsPatch is adjacently
+// tagged with one variant per field (SetHarnessEnabled, SetDisplayName,
+// SetAccentColor, SetEnv, SetSharedEnv, SetBinaryPath, SetHomePath,
+// SetLaunchArgs, SetToggle, SetCustomModels, SetHiddenModels) instead of
+// ReplaceConfiguration; ProviderSettings' shared_env; CreateThirdPartyProfile
+// names its provider; AddCustomAcpAgent drops env; an installed ACP agent's
+// env is EnvVar rows and AcpAgentPatch has SetLaunchArgs and SetEnv instead
+// of SetLaunchOptions; ProviderLogin's AwaitingDevice and the MissingApiKey
+// probe diagnostic.
+// Rewind follows each harness's own: RewindTurn takes an optional steer,
+// checkpoint_id and client_id (PreviewRewind a steer and checkpoint_id); the
+// PreviewRewind command (answered with
+// CommandResponse::RewindPreview) and the UndoRewind command are new;
+// ServerEvent::NativeRewindPrefill becomes RewindPrefill (client_id,
+// attachments); SessionStatus drops native_rewind_blocked,
+// native_rewind_pending and native_rewind_prefill_available for rewind
+// (RewindStatus with RewindBlocked and PendingRewind) and queue_held;
+// RuntimeError drops native_rewind_blocked and RuntimeNotice
+// native_rewind_completed. The rewind agent events change (RewindFailed's
+// failure, RewindCompleted's later_history, files, incomplete, undo_token
+// and prefill_attachments) and SteerCheckpoint, CheckpointsCleared,
+// RewindAvailability, RewindPreviewed, RewindUndone and RewindUndoFailed
+// are new.
+// Files only a client can read reach the host through the new BeginUpload,
+// WriteUpload and DiscardUpload queries (answered with UploadBegun,
+// UploadWritten and UploadDiscarded).
+// RuntimeError's ProviderStart and ProviderClosed carry `harness`, the
+// display name of the thread's Harness.
+// Fork from a message: ForkThread takes an optional at (ForkAt), answered with
+// CommandResponse::ForkedAt; SessionStatus has fork_at (ForkStatus); SessionMeta
+// has fork_origin and pending_fork is a ForkPoint (a stored bool still reads).
+pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]
 mod tests;

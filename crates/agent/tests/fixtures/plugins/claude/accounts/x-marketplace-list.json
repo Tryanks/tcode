@@ -1,0 +1,8 @@
+[
+  {
+    "name": "tcode-probe",
+    "source": "directory",
+    "path": "@PROBE@/mkt",
+    "installLocation": "@PROBE@/mkt"
+  }
+]

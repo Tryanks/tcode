@@ -134,20 +134,41 @@ pub struct ClientPreferences {
     /// [`tcode_core::attachments::DEFAULT_REMOTE_BYTES`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_attachment_limit_mib: Option<u32>,
+    /// The width, in points, the user dragged a right panel to. One value:
+    /// every conversation's panel in every pane rests at it, as far as its
+    /// pane allows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_panel_width: Option<u32>,
 }
 
-/// One image the platform's own picker handed back, already read into memory.
+/// One file a platform picker handed back, already read into memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PickedImage {
+pub struct PickedFile {
     pub name: String,
     pub mime: String,
     pub bytes: Vec<u8>,
+}
+
+/// A platform's notification center. Each notification is keyed by the
+/// thread it is about; a later one replaces it.
+pub trait SystemNotifier {
+    /// Show a notification, asking the user for permission the first time.
+    fn post(&self, thread_id: &str, title: &str, body: &str);
+    /// Take back the thread's notification once nothing waits on it.
+    fn withdraw(&self, thread_id: &str);
+    /// The threads whose notifications the user clicks, as they do.
+    fn opened(&self) -> async_channel::Receiver<String>;
 }
 
 /// Persistence, pairing, transport, and platform facilities for a tcode client.
 pub trait ClientHost: 'static {
     /// Native dictation supplied by this client platform, when available.
     fn speech_recognizer(&self) -> Option<std::rc::Rc<dyn crate::speech::SpeechRecognizer>> {
+        None
+    }
+
+    /// The operating system's notifications, on a platform that has them.
+    fn system_notifier(&self) -> Option<std::rc::Rc<dyn SystemNotifier>> {
         None
     }
 
@@ -253,8 +274,20 @@ pub trait ClientHost: 'static {
     /// Let the user choose up to `limit` images in the platform's media
     /// picker. Dismissing the picker resolves to an empty list; `Err` is a
     /// real failure to show.
-    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedImage>, String>> {
+    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
         let _ = limit;
+        Box::pin(async { Err("unsupported".into()) })
+    }
+
+    /// Whether [`pick_files`](Self::pick_files) opens a platform file picker.
+    /// Desktops attach by drop and paste instead.
+    fn supports_file_picker(&self) -> bool {
+        false
+    }
+
+    /// Let the user choose files of any type. Dismissing the picker resolves
+    /// to an empty list; `Err` is a real failure to show.
+    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
         Box::pin(async { Err("unsupported".into()) })
     }
 

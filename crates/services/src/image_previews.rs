@@ -5,7 +5,7 @@ use image::{
 use sha2::{Digest, Sha256};
 use std::{
     io::{self, Cursor, Read},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::UNIX_EPOCH,
 };
@@ -114,6 +114,11 @@ fn cache_key(mut hash: Sha256, width: u32, height: u32, cover: bool) -> [u8; 32]
     hash.finalize().into()
 }
 
+/// Where the previews made of images are kept.
+pub fn previews_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("image-previews-v1")
+}
+
 fn cached(
     data_dir: &Path,
     key: [u8; 32],
@@ -123,7 +128,7 @@ fn cached(
     let _generation = GENERATING[usize::from(key[0]) % GENERATING.len()]
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let directory = data_dir.join("image-previews-v1");
+    let directory = previews_dir(data_dir);
     let name = key
         .iter()
         .map(|byte| format!("{byte:02x}"))

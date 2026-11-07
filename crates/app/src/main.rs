@@ -21,6 +21,8 @@ use tcode_ui::overlay::{DialogActions, OverlayExt as _};
 use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 mod migration;
+#[cfg(target_os = "macos")]
+mod notifications;
 mod preview_smoke;
 
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
@@ -44,10 +46,6 @@ fn main_window_background() -> WindowBackgroundAppearance {
         WindowBackgroundAppearance::Opaque
     }
 }
-
-/// Background redraws of an inactive window are capped to this interval
-/// unless Settings turns the throttle off.
-const INACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 
 const QUIT_PROMPT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -255,8 +253,8 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
 }
 
 /// Every desktop window: the main one and the startup migration's.
-fn window_options(cx: &App, inactive_frame_interval: Option<Duration>) -> WindowOptions {
-    WindowOptions {
+fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
+    let mut options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
         // Low enough that the window can actually be dragged into the
         // compact layout; the launch geometry above is unchanged.
@@ -292,13 +290,14 @@ fn window_options(cx: &App, inactive_frame_interval: Option<Duration>) -> Window
         // Persistent windows use the platform's system material:
         // macOS sidebar vibrancy, Windows Acrylic, or an opaque fallback.
         window_background: main_window_background(),
-        // Throttle background redraws (spinners, streaming output) to
-        // ~2 FPS while the window is inactive; gpui lifts the cap the
-        // moment the window is active or receiving high-rate input.
-        // This setting is captured at window creation and requires a restart.
-        inactive_frame_interval,
         ..Default::default()
+    };
+    // gpui reads the inactive-window frame cap only as it creates the window,
+    // so turning it off in Settings takes a restart.
+    if !throttle_inactive {
+        options.inactive_frame_interval = None;
     }
+    options
 }
 
 /// The local host, once this process owns the data dir.
@@ -450,6 +449,16 @@ impl LocalKernel {
     }
 }
 
+/// Notification Center, on the platform it is written for. Windows and Linux
+/// have no notifier yet.
+fn with_system_notifier(host: NativeClientHost) -> NativeClientHost {
+    #[cfg(target_os = "macos")]
+    if let Some(notifier) = notifications::MacNotifier::new() {
+        return host.with_system_notifier(notifier);
+    }
+    host
+}
+
 fn main() {
     env_logger::init();
     tcode_services::process::raise_open_file_limit();
@@ -488,11 +497,11 @@ fn main() {
     tcode_ui::set_client_data_dir(data_dir.clone());
     // Launching an editor is process work this crate already owns the helpers
     // for, so it is injected rather than linked into the UI.
-    let native_client = Rc::new(
+    let native_client = Rc::new(with_system_notifier(
         NativeClientHost::new(data_dir.clone(), machine_name()).with_editor_opener(|path| {
             tcode_services::desktop::open_in_zed(path).map_err(|error| error.to_string())
         }),
-    );
+    ));
 
     if let Some(index) = args.iter().position(|arg| arg == "--pair") {
         // Pairing writes hosts.json and device.json, at which a later move of
@@ -639,11 +648,7 @@ fn main() {
                     }
                 });
 
-                let options = window_options(
-                    cx,
-                    (!local_settings.inactive_frame_throttle_disabled)
-                        .then_some(INACTIVE_FRAME_INTERVAL),
-                );
+                let options = window_options(cx, !local_settings.inactive_frame_throttle_disabled);
                 let (window, shell) = tcode_ui::run_shell(
                     cx,
                     native_client.clone(),
@@ -683,7 +688,7 @@ fn main() {
                     if let Some(id) = session_id
                         && let Some(store) = shell.read(cx).store()
                     {
-                        store.update(cx, |store, _| store.select_session(id));
+                        store.update(cx, |store, cx| store.show_thread(id, cx));
                     }
                     let window_state = shell.read(cx).window_state();
                     window_state.update(cx, |state, cx| {
@@ -707,24 +712,7 @@ fn main() {
                             link.command(Command::OpenLatestSession).await
                             && let Some(store) = cx.update(|cx| shell.read(cx).store())
                         {
-                            store.update(cx, |store, _| store.select_session(id));
-                        }
-                        for _ in 0..100 {
-                            if cx.update(|cx| {
-                                shell.read(cx).store().is_some_and(|store| {
-                                    store.read(cx).active_session_id().is_some()
-                                })
-                            }) {
-                                break;
-                            }
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(10))
-                                .await;
-                        }
-                        if let Some(store) = cx.update(|cx| shell.read(cx).store()) {
-                            store.update(cx, |store, _cx| {
-                                store.sync_active_conversation_ui();
-                            });
+                            store.update(cx, |store, cx| store.show_thread(id, cx));
                         }
                     }
                 })
@@ -734,7 +722,7 @@ fn main() {
             match started {
                 Ok(LocalStart::Started(kernel)) => launch(cx, Ok(kernel)),
                 Ok(LocalStart::Migrate(store)) => {
-                    let options = window_options(cx, Some(INACTIVE_FRAME_INTERVAL));
+                    let options = window_options(cx, true);
                     let kernel_store = store.clone();
                     migration::run(cx, store, options, appearance, move |cx| {
                         launch(cx, Ok(LocalKernel::start(kernel_store)?));

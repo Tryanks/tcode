@@ -6,13 +6,16 @@ use std::rc::Rc;
 use gpui::{
     App, Bounds, Hitbox, HitboxBehavior, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, RenderOnce, Styled as _, TouchDragEvent, TouchPhase, Window,
-    canvas, deferred,
+    canvas, deferred, div,
 };
 use gpui_base::{SelectionEdge, TouchHandle};
 
 use super::TouchSelectionLayout;
 
 use crate::theme::ActiveTheme as _;
+
+/// How long a surface drawn here takes to appear, and to leave.
+const APPEAR: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Reads the touch selection as laid out by the time the handles paint.
 pub(crate) type SnapshotSource = Rc<dyn Fn(&Window, &App) -> Option<TouchSelectionLayout>>;
@@ -34,6 +37,7 @@ pub(crate) type DragHandler =
 /// exercised without a touch screen.
 #[derive(IntoElement)]
 pub(crate) struct SelectionHandles {
+    id: gpui::ElementId,
     source: SnapshotSource,
     on_drag: DragHandler,
 }
@@ -46,8 +50,16 @@ struct LaidOutHandle {
 }
 
 impl SelectionHandles {
-    pub(crate) fn new(source: SnapshotSource, on_drag: DragHandler) -> Self {
-        Self { source, on_drag }
+    pub(crate) fn new(
+        id: impl Into<gpui::ElementId>,
+        source: SnapshotSource,
+        on_drag: DragHandler,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            source,
+            on_drag,
+        }
     }
 
     /// Lays out a handle for each end of a non-empty selection that is in
@@ -80,13 +92,14 @@ impl SelectionHandles {
         handles
     }
 
-    fn paint_handle(handle: &LaidOutHandle, window: &mut Window, cx: &mut App) {
-        TouchHandle::paint(
-            handle.edge,
-            handle.caret,
-            cx.theme().selection.alpha(1.),
-            window,
-        );
+    fn paint_handle(
+        edge: SelectionEdge,
+        caret: Bounds<Pixels>,
+        opacity: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        TouchHandle::paint(edge, caret, cx.theme().selection.alpha(opacity), window);
     }
 
     /// The drag begins on whichever handle is under the finger or pointer;
@@ -185,25 +198,60 @@ impl SelectionHandles {
 }
 
 impl RenderOnce for SelectionHandles {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let source = self.source;
         let on_drag = self.on_drag;
+        // The handles fade in once there is a selection to hold, and out
+        // where they last were once it is gone; a leaving handle takes no
+        // touch.
+        let present = source(window, cx).is_some_and(|snapshot| !snapshot.is_empty());
+        let presence =
+            crate::motion::appear((self.id.clone(), "handles"), present, APPEAR, window, cx);
+        let last = window
+            .use_keyed_state((self.id, "handles-last"), cx, |_, _| {
+                Rc::new(std::cell::RefCell::new(Vec::new()))
+            })
+            .read(cx)
+            .clone();
+        if !presence.should_render() {
+            last.borrow_mut().clear();
+            return div().into_any_element();
+        }
+        let opacity = presence.progress;
         deferred(
             canvas(
                 {
                     let source = source.clone();
-                    move |_, window, cx| Self::layout(&source, window, cx)
+                    let last = last.clone();
+                    move |_, window, cx| {
+                        if !present {
+                            return Vec::new();
+                        }
+                        let handles = Self::layout(&source, window, cx);
+                        *last.borrow_mut() = handles
+                            .iter()
+                            .map(|handle| (handle.edge, handle.caret))
+                            .collect();
+                        handles
+                    }
                 },
                 move |_, handles, window, cx| {
-                    for handle in &handles {
-                        Self::paint_handle(handle, window, cx);
+                    if present {
+                        for handle in &handles {
+                            Self::paint_handle(handle.edge, handle.caret, opacity, window, cx);
+                        }
+                        Self::listen(&handles, &source, &on_drag, window);
+                    } else {
+                        for (edge, caret) in last.borrow().iter() {
+                            Self::paint_handle(*edge, *caret, opacity, window, cx);
+                        }
                     }
-                    Self::listen(&handles, &source, &on_drag, window);
                 },
             )
             .absolute()
             .size_0(),
         )
         .with_priority(gpui_base::POPUP_PRIORITY)
+        .into_any_element()
     }
 }

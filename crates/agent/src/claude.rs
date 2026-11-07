@@ -22,6 +22,10 @@
 //! task owns the child: it reads stdout lines, receives [`SessionCommand`]s, and
 //! writes stream-json lines to stdin. Multiple turns run over one process.
 
+use crate::{
+    ForkPoint, LaterHistory, RewindFailure, RewindFailureReason, RewindFile, RewindFiles,
+    RewindIncomplete, RewindPreview, RewindPreviewResult,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -36,17 +40,26 @@ use crate::claude_goal::GoalTranscript;
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, CatalogRefresh, ClassifierCategory, DeltaKind, FileChange,
-    FileChangeKind, GoalStatus, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
-    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
-    ResumeCursor, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
-    TokenUsage, TurnStatus, UserInputDelivery, UserInputOption, UserInputQuestion, selection_bool,
-    selection_str,
+    ApprovalRequest, Attachment, CatalogRefresh, DeltaKind, FileChange, FileChangeKind, GoalStatus,
+    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
+    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
+    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, ToolOutput, TurnStatus,
+    UserInputDelivery, UserInputOption, UserInputQuestion, selection_bool, selection_str,
 };
 
 /// First Claude Code build whose headless control protocol is verified to
 /// expose `rewind_conversation` alongside the SDK's `rewind_files` request.
 const NATIVE_REWIND_MIN_VERSION: (u32, u32, u32) = (2, 1, 214);
+/// The release whose `rewind_files` `dry_run` was read to restore nothing.
+/// An older CLI that ignored the flag would restore files when the panel
+/// merely opens, so it is not asked.
+const REWIND_PREVIEW_MIN_VERSION: (u32, u32, u32) = (2, 1, 318);
+/// The release whose print mode has `--resume-session-at`.
+const FORK_AT_MIN_VERSION: (u32, u32, u32) = (2, 1, 223);
+
+/// First Claude Code release with `--append-system-prompt-file` (a hidden
+/// option in the published 2.0.33 `cli.js`; 2.0.32 lacks it).
+const APPEND_SYSTEM_PROMPT_FILE_MIN_VERSION: (u32, u32, u32) = (2, 0, 33);
 
 /// Resolve the last permission-mode value on the effective argv. Provider
 /// launch arguments intentionally follow internal arguments and may use either
@@ -69,21 +82,26 @@ fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
 /// The directory the CLI launched with `launch_env` keeps its settings,
 /// sign-in and transcripts in.
 pub fn config_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
-    let pairs = launch_env.pairs(ProviderKind::ClaudeCode);
-    let child_env = |key: &str| {
-        pairs
-            .iter()
-            .rev()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| PathBuf::from(value))
-            .or_else(|| std::env::var_os(key).map(PathBuf::from))
-    };
+    let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
     child_env("CLAUDE_CONFIG_DIR").or_else(|| child_env("HOME").map(|home| home.join(".claude")))
+}
+
+/// The CLI's account file, `.claude.json`: in `CLAUDE_CONFIG_DIR` when that
+/// is set, else in the home directory itself rather than in `~/.claude`.
+pub fn account_file(launch_env: &LaunchEnv) -> Option<PathBuf> {
+    let child_env = |key: &str| launch_env.child_path(ProviderKind::ClaudeCode, key);
+    account_file_in(child_env("CLAUDE_CONFIG_DIR"), child_env("HOME"))
+}
+
+fn account_file_in(config_dir: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    config_dir.or(home).map(|dir| dir.join(".claude.json"))
 }
 
 // Credentials and per-account state (`.claude.json`, `projects/`) must not
 // cross accounts, and `plugins/` records absolute paths into its own config
-// directory.
+// directory. The one exception is `transfer_session`: when the user switches a
+// thread to another account, that thread's own session files are copied, and
+// nothing else of either account.
 const INHERITED_CONFIG: [&str; 4] = ["CLAUDE.md", "agents", "commands", "skills"];
 
 /// Copy the user's configuration from one config directory into another.
@@ -96,10 +114,139 @@ pub fn inherit_config(from: &Path, to: &Path) -> std::io::Result<()> {
     inherit_settings(&from.join("settings.json"), &to.join("settings.json"))
 }
 
+/// Copy the session `resume` names from the config directory `from` launches
+/// with into the one `to` launches with: its transcript, the directory beside
+/// it (subagent transcripts, stored tool results), its file checkpoints, task
+/// list, todo lists, hook-set environment and the plan files its transcript
+/// names. What `to` already holds of the session is replaced, since `from`
+/// holds the copy the thread last ran. Blocking.
+pub fn transfer_session(
+    from: &LaunchEnv,
+    to: &LaunchEnv,
+    resume: &ResumeCursor,
+) -> std::io::Result<()> {
+    let not_found = |what: String| std::io::Error::new(std::io::ErrorKind::NotFound, what);
+    let session_id = resume
+        .str_field(&["session_id"])
+        .filter(|id| is_file_name(id))
+        .ok_or_else(|| not_found("the resume cursor names no session".into()))?;
+    let (Some(from), Some(to)) = (config_dir(from), config_dir(to)) else {
+        return Err(not_found("a profile has no config directory".into()));
+    };
+    if let (Ok(source), Ok(target)) = (std::fs::canonicalize(&from), std::fs::canonicalize(&to))
+        && source == target
+    {
+        return Ok(());
+    }
+    // The project directory's name is the CLI's own encoding of the session's
+    // directory, so the one the session is found under is reused rather than
+    // derived again.
+    let projects = from.join("projects");
+    let transcript = format!("{session_id}.jsonl");
+    let project = std::fs::read_dir(&projects)
+        .map_err(|error| {
+            std::io::Error::new(error.kind(), format!("{}: {error}", projects.display()))
+        })?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|dir| dir.join(&transcript).is_file())
+        .ok_or_else(|| {
+            not_found(format!(
+                "{} holds no session {session_id}",
+                projects.display()
+            ))
+        })?;
+    let target = to
+        .join("projects")
+        .join(project.file_name().unwrap_or_default());
+    if target.join(&transcript).exists() {
+        log::info!(
+            "claude: replacing session {session_id} in {} with the copy in {}",
+            to.display(),
+            from.display()
+        );
+    }
+    let mut ancestors = HashSet::new();
+    copy_resolved(
+        &project.join(session_id),
+        &target.join(session_id),
+        &mut ancestors,
+    )?;
+    for dir in ["file-history", "tasks", "session-env"] {
+        copy_resolved(
+            &from.join(dir).join(session_id),
+            &to.join(dir).join(session_id),
+            &mut ancestors,
+        )?;
+    }
+    let agent_todos = format!("{session_id}-agent-");
+    copy_entries(&from.join("todos"), &to.join("todos"), |name| {
+        name.starts_with(&agent_todos) && name.ends_with(".json")
+    })?;
+    // A plan file is named for the plan's slug, which the transcript records
+    // on its entries; a subagent's plan adds its agent id.
+    for slug in plan_slugs(&project.join(&transcript))? {
+        let agent_plans = format!("{slug}-agent-");
+        copy_entries(&from.join("plans"), &to.join("plans"), |name| {
+            name.strip_suffix(".md")
+                .is_some_and(|stem| stem == slug || stem.starts_with(&agent_plans))
+        })?;
+    }
+    std::fs::create_dir_all(&target)?;
+    std::fs::copy(project.join(&transcript), target.join(&transcript))?;
+    Ok(())
+}
+
+fn is_file_name(name: &str) -> bool {
+    Path::new(name).file_name() == Some(std::ffi::OsStr::new(name))
+}
+
+/// The plan slugs a session transcript records, in the order they appear.
+fn plan_slugs(transcript: &Path) -> std::io::Result<Vec<String>> {
+    let mut slugs = Vec::<String>::new();
+    for line in std::fs::read(transcript)?.split(|byte| *byte == b'\n') {
+        if !line.windows(6).any(|window| window == b"\"slug\"") {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if let Some(slug) = entry.get("slug").and_then(Value::as_str)
+            && is_file_name(slug)
+            && !slugs.iter().any(|known| known == slug)
+        {
+            slugs.push(slug.to_owned());
+        }
+    }
+    Ok(slugs)
+}
+
+/// Copy the entries of the directory `from` whose names `wanted` accepts into
+/// `to`.
+fn copy_entries(from: &Path, to: &Path, wanted: impl Fn(&str) -> bool) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(from) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    let mut ancestors = HashSet::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_str().is_some_and(&wanted) {
+            std::fs::create_dir_all(to)?;
+            copy_resolved(&entry.path(), &to.join(entry.file_name()), &mut ancestors)?;
+        }
+    }
+    Ok(())
+}
+
 /// Copy what `from` names, following symbolic links: a link copied as a link
 /// would resolve its relative target under the new directory. A directory
 /// that is its own ancestor is skipped.
-fn copy_resolved(from: &Path, to: &Path, ancestors: &mut HashSet<PathBuf>) -> std::io::Result<()> {
+pub(crate) fn copy_resolved(
+    from: &Path,
+    to: &Path,
+    ancestors: &mut HashSet<PathBuf>,
+) -> std::io::Result<()> {
     const MAX_DEPTH: usize = 32;
     let metadata = match std::fs::metadata(from) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -152,9 +299,29 @@ fn inherit_settings(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let native_rewind = claude_version(opts.binary_path.as_deref(), &opts.launch_env)
-        .await
-        .is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
+    let version = claude_version(opts.binary_path.as_deref(), &opts.launch_env).await;
+    let native_rewind = version.is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
+    let rewind_preview = version.is_some_and(|version| version >= REWIND_PREVIEW_MIN_VERSION);
+    let fork_anchor = match &opts.fork {
+        Some(ForkPoint::Before { checkpoint_id }) => {
+            if version.is_some_and(|version| version < FORK_AT_MIN_VERSION) {
+                return Err(AgentError::Provider(
+                    "forking from a message needs Claude Code 2.1.223 or later".into(),
+                ));
+            }
+            Some(fork_anchor(
+                &opts.resume,
+                config_dir(&opts.launch_env).as_deref(),
+                checkpoint_id,
+            )?)
+        }
+        Some(ForkPoint::Branch { .. }) => {
+            return Err(AgentError::Provider(
+                "Claude Code keeps no branches to go on in".into(),
+            ));
+        }
+        Some(ForkPoint::Tail) | None => None,
+    };
     // Absolute path: a bare name would be resolved against the session cwd we
     // set below, which breaks PATH lookup (see `resolve_binary`).
     let binary = crate::resolve_binary(opts.binary_path.as_deref(), "claude")?;
@@ -206,7 +373,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if let Some(settings) = &launch.settings_json {
         cmd.arg("--settings").arg(settings);
     }
-    for arg in resume_args(&opts.resume, opts.fork) {
+    for arg in resume_args(&opts.resume, opts.fork.is_some(), fork_anchor.as_deref()) {
         cmd.arg(arg);
     }
     // Register tcode's enabled HTTP MCP servers. Tokens ride in Authorization
@@ -216,10 +383,25 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     }
     // Passed on every launch: the CLI records the rendered system prompt with the conversation
     // and renders it again from the current launch after a compaction.
-    if let Some(instructions) = &opts.instructions {
-        cmd.arg("--append-system-prompt").arg(instructions);
+    // A file keeps the argument on one line for a Windows batch launcher; an
+    // older CLI, or one whose version is unknown, gets the text itself.
+    let file_supported =
+        version.is_some_and(|version| version >= APPEND_SYSTEM_PROMPT_FILE_MIN_VERSION);
+    let instructions_file = match opts.instructions.as_deref() {
+        Some(text) if file_supported => Some(
+            InstructionsFile::write(text)
+                .map_err(|err| AgentError::Spawn(format!("writing Tcode's instructions: {err}")))?,
+        ),
+        Some(text) => {
+            cmd.arg("--append-system-prompt").arg(text);
+            None
+        }
+        None => None,
+    };
+    if let Some(file) = &instructions_file {
+        cmd.arg("--append-system-prompt-file").arg(&file.0);
     }
-    // Settings → Providers "Launch arguments", appended last so the user can
+    // Settings → Harnesses "Launch arguments", appended last so the user can
     // override anything we set above.
     for arg in &opts.extra_args {
         cmd.arg(arg);
@@ -246,6 +428,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         cmd.env(key, value);
     }
 
+    crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
     let mut child = cmd
         .spawn()
         .map_err(|e| AgentError::Spawn(format!("spawning `{binary}`: {e}")))?;
@@ -270,6 +453,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     // internal channel; closing the channel signals stdout EOF.
     let (line_tx, line_rx) = smol::channel::unbounded::<String>();
     smol::spawn(async move {
+        // Kept until the CLI's output ends, so it reads the file whenever it likes.
+        let _instructions = instructions_file;
         let mut lines = BufReader::new(stdout).lines();
         while let Some(line) = lines.next().await {
             match line {
@@ -320,8 +505,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         event_tx,
         session_config,
         applied_permission_mode,
-        native_rewind,
-        opts.model.clone(),
+        (native_rewind, rewind_preview),
         stderr_tail,
         stderr_task,
     ))
@@ -332,6 +516,53 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         commands: cmd_tx,
         events: event_rx,
     })
+}
+
+/// Tcode's instructions for `--append-system-prompt-file`, removed when dropped. Text that spans
+/// lines cannot be an argument to a Windows batch file, which `claude.cmd` may be.
+struct InstructionsFile(PathBuf);
+
+impl InstructionsFile {
+    fn write(text: &str) -> std::io::Result<Self> {
+        use std::io::Write as _;
+        let path = std::env::temp_dir().join(format!(
+            "tcode-claude-instructions-{}.md",
+            uuid::Uuid::new_v4()
+        ));
+        // A new file: in a shared temporary directory, a name someone else
+        // created first must not be written through.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let written = Self(path);
+        file.write_all(text.as_bytes())?;
+        Ok(written)
+    }
+}
+
+impl Drop for InstructionsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+const USAGE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The payload of a `get_usage` control response.
+fn usage_response(response: &Value) -> Result<Value, AgentError> {
+    if response.get("subtype").and_then(Value::as_str) == Some("error") {
+        let error = response
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| response.get("error").unwrap_or(response).to_string());
+        return Err(AgentError::Provider(error));
+    }
+    response
+        .get("response")
+        .cloned()
+        .ok_or_else(|| AgentError::Protocol("Claude usage response omitted response".into()))
 }
 
 /// Ask a short-lived Claude Code process for its subscription usage.
@@ -396,17 +627,7 @@ pub async fn read_usage(
             if response.get("request_id").and_then(Value::as_str) != Some("usage-1") {
                 continue;
             }
-            if response.get("subtype").and_then(Value::as_str) == Some("error") {
-                let error = response
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| response.get("error").unwrap_or(response).to_string());
-                return Err(AgentError::Provider(error));
-            }
-            return response.get("response").cloned().ok_or_else(|| {
-                AgentError::Protocol("Claude usage response omitted response".into())
-            });
+            return usage_response(response);
         }
         Err(AgentError::Protocol(
             "Claude stdout closed before usage response".into(),
@@ -424,9 +645,21 @@ pub async fn read_usage(
         ))
     });
 
+    // End of input lets the CLI leave: only then is the read in its config
+    // directory, where the next read is answered from it if the usage endpoint
+    // refuses that one. Killed here, a profile without a long-running session
+    // would keep nothing.
     let _ = stdin.close().await;
-    let _ = child.kill();
-    let _ = child.status().await;
+    drop(stdin);
+    let exited = smol::future::or(async { child.status().await.is_ok() }, async {
+        smol::Timer::after(USAGE_EXIT_GRACE).await;
+        false
+    })
+    .await;
+    if !exited {
+        let _ = child.kill();
+        let _ = child.status().await;
+    }
     result
 }
 
@@ -547,7 +780,51 @@ struct SessionConfig {
 const GOAL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
 const GOAL_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
-fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
+/// The entry the prompt `checkpoint_id` answered: where a fork before it ends,
+/// which `--resume-session-at` takes. Stream-json does not carry a message's
+/// parent, only the session's transcript does. `--resume-drops-turn`, which
+/// guards the same flag, is left out: it refuses any range holding a later
+/// prompt, so it allows a fork before the last turn alone.
+fn fork_anchor(
+    resume: &Option<ResumeCursor>,
+    claude_dir: Option<&Path>,
+    checkpoint_id: &str,
+) -> Result<String, AgentError> {
+    let session_id = resume
+        .as_ref()
+        .and_then(|cursor| cursor.str_field(&["session_id"]))
+        .ok_or_else(|| AgentError::Protocol("Claude Code fork without a session".into()))?;
+    let transcript = claude_dir
+        .and_then(|dir| crate::claude_goal::find_session_transcript(dir, session_id))
+        .ok_or_else(|| {
+            AgentError::Provider(format!("Claude Code has no transcript of {session_id}"))
+        })?;
+    let file = std::fs::File::open(&transcript)
+        .map_err(|err| AgentError::Provider(format!("{}: {err}", transcript.display())))?;
+    let entry = std::io::BufRead::lines(std::io::BufReader::new(file))
+        .map_while(Result::ok)
+        .filter(|line| line.contains(checkpoint_id))
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .find(|entry| entry.get("uuid").and_then(Value::as_str) == Some(checkpoint_id))
+        .ok_or_else(|| {
+            AgentError::Provider(format!(
+                "message {checkpoint_id} is not in Claude Code's transcript of {session_id}"
+            ))
+        })?;
+    entry
+        .get("parentUuid")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            AgentError::Provider("Claude Code cannot fork before a session's first message".into())
+        })
+}
+
+fn resume_args(
+    resume: &Option<ResumeCursor>,
+    fork: bool,
+    fork_anchor: Option<&str>,
+) -> Vec<String> {
     let Some(session_id) = resume
         .as_ref()
         .and_then(|cursor| cursor.str_field(&["session_id"]))
@@ -558,6 +835,9 @@ fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
     let mut args = vec!["--resume".into(), session_id];
     if fork {
         args.push("--fork-session".into());
+    }
+    if let Some(anchor) = fork_anchor {
+        args.extend(["--resume-session-at".into(), anchor.to_owned()]);
     }
     args
 }
@@ -571,12 +851,12 @@ async fn actor_loop(
     event_tx: smol::channel::Sender<AgentEvent>,
     config: SessionConfig,
     applied_permission_mode: String,
-    native_rewind: bool,
-    expected_model: Option<String>,
+    (native_rewind, rewind_preview): (bool, bool),
     stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
-    let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind, expected_model);
+    let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind);
+    mapper.rewind_preview = rewind_preview;
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
     let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
@@ -1044,6 +1324,51 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::SetOption { .. } => ControlFlow::Continue(()),
+        // Claude Code keeps no rewind undoable.
+        command @ SessionCommand::UndoRewind { .. } => {
+            if let Some(event) =
+                command.rewind_refusal(RewindFailure::new(RewindFailureReason::Unsupported, None))
+            {
+                let _ = event_tx.send(event).await;
+            }
+            ControlFlow::Continue(())
+        }
+        SessionCommand::PreviewRewind {
+            checkpoint_id,
+            mode,
+        } => {
+            let failure =
+                if !mapper.native_rewind || (mode.includes_files() && !mapper.rewind_preview) {
+                    Some(RewindFailure::new(RewindFailureReason::Unsupported, None))
+                } else {
+                    match mapper.begin_preview(checkpoint_id.clone(), mode) {
+                        Some(request) => write_line(stdin, &request).await.err().map(|error| {
+                            RewindFailure::new(RewindFailureReason::ProcessGone, error.to_string())
+                        }),
+                        // Restoring the conversation alone changes no file.
+                        None => {
+                            let _ = event_tx
+                                .send(AgentEvent::RewindPreviewed {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    mode,
+                                    result: RewindPreviewResult::Ready(RewindPreview::default()),
+                                })
+                                .await;
+                            None
+                        }
+                    }
+                };
+            if let Some(failure) = failure {
+                let _ = event_tx
+                    .send(AgentEvent::RewindPreviewed {
+                        checkpoint_id,
+                        mode,
+                        result: RewindPreviewResult::Refused(failure),
+                    })
+                    .await;
+            }
+            ControlFlow::Continue(())
+        }
         SessionCommand::Rewind {
             checkpoint_id,
             mode,
@@ -1055,7 +1380,10 @@ async fn handle_command(
                         .send(AgentEvent::RewindFailed {
                             checkpoint_id,
                             mode,
-                            error: "failed to write rewind request to provider stdin".into(),
+                            failure: RewindFailure::new(
+                                RewindFailureReason::ProcessGone,
+                                "failed to write rewind request to provider stdin".to_owned(),
+                            ),
                         })
                         .await;
                 }
@@ -1064,7 +1392,7 @@ async fn handle_command(
                         .send(AgentEvent::RewindFailed {
                             checkpoint_id,
                             mode,
-                            error,
+                            failure: RewindFailure::new(RewindFailureReason::Unsupported, error),
                         })
                         .await;
                 }
@@ -1086,11 +1414,39 @@ async fn handle_command(
             // residual race: a steer written microseconds before that status
             // may actually miss the request, but the CLI protocol exposes no
             // stronger acknowledgement, so we accept it at that checkpoint.
-            let msg = user_message(&text, &attachments);
-            write_steering_message(stdin, &msg, request_id, mapper, event_tx).await;
+            let mut msg = user_message(&text, &attachments);
+            // A steer sent under its own uuid comes back in the replayed
+            // echo under it, which makes it a conversation restore point.
+            let uuid = mapper
+                .native_rewind
+                .then(|| uuid::Uuid::new_v4().to_string());
+            if let Some(uuid) = &uuid {
+                msg["uuid"] = json!(uuid);
+            }
+            if write_steering_message(stdin, &msg, request_id.clone(), mapper, event_tx).await
+                && let Some(uuid) = uuid
+            {
+                mapper.steer_uuids.insert(uuid, request_id);
+            }
             ControlFlow::Continue(())
         }
         SessionCommand::RetryTurn { .. } => ControlFlow::Continue(()),
+        // The same `get_usage` control request [`read_usage`] sends, asked
+        // of the running CLI instead of a process started for it.
+        SessionCommand::ReadAccountUsage { reply } => {
+            let msg = mapper.control_request(json!({ "subtype": "get_usage" }));
+            if let Some(request_id) = msg["request_id"].as_str() {
+                mapper
+                    .pending_usage_reads
+                    .insert(request_id.to_owned(), reply);
+            }
+            if write_line(stdin, &msg).await.is_err()
+                && let Some(request_id) = msg["request_id"].as_str()
+            {
+                mapper.pending_usage_reads.remove(request_id);
+            }
+            ControlFlow::Continue(())
+        }
         SessionCommand::Shutdown => {
             // Settle pending AskUserQuestion callbacks before closing stdin.
             for (request_id, response) in mapper.cancel_pending_user_input() {
@@ -1157,7 +1513,7 @@ async fn write_steering_message<W: AsyncWrite + Unpin>(
     request_id: String,
     mapper: &mut Mapper,
     event_tx: &smol::channel::Sender<AgentEvent>,
-) {
+) -> bool {
     if write_line(stdin, message).await.is_err() {
         let _ = event_tx
             .send(AgentEvent::Error {
@@ -1165,8 +1521,65 @@ async fn write_steering_message<W: AsyncWrite + Unpin>(
                 fatal: true,
             })
             .await;
+        false
     } else {
         mapper.pending_steers.push_back(request_id);
+        true
+    }
+}
+
+/// The files a `rewind_files` answer names (`filesChanged` is withheld from
+/// some clients; the line totals are across all files).
+fn rewind_files(result: &Value) -> RewindFiles {
+    RewindFiles {
+        files: result
+            .get("filesChanged")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(RewindFile::path)
+            .collect(),
+        insertions: result.get("insertions").and_then(Value::as_u64),
+        deletions: result.get("deletions").and_then(Value::as_u64),
+        skipped_links: result
+            .get("skippedLinks")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    }
+}
+
+/// Why `rewind_files` could not restore, from the words Claude Code answers
+/// with: it gives no reason code for files.
+fn files_failure(error: Option<String>) -> RewindFailure {
+    let reason = match error.as_deref() {
+        Some(error) if error.contains("No file checkpoint") => {
+            RewindFailureReason::NothingToRestore
+        }
+        Some(error) if error.contains("not enabled") => RewindFailureReason::Unsupported,
+        _ => RewindFailureReason::Other,
+    };
+    RewindFailure::new(reason, error)
+}
+
+/// `rewind_conversation`'s refusal `reason`, in the canonical terms.
+fn conversation_refusal(reason: Option<&str>) -> RewindFailureReason {
+    match reason {
+        Some("commands_queued" | "prompt_pending") => RewindFailureReason::Busy,
+        Some("turn_running") => RewindFailureReason::TurnRunning,
+        Some("target_not_found") => RewindFailureReason::TargetNotFound,
+        Some("stale_target" | "unseen_later_turn" | "state_changed") => {
+            RewindFailureReason::ConversationChanged
+        }
+        Some(
+            "poll_tool_result_target"
+            | "target_splits_tool_call"
+            | "delivered_poll_events_in_range",
+        ) => RewindFailureReason::CannotCutHere,
+        Some("persist_failed") => RewindFailureReason::SaveFailed,
+        Some("usage_limited") => RewindFailureReason::UsageLimited,
+        Some("expired") => RewindFailureReason::Expired,
+        _ => RewindFailureReason::Other,
     }
 }
 
@@ -1205,7 +1618,7 @@ fn user_message(text: &str, attachments: &[Attachment]) -> Value {
 
 /// Remembers what kind of tool-use item a `tool_use_id` refers to, so that when
 /// the matching `tool_result` arrives we can emit the right `ItemCompleted`.
-enum ToolItem {
+pub(crate) enum ToolItem {
     Command {
         command: String,
         output: String,
@@ -1216,6 +1629,9 @@ enum ToolItem {
     Tool {
         name: String,
         input: Value,
+    },
+    Plan {
+        markdown: String,
     },
     Subagent {
         agent_type: String,
@@ -1230,6 +1646,124 @@ enum ToolItem {
 }
 
 impl ToolItem {
+    /// The in-progress item for a call that is not an `Agent` spawn,
+    /// `TodoWrite` or `ExitPlanMode`, and the state its result completes.
+    /// Calls made at the top level and inside a subagent map alike.
+    pub(crate) fn started(name: String, input: Value) -> (Self, ItemContent) {
+        if name == "Bash" {
+            let command = input
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            (
+                ToolItem::Command {
+                    command: command.clone(),
+                    output: String::new(),
+                },
+                ItemContent::CommandExecution {
+                    command,
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::InProgress,
+                },
+            )
+        } else if is_file_tool(&name) {
+            let changes = file_changes(&name, &input);
+            (
+                ToolItem::File {
+                    changes: changes.clone(),
+                },
+                ItemContent::FileChange {
+                    changes,
+                    status: ItemStatus::InProgress,
+                },
+            )
+        } else {
+            (
+                ToolItem::Tool {
+                    name: name.clone(),
+                    input: input.clone(),
+                },
+                ItemContent::ToolCall {
+                    image_reads: Vec::new(),
+                    name,
+                    input,
+                    output: None,
+                    status: ItemStatus::InProgress,
+                },
+            )
+        }
+    }
+
+    /// The finished item for a call from its `tool_result` block and the
+    /// message's `tool_use_result` (`toolUseResult` in transcript files).
+    pub(crate) fn finished(self, block: &Value, tool_use_result: Option<&Value>) -> ItemContent {
+        let is_error = block
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let status = if is_error {
+            ItemStatus::Failed
+        } else {
+            ItemStatus::Completed
+        };
+        let ToolOutput { text, images } =
+            ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null));
+        match self {
+            ToolItem::Command { command, .. } => ItemContent::CommandExecution {
+                command,
+                output: text,
+                exit_code: Some(i32::from(is_error)),
+                status,
+            },
+            ToolItem::File { mut changes } => {
+                if let Some(structured_patch) =
+                    tool_use_result.and_then(|result| result.get("structuredPatch"))
+                {
+                    let diff = render_structured_patch(structured_patch);
+                    let path = tool_use_result
+                        .and_then(|result| result.get("filePath"))
+                        .and_then(Value::as_str);
+                    for change in &mut changes {
+                        if let Some(path) = path {
+                            change.path = path.to_owned();
+                        }
+                        // Successful writes can report `structuredPatch: []`;
+                        // that omission must not erase the input-derived diff.
+                        if let Some(diff) = &diff {
+                            change.diff = Some(diff.clone());
+                        }
+                    }
+                }
+                ItemContent::FileChange { changes, status }
+            }
+            ToolItem::Tool { name, input } => ItemContent::ToolCall {
+                image_reads: images,
+                name,
+                input,
+                output: Some(text),
+                status,
+            },
+            ToolItem::Plan { markdown } => ItemContent::Plan { markdown },
+            ToolItem::Subagent {
+                agent_type,
+                description,
+                summary,
+                model,
+                effort,
+                ..
+            } => ItemContent::Subagent {
+                agent_type,
+                description,
+                status,
+                summary,
+                model,
+                effort,
+            },
+        }
+    }
+
     fn subagent(content: &ItemContent, parent_item_id: Option<String>) -> Option<Self> {
         let ItemContent::Subagent {
             agent_type,
@@ -1282,18 +1816,27 @@ enum ChildItemStage {
     Completed,
 }
 
+/// A rewind, or a preview of one, made of the control requests Claude Code's
+/// own rewind menu makes, one at a time.
 struct PendingRewind {
     checkpoint_id: String,
     mode: RewindMode,
-    conversation: bool,
+    step: RewindStep,
+    /// What the files step restored, once it has.
+    files: Option<RewindFiles>,
+    /// Why the files step failed; the conversation is still rewound after it,
+    /// as the native menu does.
+    files_failure: Option<RewindFailure>,
 }
 
-fn served_model_changed(expected: &str, served: &str) -> bool {
-    // CLI-generated errors/refusals do not identify a serving model.
-    !served.is_empty()
-        && served != "<synthetic>"
-        && !strip_context_window_suffix(expected)
-            .eq_ignore_ascii_case(strip_context_window_suffix(served))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RewindStep {
+    /// `rewind_files` has no `interrupt_if_running`: a running turn is
+    /// stopped first so the restore does not race the agent's own edits.
+    Interrupt,
+    Files,
+    Conversation,
+    Preview,
 }
 
 #[derive(Default)]
@@ -1347,6 +1890,8 @@ pub(crate) struct Mapper {
     /// Live permission-mode requests awaiting Claude's correlated response.
     /// A successful stdin write is not proof that the CLI applied the mode.
     pending_permission_modes: HashMap<String, String>,
+    /// [`SessionCommand::ReadAccountUsage`] askers by control request_id.
+    pending_usage_reads: HashMap<String, smol::channel::Sender<Result<Value, String>>>,
     outgoing: Vec<Value>,
     request_usage: Value,
     latest_usage: TokenUsage,
@@ -1365,17 +1910,19 @@ pub(crate) struct Mapper {
     background_tasks: HashSet<String>,
     /// Native rewind control requests awaiting Claude's correlated response.
     pending_rewinds: HashMap<String, PendingRewind>,
+    /// What the latest dry run of each restore point found: Claude answers a
+    /// real `rewind_files` with skipped links alone.
+    rewind_previews: HashMap<String, RewindFiles>,
+    /// The uuids steers were sent under, to the steer's request id. Their
+    /// replayed echo makes them conversation restore points.
+    steer_uuids: HashMap<String, String>,
     native_rewind: bool,
+    /// The CLI's `rewind_files` `dry_run` is known to restore nothing.
+    rewind_preview: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
-    /// Selected model: the comparison baseline and the source for synthetic refusals.
-    expected_model: Option<String>,
-    /// Whether a served-model mismatch was already reported for the active turn.
-    fallback_detected: bool,
     /// Latest structured stop reason for the active turn.
     stop_reason: Option<String>,
-    /// Classifier category captured from the active turn's structured refusal details.
-    pending_refusal_category: Option<ClassifierCategory>,
     /// Reset time reported for a rejected usage window in the active turn.
     limit_resets_at: Option<u64>,
     /// Warning-bearing stop reason already emitted for this occurrence.
@@ -1385,14 +1932,10 @@ pub(crate) struct Mapper {
 impl Mapper {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::new_configured("default".to_owned(), false, None)
+        Self::new_configured("default".to_owned(), false)
     }
 
-    fn new_configured(
-        applied_permission_mode: String,
-        native_rewind: bool,
-        expected_model: Option<String>,
-    ) -> Self {
+    fn new_configured(applied_permission_mode: String, native_rewind: bool) -> Self {
         Mapper {
             session_id: None,
             current_message_id: None,
@@ -1414,6 +1957,7 @@ impl Mapper {
             applied_permission_mode,
             auto_unavailable: None,
             pending_permission_modes: HashMap::new(),
+            pending_usage_reads: HashMap::new(),
             outgoing: Vec::new(),
             request_usage: json!({}),
             latest_usage: TokenUsage::default(),
@@ -1424,12 +1968,12 @@ impl Mapper {
             saw_requesting: false,
             background_tasks: HashSet::new(),
             pending_rewinds: HashMap::new(),
+            rewind_previews: HashMap::new(),
+            steer_uuids: HashMap::new(),
             native_rewind,
+            rewind_preview: native_rewind,
             last_served_model: None,
-            expected_model,
-            fallback_detected: false,
             stop_reason: None,
-            pending_refusal_category: None,
             limit_resets_at: None,
             warned_stop_reason: None,
         }
@@ -1456,9 +2000,7 @@ impl Mapper {
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
-        self.fallback_detected = false;
         self.stop_reason = None;
-        self.pending_refusal_category = None;
         self.warned_stop_reason = None;
         id
     }
@@ -1472,37 +2014,68 @@ impl Mapper {
         if !self.native_rewind {
             return Err("this Claude Code version does not expose native rewind controls".into());
         }
-        Ok(self.rewind_request(checkpoint_id, mode, !mode.includes_files()))
+        let step = if !mode.includes_files() {
+            RewindStep::Conversation
+        } else if self.current_turn_id.is_some() {
+            RewindStep::Interrupt
+        } else {
+            RewindStep::Files
+        };
+        Ok(self.rewind_request(PendingRewind {
+            checkpoint_id,
+            mode,
+            step,
+            files: None,
+            files_failure: None,
+        }))
     }
 
-    fn rewind_request(
-        &mut self,
-        checkpoint_id: String,
-        mode: RewindMode,
-        conversation: bool,
-    ) -> Value {
-        let request = if conversation {
-            json!({
+    /// A dry run of the files a rewind would restore; `None` when `mode`
+    /// restores none, which needs no preview.
+    fn begin_preview(&mut self, checkpoint_id: String, mode: RewindMode) -> Option<Value> {
+        mode.includes_files().then(|| {
+            self.rewind_request(PendingRewind {
+                checkpoint_id,
+                mode,
+                step: RewindStep::Preview,
+                files: None,
+                files_failure: None,
+            })
+        })
+    }
+
+    fn rewind_request(&mut self, pending: PendingRewind) -> Value {
+        let checkpoint_id = pending.checkpoint_id.as_str();
+        let request = match pending.step {
+            RewindStep::Interrupt => {
+                if self.current_turn_id.is_some() {
+                    self.interrupt_pending = true;
+                }
+                json!({ "subtype": "interrupt" })
+            }
+            RewindStep::Files => {
+                json!({ "subtype": "rewind_files", "user_message_id": checkpoint_id })
+            }
+            RewindStep::Preview => json!({
+                "subtype": "rewind_files",
+                "user_message_id": checkpoint_id,
+                "dry_run": true,
+            }),
+            // A target before a compaction boundary resolves to the summary
+            // that replaced it, as the native menu allows.
+            RewindStep::Conversation => json!({
                 "subtype": "rewind_conversation",
                 "target_message_uuid": checkpoint_id,
-                "interrupt_if_running": false,
-            })
-        } else {
-            json!({ "subtype": "rewind_files", "user_message_id": checkpoint_id })
+                "interrupt_if_running": true,
+                "allow_summarized_target": true,
+            }),
         };
         let message = self.control_request(request);
         let request_id = message["request_id"]
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        self.pending_rewinds.insert(
-            request_id,
-            PendingRewind {
-                checkpoint_id,
-                mode,
-                conversation,
-            },
-        );
+        self.pending_rewinds.insert(request_id, pending);
         message
     }
 
@@ -1559,6 +2132,9 @@ impl Mapper {
                 let suggestions = pending.suggestions.get(&id)?;
                 json!({ "behavior": "allow", "updatedInput": pending.input, "updatedPermissions": suggestions })
             }
+            ApprovalDecision::Feedback(text) => json!({
+                "behavior": "deny", "message": text,
+            }),
             ApprovalDecision::Cancel => json!({
                 "behavior": "deny", "message": "User cancelled tool execution.",
             }),
@@ -1836,6 +2412,10 @@ impl Mapper {
                 model,
             },
             self.permission_options(),
+            // A CLI older than the rewind controls has none for this session.
+            AgentEvent::RewindAvailability {
+                unavailable: (!self.native_rewind).then_some(RewindFailureReason::Unsupported),
+            },
         ];
         // The `slash_commands` (Command) and `skills` (Skill) arrays feed the
         // composer's `/` and `$` menus. Both are arrays of names (no descriptions).
@@ -1847,35 +2427,11 @@ impl Mapper {
     }
 
     fn on_model_refusal_fallback(&mut self, msg: &Value) -> Vec<AgentEvent> {
-        let (Some(expected), Some(actual)) = (
-            msg.get("original_model").and_then(Value::as_str),
-            msg.get("fallback_model").and_then(Value::as_str),
-        ) else {
+        let Some(actual) = msg.get("fallback_model").and_then(Value::as_str) else {
             log::debug!("claude: ignoring malformed model_refusal_fallback");
             return Vec::new();
         };
-        if !served_model_changed(expected, actual) {
-            return Vec::new();
-        }
-        self.fallback_detected = true;
-        let mut events = vec![AgentEvent::ModelFallbackDetected {
-            expected: expected.to_owned(),
-            actual: actual.to_owned(),
-            category: msg
-                .get("api_refusal_category")
-                .and_then(Value::as_str)
-                .map(ClassifierCategory::parse),
-            checkpoint_id: msg
-                .get("refused_user_message_uuid")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            parent_tool_use_id: msg
-                .get("parent_tool_use_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        }];
-        events.extend(self.observe_served_model(&json!({ "model": actual })));
-        events
+        self.observe_served_model(&json!({ "model": actual }))
     }
 
     fn accept_pending_steers(&mut self) -> Vec<AgentEvent> {
@@ -1990,10 +2546,13 @@ impl Mapper {
                 .and_then(Value::as_str)
                 .unwrap_or("completed"),
         );
-        let summary = msg
-            .get("summary")
-            .and_then(Value::as_str)
-            .map(one_line_summary);
+        let summary = handback_summary(
+            msg.get("handback"),
+            msg.get("handback_report"),
+            msg.get("summary")
+                .and_then(Value::as_str)
+                .map(one_line_summary),
+        );
         // A Command still held here is a background Bash: foreground ones
         // leave `tool_items` with their tool_result.
         if matches!(
@@ -2117,9 +2676,22 @@ impl Mapper {
                             Some(ToolItem::Subagent { .. })
                         ) =>
                 {
+                    let mut item = item.clone();
                     let id = item.id.clone();
-                    self.tool_items.remove(&id);
-                    out.extend(self.gate_subagent_terminal(&id, event));
+                    // A task_notification outranks the tool_result's text
+                    // here as at the top level: this record never says
+                    // whether that text is a report.
+                    if let (
+                        Some(ToolItem::Subagent {
+                            summary: Some(notified),
+                            ..
+                        }),
+                        ItemContent::Subagent { summary, .. },
+                    ) = (self.tool_items.remove(&id), &mut item.content)
+                    {
+                        *summary = Some(notified);
+                    }
+                    out.extend(self.gate_subagent_terminal(&id, AgentEvent::ItemCompleted(item)));
                 }
                 _ => out.push(event),
             }
@@ -2356,28 +2928,6 @@ impl Mapper {
         }
     }
 
-    fn observe_fallback_block(&mut self, block: &Value) -> Vec<AgentEvent> {
-        let (Some(expected), Some(actual)) = (
-            block.pointer("/from/model").and_then(Value::as_str),
-            block.pointer("/to/model").and_then(Value::as_str),
-        ) else {
-            return Vec::new();
-        };
-        let mut events = Vec::new();
-        if !self.fallback_detected && served_model_changed(expected, actual) {
-            self.fallback_detected = true;
-            events.push(AgentEvent::ModelFallbackDetected {
-                expected: expected.to_owned(),
-                actual: actual.to_owned(),
-                category: None,
-                checkpoint_id: None,
-                parent_tool_use_id: None,
-            });
-        }
-        events.extend(self.observe_served_model(&block["to"]));
-        events
-    }
-
     fn observe_served_model(&mut self, message: &Value) -> Vec<AgentEvent> {
         let Some(model) = message
             .get("model")
@@ -2386,29 +2936,14 @@ impl Mapper {
         else {
             return Vec::new();
         };
-        let mut events = Vec::new();
-        if !self.fallback_detected
-            && let Some(expected) = self.expected_model.as_deref()
-            && served_model_changed(expected, model)
-        {
-            self.fallback_detected = true;
-            events.push(AgentEvent::ModelFallbackDetected {
-                expected: expected.to_owned(),
-                actual: model.to_owned(),
-                category: None,
-                checkpoint_id: None,
-                // Child messages are routed to their own mapper by on_message.
-                parent_tool_use_id: None,
-            });
+        if self.last_served_model.as_deref() == Some(model) {
+            return Vec::new();
         }
-        if self.last_served_model.as_deref() != Some(model) {
-            self.last_served_model = Some(model.to_owned());
-            events.push(AgentEvent::ServedModel {
-                model: model.to_owned(),
-                reason: None,
-            });
-        }
-        events
+        self.last_served_model = Some(model.to_owned());
+        vec![AgentEvent::ServedModel {
+            model: model.to_owned(),
+            reason: None,
+        }]
     }
 
     fn on_assistant(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -2421,16 +2956,6 @@ impl Mapper {
             message.get("usage"),
             false,
         );
-        if message
-            .pointer("/stop_details/type")
-            .and_then(Value::as_str)
-            == Some("refusal")
-        {
-            self.pending_refusal_category = message
-                .pointer("/stop_details/category")
-                .and_then(Value::as_str)
-                .map(ClassifierCategory::parse);
-        }
         let msg_id = message
             .get("id")
             .and_then(Value::as_str)
@@ -2507,7 +3032,7 @@ impl Mapper {
                 Some("tool_use") => {
                     out.extend(self.on_tool_use(block));
                 }
-                Some("fallback") => out.extend(self.observe_fallback_block(block)),
+                Some("fallback") => out.extend(self.observe_served_model(&block["to"])),
                 _ => {}
             }
         }
@@ -2561,49 +3086,16 @@ impl Mapper {
             let content = spawned_subagent(&input);
             let item = ToolItem::subagent(&content, None).expect("a spawn snapshot is a Subagent");
             (item, content)
-        } else if name == "Bash" {
-            let command = input
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+        } else if name == EXIT_PLAN_MODE {
+            let markdown = plan_markdown(&input);
             (
-                ToolItem::Command {
-                    command: command.clone(),
-                    output: String::new(),
+                ToolItem::Plan {
+                    markdown: markdown.clone(),
                 },
-                ItemContent::CommandExecution {
-                    command,
-                    output: String::new(),
-                    exit_code: None,
-                    status: ItemStatus::InProgress,
-                },
-            )
-        } else if is_file_tool(&name) {
-            let changes = file_changes(&name, &input);
-            (
-                ToolItem::File {
-                    changes: changes.clone(),
-                },
-                ItemContent::FileChange {
-                    changes,
-                    status: ItemStatus::InProgress,
-                },
+                ItemContent::Plan { markdown },
             )
         } else {
-            (
-                ToolItem::Tool {
-                    name: name.clone(),
-                    input: input.clone(),
-                },
-                ItemContent::ToolCall {
-                    image_reads: Vec::new(),
-                    name,
-                    input,
-                    output: None,
-                    status: ItemStatus::InProgress,
-                },
-            )
+            ToolItem::started(name, input)
         };
 
         self.tool_items.insert(tool_use_id.clone(), item);
@@ -2625,7 +3117,14 @@ impl Mapper {
                 .iter()
                 .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
         });
-        if self.awaiting_turn_checkpoint
+        if let Some(uuid) = msg.get("uuid").and_then(Value::as_str)
+            && let Some(request_id) = self.steer_uuids.remove(uuid)
+        {
+            out.push(AgentEvent::SteerCheckpoint {
+                request_id,
+                checkpoint_id: uuid.to_owned(),
+            });
+        } else if self.awaiting_turn_checkpoint
             && !has_tool_result
             && let (Some(turn_id), Some(checkpoint_id)) = (
                 self.current_turn_id.clone(),
@@ -2666,23 +3165,33 @@ impl Mapper {
                     self.task_tools
                         .insert(agent_id.to_owned(), tool_use_id.clone());
                 }
+                let ToolItem::Subagent { parent_item_id, .. } = &item else {
+                    unreachable!("matched as a subagent");
+                };
+                let parent_item_id = parent_item_id.clone();
                 self.tool_items.insert(tool_use_id.clone(), item);
                 out.extend(self.update_subagent(&tool_use_id, ItemStatus::InProgress, None));
+                out.push(AgentEvent::ItemBackgrounded {
+                    item_id: tool_use_id.clone(),
+                    parent_item_id,
+                });
                 continue;
             }
             let is_error = block
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let output = tool_result_text(block.get("content"));
+            let output =
+                ToolOutput::from_content(block.get("content").unwrap_or(&Value::Null)).text;
             let status = if is_error {
                 ItemStatus::Failed
             } else {
                 ItemStatus::Completed
             };
             let mut parent_item_id = None;
+            let backgrounded = launched_in_background && matches!(item, ToolItem::Command { .. });
             let content = match item {
-                ToolItem::Command { command, .. } if launched_in_background => {
+                ToolItem::Command { command, .. } if backgrounded => {
                     self.tool_items.insert(
                         tool_use_id.clone(),
                         ToolItem::Command {
@@ -2697,45 +3206,10 @@ impl Mapper {
                         status: ItemStatus::InProgress,
                     }
                 }
-                ToolItem::Command { command, .. } => ItemContent::CommandExecution {
-                    command,
-                    output,
-                    exit_code: if is_error { Some(1) } else { Some(0) },
-                    status,
-                },
-                ToolItem::File { mut changes } => {
-                    if let Some(structured_patch) = msg.pointer("/tool_use_result/structuredPatch")
-                    {
-                        let diff = render_structured_patch(structured_patch);
-                        let path = msg
-                            .pointer("/tool_use_result/filePath")
-                            .and_then(Value::as_str);
-                        for change in &mut changes {
-                            if let Some(path) = path {
-                                change.path = path.to_owned();
-                            }
-                            // Successful writes can report `structuredPatch: []`;
-                            // that omission must not erase the input-derived diff.
-                            if let Some(diff) = &diff {
-                                change.diff = Some(diff.clone());
-                            }
-                        }
-                    }
-                    ItemContent::FileChange { changes, status }
-                }
-                ToolItem::Tool { name, input } => ItemContent::ToolCall {
-                    image_reads: if !is_error && crate::image_reads::is_read_tool(&name) {
-                        crate::image_reads::content_images(
-                            block.get("content").unwrap_or(&Value::Null),
-                        )
-                    } else {
-                        Vec::new()
-                    },
-                    name,
-                    input,
-                    output: Some(output),
-                    status,
-                },
+                item @ (ToolItem::Command { .. }
+                | ToolItem::File { .. }
+                | ToolItem::Tool { .. }
+                | ToolItem::Plan { .. }) => item.finished(block, msg.get("tool_use_result")),
                 ToolItem::Subagent {
                     agent_type,
                     description,
@@ -2746,13 +3220,18 @@ impl Mapper {
                     ..
                 } => {
                     parent_item_id = parent;
+                    let result = msg.get("tool_use_result");
                     ItemContent::Subagent {
                         agent_type,
                         description,
                         status,
-                        summary: summary.or_else(|| {
-                            (!output.trim().is_empty()).then(|| one_line_summary(&output))
-                        }),
+                        summary: handback_summary(
+                            result.and_then(|result| result.get("handback")),
+                            result.and_then(|result| result.get("handbackReport")),
+                            summary.or_else(|| {
+                                (!output.trim().is_empty()).then(|| one_line_summary(&output))
+                            }),
+                        ),
                         model,
                         effort,
                     }
@@ -2780,6 +3259,12 @@ impl Mapper {
             } else {
                 out.push(event);
             }
+            if backgrounded {
+                out.push(AgentEvent::ItemBackgrounded {
+                    item_id: tool_use_id.clone(),
+                    parent_item_id: None,
+                });
+            }
         }
         out
     }
@@ -2791,6 +3276,10 @@ impl Mapper {
         let Some(request_id) = response.get("request_id").and_then(Value::as_str) else {
             return Vec::new();
         };
+        if let Some(reply) = self.pending_usage_reads.remove(request_id) {
+            let _ = reply.try_send(usage_response(response).map_err(|error| error.to_string()));
+            return Vec::new();
+        }
         if let Some(mode) = self.pending_permission_modes.remove(request_id) {
             if response.get("subtype").and_then(Value::as_str) == Some("success") {
                 self.applied_permission_mode = response
@@ -2825,63 +3314,147 @@ impl Mapper {
         let Some(pending) = self.pending_rewinds.remove(request_id) else {
             return Vec::new();
         };
-        let checkpoint_id = pending.checkpoint_id.clone();
-        let mode = pending.mode;
-        if response.get("subtype").and_then(Value::as_str) != Some("success") {
-            let error = response
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("Claude Code rejected the rewind request")
-                .to_owned();
-            return vec![AgentEvent::RewindFailed {
-                checkpoint_id,
-                mode,
-                error,
-            }];
-        }
+        self.on_rewind_response(pending, response)
+    }
+
+    /// One step of a rewind answered: send the next, or report the outcome.
+    fn on_rewind_response(
+        &mut self,
+        mut pending: PendingRewind,
+        response: &Value,
+    ) -> Vec<AgentEvent> {
+        let succeeded = response.get("subtype").and_then(Value::as_str) == Some("success");
         let result = response.get("response").unwrap_or(&Value::Null);
-        if !pending.conversation {
-            if result.get("canRewind").and_then(Value::as_bool) == Some(false) {
-                return vec![AgentEvent::RewindFailed {
-                    checkpoint_id,
-                    mode,
-                    error: result
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Claude Code could not restore files")
-                        .to_owned(),
-                }];
-            }
-            if mode == RewindMode::FilesAndConversation {
-                let request = self.rewind_request(checkpoint_id, mode, true);
+        let error = || {
+            response
+                .get("error")
+                .or_else(|| result.get("error"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        match pending.step {
+            RewindStep::Interrupt => {
+                pending.step = RewindStep::Files;
+                let request = self.rewind_request(pending);
                 self.outgoing.push(request);
-                return Vec::new();
+                Vec::new()
             }
-            return vec![AgentEvent::RewindCompleted {
-                checkpoint_id,
-                mode,
-                prefill: None,
-            }];
-        }
-        if result.get("rewound").and_then(Value::as_bool) != Some(true) {
-            vec![AgentEvent::RewindFailed {
-                checkpoint_id,
-                mode,
-                error: result
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Claude Code could not restore the conversation")
-                    .to_owned(),
-            }]
-        } else {
-            vec![AgentEvent::RewindCompleted {
-                checkpoint_id,
-                mode,
-                prefill: result
-                    .get("prefillText")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            }]
+            RewindStep::Preview => {
+                let result = if succeeded
+                    && result.get("canRewind").and_then(Value::as_bool) == Some(true)
+                {
+                    let files = rewind_files(result);
+                    self.rewind_previews
+                        .insert(pending.checkpoint_id.clone(), files.clone());
+                    RewindPreviewResult::Ready(RewindPreview {
+                        files,
+                        conflicts: Vec::new(),
+                    })
+                } else {
+                    RewindPreviewResult::Refused(files_failure(error()))
+                };
+                vec![AgentEvent::RewindPreviewed {
+                    checkpoint_id: pending.checkpoint_id,
+                    mode: pending.mode,
+                    result,
+                }]
+            }
+            RewindStep::Files => {
+                if succeeded && result.get("canRewind").and_then(Value::as_bool) != Some(false) {
+                    let mut files = self
+                        .rewind_previews
+                        .remove(&pending.checkpoint_id)
+                        .unwrap_or_default();
+                    files.skipped_links = result
+                        .get("skippedLinks")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    pending.files = Some(files);
+                } else {
+                    pending.files_failure = Some(files_failure(error()));
+                }
+                if pending.mode.includes_conversation() {
+                    pending.step = RewindStep::Conversation;
+                    let request = self.rewind_request(pending);
+                    self.outgoing.push(request);
+                    return Vec::new();
+                }
+                vec![match pending.files_failure {
+                    Some(failure) => AgentEvent::RewindFailed {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: pending.mode,
+                        failure,
+                    },
+                    None => AgentEvent::RewindCompleted {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: pending.mode,
+                        prefill: None,
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Truncated,
+                        files: pending.files,
+                        incomplete: None,
+                        undo_token: None,
+                    },
+                }]
+            }
+            RewindStep::Conversation => {
+                let rewound =
+                    succeeded && result.get("rewound").and_then(Value::as_bool) == Some(true);
+                if rewound {
+                    let restored = if pending.files_failure.is_some() {
+                        RewindMode::Conversation
+                    } else {
+                        pending.mode
+                    };
+                    return vec![AgentEvent::RewindCompleted {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: restored,
+                        prefill: result
+                            .get("prefillText")
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.is_empty())
+                            .map(str::to_owned),
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Truncated,
+                        files: pending.files,
+                        incomplete: pending.files_failure.map(|failure| RewindIncomplete {
+                            requested: pending.mode,
+                            failure,
+                        }),
+                        undo_token: None,
+                    }];
+                }
+                let failure = RewindFailure::new(
+                    if succeeded {
+                        conversation_refusal(result.get("reason").and_then(Value::as_str))
+                    } else {
+                        RewindFailureReason::Other
+                    },
+                    error(),
+                );
+                if pending.mode.includes_files() && pending.files_failure.is_none() {
+                    // The files were restored before the conversation refused.
+                    vec![AgentEvent::RewindCompleted {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: RewindMode::Files,
+                        prefill: None,
+                        prefill_attachments: Vec::new(),
+                        later_history: LaterHistory::Truncated,
+                        files: pending.files,
+                        incomplete: Some(RewindIncomplete {
+                            requested: pending.mode,
+                            failure,
+                        }),
+                        undo_token: None,
+                    }]
+                } else {
+                    vec![AgentEvent::RewindFailed {
+                        checkpoint_id: pending.checkpoint_id,
+                        mode: pending.mode,
+                        failure,
+                    }]
+                }
+            }
         }
     }
 
@@ -2922,6 +3495,10 @@ impl Mapper {
                 questions,
                 delivery: UserInputDelivery::Blocking,
             }];
+        }
+
+        if tool_name == EXIT_PLAN_MODE {
+            return self.plan_approval(request_id, request, input);
         }
 
         let request_type = classify_claude_tool(&tool_name);
@@ -3012,6 +3589,79 @@ impl Mapper {
         })]
     }
 
+    /// `ExitPlanMode`'s permission prompt: the plan item it decides on (from
+    /// the tool's own item, emitted here when the prompt arrives first), then
+    /// the decision with Claude Code's allow and deny under plan names.
+    fn plan_approval(
+        &mut self,
+        request_id: String,
+        request: &Value,
+        input: Value,
+    ) -> Vec<AgentEvent> {
+        let markdown = plan_markdown(&input);
+        let item_id = request
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("plan-{request_id}"));
+        let mut events = Vec::new();
+        let known = match self.tool_items.get(&item_id) {
+            Some(ToolItem::Plan { markdown: shown }) => Some(*shown == markdown),
+            _ => None,
+        };
+        if known != Some(true) {
+            self.tool_items.insert(
+                item_id.clone(),
+                ToolItem::Plan {
+                    markdown: markdown.clone(),
+                },
+            );
+            let item = ThreadItem {
+                id: item_id.clone(),
+                parent_item_id: None,
+                content: ItemContent::Plan {
+                    markdown: markdown.clone(),
+                },
+            };
+            events.push(if known.is_some() {
+                AgentEvent::ItemUpdated(item)
+            } else {
+                AgentEvent::ItemStarted(item)
+            });
+        }
+        self.pending_approvals.insert(
+            request_id.clone(),
+            PendingApproval {
+                input,
+                suggestions: HashMap::new(),
+            },
+        );
+        let parent_item_id = request
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .and_then(|agent_id| self.task_tools.get(agent_id))
+            .cloned();
+        events.push(AgentEvent::ApprovalRequested(ApprovalRequest {
+            id: request_id,
+            turn_id: self.current_turn_id.clone(),
+            parent_item_id,
+            kind: ApprovalKind::Plan { item_id, markdown },
+            options: vec![
+                ApprovalOption {
+                    id: "allow".into(),
+                    label: "Approve".into(),
+                    kind: ApprovalOptionKind::AllowOnce,
+                },
+                ApprovalOption {
+                    id: "deny".into(),
+                    label: "Keep planning".into(),
+                    kind: ApprovalOptionKind::RejectOnce,
+                },
+            ],
+        }));
+        events
+    }
+
     fn on_result(&mut self, msg: &Value) -> Vec<AgentEvent> {
         if let Some(id) = msg.get("uuid").and_then(Value::as_str)
             && !self.result_ids.insert(id.to_owned())
@@ -3099,19 +3749,6 @@ impl Mapper {
             }
         }
         self.limit_resets_at = None;
-        if self.stop_reason.as_deref() == Some("refusal") {
-            let detail = msg
-                .get("result")
-                .and_then(Value::as_str)
-                .filter(|text| !text.trim().is_empty())
-                .unwrap_or("Claude blocked this turn after a safety classifier refusal.")
-                .to_owned();
-            events.push(AgentEvent::TurnBlocked {
-                category: self.pending_refusal_category.take(),
-                model: self.expected_model.clone(),
-                detail,
-            });
-        }
         // Publish the current background-task liveness with every result, not
         // only task-notification-origin ones. `background_tasks_changed []`
         // deliberately withholds the zero (see `on_background_tasks_changed`),
@@ -3179,6 +3816,47 @@ pub(crate) fn one_line_summary(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// What a finished subagent's record leaves to show. A `handback` outcome
+/// means its text is a note to the model and the report comes beside it, the
+/// warning auto mode raised above the report's text; `withheld` has no report.
+/// With no outcome the agent did not report through `SubagentHandback`, and
+/// `text` is what it ended with.
+fn handback_summary(
+    handback: Option<&Value>,
+    report: Option<&Value>,
+    text: Option<String>,
+) -> Option<String> {
+    if handback.is_none() {
+        return text.filter(|text| !is_handback_note(text));
+    }
+    let report = report?;
+    let text = report
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())?;
+    Some(match report.get("warning").and_then(Value::as_str) {
+        Some(warning) => format!("{warning}\n\n{text}"),
+        None => text.to_owned(),
+    })
+}
+
+/// Whether a subagent's result is Claude Code's note to the model about a
+/// `SubagentHandback` rather than a report. Only the sentence tells: an Agent
+/// tool_result inside a subagent has no `tool_use_result`, and a
+/// task_notification for an agent waiting on its own work has no `handback`
+/// (`subagent_handback_nested_trace.jsonl`, `subagent_withheld_nested_trace.jsonl`;
+/// the waiting sentence is from the 2.1.317 bundle).
+pub(crate) fn is_handback_note(text: &str) -> bool {
+    let text = text.trim_start();
+    [
+        "This agent's report was delivered to you",
+        "This agent has not reported yet",
+        "The subagent ended without delivering a report",
+    ]
+    .iter()
+    .any(|note| text.starts_with(note))
+}
+
 /// Approval categories; tools without a dedicated category use `ToolUse`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaudeRequestType {
@@ -3234,6 +3912,19 @@ fn subagent_description(input: &Value) -> String {
 /// Classify approvals with an ordered substring matcher. Read-only matches
 /// take precedence (`WebSearch` → `FileRead`); agent tools use `ToolUse` even
 /// when their names also match command or file-change substrings.
+/// The tool Claude Code calls to present its plan and leave plan mode.
+const EXIT_PLAN_MODE: &str = "ExitPlanMode";
+
+/// The plan `ExitPlanMode` presents, which Claude Code fills in from the plan
+/// file it wrote.
+fn plan_markdown(input: &Value) -> String {
+    input
+        .get("plan")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn classify_claude_tool(name: &str) -> ClaudeRequestType {
     let n = name.to_lowercase();
     if n == "read"
@@ -3436,26 +4127,6 @@ fn render_structured_patch(value: &Value) -> Option<String> {
     (!rendered.is_empty()).then(|| rendered.join("\n"))
 }
 
-/// Flatten a `tool_result` content field (string or block array) into text.
-fn tool_result_text(content: Option<&Value>) -> String {
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => {
-            let mut parts = Vec::new();
-            for block in blocks {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    parts.push(text.to_string());
-                } else {
-                    parts.push(block.to_string());
-                }
-            }
-            parts.join("\n")
-        }
-        Some(other) => other.to_string(),
-        None => String::new(),
-    }
-}
-
 fn result_status(msg: &Value, stop_reason: Option<&str>) -> TurnStatus {
     let subtype = msg.get("subtype").and_then(Value::as_str);
     let is_error = msg.get("is_error").and_then(Value::as_bool);
@@ -3653,6 +4324,63 @@ mod tests {
         assert_eq!(config_dir(&launch_env), Some(PathBuf::from("/configured")));
     }
 
+    /// claude 2.1.318 reads its account file as `join(CLAUDE_CONFIG_DIR ??
+    /// home, ".claude.json")`: inside a configured directory, but beside
+    /// `~/.claude`, not in it, for the default account.
+    #[test]
+    fn account_file_sits_in_a_configured_dir_and_beside_dot_claude_otherwise() {
+        assert_eq!(
+            account_file_in(Some("/configured".into()), Some("/home".into())),
+            Some(PathBuf::from("/configured/.claude.json"))
+        );
+        assert_eq!(
+            account_file_in(None, Some("/home".into())),
+            Some(PathBuf::from("/home/.claude.json"))
+        );
+    }
+
+    /// claude 2.1.317 records a usage read in its config directory on its way
+    /// out, and that record is all it has to answer from when the usage
+    /// endpoint refuses a later read. A CLI that never leaves costs the read
+    /// nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_usage_read_lets_the_cli_leave_on_its_own() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const ANSWER: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"usage-1","response":{"rate_limits_available":true,"rate_limits":{}}}}"#;
+        let dir = std::env::temp_dir().join(format!("tcode-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let read = |name: &str, after_answer: &str| {
+            let binary = dir.join(name);
+            std::fs::write(
+                &binary,
+                format!("#!/bin/sh\nread request\necho '{ANSWER}'\n{after_answer}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            smol::block_on(read_usage(
+                Some(binary),
+                LaunchEnv {
+                    env: Vec::new(),
+                    home: Some(dir.clone()),
+                },
+            ))
+            .unwrap()
+        };
+
+        let leaves = read(
+            "leaves",
+            "while read line; do :; done\ntouch \"$CLAUDE_CONFIG_DIR/recorded\"",
+        );
+        assert_eq!(leaves["rate_limits_available"], true);
+        assert!(dir.join("recorded").exists());
+
+        let stays = read("stays", "exec sleep 30");
+        assert_eq!(stays["rate_limits_available"], true);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn native_permission_switches_publish_only_confirmed_values() {
         let mut mapper = Mapper::new();
@@ -3711,7 +4439,7 @@ mod tests {
             "the provider's explicit auto unavailability must reach the picker: {events:?}"
         );
 
-        let mut auto = Mapper::new_configured("auto".into(), false, None);
+        let mut auto = Mapper::new_configured("auto".into(), false);
         let events = auto.on_message(json!({"type":"system", "subtype":"init", "session_id":"native", "permissionMode":"default"}));
         let descriptor = events
             .iter()
@@ -3731,7 +4459,7 @@ mod tests {
                 if options.iter().any(|option| option.value == "plan" && option.unavailable.as_deref() == Some("Entered by the agent"))))
         );
 
-        let mut supported = Mapper::new_configured("auto".into(), false, None);
+        let mut supported = Mapper::new_configured("auto".into(), false);
         supported.on_message(json!({"type":"system", "subtype":"init", "session_id":"supported", "permissionMode":"auto"}));
         let events = supported.on_message(json!({"type":"system", "subtype":"init", "session_id":"supported", "permissionMode":"plan"}));
         assert!(
@@ -3743,7 +4471,7 @@ mod tests {
         );
 
         for confirmation in ["control_response", "init"] {
-            let mut recovered = Mapper::new_configured("auto".into(), false, None);
+            let mut recovered = Mapper::new_configured("auto".into(), false);
             recovered.on_message(json!({"type":"system", "subtype":"init", "session_id":"recovered", "permissionMode":"default"}));
             let message = if confirmation == "init" {
                 json!({"type":"system", "subtype":"init", "session_id":"recovered", "permissionMode":"auto"})
@@ -3772,8 +4500,7 @@ mod tests {
         for name in [
             "Write",
             "EnterPlanMode",
-            "ExitPlanMode",
-            "mcp__tcode_report__report_result",
+            "mcp__tcode_control__report_result",
         ] {
             for choice in [
                 "allow",
@@ -3837,15 +4564,77 @@ mod tests {
         }
     }
 
-    /// A stand-in CLI that records its arguments, one per line, in `directory/argv`.
+    /// A stand-in CLI that records its arguments, each ended by a NUL, in `directory/argv`.
     #[cfg(unix)]
     fn recording_claude(directory: &std::path::Path) -> PathBuf {
+        recording_claude_at(directory, "2.1.200")
+    }
+
+    #[cfg(unix)]
+    fn recording_claude_at(directory: &std::path::Path, version: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::create_dir_all(directory).unwrap();
         let binary = directory.join("claude");
-        std::fs::write(&binary, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > argv\nprintf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\nwhile IFS= read -r line; do :; done\n").unwrap();
+        std::fs::write(&binary, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '{version}\\n'; exit 0; fi\nprintf '%s\\0' \"$@\" > argv\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}}'\nwhile IFS= read -r line; do :; done\n")).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         binary
+    }
+
+    /// A running session answers a usage read itself: the `get_usage`
+    /// control request goes to the live CLI and its payload reaches the
+    /// asker, so no second process is started for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_usage_read_asks_the_running_cli() {
+        use std::os::unix::fs::PermissionsExt as _;
+        smol::block_on(async {
+            let directory =
+                std::env::temp_dir().join(format!("agent-claude-usage-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let binary = directory.join("claude");
+            std::fs::write(
+                &binary,
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.200\\n'; exit 0; fi\n\
+                 printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"auto\"}'\n\
+                 while IFS= read -r line; do case \"$line\" in *get_usage*)\n\
+                 id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+                 printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"rate_limits_available\":true}}}\\n' \"$id\";;\n\
+                 esac; done\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: None,
+                binary_path: Some(binary),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            while !matches!(
+                handle.events.recv().await.unwrap(),
+                AgentEvent::ProviderOptions { .. }
+            ) {}
+            let (reply, answer) = smol::channel::bounded(1);
+            handle
+                .commands
+                .send(SessionCommand::ReadAccountUsage { reply })
+                .await
+                .unwrap();
+            assert_eq!(
+                answer.recv().await.unwrap().unwrap(),
+                json!({"rate_limits_available": true})
+            );
+            shut_down(handle).await;
+            let _ = std::fs::remove_dir_all(directory);
+        });
     }
 
     #[cfg(unix)]
@@ -3862,6 +4651,8 @@ mod tests {
         }
     }
 
+    /// Every argument fits on one line, so a Windows batch launcher can pass it,
+    /// and the instructions reach the system prompt word for word.
     #[cfg(unix)]
     #[test]
     fn instructions_append_to_the_system_prompt_on_creation_and_resume() {
@@ -3878,10 +4669,14 @@ mod tests {
                     cwd: directory.clone(),
                     model: None,
                     resume: resume.clone(),
-                    fork: false,
+                    fork: None,
                     binary_path: Some(binary.clone()),
                     option_selections: Vec::new(),
-                    mcp_servers: Vec::new(),
+                    mcp_servers: vec![crate::McpRegistration {
+                        name: "tcode_pull_requests".into(),
+                        url: "http://127.0.0.1:1/mcp".into(),
+                        bearer_token: "token".into(),
+                    }],
                     launch_env: LaunchEnv::default(),
                     extra_args: Vec::new(),
                     acp: None,
@@ -3894,15 +4689,56 @@ mod tests {
                     AgentEvent::ProviderOptions { .. }
                 ) {}
                 let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-                assert_eq!(resume.is_some(), argv.contains("--resume\nnative\n"));
-                assert_eq!(
-                    argv.matches(&format!("--append-system-prompt\n{instructions}"))
-                        .count(),
-                    1,
-                    "{argv}"
+                let args: Vec<_> = argv.trim_end_matches('\0').split('\0').collect();
+                assert!(
+                    !args.iter().any(|arg| arg.contains(['\r', '\n'])),
+                    "{args:?}"
                 );
+                assert_eq!(
+                    resume.is_some(),
+                    args.windows(2).any(|pair| pair == ["--resume", "native"])
+                );
+                let files: Vec<_> = args
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--append-system-prompt-file")
+                    .map(|pair| pair[1])
+                    .collect();
+                let [file] = files[..] else {
+                    panic!("{args:?}");
+                };
+                assert_eq!(std::fs::read_to_string(file).unwrap(), instructions);
+                assert!(args.contains(&"--mcp-config"));
                 shut_down(handle).await;
             }
+            // A CLI older than the file option is given the text itself.
+            let older = directory.join("older");
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: None,
+                binary_path: Some(recording_claude_at(&older, "2.0.32")),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: Some(instructions.into()),
+            })
+            .await
+            .unwrap();
+            while !matches!(
+                handle.events.recv().await.unwrap(),
+                AgentEvent::ProviderOptions { .. }
+            ) {}
+            let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
+            let args: Vec<_> = argv.trim_end_matches('\0').split('\0').collect();
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--append-system-prompt", instructions])
+            );
+            assert!(!args.contains(&"--append-system-prompt-file"));
+            shut_down(handle).await;
             std::fs::remove_dir_all(directory).unwrap();
         });
     }
@@ -3918,7 +4754,7 @@ mod tests {
                 cwd: directory.clone(),
                 model: None,
                 resume: None,
-                fork: false,
+                fork: None,
                 binary_path: Some(binary),
                 option_selections: vec![OptionSelection {
                     id: "permissionMode".into(),
@@ -3945,7 +4781,7 @@ mod tests {
                 }
             }
             let argv = std::fs::read_to_string(directory.join("argv")).unwrap();
-            let args: Vec<_> = argv.lines().collect();
+            let args: Vec<_> = argv.split('\0').collect();
             assert!(
                 args.windows(2)
                     .any(|pair| pair == ["--permission-mode", "auto"])
@@ -3960,11 +4796,64 @@ mod tests {
     fn fork_flag_requires_both_request_and_resume_cursor() {
         let resume = Some(ResumeCursor(json!({"session_id": "session-source"})));
         assert_eq!(
-            resume_args(&resume, true),
+            resume_args(&resume, true, None),
             ["--resume", "session-source", "--fork-session"]
         );
-        assert_eq!(resume_args(&resume, false), ["--resume", "session-source"]);
-        assert!(resume_args(&None, true).is_empty());
+        assert_eq!(
+            resume_args(&resume, false, None),
+            ["--resume", "session-source"]
+        );
+        assert!(resume_args(&None, true, None).is_empty());
+    }
+
+    /// A fork from a message ends at the entry the message answered, which
+    /// only the transcript names (entries as 2.1.318 writes them), and leaves
+    /// out `--resume-drops-turn`, which refuses a range of several turns.
+    #[test]
+    fn a_fork_from_a_message_ends_where_its_transcript_says_it_was_sent() {
+        let dir = std::env::temp_dir().join(format!("agent-claude-fork-{}", uuid::Uuid::new_v4()));
+        let project = dir.join("projects/-work");
+        std::fs::create_dir_all(&project).unwrap();
+        let entry = |kind: &str, uuid: &str, parent: Option<&str>| {
+            json!({"type": kind, "uuid": uuid, "parentUuid": parent, "sessionId": "source",
+                "message": {"role": kind, "content": [{"type": "text", "text": "text"}]}})
+            .to_string()
+        };
+        std::fs::write(
+            project.join("source.jsonl"),
+            [
+                entry("user", "prompt-1", None),
+                entry("assistant", "reply-1", Some("prompt-1")),
+                entry("user", "prompt-2", Some("reply-1")),
+                entry("assistant", "reply-2", Some("prompt-2")),
+                entry("user", "prompt-3", Some("reply-2")),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let resume = Some(ResumeCursor(json!({"session_id": "source"})));
+
+        let anchor = fork_anchor(&resume, Some(&dir), "prompt-2").unwrap();
+        assert_eq!(
+            resume_args(&resume, true, Some(&anchor)),
+            [
+                "--resume",
+                "source",
+                "--fork-session",
+                "--resume-session-at",
+                "reply-1"
+            ]
+        );
+        for refused in ["prompt-1", "not-in-the-session"] {
+            assert!(
+                matches!(
+                    fork_anchor(&resume, Some(&dir), refused),
+                    Err(AgentError::Provider(_))
+                ),
+                "{refused}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3976,7 +4865,7 @@ mod tests {
                 bearer_token: "p".into(),
             },
             crate::McpRegistration {
-                name: "tcode_orchestrate".into(),
+                name: "tcode_control".into(),
                 url: "http://o".into(),
                 bearer_token: "o".into(),
             },
@@ -3999,7 +4888,7 @@ mod tests {
             assert_eq!(servers.len(), count);
             for (name, url, authorization) in [
                 ("tcode_preview", "http://p", "Bearer p"),
-                ("tcode_orchestrate", "http://o", "Bearer o"),
+                ("tcode_control", "http://o", "Bearer o"),
                 ("tcode_computer_use", "http://c", "Bearer c"),
             ]
             .into_iter()
@@ -4047,8 +4936,8 @@ mod tests {
         // Claude Code 2.1.299 against a local SSE endpoint using the documented
         // fallback boundary; only stream, assistant and result messages retained.
         let fixture = include_str!("../tests/fixtures/claude/mid-stream-fallback.jsonl");
-        for requested in [Some("claude-fable-5".into()), None] {
-            let mut mapper = Mapper::new_configured("default".into(), false, requested);
+        {
+            let mut mapper = Mapper::new();
             mapper.start_turn();
             let mut switched = false;
             let mut completed = false;
@@ -4063,13 +4952,7 @@ mod tests {
                     assert!(!completed);
                     let notices = events
                         .iter()
-                        .filter(|event| {
-                            matches!(
-                                event,
-                                AgentEvent::ModelFallbackDetected { .. }
-                                    | AgentEvent::ServedModel { .. }
-                            )
-                        })
+                        .filter(|event| matches!(event, AgentEvent::ServedModel { .. }))
                         .cloned()
                         .collect::<Vec<_>>();
                     assert!(
@@ -4079,28 +4962,17 @@ mod tests {
                     );
                     assert_eq!(
                         notices,
-                        [
-                            AgentEvent::ModelFallbackDetected {
-                                expected: "claude-fable-5".into(),
-                                actual: "claude-opus-4-8".into(),
-                                category: None,
-                                checkpoint_id: None,
-                                parent_tool_use_id: None,
-                            },
-                            AgentEvent::ServedModel {
-                                model: "claude-opus-4-8".into(),
-                                reason: None
-                            },
-                        ]
+                        [AgentEvent::ServedModel {
+                            model: "claude-opus-4-8".into(),
+                            reason: None
+                        }]
                     );
                     switched = true;
                 } else if switched {
                     assert!(
-                        !events.iter().any(|event| matches!(
-                            event,
-                            AgentEvent::ModelFallbackDetected { .. }
-                                | AgentEvent::ServedModel { .. }
-                        )),
+                        !events
+                            .iter()
+                            .any(|event| matches!(event, AgentEvent::ServedModel { .. })),
                         "later blocks must not repeat or undo the switch: {events:?}"
                     );
                 }
@@ -4127,145 +4999,21 @@ mod tests {
 
         assert_eq!(
             events,
-            [
-                AgentEvent::ModelFallbackDetected {
-                    expected: "claude-fable-5".into(),
-                    actual: "claude-opus-4-8".into(),
-                    category: Some(ClassifierCategory::Cyber),
-                    checkpoint_id: Some("cf7703ac-420b-4038-9f32-582077b27352".into()),
-                    parent_tool_use_id: None,
-                },
-                AgentEvent::ServedModel {
-                    model: "claude-opus-4-8".into(),
-                    reason: None,
-                }
-            ]
+            [AgentEvent::ServedModel {
+                model: "claude-opus-4-8".into(),
+                reason: None,
+            }]
         );
     }
 
     #[test]
-    fn assistant_model_changes_are_detected_without_family_rules() {
-        for (expected, served, changed) in [
-            ("claude-fable-5-1", "claude-fable-5", true),
-            ("claude-fable-5-1", "claude-opus-5", true),
-            ("claude-fable-5-1", "claude-opus-4-8", true),
-            ("claude-fable-5-1", "claude-sonnet-4-5", true),
-            ("claude-fable-5-1", "claude-haiku-4-5", true),
-            ("claude-opus-4-8", "claude-opus-5", true),
-            ("custom-model", "another-model", true),
-            ("claude-fable-5-1", "claude-fable-5-1", false),
-            ("claude-opus-5[1m]", "claude-opus-5", false),
-            ("claude-opus-5", "CLAUDE-OPUS-5[1M]", false),
-            ("claude-opus-5[2m]", "claude-opus-5", false),
-            ("custom-model[variant]", "custom-model", true),
-            ("claude-fable-5-1", "<synthetic>", false),
-        ] {
-            let mut mapper = Mapper::new_configured("default".into(), false, Some(expected.into()));
-            mapper.start_turn();
-            let events = mapper.on_message(json!({
-                "type": "assistant",
-                "message": { "id": "msg-change", "model": served, "content": [] },
-                "parent_tool_use_id": null,
-            }));
-            let changes: Vec<_> = events
-                .iter()
-                .filter(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                .collect();
-            assert_eq!(
-                changes.len(),
-                usize::from(changed),
-                "{expected} -> {served}"
-            );
-            if changed {
-                assert!(matches!(changes[0], AgentEvent::ModelFallbackDetected {
-                    expected: requested, actual, category: None,
-                    checkpoint_id: None, parent_tool_use_id: None,
-                } if requested == expected && actual == served));
-            }
-        }
-    }
-
-    #[test]
-    fn model_changes_are_detected_at_stream_start_once_per_turn() {
-        let mut mapper =
-            Mapper::new_configured("default".into(), false, Some("claude-fable-5-1".into()));
-        for served in ["claude-opus-5", "claude-opus-4-8", "claude-fable-5"] {
-            let stream = json!({
-                "type": "stream_event",
-                "event": { "type": "message_start", "message": {
-                    "id": "msg-change", "model": served,
-                } },
-                "parent_tool_use_id": null,
-            });
-            for _ in 0..2 {
-                mapper.start_turn();
-                // A child using another model must not consume the parent's guard.
-                let mut child = stream.clone();
-                child["parent_tool_use_id"] = json!("child-tool");
-                let child_events = mapper.on_message(child);
-                assert!(
-                    !child_events
-                        .iter()
-                        .any(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                );
-                let first = mapper.on_message(stream.clone());
-                assert_eq!(
-                    first
-                        .iter()
-                        .filter(|event| matches!(
-                            event, AgentEvent::ModelFallbackDetected { expected, actual, .. }
-                                if expected == "claude-fable-5-1" && actual == served
-                        ))
-                        .count(),
-                    1
-                );
-                let repeated = mapper.on_message(stream.clone());
-                let completed = mapper.on_message(json!({
-                    "type": "assistant", "message": {
-                        "id": "msg-change", "model": served, "content": [],
-                    }, "parent_tool_use_id": null,
-                }));
-                assert!(
-                    !repeated
-                        .iter()
-                        .chain(&completed)
-                        .any(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn explicit_model_changes_ignore_only_context_suffix_differences() {
-        for (actual, changed) in [("claude-opus-5", false), ("claude-opus-4-8", true)] {
-            let mut mapper = Mapper::new();
-            let events = mapper.on_message(json!({
-                "type": "system", "subtype": "model_refusal_fallback",
-                "original_model": "claude-opus-5[1m]", "fallback_model": actual,
-            }));
-            assert_eq!(
-                events
-                    .iter()
-                    .filter(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                    .count(),
-                usize::from(changed)
-            );
-        }
-    }
-
-    #[test]
-    fn classifier_refusal_result_emits_turn_blocked() {
-        let mut mapper =
-            Mapper::new_configured("default".into(), false, Some("claude-fable-5".into()));
+    fn classifier_refusal_result_fails_the_turn_with_claudes_text() {
+        let mut mapper = Mapper::new();
         mapper.start_turn();
 
         let assistant_events = feed(
             &mut mapper,
             r#"{"type":"assistant","message":{"id":"msg-refusal","model":"<synthetic>","stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"This request triggered cyber content restrictions."},"content":[{"type":"text","text":"API Error: safeguards flagged this message. Details: `[cyber]`"}]},"parent_tool_use_id":null}"#,
-        );
-        assert_eq!(
-            mapper.pending_refusal_category,
-            Some(ClassifierCategory::Cyber)
         );
         assert!(
             assistant_events
@@ -4280,17 +5028,8 @@ mod tests {
 
         assert!(events.iter().any(|event| matches!(
             event,
-            AgentEvent::TurnBlocked {
-                category: Some(ClassifierCategory::Cyber),
-                model: Some(model),
-                detail,
-            } if model == "claude-fable-5" && detail.contains("[cyber]")
+            AgentEvent::Error { fatal: false, message } if message.contains("[cyber]")
         )));
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AgentEvent::Error { fatal: false, .. }))
-        );
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::TurnCompleted {
@@ -4326,60 +5065,263 @@ mod tests {
         .is_empty());
     }
 
+    fn rewind_response(mapper: &mut Mapper, request: &Value, response: Value) -> Vec<AgentEvent> {
+        feed(
+            mapper,
+            &json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request["request_id"],
+                    "response": response,
+                }
+            })
+            .to_string(),
+        )
+    }
+
+    /// Restoring files and conversation during a running turn: the turn is
+    /// stopped first, files are restored, and when the files fail the
+    /// conversation is still rewound, as Claude Code's own menu does.
     #[test]
-    fn combined_native_rewind_sequences_files_then_conversation() {
+    fn a_running_turn_is_stopped_before_files_and_a_files_failure_still_rewinds_the_conversation() {
         let mut mapper = Mapper::new();
         mapper.native_rewind = true;
-        let files = mapper
+        mapper.start_turn();
+        let interrupt = mapper
             .begin_rewind("checkpoint-2".into(), RewindMode::FilesAndConversation)
             .unwrap();
-        assert_eq!(files["request"]["subtype"], "rewind_files");
-        let files_id = files["request_id"].as_str().unwrap();
+        assert_eq!(interrupt["request"], json!({ "subtype": "interrupt" }));
+        assert!(rewind_response(&mut mapper, &interrupt, json!({})).is_empty());
+        let files = mapper.take_outgoing().remove(0);
+        assert_eq!(
+            files["request"],
+            json!({ "subtype": "rewind_files", "user_message_id": "checkpoint-2" })
+        );
+        let error = "Failed to rewind: No file checkpoint found for this message.";
         let events = feed(
             &mut mapper,
             &json!({
                 "type": "control_response",
                 "response": {
-                    "subtype": "success",
-                    "request_id": files_id,
-                    "response": { "canRewind": true }
+                    "subtype": "error",
+                    "request_id": files["request_id"],
+                    "error": error,
                 }
             })
             .to_string(),
         );
         assert!(events.is_empty());
-        let outgoing = mapper.take_outgoing();
-        assert_eq!(outgoing.len(), 1);
-        assert_eq!(outgoing[0]["request"]["subtype"], "rewind_conversation");
+        let conversation = mapper.take_outgoing().remove(0);
         assert_eq!(
-            outgoing[0]["request"]["target_message_uuid"],
-            "checkpoint-2"
-        );
-
-        let conversation_id = outgoing[0]["request_id"].as_str().unwrap();
-        let events = feed(
-            &mut mapper,
-            &json!({
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": conversation_id,
-                    "response": {
-                        "rewound": true,
-                        "prefillText": "original prompt"
-                    }
-                }
+            conversation["request"],
+            json!({
+                "subtype": "rewind_conversation",
+                "target_message_uuid": "checkpoint-2",
+                "interrupt_if_running": true,
+                "allow_summarized_target": true,
             })
-            .to_string(),
         );
-        assert!(matches!(
-            events.as_slice(),
-            [AgentEvent::RewindCompleted {
+        let events = rewind_response(
+            &mut mapper,
+            &conversation,
+            json!({ "rewound": true, "prefillText": "original prompt" }),
+        );
+        assert_eq!(
+            serde_json::to_value(&events).unwrap(),
+            json!([{
+                "type": "rewind_completed",
+                "checkpoint_id": "checkpoint-2",
+                "mode": "conversation",
+                "prefill": "original prompt",
+                "later_history": "truncated",
+                "incomplete": {
+                    "requested": "files_and_conversation",
+                    "failure": { "reason": "nothing_to_restore", "detail": error },
+                },
+            }])
+        );
+    }
+
+    /// A stand-in Claude Code 2.1.318 that answers the rewind controls the way
+    /// the CLI does, echoes a user message under the uuid it was sent with,
+    /// and records every line it reads in `directory/requests`.
+    #[cfg(unix)]
+    fn rewinding_claude(directory: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::create_dir_all(directory).unwrap();
+        let binary = directory.join("claude");
+        let answer = |response: &str| {
+            format!(
+                "id=$(printf '%s' \"$line\" | sed -n 's/.*\"request_id\":\"\\([^\"]*\\)\".*/\\1/p'); \
+                 printf '{{\"type\":\"control_response\",\"response\":{{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{response}}}}}\\n' \"$id\";;"
+            )
+        };
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then printf '2.1.318\\n'; exit 0; fi\n\
+                 printf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"native\",\"permissionMode\":\"default\"}}'\n\
+                 while IFS= read -r line; do printf '%s\\n' \"$line\" >> requests; case \"$line\" in\n\
+                 *'\"dry_run\":true'*) {}\n\
+                 *'\"subtype\":\"rewind_files\"'*) {}\n\
+                 *'\"subtype\":\"rewind_conversation\"'*) {}\n\
+                 *'\"type\":\"user\"'*) uuid=$(printf '%s' \"$line\" | sed -n 's/.*\"uuid\":\"\\([^\"]*\\)\".*/\\1/p'); \
+                 printf '{{\"type\":\"user\",\"uuid\":\"%s\",\"isReplay\":true,\"session_id\":\"native\",\"parent_tool_use_id\":null,\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"also this\"}}]}}}}\\n' \"$uuid\";;\n\
+                 esac; done\n",
+                answer(r#"{\"canRewind\":true,\"filesChanged\":[\"src/lib.rs\"],\"insertions\":3,\"deletions\":1}"#),
+                answer(r#"{\"canRewind\":true,\"skippedLinks\":0}"#),
+                answer(
+                    r#"{\"rewound\":false,\"reason\":\"stale_target\",\"error\":\"The conversation changed since this message was chosen.\",\"precedingAssistantUuid\":null}"#
+                ),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        binary
+    }
+
+    /// Through a running session: a steer is sent under its own uuid and its
+    /// replayed echo makes it a restore point; a preview is Claude's dry run;
+    /// a combined rewind whose conversation half is refused reports the files
+    /// it restored and why the conversation was not rewound.
+    #[cfg(unix)]
+    #[test]
+    fn a_session_previews_rewinds_and_reports_the_part_claude_refused() {
+        smol::block_on(async {
+            let directory =
+                std::env::temp_dir().join(format!("agent-claude-rewind-{}", uuid::Uuid::new_v4()));
+            let binary = rewinding_claude(&directory);
+            let handle = start(SessionOptions {
+                cwd: directory.clone(),
+                model: None,
+                resume: None,
+                fork: None,
+                binary_path: Some(binary),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            let next = async |matches: fn(&AgentEvent) -> bool| loop {
+                let event = handle.events.recv().await.unwrap();
+                if matches(&event) {
+                    break event;
+                }
+            };
+            assert!(matches!(
+                next(|event| matches!(event, AgentEvent::RewindAvailability { .. })).await,
+                AgentEvent::RewindAvailability { unavailable: None }
+            ));
+
+            handle
+                .commands
+                .send(SessionCommand::Steer {
+                    request_id: "steer-1".into(),
+                    text: "also this".into(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let AgentEvent::SteerCheckpoint {
+                request_id,
                 checkpoint_id,
-                mode: RewindMode::FilesAndConversation,
-                prefill: Some(prefill),
-            }] if checkpoint_id == "checkpoint-2" && prefill == "original prompt"
-        ));
+            } = next(|event| matches!(event, AgentEvent::SteerCheckpoint { .. })).await
+            else {
+                unreachable!()
+            };
+            assert_eq!(request_id, "steer-1");
+
+            for mode in [RewindMode::FilesAndConversation, RewindMode::Conversation] {
+                handle
+                    .commands
+                    .send(SessionCommand::PreviewRewind {
+                        checkpoint_id: "checkpoint-2".into(),
+                        mode,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let previews = [
+                next(|event| matches!(event, AgentEvent::RewindPreviewed { .. })).await,
+                next(|event| matches!(event, AgentEvent::RewindPreviewed { .. })).await,
+            ];
+            let files = RewindFiles {
+                files: vec![RewindFile::path("src/lib.rs")],
+                insertions: Some(3),
+                deletions: Some(1),
+                skipped_links: 0,
+            };
+            for (mode, expected) in [
+                (
+                    RewindMode::FilesAndConversation,
+                    RewindPreview {
+                        files: files.clone(),
+                        conflicts: Vec::new(),
+                    },
+                ),
+                (RewindMode::Conversation, RewindPreview::default()),
+            ] {
+                assert!(
+                    previews.contains(&AgentEvent::RewindPreviewed {
+                        checkpoint_id: "checkpoint-2".into(),
+                        mode,
+                        result: RewindPreviewResult::Ready(expected),
+                    }),
+                    "{previews:?}"
+                );
+            }
+
+            handle
+                .commands
+                .send(SessionCommand::Rewind {
+                    checkpoint_id: "checkpoint-2".into(),
+                    mode: RewindMode::FilesAndConversation,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                next(|event| matches!(event, AgentEvent::RewindCompleted { .. })).await,
+                AgentEvent::RewindCompleted {
+                    checkpoint_id: "checkpoint-2".into(),
+                    mode: RewindMode::Files,
+                    prefill: None,
+                    prefill_attachments: Vec::new(),
+                    later_history: LaterHistory::Truncated,
+                    files: Some(files),
+                    incomplete: Some(RewindIncomplete {
+                        requested: RewindMode::FilesAndConversation,
+                        failure: RewindFailure::new(
+                            RewindFailureReason::ConversationChanged,
+                            "The conversation changed since this message was chosen.".to_owned(),
+                        ),
+                    }),
+                    undo_token: None,
+                }
+            );
+            shut_down(handle).await;
+
+            let requests: Vec<Value> = std::fs::read_to_string(directory.join("requests"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                requests.iter().any(|request| request["type"] == "user"
+                    && request["uuid"] == checkpoint_id.as_str())
+            );
+            assert!(requests.iter().any(|request| request["request"]
+                == json!({
+                    "subtype": "rewind_files",
+                    "user_message_id": "checkpoint-2",
+                    "dry_run": true,
+                })));
+            let _ = std::fs::remove_dir_all(directory);
+        });
     }
 
     fn select(id: &str, value: Value) -> OptionSelection {
@@ -5045,42 +5987,76 @@ mod tests {
         }
     }
 
+    /// Recorded from Claude Code 2.1.316 (`claude -p --output-format
+    /// stream-json --verbose --model haiku` in a scratch directory holding an
+    /// 8x8 blue PNG and `a.txt`): a Read of the image, then a subagent that
+    /// runs Bash, reads and edits `a.txt`. The image is the result's only
+    /// content and reaches `image_reads` alone; the subagent's Bash and Edit
+    /// map as they do at the top level.
     #[test]
-    fn image_read_results_exclude_failed_reads_and_image_generation() {
-        for (name, failed, expected) in [
-            ("Read", false, 1),
-            ("Read", true, 0),
-            ("generate_image", false, 0),
-            ("mcp__browser__preview_screenshot", false, 1),
-        ] {
-            let mut mapper = Mapper::new();
-            feed(&mut mapper, &json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"read","name":name,"input":{"file_path":"/tmp/image.png"}}]}}).to_string());
-            let events = feed(&mut mapper, &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"read","is_error":failed,"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQID"}}]}]}}).to_string());
-            let AgentEvent::ItemCompleted(ThreadItem {
-                content:
-                    ItemContent::ToolCall {
-                        image_reads,
-                        status,
-                        ..
-                    },
-                ..
-            }) = &events[0]
-            else {
-                panic!("tool completion: {events:?}")
-            };
-            assert_eq!(image_reads.len(), expected, "{name}, failed={failed}");
-            assert_eq!(
-                *status,
-                if failed {
-                    ItemStatus::Failed
-                } else {
-                    ItemStatus::Completed
+    fn recorded_image_read_and_subagent_tools_map_like_top_level_calls() {
+        let mut mapper = Mapper::new();
+        let mut completed = Vec::new();
+        for line in include_str!("../tests/fixtures/claude/tool_results_recorded.jsonl").lines() {
+            for event in feed(&mut mapper, line) {
+                if let AgentEvent::ItemCompleted(item) = event {
+                    completed.push(item);
                 }
-            );
-            if expected != 0 {
-                assert_eq!(image_reads[0].data_base64, "AQID");
             }
         }
+        let item = |id: &str| {
+            completed
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("{id} never completed: {completed:#?}"))
+        };
+        assert_eq!(
+            item("toolu_01HG34Q57eKf3Vmy7mipKtqD").content,
+            ItemContent::ToolCall {
+                image_reads: vec![Attachment {
+                    media_type: "image/png".into(),
+                    data_base64: "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==".into(),
+                    source_path: None,
+                }],
+                name: "Read".into(),
+                input: json!({"file_path": "blue.png"}),
+                output: Some(String::new()),
+                status: ItemStatus::Completed,
+            }
+        );
+        let child = |id: &str| {
+            let item = item(&format!("toolu_01DEp56X845RWkeSRLr9oGhE:{id}"));
+            assert_eq!(
+                item.parent_item_id.as_deref(),
+                Some("toolu_01DEp56X845RWkeSRLr9oGhE")
+            );
+            &item.content
+        };
+        assert_eq!(
+            child("toolu_014AnXC7pBrAgEgqpWymetDS"),
+            &ItemContent::CommandExecution {
+                command: "echo hi".into(),
+                output: "hi".into(),
+                exit_code: Some(0),
+                status: ItemStatus::Completed,
+            }
+        );
+        assert_eq!(
+            child("toolu_01QkfKor1fX5xFDBvWR1ZUEX"),
+            &ItemContent::FileChange {
+                changes: vec![FileChange {
+                    path: "/private/tmp/b2rec/claude/a.txt".into(),
+                    kind: FileChangeKind::Modify,
+                    diff: Some("-hello\n+bye".into()),
+                }],
+                status: ItemStatus::Completed,
+            }
+        );
+        assert!(matches!(
+            child("toolu_01KLtmHwybFdAVQGeGUZEfvP"),
+            ItemContent::ToolCall { name, output: Some(output), .. }
+                if name == "Read" && output == "1\thello\n2\tworld\n3\t"
+        ));
     }
 
     #[test]
@@ -5168,16 +6144,20 @@ mod tests {
             &mut m,
             r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu-bg","type":"tool_result","content":"Command running in background with ID: bg-1","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"backgroundTaskId":"bg-1"}}"#,
         );
+        // The call returned; the command goes on in the background.
         assert!(matches!(
             running.as_slice(),
-            [AgentEvent::ItemUpdated(ThreadItem {
-                content: ItemContent::CommandExecution {
-                    status: ItemStatus::InProgress,
-                    exit_code: None,
+            [
+                AgentEvent::ItemUpdated(ThreadItem {
+                    content: ItemContent::CommandExecution {
+                        status: ItemStatus::InProgress,
+                        exit_code: None,
+                        ..
+                    },
                     ..
-                },
-                ..
-            })]
+                }),
+                AgentEvent::ItemBackgrounded { item_id, parent_item_id: None },
+            ] if item_id == "toolu-bg"
         ));
         let first_result = feed(
             &mut m,
@@ -5502,6 +6482,80 @@ mod tests {
     }
 
     #[test]
+    fn exit_plan_mode_shows_its_plan_and_takes_the_decision_natively() {
+        let plan = "# Plan\n\n1. Write hello.txt";
+        let input = json!({"plan": plan, "planFilePath": "/plans/p.md"});
+        for (choice, expected) in [
+            (
+                ApprovalDecision::Option("allow".into()),
+                json!({"behavior": "allow", "updatedInput": input}),
+            ),
+            (
+                ApprovalDecision::Option("deny".into()),
+                json!({"behavior": "deny", "message": "User declined tool execution."}),
+            ),
+            (
+                ApprovalDecision::Feedback("Use Python instead".into()),
+                json!({"behavior": "deny", "message": "Use Python instead"}),
+            ),
+        ] {
+            let mut mapper = Mapper::new();
+            let started = mapper.on_message(json!({"type":"assistant", "message": {"id":"msg_plan",
+                "content":[{"type":"tool_use", "id":"toolu_plan", "name":"ExitPlanMode", "input":input}]}}));
+            assert!(
+                started.iter().any(|event| matches!(event, AgentEvent::ItemStarted(ThreadItem { id, content: ItemContent::Plan { markdown }, .. })
+                    if id == "toolu_plan" && markdown == plan)),
+                "{started:?}"
+            );
+            let events = mapper.on_message(json!({"type":"control_request", "request_id":"plan-request",
+                "request": {"subtype":"can_use_tool", "tool_name":"ExitPlanMode", "input":input, "tool_use_id":"toolu_plan"}}));
+            let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
+                panic!("the plan item is already shown: {events:?}")
+            };
+            assert_eq!(
+                request.kind,
+                ApprovalKind::Plan {
+                    item_id: "toolu_plan".into(),
+                    markdown: plan.into()
+                }
+            );
+            assert_eq!(
+                request
+                    .options
+                    .iter()
+                    .map(|option| (option.id.as_str(), option.label.as_str(), option.kind))
+                    .collect::<Vec<_>>(),
+                [
+                    ("allow", "Approve", ApprovalOptionKind::AllowOnce),
+                    ("deny", "Keep planning", ApprovalOptionKind::RejectOnce)
+                ]
+            );
+            let response = mapper
+                .build_approval_response("plan-request", choice)
+                .unwrap();
+            assert_eq!(response["response"]["response"], expected);
+            let completed = mapper.on_message(json!({"type":"user", "message": {"content":[
+                {"type":"tool_result", "tool_use_id":"toolu_plan", "content":"User has approved your plan."}]}}));
+            assert!(
+                completed.iter().any(|event| matches!(event, AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Plan { markdown }, .. })
+                    if id == "toolu_plan" && markdown == plan)),
+                "{completed:?}"
+            );
+        }
+
+        let mut mapper = Mapper::new();
+        let events = mapper.on_message(json!({"type":"control_request", "request_id":"early",
+            "request": {"subtype":"can_use_tool", "tool_name":"ExitPlanMode", "input":{"plan": plan}, "tool_use_id":"toolu_early"}}));
+        assert!(
+            matches!(events.as_slice(), [
+                AgentEvent::ItemStarted(ThreadItem { id, content: ItemContent::Plan { markdown }, .. }),
+                AgentEvent::ApprovalRequested(ApprovalRequest { kind: ApprovalKind::Plan { item_id, .. }, .. }),
+            ] if id == "toolu_early" && item_id == id && markdown == plan),
+            "a prompt that arrives before its tool block still shows the plan it decides: {events:?}"
+        );
+    }
+
+    #[test]
     fn ask_user_question_parse_and_answer_wire_shape() {
         let mut m = Mapper::new();
         feed(
@@ -5792,6 +6846,12 @@ mod tests {
         for line in trace.lines() {
             events.extend(feed(&mut mapper, line));
         }
+        // The lead waited on this agent: its call never returned early.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ItemBackgrounded { .. }))
+        );
         // task_started opened a transcript tail; every terminal snapshot
         // (task_updated, task_notification, tool_result) waits for its ack.
         assert!(events.iter().all(|event| !matches!(
@@ -5916,11 +6976,17 @@ mod tests {
                 .all(|status| status == ItemStatus::InProgress),
             "launch acknowledgement and task_notification must not settle the item yet"
         );
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
-        );
+        // The launch acknowledgement returns the call; the agent goes on in
+        // the background past the turn.
+        let position = |wanted: &dyn Fn(&AgentEvent) -> bool| events.iter().position(wanted);
+        let backgrounded = position(&|event| {
+            matches!(event, AgentEvent::ItemBackgrounded { item_id, parent_item_id: None }
+                if item_id == "toolu_spawn_bg")
+        })
+        .expect("the launch backgrounds the spawn");
+        let turn_completed = position(&|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+            .expect("the turn completes");
+        assert!(backgrounded < turn_completed);
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall { status: ItemStatus::Completed, .. }, .. })
@@ -6180,6 +7246,173 @@ mod tests {
             "{events:?}"
         );
         assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    /// A recorded stdout trace driven as the actor drives it: every line, then
+    /// the acknowledgement of each tail the trace stopped.
+    fn replay_subagent_trace<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<AgentEvent> {
+        let mut mapper = Mapper::new();
+        let mut events = Vec::new();
+        for line in lines {
+            events.extend(feed(&mut mapper, line));
+        }
+        for request in mapper.take_tail_requests() {
+            if let TailRequest::Stop { parent_id } = request {
+                events.extend(mapper.on_tail_notice(SubagentTailNotice {
+                    parent_id,
+                    events: Vec::new(),
+                    model: None,
+                    stopped: true,
+                }));
+            }
+        }
+        assert!(mapper.take_pending_subagent_terminals().is_empty());
+        events
+    }
+
+    /// The summary a thread shows for `id` once it has settled: a snapshot
+    /// without one leaves the last one standing.
+    #[track_caller]
+    fn settled_summary(events: &[AgentEvent], id: &str) -> Option<String> {
+        let mut shown = None;
+        let mut settled = false;
+        for event in events {
+            if let AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item) = event
+                && item.id == id
+                && let ItemContent::Subagent {
+                    status, summary, ..
+                } = &item.content
+            {
+                shown = summary.clone().or(shown);
+                settled |= *status == ItemStatus::Completed;
+            }
+        }
+        assert!(settled, "{id} never settled: {events:?}");
+        shown
+    }
+
+    #[track_caller]
+    fn assert_no_handback_note(events: &[AgentEvent]) {
+        for event in events {
+            if let AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item) = event
+                && let ItemContent::Subagent {
+                    summary: Some(summary),
+                    ..
+                } = &item.content
+            {
+                assert!(!is_handback_note(summary), "{event:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_foreground_subagent_that_hands_back_shows_its_report_whole() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_018ti8UQiJ6xqBmKf5gTsp1d").as_deref(),
+            Some("PONG-FG-REPORT\nsecond-line")
+        );
+        assert_no_handback_note(&events);
+    }
+
+    #[test]
+    fn a_background_subagent_that_hands_back_shows_its_report() {
+        let trace =
+            include_str!("../tests/fixtures/claude/subagent_handback_background_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_01BXJLqzyGgqst9idkvgU4Mw").as_deref(),
+            Some("PONG-BG-REPORT")
+        );
+        assert_no_handback_note(&events);
+    }
+
+    /// The tool_result of a nested Agent carries only the note, so the
+    /// nested agent's report is the one its task_notification brought.
+    #[test]
+    fn a_nested_subagent_that_hands_back_shows_its_report() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_nested_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_016TdmuRUJr9k29RQGwWCy15").as_deref(),
+            Some("PONG-INNER-REPORT")
+        );
+        assert_eq!(
+            settled_summary(&events, "toolu_013VQTQyj7vJ4uRuHAC4KupS").as_deref(),
+            Some("PONG-OUTER-REPORT")
+        );
+        assert_no_handback_note(&events);
+    }
+
+    /// The child's transcript tail can reach the nested tool_result before
+    /// stdout reaches the task_notification.
+    #[test]
+    fn a_nested_result_ahead_of_its_notification_shows_no_note() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_nested_trace.jsonl");
+        let notification = "\"task_notification\",\"task_id\":\"acaf13a689ed20a44\"";
+        let events =
+            replay_subagent_trace(trace.lines().filter(|line| !line.contains(notification)));
+        assert_eq!(
+            settled_summary(&events, "toolu_016TdmuRUJr9k29RQGwWCy15"),
+            None
+        );
+        assert_no_handback_note(&events);
+    }
+
+    #[test]
+    fn a_subagent_that_delivered_no_report_has_no_summary() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_withheld_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_01EV4e7BpxB6KFymEFQVWcYf"),
+            None
+        );
+        assert_no_handback_note(&events);
+    }
+
+    #[test]
+    fn a_nested_subagent_that_delivered_no_report_has_no_summary() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_withheld_nested_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_015Cfy34pCnu1nyFgoJWpV6c"),
+            None
+        );
+        assert_eq!(
+            settled_summary(&events, "toolu_019EPWayHRRkcGs1fKMrydKv").as_deref(),
+            Some("OUTER-REPORT")
+        );
+        assert_no_handback_note(&events);
+    }
+
+    /// Outside auto mode a subagent has no `SubagentHandback`: it ends with
+    /// text, and the task_notification's `summary` is that text.
+    #[test]
+    fn a_subagent_that_ends_with_text_keeps_it() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_text_end_trace.jsonl");
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_01Y1QieQFWmLquSD4EMDRfdg").as_deref(),
+            Some("PONG-FG-REPORT")
+        );
+    }
+
+    /// No recording: auto mode has to block the report. The fields are those
+    /// of the CLI's own schema, which has a client show `warning` above `text`.
+    #[test]
+    fn a_flagged_report_keeps_its_warning_above_it() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_handback_trace.jsonl")
+            .replace("\"handback\":\"send\"", "\"handback\":\"flagged\"")
+            .replace(
+                "{\"text\":\"PONG-FG-REPORT",
+                "{\"warning\":\"SECURITY WARNING\",\"text\":\"PONG-FG-REPORT",
+            );
+        let events = replay_subagent_trace(trace.lines());
+        assert_eq!(
+            settled_summary(&events, "toolu_018ti8UQiJ6xqBmKf5gTsp1d").as_deref(),
+            Some("SECURITY WARNING\n\nPONG-FG-REPORT\nsecond-line")
+        );
     }
 
     #[test]

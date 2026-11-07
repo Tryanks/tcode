@@ -23,6 +23,20 @@ pub(crate) fn format_countdown(secs: u64) -> String {
     }
 }
 
+/// A span as its two largest whole units, floored: days and hours past a
+/// day, hours and minutes past an hour, else minutes ("1d 3h", "2h 15m",
+/// "0m").
+pub(crate) fn format_span(secs: u64) -> String {
+    let (days, hours, minutes) = (secs / 86_400, (secs % 86_400) / 3_600, (secs % 3_600) / 60);
+    if days > 0 {
+        crate::tr!("time.span_days", days = days, hours = hours).into_owned()
+    } else if hours > 0 {
+        crate::tr!("time.span_hours", hours = hours, minutes = minutes).into_owned()
+    } else {
+        crate::tr!("time.span_minutes", minutes = minutes).into_owned()
+    }
+}
+
 /// Compact relative-time label (e.g. "5m ago") from an elapsed-seconds count.
 pub fn humanize_ago(secs: u64) -> String {
     if secs < 60 {

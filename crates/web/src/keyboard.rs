@@ -1,6 +1,6 @@
 //! Bringing back a software keyboard the user dismissed.
 //!
-//! gpui-fast-web 0.1.10 summons a dismissed keyboard for a tap into the
+//! gpui-fast-web summons a dismissed keyboard for a tap into the
 //! focused field by blurring and focusing its hidden input in one task; iOS
 //! coalesces that pair into nothing, so on an iPad the keyboard stays down.
 //! Blurring the input in the tap's own `pointerdown` puts the two in

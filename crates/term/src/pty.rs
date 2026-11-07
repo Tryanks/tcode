@@ -85,13 +85,12 @@ struct Shared {
 /// state and its public API contains no grid or parser types.
 pub(crate) struct PtyHandle {
     sender: PtyCommandSender,
-    notifications: async_channel::Sender<PtyEvent>,
     events: async_channel::Receiver<PtyEvent>,
     shared: Arc<Mutex<Shared>>,
     shell_name: String,
     cwd: PathBuf,
     pty_info: Arc<pty_info::PtyInfo>,
-    refresh_running: Arc<AtomicBool>,
+    refresh: ProcessRefresh,
 }
 
 impl PtyHandle {
@@ -146,8 +145,9 @@ impl PtyHandle {
             command_label: None,
             activity: 0,
         }));
-        let refresh_running = Arc::new(AtomicBool::new(false));
         let (notifications, events) = async_channel::unbounded();
+        let refresh =
+            ProcessRefresh::start(pty_info.clone(), shared.clone(), notifications.clone())?;
         #[cfg(unix)]
         let command_sender = {
             let (sender, receiver) = channel::channel();
@@ -164,8 +164,7 @@ impl PtyHandle {
                 receiver,
                 notifications: notifications.clone(),
                 shared: shared.clone(),
-                pty_info: pty_info.clone(),
-                refresh_running: refresh_running.clone(),
+                refresh: refresh.clone(),
             };
             thread::Builder::new()
                 .name("tcode-pty-io".into())
@@ -182,22 +181,16 @@ impl PtyHandle {
             notifications.clone(),
         )?;
 
-        schedule_process_refresh(
-            pty_info.clone(),
-            shared.clone(),
-            notifications.clone(),
-            refresh_running.clone(),
-        );
+        refresh.schedule();
 
         Ok(Self {
             sender: command_sender,
-            notifications,
             events,
             shared,
             shell_name,
             cwd,
             pty_info,
-            refresh_running,
+            refresh,
         })
     }
 
@@ -254,12 +247,7 @@ impl PtyHandle {
             shared.command_label != previous_label
         };
         let result = self.sender.send(PtyCommand::Input(bytes));
-        schedule_process_refresh(
-            self.pty_info.clone(),
-            self.shared.clone(),
-            self.notifications.clone(),
-            self.refresh_running.clone(),
-        );
+        self.refresh.schedule();
         result.map(|()| label_changed)
     }
 
@@ -336,8 +324,7 @@ struct RawPtyEventLoop {
     receiver: channel::Receiver<PtyCommand>,
     notifications: async_channel::Sender<PtyEvent>,
     shared: Arc<Mutex<Shared>>,
-    pty_info: Arc<pty_info::PtyInfo>,
-    refresh_running: Arc<AtomicBool>,
+    refresh: ProcessRefresh,
 }
 
 #[cfg(unix)]
@@ -464,12 +451,7 @@ impl RawPtyEventLoop {
             }
         }
         if read_any {
-            schedule_process_refresh(
-                self.pty_info.clone(),
-                self.shared.clone(),
-                self.notifications.clone(),
-                self.refresh_running.clone(),
-            );
+            self.refresh.schedule();
         }
         Ok(())
     }
@@ -556,29 +538,54 @@ fn refresh_process_info(
     }
 }
 
-fn schedule_process_refresh(
+/// The foreground process's name and directory, refreshed on one worker per
+/// terminal that sleeps until it is asked.
+#[derive(Clone)]
+struct ProcessRefresh {
     info: Arc<pty_info::PtyInfo>,
-    shared: Arc<Mutex<Shared>>,
-    notifications: async_channel::Sender<PtyEvent>,
     running: Arc<AtomicBool>,
-) {
-    if !info.should_refresh() || running.swap(true, Ordering::AcqRel) {
-        return;
+    wake: std::sync::mpsc::Sender<()>,
+}
+
+impl ProcessRefresh {
+    /// The worker ends once every handle to it is gone.
+    fn start(
+        info: Arc<pty_info::PtyInfo>,
+        shared: Arc<Mutex<Shared>>,
+        notifications: async_channel::Sender<PtyEvent>,
+    ) -> io::Result<Self> {
+        let (wake, woken) = std::sync::mpsc::channel::<()>();
+        let running = Arc::new(AtomicBool::new(false));
+        let worker_info = info.clone();
+        let worker_running = running.clone();
+        thread::Builder::new()
+            .name("tcode-terminal-pty-info".into())
+            .spawn(move || {
+                while woken.recv().is_ok() {
+                    refresh_process_info(&worker_info, &shared, &notifications);
+                    // Input/output can precede the shell applying `cd` or
+                    // launching its foreground process. One bounded trailing
+                    // refresh catches that transition even when the command
+                    // itself is silent.
+                    thread::sleep(Duration::from_millis(300));
+                    refresh_process_info(&worker_info, &shared, &notifications);
+                    worker_running.store(false, Ordering::Release);
+                }
+            })?;
+        Ok(Self {
+            info,
+            running,
+            wake,
+        })
     }
-    let running_on_error = running.clone();
-    let spawn_result = thread::Builder::new()
-        .name("tcode-terminal-pty-info".into())
-        .spawn(move || {
-            refresh_process_info(&info, &shared, &notifications);
-            // Input/output can precede the shell applying `cd` or launching
-            // its foreground process. One bounded trailing refresh catches
-            // that transition even when the command itself is silent.
-            thread::sleep(Duration::from_millis(300));
-            refresh_process_info(&info, &shared, &notifications);
-            running.store(false, Ordering::Release);
-        });
-    if spawn_result.is_err() {
-        running_on_error.store(false, Ordering::Release);
+
+    fn schedule(&self) {
+        if !self.info.should_refresh() || self.running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if self.wake.send(()).is_err() {
+            self.running.store(false, Ordering::Release);
+        }
     }
 }
 

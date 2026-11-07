@@ -559,6 +559,25 @@ fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() 
         projection.update(&session.terminal).is_none(),
         "a quiet grid has no content to send"
     );
+    // A full screen that scrolls by a line moves the subscriber's rows up
+    // rather than sending each of them again.
+    session.terminal.grid().feed(&b"filler\r\n".repeat(40));
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+        panic!("changed content must produce a delta");
+    };
+    replica.apply(&delta);
+    session.terminal.grid().feed(b"one more row\r\n");
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+        panic!("changed content must produce a delta");
+    };
+    assert_eq!(delta.scrolled, 1);
+    assert!(
+        delta.rows_replaced.len() <= 2,
+        "a scrolled line replaced {} rows",
+        delta.rows_replaced.len()
+    );
+    replica.apply(&delta);
+    assert!(difference(&replica, &host_frame(&session.terminal)).is_none());
     let start = start + Duration::from_millis(32);
     let chunk = b"y\r\n".repeat(10_000);
     let mut bytes = 0;

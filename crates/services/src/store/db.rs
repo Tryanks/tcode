@@ -17,10 +17,36 @@ use turso::{Builder, Connection, Database, Row, Value};
 
 /// `PRAGMA user_version` of a completed store. A staged database keeps 0
 /// until its last write, so a file at the final name with 0 was never
-/// finished, and a larger value was written by a newer Tcode.
-pub(super) const SCHEMA_VERSION: i64 = 1;
+/// finished, and a larger value was written by a newer Tcode. A build that
+/// knows only [`V1_VERSION`] refuses this one, so it never shows a store
+/// whose threads are still moving out of the file it knew.
+pub(super) const SCHEMA_VERSION: i64 = 3;
 
-const SCHEMA: &str = "
+/// Every thread's log in one table keyed by `thread << 32 | position`, so a
+/// log is one contiguous range of the rowid tree.
+pub(super) const SCHEMA: &str = "
+CREATE TABLE projects (id TEXT PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE kept_worktrees (path TEXT PRIMARY KEY);
+CREATE TABLE threads (
+    key INTEGER PRIMARY KEY,
+    id TEXT NOT NULL UNIQUE,
+    revision BLOB NOT NULL,
+    compacted INTEGER NOT NULL,
+    old_id TEXT,
+    old_end INTEGER NOT NULL DEFAULT 0,
+    moved INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE events (key INTEGER PRIMARY KEY, line BLOB NOT NULL);
+CREATE TABLE event_refs (key INTEGER PRIMARY KEY, hashes BLOB NOT NULL);
+CREATE TABLE codec_dicts (id INTEGER PRIMARY KEY, dict BLOB NOT NULL);
+";
+
+/// The version and schema of the store before [`SCHEMA_VERSION`]: an
+/// older build's `tcode.db`, and what the JSONL migration still produces.
+pub(super) const V1_VERSION: i64 = 1;
+
+pub(super) const V1_SCHEMA: &str = "
 CREATE TABLE projects (id TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE sessions (id TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE events (
@@ -30,12 +56,6 @@ CREATE TABLE events (
     PRIMARY KEY (session_id, position)
 );
 ";
-
-/// Worktrees whose thread was deleted with "keep": the orphan sweep leaves
-/// them. Added to version 1 without a version change, since an older build
-/// that ignores the table loses nothing, so every open creates it if missing.
-pub(super) const KEPT_WORKTREES: &str =
-    "CREATE TABLE IF NOT EXISTS kept_worktrees (path TEXT PRIMARY KEY)";
 
 /// A failure after which the connection or database can no longer be
 /// trusted; the store stops serving every handle once it sees one.
@@ -69,10 +89,10 @@ pub(super) struct Db {
 }
 
 impl Db {
-    /// Open an existing database file, or create an empty one with the schema
-    /// when `create` is set (only ever on the staging path).
-    pub(super) fn open(path: &Path, create: bool) -> io::Result<Self> {
-        if !create && !path.is_file() {
+    /// Open an existing database file, or create an empty one with `schema`
+    /// (only ever on a staging path).
+    pub(super) fn open(path: &Path, schema: Option<&str>) -> io::Result<Self> {
+        if schema.is_none() && !path.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("{} does not exist", path.display()),
@@ -119,8 +139,8 @@ impl Db {
                     path.display()
                 )));
             }
-            if create {
-                block_on(writer.execute_batch(SCHEMA))
+            if let Some(schema) = schema {
+                block_on(writer.execute_batch(schema))
                     .map_err(|error| sql_error(path, "create schema", error))?;
             }
         }

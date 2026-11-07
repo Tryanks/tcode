@@ -1,7 +1,7 @@
 mod capture;
-mod focus;
 mod input;
 mod map;
+mod overlay;
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -33,7 +33,6 @@ use self::map::{
     PatternSupport, actions_for_patterns, frame_from_uia_rect, role_for_control_type,
     root_kind_for_control_type,
 };
-use focus::{CursorGuard, ForegroundGuard};
 
 const MAX_DEPTH: usize = 18;
 const MAX_NODES: usize = 3_000;
@@ -105,6 +104,23 @@ pub fn perform_action(
     root: &RootInfo,
     request: &ActionRequest,
 ) -> Result<ActionResult, BackendError> {
+    perform_action_with_feedback(root, request, None, false)
+}
+
+/// `paced` delivers the input only once the agent cursor has reached its point.
+pub(crate) fn perform_action_with_feedback(
+    root: &RootInfo,
+    request: &ActionRequest,
+    feedback: Option<&crate::feedback::FeedbackRun>,
+    paced: bool,
+) -> Result<ActionResult, BackendError> {
+    reflect_overlay(root, request, feedback, paced).wait();
+    if feedback.is_some_and(|run| !run.is_current()) {
+        return Ok(ActionResult::didnt(
+            "computer-use action cancelled",
+            Delivery::None,
+        ));
+    }
     match request.kind {
         ActionKind::Press | ActionKind::Click => {
             if request.kind == ActionKind::Press
@@ -128,23 +144,17 @@ pub fn perform_action(
                             ));
                         };
                         let (x, y) = frame.center();
-                        let _cursor_guard = CursorGuard::acquire();
-                        let _foreground_guard = ForegroundGuard::acquire(root);
-                        input::click(x, y, super::MouseButton::Left, 1)?;
-                        ActionResult::unknown(
-                            format!("{uia_error}; uiautomation mouse events were posted instead"),
-                            Delivery::ForegroundHid,
+                        posted(
+                            input::click(root, x, y, super::MouseButton::Left, 1),
+                            format!("{uia_error}; {MOUSE_MESSAGES} instead"),
                         )
                     }
                 });
             }
             let (x, y) = action_point(root, request)?;
-            let _cursor_guard = CursorGuard::acquire();
-            let _foreground_guard = ForegroundGuard::acquire(root);
-            input::click(x, y, request.button, request.click_count)?;
-            Ok(ActionResult::unknown(
-                "uiautomation mouse events were posted",
-                Delivery::ForegroundHid,
+            Ok(posted(
+                input::click(root, x, y, request.button, request.click_count),
+                MOUSE_MESSAGES.to_string(),
             ))
         }
         ActionKind::SetText => {
@@ -155,33 +165,20 @@ pub fn perform_action(
             match target.set_text(text) {
                 Ok(message) => Ok(ActionResult::worked(message, Delivery::Ax)),
                 Err(uia_error) => {
-                    let focus_failed = target.focus().is_err();
-                    let click_point = if focus_failed {
-                        let frame = target.frame();
-                        if !frame.has_area() {
-                            return Ok(ActionResult::didnt(
-                                format!(
-                                    "{uia_error}; the target also rejected focus and has no clickable frame"
-                                ),
-                                Delivery::None,
-                            ));
-                        }
-                        Some(frame.center())
-                    } else {
-                        None
-                    };
-                    let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-                    let _foreground_guard = ForegroundGuard::acquire(root);
-                    if let Some((x, y)) = click_point {
-                        input::click(x, y, super::MouseButton::Left, 1)?;
+                    if let Err(failure) = focus_for_keyboard(root, &target) {
+                        return Ok(ActionResult::didnt(
+                            format!("{uia_error}; {failure}"),
+                            Delivery::None,
+                        ));
                     }
-                    input::keypress(&["ctrl+a".into()])?;
-                    input::type_text(text)?;
-                    Ok(ActionResult::unknown(
+                    Ok(posted(
+                        input::keyboard_window(root).and_then(|window| {
+                            input::select_all(window)?;
+                            input::type_text(window, text)
+                        }),
                         format!(
-                            "{uia_error}; uiautomation keyboard replacement events were posted instead"
+                            "{uia_error}; an EM_SETSEL select-all, which only standard edit controls honour, and the text as WM_CHAR messages were posted to the target's focused window instead"
                         ),
-                        Delivery::ForegroundHid,
                     ))
                 }
             }
@@ -190,64 +187,42 @@ pub fn perform_action(
             let text = request.text.as_deref().ok_or_else(|| {
                 BackendError::new(BackendErrorCode::InvalidAction, "type_text requires text")
             })?;
-            let click_point = if request.target_path.is_some() {
+            if request.target_path.is_some() {
                 let target = target(root, request)?;
-                if target.focus().is_err() {
-                    let frame = target.frame();
-                    if !frame.has_area() {
-                        return Ok(ActionResult::didnt(
-                            "target rejected focus and has no clickable frame",
-                            Delivery::None,
-                        ));
-                    }
-                    Some(frame.center())
-                } else {
-                    None
+                if let Err(failure) = focus_for_keyboard(root, &target) {
+                    return Ok(ActionResult::didnt(failure, Delivery::None));
                 }
-            } else {
-                None
-            };
-            let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-            let _foreground_guard = ForegroundGuard::acquire(root);
-            if let Some((x, y)) = click_point {
-                input::click(x, y, super::MouseButton::Left, 1)?;
             }
-            input::type_text(text)?;
-            Ok(ActionResult::unknown(
-                "uiautomation Unicode keyboard events were posted",
-                Delivery::ForegroundHid,
+            Ok(posted(
+                input::keyboard_window(root).and_then(|window| input::type_text(window, text)),
+                "the text was posted as WM_CHAR messages to the target's focused window".into(),
             ))
         }
         ActionKind::Keypress => {
             let keys = request.keys.as_deref().ok_or_else(|| {
                 BackendError::new(BackendErrorCode::InvalidAction, "keypress requires keys")
             })?;
-            let click_point = if request.target_path.is_some() {
+            if request.target_path.is_some() {
                 let target = target(root, request)?;
-                if target.focus().is_err() {
-                    let frame = target.frame();
-                    if !frame.has_area() {
-                        return Ok(ActionResult::didnt(
-                            "keypress target rejected focus and has no clickable frame",
-                            Delivery::None,
-                        ));
-                    }
-                    Some(frame.center())
-                } else {
-                    None
+                if let Err(failure) = focus_for_keyboard(root, &target) {
+                    return Ok(ActionResult::didnt(failure, Delivery::None));
                 }
-            } else {
-                None
-            };
-            let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-            let _foreground_guard = ForegroundGuard::acquire(root);
-            if let Some((x, y)) = click_point {
-                input::click(x, y, super::MouseButton::Left, 1)?;
             }
-            input::keypress(keys)?;
-            Ok(ActionResult::unknown(
-                "uiautomation keyboard events were posted",
-                Delivery::ForegroundHid,
+            let modified = super::parse_key_chord(keys).is_ok_and(|chord| {
+                chord.modifiers.command
+                    || chord.modifiers.control
+                    || chord.modifiers.option
+                    || chord.modifiers.shift
+            });
+            let mut message = "key messages were posted to the target's focused window".to_string();
+            if modified {
+                message.push_str(
+                    "; posted messages leave the target's key state unchanged, so an application that reads modifiers with GetKeyState sees the key without them",
+                );
+            }
+            Ok(posted(
+                input::keyboard_window(root).and_then(|window| input::keypress(window, keys)),
+                message,
             ))
         }
         ActionKind::Scroll => {
@@ -264,38 +239,18 @@ pub fn perform_action(
             match target.scroll(scroll_x, scroll_y) {
                 Ok(message) => Ok(ActionResult::worked(message, Delivery::Ax)),
                 Err(uia_error) => {
-                    let frame = target.frame();
-                    let focus_failed = target.focus().is_err();
-                    let mouse_action = if focus_failed {
-                        if !frame.has_area() {
-                            return Ok(ActionResult::didnt(
-                                format!(
-                                    "{uia_error}; the target rejected focus and has no frame for keyboard fallback"
-                                ),
-                                Delivery::None,
-                            ));
-                        }
-                        Some((frame.center(), true))
-                    } else if frame.has_area() {
-                        Some((frame.center(), false))
-                    } else {
-                        None
-                    };
-                    let _cursor_guard = mouse_action.map(|_| CursorGuard::acquire());
-                    let _foreground_guard = ForegroundGuard::acquire(root);
-                    if let Some(((x, y), should_click)) = mouse_action {
-                        if should_click {
-                            input::click(x, y, super::MouseButton::Left, 1)?;
-                        } else {
-                            input::move_mouse(x, y)?;
-                        }
-                    }
-                    input::scroll_with_keyboard(scroll_x, scroll_y)?;
-                    Ok(ActionResult::unknown(
+                    let point = action_point(root, request)
+                        .ok()
+                        .or_else(|| {
+                            let frame = target.frame();
+                            frame.has_area().then(|| frame.center())
+                        })
+                        .unwrap_or_else(|| root.frame.center());
+                    Ok(posted(
+                        input::scroll(root, point, scroll_x, scroll_y),
                         format!(
-                            "{uia_error}; uiautomation keyboard scroll events were posted instead"
+                            "{uia_error}; mouse-wheel messages were posted to the target window instead"
                         ),
-                        Delivery::ForegroundHid,
                     ))
                 }
             }
@@ -304,22 +259,94 @@ pub fn perform_action(
             let path = request.path.as_deref().ok_or_else(|| {
                 BackendError::new(BackendErrorCode::InvalidAction, "drag requires a path")
             })?;
-            let _cursor_guard = CursorGuard::acquire();
-            let _foreground_guard = ForegroundGuard::acquire(root);
-            input::drag(path, request.button)?;
-            Ok(ActionResult::unknown(
-                "uiautomation mouse drag events were posted",
-                Delivery::ForegroundHid,
+            Ok(posted(
+                input::drag(root, path, request.button),
+                "mouse drag messages were posted to the target window; an OLE drag-and-drop follows the real pointer and does not start from them".into(),
             ))
         }
         ActionKind::MoveMouse => {
             let (x, y) = action_point(root, request)?;
-            let _foreground_guard = ForegroundGuard::acquire(root);
-            input::move_mouse(x, y)?;
-            Ok(ActionResult::unknown(
-                "a uiautomation mouse-move event was posted",
-                Delivery::ForegroundHid,
+            Ok(posted(
+                input::move_mouse(root, x, y),
+                "a mouse-move message was posted to the target window; hover that the application tracks from the real pointer, such as TrackMouseEvent tooltips, may not appear".into(),
             ))
+        }
+    }
+}
+
+const MOUSE_MESSAGES: &str = "mouse messages were posted to the target window";
+
+/// Posted window messages are never confirmed: the result is `unknown` once
+/// they are queued.
+fn posted(delivery: Result<(), BackendError>, message: String) -> ActionResult {
+    match delivery {
+        Ok(()) => ActionResult::unknown(message, Delivery::WindowMessage),
+        Err(error) => ActionResult::didnt(
+            format!("window-message delivery failed: {error}"),
+            Delivery::None,
+        ),
+    }
+}
+
+/// UI Automation focus first; when the element refuses it, a click posted to
+/// its centre, which most controls take focus from.
+fn focus_for_keyboard(root: &RootInfo, target: &Target) -> Result<(), String> {
+    if target.focus().is_ok() {
+        return Ok(());
+    }
+    let frame = target.frame();
+    if !frame.has_area() {
+        return Err("target rejected focus and has no clickable frame".into());
+    }
+    let (x, y) = frame.center();
+    input::click(root, x, y, super::MouseButton::Left, 1).map_err(|error| {
+        format!("target rejected focus, and posting a focusing click failed: {error}")
+    })
+}
+
+fn reflect_overlay(
+    root: &RootInfo,
+    request: &ActionRequest,
+    feedback: Option<&crate::feedback::FeedbackRun>,
+    paced: bool,
+) -> overlay::CursorArrival {
+    let Some(publication) = overlay::begin_action(feedback.map(|run| run.ticket())) else {
+        return overlay::CursorArrival::none();
+    };
+    use overlay::OverlayActionKind as K;
+    match request.kind {
+        ActionKind::Drag => {
+            if let Some(path) = request.path.as_ref()
+                && let (Some(first), Some(last)) = (path.first(), path.last())
+            {
+                overlay::show_drag(
+                    publication,
+                    root.window_id,
+                    (first[0], first[1]),
+                    (last[0], last[1]),
+                    paced,
+                )
+            } else {
+                overlay::CursorArrival::none()
+            }
+        }
+        ActionKind::TypeText | ActionKind::SetText | ActionKind::Keypress => {
+            // Untargeted typing and key chords keep the cursor where the
+            // previous action on this window left it.
+            let point = action_point(root, request).ok();
+            overlay::show_action(publication, root.window_id, K::Point, point, paced)
+        }
+        other => {
+            let kind = match other {
+                ActionKind::Scroll | ActionKind::MoveMouse => K::Point,
+                _ => K::Click,
+            };
+            match action_point(root, request) {
+                Ok(point) => {
+                    overlay::show_action(publication, root.window_id, kind, Some(point), paced)
+                }
+                Err(_) => overlay::CursorArrival::none(),
+            }
         }
     }
 }
@@ -1145,3 +1172,5 @@ fn nonempty(value: String) -> Option<String> {
 fn backend_error(code: BackendErrorCode, message: impl Into<String>) -> BackendError {
     BackendError::new(code, message)
 }
+
+pub(crate) use overlay::{clear as clear_feedback, set_enabled as set_feedback_enabled};

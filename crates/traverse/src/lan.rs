@@ -7,7 +7,7 @@
 //! tried. A candidate address is never authorization: the QUIC handshake
 //! verifies the machine's key. The device publishes nothing.
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
@@ -20,7 +20,7 @@ use std::{
 
 use futures_lite::{Stream, stream::Boxed};
 use iroh::{
-    EndpointId,
+    EndpointAddr, EndpointId, Watcher,
     address_lookup::{AddressLookup, EndpointInfo, Error, Item},
 };
 use mdns_sd::{IfKind, RecvTimeoutError, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperties};
@@ -36,49 +36,6 @@ pub(crate) const MAX_NAME_BYTES: usize = 64;
 const TXT_VERSION: &str = "1";
 /// How long one resolve browses DNS-SD.
 pub const BROWSE_TIME: Duration = Duration::from_millis(2_500);
-/// How often the device compares its interface addresses with the last
-/// snapshot; see [`InterfaceWatch`].
-pub(crate) const INTERFACE_POLL: Duration = Duration::from_secs(5);
-
-/// One usable interface address of this device with its real prefix.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct LocalNetwork {
-    pub name: String,
-    pub ip: IpAddr,
-    pub prefix: u8,
-}
-
-/// This device's usable addresses: no loopback, no link-local, sorted and
-/// deduplicated so two snapshots compare as sets.
-pub(crate) fn local_networks() -> Vec<LocalNetwork> {
-    let interfaces = match if_addrs::get_if_addrs() {
-        Ok(interfaces) => interfaces,
-        Err(error) => {
-            log::debug!("local network enumeration failed: {error}");
-            return Vec::new();
-        }
-    };
-    let mut networks: Vec<_> = interfaces
-        .into_iter()
-        .filter(|interface| interface.is_oper_up() && usable_address(interface.ip()))
-        .map(|interface| match interface.addr {
-            if_addrs::IfAddr::V4(addr) => LocalNetwork {
-                name: interface.name,
-                ip: addr.ip.into(),
-                prefix: addr.prefixlen,
-            },
-            if_addrs::IfAddr::V6(addr) => LocalNetwork {
-                name: interface.name,
-                ip: addr.ip.into(),
-                prefix: addr.prefixlen,
-            },
-        })
-        .collect();
-    networks.sort();
-    networks.dedup();
-    networks
-}
-
 /// An address a machine can be dialled at from another host.
 fn usable_address(address: IpAddr) -> bool {
     !address.is_loopback()
@@ -90,28 +47,26 @@ fn usable_address(address: IpAddr) -> bool {
         }
 }
 
-/// Detects when this device's address set changes — another Wi-Fi network,
-/// a hotspot, a new DHCP lease — from periodic [`local_networks`] snapshots.
-pub(crate) struct InterfaceWatch {
-    networks: Vec<LocalNetwork>,
-}
-
-impl InterfaceWatch {
-    pub(crate) fn new(networks: Vec<LocalNetwork>) -> Self {
-        let mut watch = Self {
-            networks: Vec::new(),
-        };
-        watch.observe(networks);
-        watch
-    }
-
-    /// Record a snapshot; true when the address set differs from the last one.
-    pub(crate) fn observe(&mut self, mut networks: Vec<LocalNetwork>) -> bool {
-        networks.sort();
-        networks.dedup();
-        let changed = networks != self.networks;
-        self.networks = networks;
-        changed
+/// Wait until the endpoint's own IP addresses differ from `known`, which it
+/// then holds; a change of relay alone does not count. iroh's network
+/// monitor updates them when an interface or its addresses change — another
+/// Wi-Fi network, a hotspot, a new lease. `None` once the endpoint is gone.
+pub(crate) async fn address_change(
+    addresses: &mut impl Watcher<Value = EndpointAddr>,
+    known: &mut BTreeSet<SocketAddr>,
+) -> Option<()> {
+    loop {
+        let current: BTreeSet<SocketAddr> = addresses
+            .updated()
+            .await
+            .ok()?
+            .ip_addrs()
+            .copied()
+            .collect();
+        if current != *known {
+            *known = current;
+            return Some(());
+        }
     }
 }
 
@@ -153,17 +108,23 @@ fn advertised_id(txt: &TxtProperties) -> Option<EndpointId> {
 pub(crate) struct Advertisement {
     daemon: ServiceDaemon,
     fullname: String,
+    recheck: tokio::task::AbortHandle,
 }
 
 impl Advertisement {
     /// Advertise `id` at UDP `port` on every non-loopback interface. One SRV
     /// record carries one port, so when the IPv6 socket is on another port
     /// only A records are published.
+    ///
+    /// mdns-sd reads the interfaces again only on its IP check, every 5 s by
+    /// default. The check runs instead when the endpoint's `addresses`
+    /// change: the interval is set to 1 s for one check, then off again.
     pub(crate) fn start(
         id: &EndpointId,
         name: &str,
         port: u16,
         ipv6: bool,
+        mut addresses: impl Watcher<Value = EndpointAddr> + Send + 'static,
     ) -> Result<Self, mdns_sd::Error> {
         let label = instance_label(id);
         let info = ServiceInfo::new(
@@ -183,18 +144,39 @@ impl Advertisement {
             if !ipv6 {
                 daemon.disable_interface(IfKind::IPv6)?;
             }
+            daemon.set_ip_check_interval(0)?;
             daemon.register(info)
         };
         if let Err(error) = configure() {
             let _ = daemon.shutdown();
             return Err(error);
         }
-        Ok(Self { daemon, fullname })
+        let checked = daemon.clone();
+        let recheck = runtime()
+            .spawn(async move {
+                let mut known = addresses.get().ip_addrs().copied().collect();
+                while address_change(&mut addresses, &mut known).await.is_some() {
+                    if checked.set_ip_check_interval(1).is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1_500)).await;
+                    if checked.set_ip_check_interval(0).is_err() {
+                        return;
+                    }
+                }
+            })
+            .abort_handle();
+        Ok(Self {
+            daemon,
+            fullname,
+            recheck,
+        })
     }
 }
 
 impl Drop for Advertisement {
     fn drop(&mut self) {
+        self.recheck.abort();
         // The goodbye packet needs the daemon alive for a moment.
         if let Ok(done) = self.daemon.unregister(&self.fullname) {
             let _ = done.recv_timeout(Duration::from_secs(1));
@@ -590,14 +572,6 @@ fn browse_dns_sd(id: EndpointId, sender: &async_channel::Sender<Item>, cancel: &
 mod tests {
     use super::*;
 
-    fn network(name: &str, ip: &str, prefix: u8) -> LocalNetwork {
-        LocalNetwork {
-            name: name.into(),
-            ip: ip.parse().unwrap(),
-            prefix,
-        }
-    }
-
     #[test]
     fn txt_carries_the_full_id_and_a_bounded_name_and_parses_only_its_own_version() {
         let id = iroh::SecretKey::from_bytes(&[7; 32]).public();
@@ -627,26 +601,5 @@ mod tests {
         assert_eq!(advertised_id(&txt(&[("id", &hex)])), None);
         assert_eq!(advertised_id(&txt(&[("v", "1"), ("id", &hex[1..])])), None);
         assert_eq!(advertised_id(&txt(&[("v", "1"), ("id", "not hex")])), None);
-    }
-
-    #[test]
-    fn interface_watch_ignores_order_and_reports_added_or_lost_addresses() {
-        let mut watch = InterfaceWatch::new(vec![
-            network("en0", "192.168.1.22", 24),
-            network("en0", "10.0.0.5", 24),
-        ]);
-        assert!(!watch.observe(vec![
-            network("en0", "10.0.0.5", 24),
-            network("en0", "192.168.1.22", 24)
-        ]));
-        assert!(watch.observe(vec![network("en0", "10.0.0.5", 24)]));
-        assert!(!watch.observe(vec![
-            network("en0", "10.0.0.5", 24),
-            network("en0", "10.0.0.5", 24)
-        ]));
-        assert!(watch.observe(vec![
-            network("en0", "10.0.0.5", 24),
-            network("en0", "172.20.10.3", 28)
-        ]));
     }
 }

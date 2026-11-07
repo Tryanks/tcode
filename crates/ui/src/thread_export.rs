@@ -65,7 +65,7 @@ fn open_delivery_dialog(
     let summary = crate::tr!(
         "export.ready",
         name = name.clone(),
-        size = format_size(artifact.bytes.len())
+        size = format_size(artifact.bytes.len() as u64)
     )
     .into_owned();
     let can_download = store.read(cx).supports_artifact_delivery();
@@ -219,7 +219,7 @@ fn save_to_disk(
 ) {
 }
 
-pub fn format_size(bytes: usize) -> String {
+pub fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
