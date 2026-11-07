@@ -1774,17 +1774,18 @@ impl AppState {
         let settings = self.settings.clone();
         let secrets = self.settings_store.clone();
         cx.unblock(move || {
-            let provider = settings
+            let profile = settings
                 .resolved_profile(&profile_id)
-                .ok_or("unknown profile")?
-                .kind;
+                .ok_or("unknown profile")?;
+            let provider = profile.kind;
+            let binary_path = profile.settings.binary_path;
             let launch_env = launch_env_for_profile(
                 &settings,
                 &profile_id,
                 secrets.profile_secrets(&Settings::harness_secret_id(provider)),
                 secrets.profile_secrets(&profile_id),
             );
-            agent::native_mcp::servers(provider, &launch_env)
+            agent::native_mcp::servers(provider, binary_path, &launch_env)
                 .unwrap_or_else(|| Err("no MCP configuration to read".to_owned()))
         })
     }
