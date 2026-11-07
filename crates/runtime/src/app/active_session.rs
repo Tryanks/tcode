@@ -29,7 +29,7 @@ pub struct QueuedMessage {
     pub(super) options: TurnOptions,
     /// Context-window selection changed while the provider was live.
     pub(super) context_window_changed: Option<u64>,
-    /// Sent on a process still running the settings the thread has since left.
+    /// Sent on a process that still runs settings the thread has left.
     pub(super) kept_settings: bool,
     /// Orchestration callbacks arriving during the same provider-start window
     /// are folded into one wake-up turn. Once that turn is live, later callbacks
@@ -157,9 +157,9 @@ pub struct ActiveSession {
     /// A rewind holds the queue until the user next sends a message, which
     /// goes ahead of it.
     pub(super) queue_held: bool,
-    /// The model the live provider process was actually started with. When the
-    /// user picks a different model we compare against this to decide whether a
-    /// restart is needed before the next turn.
+    /// The model the live provider process actually runs. When the user picks
+    /// a different model we compare against this to decide whether it has to
+    /// change before the next turn.
     pub(super) live_model: Option<String>,
     /// The directory the live provider process was started in; a move to another
     /// directory restarts it before the next turn.
@@ -169,6 +169,12 @@ pub struct ActiveSession {
     pub(super) live_profile_id: Option<String>,
     pub(super) live_option_selections: Vec<OptionSelection>,
     pub(super) confirmed_option_selections: Vec<OptionSelection>,
+    /// Sent to the live process, which has yet to answer. Dispatch waits: the
+    /// message after a change is the one that asked for it.
+    pub(super) settings_apply_in_flight: Option<LiveSettings>,
+    /// What the live process last refused to take where it stands; only a
+    /// restart brings these.
+    pub(super) settings_refused: Option<LiveSettings>,
     /// Draft-only: run in the current checkout or a new dedicated
     /// worktree. Chosen in the checkout row before the first send; locked after.
     pub draft_workspace: WorkspaceMode,
@@ -231,6 +237,13 @@ pub(super) struct PendingSteer {
     pub(super) origin: Option<MessageOrigin>,
 }
 
+/// The settings a live process can be asked to take without a restart.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct LiveSettings {
+    pub(super) model: Option<String>,
+    pub(super) option_selections: Vec<OptionSelection>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct PendingRelay {
     pub(super) from_provider: ProviderKind,
@@ -266,6 +279,8 @@ impl ActiveSession {
             live_profile_id,
             live_option_selections: Vec::new(),
             confirmed_option_selections: Vec::new(),
+            settings_apply_in_flight: None,
+            settings_refused: None,
             draft_workspace: WorkspaceMode::LocalCheckout,
             preparing_worktree: false,
             queue: Vec::new(),
@@ -295,7 +310,7 @@ impl ActiveSession {
     }
 
     /// Whether the live provider is running a different model than the one now
-    /// selected in `meta.model` (so the next turn must restart the provider).
+    /// selected in `meta.model`.
     pub(super) fn model_changed_while_live(&self) -> bool {
         matches!(self.runtime, Runtime::Live(_)) && self.meta.model != self.live_model
     }
@@ -315,7 +330,8 @@ impl ActiveSession {
             .or(Some(descriptor))
     }
 
-    pub(super) fn options_changed_while_live(&self) -> bool {
+    /// The permission selection changed in a way only a restart applies.
+    fn permission_restart_pending(&self) -> bool {
         if !matches!(self.runtime, Runtime::Live(_)) {
             return false;
         }
@@ -325,7 +341,7 @@ impl ActiveSession {
                 id.as_str()
             }
         });
-        let permission_restart = permission.as_ref().is_some_and(|descriptor| {
+        permission.as_ref().is_some_and(|descriptor| {
             let default = match descriptor {
                 OptionDescriptor::Select { default_value, .. } => {
                     default_value.clone().map(serde_json::Value::String)
@@ -351,10 +367,23 @@ impl ActiveSession {
                     ..
                 }
             ) && value(&self.meta.option_selections) != value(&self.live_option_selections)
-        });
+        })
+    }
+
+    pub(super) fn options_changed_while_live(&self) -> bool {
+        if !matches!(self.runtime, Runtime::Live(_)) {
+            return false;
+        }
+        let permission_restart = self.permission_restart_pending();
         if self.meta.provider.caps().options_apply_live {
             return permission_restart;
         }
+        let permission = self.permission_descriptor();
+        let permission_id = permission.as_ref().map(|descriptor| match descriptor {
+            OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. } => {
+                id.as_str()
+            }
+        });
         let ignore_effort = self.meta.provider.caps().per_turn_effort;
         let model_selections = |selections: &[OptionSelection]| {
             let selections: Vec<_> = selections
@@ -382,6 +411,42 @@ impl ActiveSession {
             || self.options_changed_while_live()
             || self.cwd_changed_while_live()
             || self.profile_changed_while_live()
+    }
+
+    fn selected_settings(&self) -> LiveSettings {
+        LiveSettings {
+            model: self.meta.model.clone(),
+            option_selections: self.meta.option_selections.clone(),
+        }
+    }
+
+    /// The live process differs from the thread only in what it can be asked
+    /// to take where it stands, and has not refused these settings.
+    fn settings_apply_due(&self) -> bool {
+        self.meta.provider.caps().live_settings
+            && (self.model_changed_while_live() || self.options_changed_while_live())
+            && !self.cwd_changed_while_live()
+            && !self.profile_changed_while_live()
+            && !self.permission_restart_pending()
+            && self.settings_refused.as_ref() != Some(&self.selected_settings())
+    }
+
+    /// The live process cannot run this thread's settings without a restart.
+    pub(super) fn restart_required(&self) -> bool {
+        self.launch_settings_changed_while_live() && !self.settings_apply_due()
+    }
+
+    /// The live process's answer to [`Self::settings_apply_in_flight`].
+    pub(super) fn settle_settings_apply(&mut self, applied: bool) {
+        let Some(settings) = self.settings_apply_in_flight.take() else {
+            return;
+        };
+        if applied {
+            self.live_model = settings.model;
+            self.live_option_selections = settings.option_selections;
+        } else {
+            self.settings_refused = Some(settings);
+        }
     }
 
     /// Give up carrying the native session to the account the thread switched to (the copy
@@ -419,7 +484,7 @@ impl ActiveSession {
     /// the queue: background work runs for as long as it likes, so a message
     /// goes out beside it on the process as it is ([`Self::dispatch_next_pending`]).
     pub(super) fn settings_restart_deferred(&self) -> bool {
-        self.launch_settings_changed_while_live()
+        self.restart_required()
             && (self.turn_in_flight
                 || self.background_task_count > 0
                 || self.delivery_in_flight.is_some())
@@ -430,6 +495,7 @@ impl ActiveSession {
         if self.queue_held
             || self.turn_in_flight
             || self.delivery_in_flight.is_some()
+            || self.settings_apply_in_flight.is_some()
             || !matches!(self.runtime, Runtime::Live(_))
         {
             return None;
@@ -472,6 +538,7 @@ impl ActiveSession {
         }
         self.runtime = Runtime::Idle;
         self.delivery_in_flight = None;
+        self.settings_apply_in_flight = None;
         self.turn_in_flight = false;
         self.interrupt_requested = false;
         self.requested_command = None;
@@ -484,6 +551,7 @@ impl ActiveSession {
     pub(super) fn mark_dead(&mut self) {
         self.runtime = Runtime::Idle;
         self.delivery_in_flight = None;
+        self.settings_apply_in_flight = None;
         self.turn_in_flight = false;
         self.interrupt_requested = false;
         self.requested_command = None;
@@ -728,6 +796,17 @@ impl ActiveSession {
         let Runtime::Live(commands) = &self.runtime else {
             return Ok(false);
         };
+        if self.settings_apply_due() {
+            let settings = self.selected_settings();
+            commands
+                .try_send(SessionCommand::ApplySettings {
+                    model: settings.model.clone(),
+                    option_selections: settings.option_selections.clone(),
+                })
+                .map_err(|_| ())?;
+            self.settings_apply_in_flight = Some(settings);
+            return Ok(false);
+        }
         let text = send.wire_text(&self.provider_commands);
         commands
             .try_send(SessionCommand::SendTurn {
@@ -737,7 +816,7 @@ impl ActiveSession {
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
-        let kept_settings = self.launch_settings_changed_while_live();
+        let kept_settings = self.restart_required();
         if let Some(message) = self.queue.iter_mut().find(|message| message.id == send.id) {
             message.kept_settings = kept_settings;
         }

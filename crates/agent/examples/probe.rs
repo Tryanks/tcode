@@ -15,7 +15,9 @@
 //! as tcode registers its own), `--linger <seconds>` (stay open until no turn has
 //! run for that long, to see turns the agent starts itself), `--follow-up
 //! <seconds> <prompt>` (send another turn that long after the first completes,
-//! running turn or not), `--interrupt-after <seconds>`, `--steer <message>`, and
+//! running turn or not), `--apply-settings <model> <effort>` (ask the running
+//! process to take them just before that follow-up), `--interrupt-after
+//! <seconds>`, `--steer <message>`, and
 //! `--image <path>`. Only one of the last three may be used.
 
 use std::path::PathBuf;
@@ -269,6 +271,11 @@ fn main() {
             "--goal" => set_mode(&mut probe_mode, ProbeMode::Goal),
             "--leave-questions" => leave_questions = true,
             "--plan-feedback" => plan_feedback = args.next(),
+            "--apply-settings" => {
+                let model = args.next().unwrap_or_else(|| usage());
+                let effort = args.next().unwrap_or_else(|| usage());
+                continuation.apply = Some((model, effort));
+            }
             "--linger" => {
                 let seconds = args.next().and_then(|value| value.parse().ok());
                 continuation.linger = Some(Duration::from_secs(seconds.unwrap_or_else(|| usage())));
@@ -377,6 +384,7 @@ struct Resumption {
 struct Continuation {
     linger: Option<Duration>,
     follow_up: Option<(Duration, String)>,
+    apply: Option<(String, String)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,6 +500,7 @@ async fn run_probe(
         .linger
         .or(continuation.follow_up.as_ref().map(|_| PHANTOM_TURN_GRACE));
     let mut follow_up = continuation.follow_up;
+    let mut apply = continuation.apply;
     let mut open_until = None;
     let mut running = false;
     let mut closing = false;
@@ -654,8 +663,23 @@ async fn run_probe(
                 if let Some((delay, text)) = follow_up.take() {
                     open_until = Some(Instant::now() + delay + Duration::from_secs(1));
                     let commands = handle.commands.clone();
+                    let apply = apply.take();
                     smol::spawn(async move {
                         smol::Timer::after(delay).await;
+                        if let Some((model, effort)) = apply {
+                            eprintln!("probe: APPLY -> {model} {effort}");
+                            commands
+                                .send(SessionCommand::ApplySettings {
+                                    model: Some(model),
+                                    option_selections: vec![OptionSelection {
+                                        id: "reasoningEffort".into(),
+                                        value: serde_json::json!(effort),
+                                    }],
+                                })
+                                .await
+                                .ok();
+                            smol::Timer::after(Duration::from_secs(1)).await;
+                        }
                         eprintln!("probe: FOLLOW-UP -> {text:?}");
                         commands
                             .send(SessionCommand::SendTurn {

@@ -159,8 +159,7 @@ impl AppState {
                 .get(&session_id)
                 .map(|parked| {
                     (
-                        parked.launch_settings_changed_while_live()
-                            && parked.background_task_count == 0,
+                        parked.restart_required() && parked.background_task_count == 0,
                         matches!(parked.runtime, Runtime::Live(_)),
                         !parked.queue.is_empty(),
                     )
@@ -251,7 +250,7 @@ impl AppState {
         let model_changed = active.model_changed_while_live();
         // A restart would drop the rewind's answer.
         let restart_deferred = active.settings_restart_deferred() || rewinding;
-        if active.launch_settings_changed_while_live() {
+        if active.restart_required() {
             if restart_deferred {
                 log::info!(
                     "deferring provider settings restart (background tasks: {}, delivery pending: {})",
@@ -296,8 +295,7 @@ impl AppState {
 
             // Match ordinary sends when a launch-time selection changed while
             // the provider was live.
-            if session.launch_settings_changed_while_live() && !session.settings_restart_deferred()
-            {
+            if session.restart_required() && !session.settings_restart_deferred() {
                 session.shutdown_to_idle();
             }
             let should_start = matches!(session.runtime, Runtime::Idle);
@@ -620,10 +618,7 @@ impl AppState {
         };
         parked.turn_in_flight = false;
         let waiting = !parked.queue.is_empty() && !parked.queue_held;
-        if waiting
-            && parked.launch_settings_changed_while_live()
-            && parked.background_task_count == 0
-        {
+        if waiting && parked.restart_required() && parked.background_task_count == 0 {
             parked.shutdown_to_idle();
             self.ensure_session_started(session_id, cx);
             return;

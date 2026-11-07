@@ -4,8 +4,9 @@ impl AppState {
     /// Select a provider-owned `model` (None = provider default) for the active
     /// session and persist it. On an unsent draft the model picker also selects
     /// its provider; an established session remains bound to its provider.
-    /// Takes effect on the next provider (re)start; if a provider is currently
-    /// live, the next `send_turn` restarts it (see `send_turn`).
+    /// Takes effect with the next `send_turn`: a harness with
+    /// [`agent::Caps::live_settings`] takes it where it runs, otherwise the
+    /// provider restarts.
     pub fn set_active_model(
         &mut self,
         target_id: &str,
@@ -173,7 +174,7 @@ impl AppState {
     /// Set (or clear) the persisted value of one option descriptor for the
     /// active session. `value` is a string (select) or bool (boolean); passing
     /// `None` removes the selection so it resolves back to its default. Takes
-    /// effect per the restart machinery (see `send_turn`).
+    /// effect with the next `send_turn`, as [`Self::set_active_model`] does.
     pub fn set_active_option(
         &mut self,
         target_id: &str,

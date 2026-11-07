@@ -56,6 +56,7 @@ impl AppState {
         active.live_profile_id = active.meta.profile_id.clone();
         active.live_option_selections = active.meta.option_selections.clone();
         active.confirmed_option_selections.clear();
+        active.settings_refused = None;
 
         let meta = active.meta.clone();
         let settings = self.settings.clone();

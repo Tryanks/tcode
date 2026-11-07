@@ -327,9 +327,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let binary = crate::resolve_binary(opts.binary_path.as_deref(), "claude")?;
     let binary = binary.to_string_lossy().into_owned();
 
-    // Resolve model-scoped launch options from the persisted selections
-    // (effort/context/fast/thinking are launch-time only; mid-session changes
-    // ride the resume-restart machinery).
+    // Resolve model-scoped launch options from the persisted selections.
     let launch = ClaudeLaunchOptions::resolve(opts.model.as_deref(), &opts.option_selections);
     let launch_permission_mode = opts
         .option_selections
@@ -496,6 +494,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
 
     let session_config = SessionConfig {
         claude_dir: config_dir(&opts.launch_env),
+        launch,
         resumed: opts.resume.is_some(),
     };
     smol::spawn(actor_loop(
@@ -676,6 +675,7 @@ fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
 }
 
 /// Model-scoped launch flags resolved from the session's option selections.
+#[derive(Clone, Debug, Default)]
 struct ClaudeLaunchOptions {
     /// Model id with the manifest's context-window suffix (e.g. `[1m]`) only
     /// when the selected window exceeds what the bare slug already opens.
@@ -685,6 +685,12 @@ struct ClaudeLaunchOptions {
     effort: Option<String>,
     /// `--settings` JSON string (fastMode / ultracode / alwaysThinkingEnabled).
     settings_json: Option<String>,
+    thinking: Option<bool>,
+    fast_mode: bool,
+    ultracode: bool,
+    auto_compact_window: Option<u64>,
+    /// The window is the bare slug's own, so `auto_compact_window` adds nothing.
+    native_window: bool,
 }
 
 fn launch_settings_json(
@@ -765,13 +771,58 @@ impl ClaudeLaunchOptions {
             model_id,
             effort,
             settings_json,
+            thinking,
+            fast_mode,
+            ultracode,
+            auto_compact_window,
+            native_window: entry.and_then(CatalogModel::default_context_window) == Some(window),
         }
     }
+
+    /// `apply_flag_settings` keys that differ from `self` in `target`; `None`
+    /// clears a key.
+    fn flag_changes(&self, target: &Self) -> serde_json::Map<String, Value> {
+        let mut flags = serde_json::Map::new();
+        if self.effort != target.effort {
+            flags.insert("effortLevel".into(), json!(target.effort));
+        }
+        if self.fast_mode != target.fast_mode {
+            flags.insert("fastMode".into(), json!(target.fast_mode.then_some(true)));
+        }
+        if self.ultracode != target.ultracode {
+            flags.insert("ultracode".into(), json!(target.ultracode));
+        }
+        flags
+    }
+
+    /// Whether `target` differs in a setting that only reaches a new process.
+    /// `alwaysThinkingEnabled` and `autoCompactWindow` land in the flag layer
+    /// but change nothing there (2.1.318: `thinking` stays adaptive, and the
+    /// compaction a launch flag brings on never comes).
+    fn needs_restart_for(&self, target: &Self) -> bool {
+        let window_is_kept = self.auto_compact_window == target.auto_compact_window
+            || (self.auto_compact_window.is_none() && target.native_window);
+        self.thinking != target.thinking || !window_is_kept
+    }
 }
+
+/// A live settings change the CLI has yet to answer. `set_model` validates the
+/// model against the API first, so the flags wait for its answer.
+struct PendingSettings {
+    request_id: String,
+    target: ClaudeLaunchOptions,
+    flags: Option<Value>,
+    deadline: std::time::Instant,
+}
+
+/// How long the CLI gets to answer before the change takes a restart instead:
+/// the queue is held meanwhile.
+const LIVE_SETTINGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Per-session config threaded into the actor loop / mapper.
 struct SessionConfig {
     claude_dir: Option<PathBuf>,
+    launch: ClaudeLaunchOptions,
     /// The transcript already holds history this process did not write.
     resumed: bool,
 }
@@ -858,6 +909,7 @@ async fn actor_loop(
 ) {
     let mut mapper = Mapper::new_configured(applied_permission_mode, native_rewind);
     mapper.rewind_preview = rewind_preview;
+    mapper.applied_settings = config.launch.clone();
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
     let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
@@ -872,24 +924,42 @@ async fn actor_loop(
         // Race a UI command against the next stdout line. `or` biases toward the
         // command channel, which is fine: both channels make independent progress.
         let next_goal_read = goal_poll.map(|(next, _)| next);
+        let settings_deadline = mapper
+            .pending_settings
+            .as_ref()
+            .map(|pending| pending.deadline);
+        let timer = |at: Option<std::time::Instant>, sel: Sel| async move {
+            match at {
+                Some(at) => {
+                    smol::Timer::at(at).await;
+                    sel
+                }
+                None => std::future::pending().await,
+            }
+        };
         let sel = smol::future::or(
             async { Sel::Cmd(cmd_rx.recv().await.ok()) },
             smol::future::or(
                 async { Sel::Line(line_rx.recv().await.ok()) },
-                smol::future::or(async { Sel::Tail(tail_rx.recv().await.ok()) }, async {
-                    match next_goal_read {
-                        Some(at) => {
-                            smol::Timer::at(at).await;
-                            Sel::GoalRead
-                        }
-                        None => std::future::pending().await,
-                    }
-                }),
+                smol::future::or(
+                    async { Sel::Tail(tail_rx.recv().await.ok()) },
+                    smol::future::or(
+                        timer(next_goal_read, Sel::GoalRead),
+                        timer(settings_deadline, Sel::SettingsDeadline),
+                    ),
+                ),
             ),
         )
         .await;
 
         match sel {
+            Sel::SettingsDeadline => {
+                log::warn!("claude: no answer to a live settings change");
+                mapper.pending_settings = None;
+                let _ = event_tx
+                    .send(AgentEvent::SettingsApplied { applied: false })
+                    .await;
+            }
             Sel::GoalRead => {
                 if let Some(mut reader) = goal.take() {
                     let (reader, changed) = crate::process::unblock(move || {
@@ -1033,6 +1103,7 @@ async fn actor_loop(
 
 enum Sel {
     GoalRead,
+    SettingsDeadline,
     Cmd(Option<SessionCommand>),
     Line(Option<String>),
     Tail(Option<SubagentTailNotice>),
@@ -1325,6 +1396,25 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::SetOption { .. } => ControlFlow::Continue(()),
+        SessionCommand::ApplySettings {
+            model,
+            option_selections,
+        } => {
+            let target = ClaudeLaunchOptions::resolve(model.as_deref(), &option_selections);
+            let answer = match mapper.begin_settings(target) {
+                Ok(Some(request)) if write_line(stdin, &request).await.is_err() => {
+                    mapper.pending_settings = None;
+                    Some(false)
+                }
+                Ok(Some(_)) => None,
+                Ok(None) => Some(true),
+                Err(()) => Some(false),
+            };
+            if let Some(applied) = answer {
+                let _ = event_tx.send(AgentEvent::SettingsApplied { applied }).await;
+            }
+            ControlFlow::Continue(())
+        }
         // Claude Code keeps no rewind undoable.
         command @ SessionCommand::UndoRewind { .. } => {
             if let Some(event) =
@@ -1912,6 +2002,9 @@ pub(crate) struct Mapper {
     background_tasks: HashSet<String>,
     /// The list emptied and its zero has not been published.
     background_drain_withheld: bool,
+    /// What the process runs now.
+    applied_settings: ClaudeLaunchOptions,
+    pending_settings: Option<PendingSettings>,
     /// Native rewind control requests awaiting Claude's correlated response.
     pending_rewinds: HashMap<String, PendingRewind>,
     /// What the latest dry run of each restore point found: Claude answers a
@@ -1972,6 +2065,8 @@ impl Mapper {
             saw_requesting: false,
             background_tasks: HashSet::new(),
             background_drain_withheld: false,
+            applied_settings: ClaudeLaunchOptions::default(),
+            pending_settings: None,
             pending_rewinds: HashMap::new(),
             rewind_previews: HashMap::new(),
             steer_uuids: HashMap::new(),
@@ -2117,6 +2212,70 @@ impl Mapper {
         self.pending_permission_modes
             .insert(request_id, mode.to_owned());
         message
+    }
+
+    /// The first request bringing the process to `target`, `None` when it runs
+    /// that already. `Err` when the change takes a restart.
+    fn begin_settings(&mut self, mut target: ClaudeLaunchOptions) -> Result<Option<Value>, ()> {
+        if self.applied_settings.needs_restart_for(&target) {
+            return Err(());
+        }
+        target.auto_compact_window = self.applied_settings.auto_compact_window;
+        let flags = self.applied_settings.flag_changes(&target);
+        let flags = (!flags.is_empty()).then(|| {
+            json!({
+                "subtype": "apply_flag_settings",
+                "settings": flags,
+            })
+        });
+        let (request, flags) = if self.applied_settings.model_id != target.model_id {
+            (
+                json!({ "subtype": "set_model", "model": target.model_id }),
+                flags,
+            )
+        } else if let Some(flags) = flags {
+            (flags, None)
+        } else {
+            self.applied_settings = target;
+            return Ok(None);
+        };
+        let message = self.control_request(request);
+        self.pending_settings = Some(PendingSettings {
+            request_id: message["request_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            target,
+            flags,
+            deadline: std::time::Instant::now() + LIVE_SETTINGS_TIMEOUT,
+        });
+        Ok(Some(message))
+    }
+
+    /// One step of a live settings change answered: send the flags that waited
+    /// for the model, or report the outcome.
+    fn on_settings_response(&mut self, response: &Value) -> Vec<AgentEvent> {
+        let Some(mut pending) = self.pending_settings.take() else {
+            return Vec::new();
+        };
+        if response.get("subtype").and_then(Value::as_str) != Some("success") {
+            log::warn!("claude: live settings change refused: {response}");
+            return vec![AgentEvent::SettingsApplied { applied: false }];
+        }
+        self.applied_settings.model_id = pending.target.model_id.clone();
+        if let Some(flags) = pending.flags.take() {
+            let message = self.control_request(flags);
+            pending.request_id = message["request_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            pending.deadline = std::time::Instant::now() + LIVE_SETTINGS_TIMEOUT;
+            self.outgoing.push(message);
+            self.pending_settings = Some(pending);
+            return Vec::new();
+        }
+        self.applied_settings = pending.target;
+        vec![AgentEvent::SettingsApplied { applied: true }]
     }
 
     /// Build the `control_response` answering a pending `can_use_tool` prompt.
@@ -3294,6 +3453,13 @@ impl Mapper {
         if let Some(reply) = self.pending_usage_reads.remove(request_id) {
             let _ = reply.try_send(usage_response(response).map_err(|error| error.to_string()));
             return Vec::new();
+        }
+        if self
+            .pending_settings
+            .as_ref()
+            .is_some_and(|pending| pending.request_id == request_id)
+        {
+            return self.on_settings_response(response);
         }
         if let Some(mode) = self.pending_permission_modes.remove(request_id) {
             if response.get("subtype").and_then(Value::as_str) == Some("success") {
@@ -6297,6 +6463,126 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false}"#,
         );
         turn_completed_after_count(&second, 0);
+    }
+
+    /// A live change sends the model first, because `set_model` validates it
+    /// against the API before answering, then the flags; only the last answer
+    /// reports it. Answers recorded from Claude Code 2.1.318.
+    #[test]
+    fn a_live_settings_change_sends_the_model_then_the_flags() {
+        let mut m = Mapper::new();
+        m.applied_settings = ClaudeLaunchOptions {
+            model_id: Some("claude-opus-4-8".into()),
+            effort: Some("max".into()),
+            ..ClaudeLaunchOptions::default()
+        };
+        let target = ClaudeLaunchOptions {
+            model_id: Some("claude-sonnet-4-6[1m]".into()),
+            effort: Some("low".into()),
+            fast_mode: true,
+            ..ClaudeLaunchOptions::default()
+        };
+
+        let model = m.begin_settings(target.clone()).unwrap().unwrap();
+        assert_eq!(
+            model["request"],
+            json!({"subtype": "set_model", "model": "claude-sonnet-4-6[1m]"})
+        );
+        let answer = format!(
+            r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"{}","response":{{"model":"claude-sonnet-4-6"}}}}}}"#,
+            model["request_id"].as_str().unwrap()
+        );
+        assert!(feed(&mut m, &answer).is_empty());
+
+        let flags = m.take_outgoing().remove(0);
+        assert_eq!(
+            flags["request"],
+            json!({
+                "subtype": "apply_flag_settings",
+                "settings": {"effortLevel": "low", "fastMode": true},
+            })
+        );
+        let answer = format!(
+            r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"{}"}}}}"#,
+            flags["request_id"].as_str().unwrap()
+        );
+        assert!(matches!(
+            feed(&mut m, &answer).as_slice(),
+            [AgentEvent::SettingsApplied { applied: true }]
+        ));
+        assert_eq!(
+            m.begin_settings(target).unwrap(),
+            None,
+            "a process already there is not asked again"
+        );
+    }
+
+    /// A model the CLI cannot validate leaves the process on its old one, and
+    /// the host restarts for it; a setting the CLI cannot take live is not
+    /// sent at all.
+    #[test]
+    fn a_live_settings_change_it_cannot_make_takes_a_restart() {
+        let mut m = Mapper::new();
+        m.applied_settings.model_id = Some("claude-opus-4-8".into());
+        let request = m
+            .begin_settings(ClaudeLaunchOptions {
+                model_id: Some("claude-sonnet-4-6".into()),
+                ..ClaudeLaunchOptions::default()
+            })
+            .unwrap()
+            .unwrap();
+        let answer = format!(
+            r#"{{"type":"control_response","response":{{"subtype":"error","request_id":"{}","error":"Unable to validate model","error_code":"check_failed","model":"claude-opus-4-8"}}}}"#,
+            request["request_id"].as_str().unwrap()
+        );
+        assert!(matches!(
+            feed(&mut m, &answer).as_slice(),
+            [AgentEvent::SettingsApplied { applied: false }]
+        ));
+        assert_eq!(
+            m.applied_settings.model_id.as_deref(),
+            Some("claude-opus-4-8")
+        );
+
+        for target in [
+            ClaudeLaunchOptions {
+                thinking: Some(false),
+                ..ClaudeLaunchOptions::default()
+            },
+            ClaudeLaunchOptions {
+                auto_compact_window: Some(500_000),
+                ..ClaudeLaunchOptions::default()
+            },
+        ] {
+            assert!(m.begin_settings(target).is_err());
+        }
+    }
+
+    /// A model that opens the selected window by itself needs no compaction
+    /// limit, so switching to it does not take a restart; leaving one the
+    /// process was launched with does, because only a launch sets that limit.
+    #[test]
+    fn a_model_with_its_own_window_needs_no_restart_for_it() {
+        let native = ClaudeLaunchOptions {
+            model_id: Some("claude-sonnet-4-6".into()),
+            auto_compact_window: Some(200_000),
+            native_window: true,
+            ..ClaudeLaunchOptions::default()
+        };
+        let mut m = Mapper::new();
+        m.applied_settings.model_id = Some("claude-opus-4-8".into());
+        assert!(m.begin_settings(native.clone()).unwrap().is_some());
+
+        let mut launched = Mapper::new();
+        launched.applied_settings = native;
+        assert!(
+            launched
+                .begin_settings(ClaudeLaunchOptions {
+                    model_id: Some("claude-opus-4-8".into()),
+                    ..ClaudeLaunchOptions::default()
+                })
+                .is_err()
+        );
     }
 
     /// A task stopped through `stop_task` starts no follow-up turn: the CLI

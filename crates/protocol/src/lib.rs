@@ -362,6 +362,7 @@ pub use wire::{
 // optional, CommandResponse::ForkedAt is gone (ForkThread answers SessionId)
 // and ForkStatus drops first_turn.
 // AgentEvent::SettingsKept and EntryContent::SettingsKept are new.
+// AgentEvent::SettingsApplied is new.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

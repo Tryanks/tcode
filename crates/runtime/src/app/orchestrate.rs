@@ -430,12 +430,10 @@ impl AppState {
         let can_steer = self
             .resident(thread_id)
             .is_some_and(|child| child.turn_in_flight && child.can_steer());
-        if can_steer {
-            if self.steer_host_message(thread_id, &message, cx) {
-                return Ok("steered");
-            }
-            // Provider channel gone: fall through so the text survives
-            // in the queue for the wake-up path.
+        // Provider channel gone: fall through so the text survives in the
+        // queue for the wake-up path.
+        if can_steer && self.steer_host_message(thread_id, &message, cx) {
+            return Ok("steered");
         }
         if !can_steer {
             self.reactivate_session(thread_id, cx);
@@ -775,13 +773,11 @@ impl AppState {
         let can_steer = self
             .resident(parent_id)
             .is_some_and(|parent| parent.turn_in_flight && parent.can_steer());
-        if can_steer {
-            // A steered callback is already part of this turn, so persist it just
-            // like a user-triggered steer before handing it to the provider.
-            if self.steer_host_message(parent_id, &text, cx) {
-                return;
-            }
-            // Provider channel gone: the callback waits for the next start.
+        // A steered callback is already part of this turn, so persist it just
+        // like a user-triggered steer before handing it to the provider. With
+        // the provider channel gone it waits for the next start instead.
+        if can_steer && self.steer_host_message(parent_id, &text, cx) {
+            return;
         }
 
         self.reactivate_session(parent_id, cx);

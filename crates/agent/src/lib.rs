@@ -100,6 +100,9 @@ pub struct Caps {
     pub per_turn_effort: bool,
     pub options_apply_live: bool,
     pub live_option_push: LiveOptionPush,
+    /// The running process can be asked to take a new model and options
+    /// ([`SessionCommand::ApplySettings`]) rather than restart for them.
+    pub live_settings: bool,
     /// Whether this adapter can attach tcode's HTTP MCP servers to a session.
     /// Preview attachment rides the same capability as every other MCP server.
     pub mcp_servers: bool,
@@ -303,6 +306,8 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
+                // `set_model` and `apply_flag_settings` (2.1.318).
+                live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
@@ -351,6 +356,7 @@ impl ProviderKind {
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
+                live_settings: false,
                 mcp_servers: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
                 native_computer_use: true,
@@ -384,6 +390,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                live_settings: false,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
                 mcp_servers: true,
@@ -420,6 +427,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                live_settings: false,
                 mcp_servers: false,
                 native_computer_use: false,
                 launch_args: true,
@@ -464,6 +472,7 @@ impl ProviderKind {
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["agent"]),
+                live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
@@ -494,6 +503,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
@@ -536,6 +546,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,
@@ -1951,6 +1962,13 @@ pub enum SessionCommand {
         id: String,
         value: serde_json::Value,
     },
+    /// Bring the running process to these settings where it stands, on a
+    /// harness whose [`Caps::live_settings`] says it can be asked. Answered by
+    /// [`AgentEvent::SettingsApplied`].
+    ApplySettings {
+        model: Option<String>,
+        option_selections: Vec<OptionSelection>,
+    },
     /// Ask the provider to restore one of its own message checkpoints. The
     /// provider remains the sole owner of both the checkpoint and the restore
     /// semantics; adapters without a native implementation reject this. Where
@@ -2180,6 +2198,11 @@ pub enum AgentEvent {
     /// not emit this transient liveness signal.
     BackgroundTasksChanged {
         count: usize,
+    },
+    /// The answer to [`SessionCommand::ApplySettings`]; `false` when the change
+    /// takes a restart. Transient, like [`Self::TurnAccepted`].
+    SettingsApplied {
+        applied: bool,
     },
     /// The provider's current net file changes for one turn. Unlike the
     /// per-tool [`ItemContent::FileChange`] stream, this is a replacement
