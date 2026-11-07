@@ -3914,6 +3914,110 @@ mod tests {
     /// one waiting in a thread the user has not opened can be answered here:
     /// approving one widens that thread's own grant on the host and leaves
     /// the other waiting; a thread's own grant is listed and revoked here.
+    /// "Show more" asks for a longer newest-first list, and a new filter asks
+    /// for the first page of what it matches: the two the host answers.
+    #[gpui::test]
+    fn the_activity_list_pages_and_filters_through_the_host(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ClientPayload, ControlActivityEntry, ControlActivityFilter, ControlActivityPage,
+            ControlActivityThread, HostMessage, Query, QueryResponse, decode_client_line,
+            encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        cx.simulate_resize(gpui::size(px(1024.), px(3000.)));
+        let asked = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    let message = decode_client_line(&line).unwrap();
+                    match message.payload {
+                        ClientPayload::Query(Query::ControlActivity { limit, filter }) => {
+                            Some((message.id, limit, filter))
+                        }
+                        _ => None,
+                    }
+                })
+                .last()
+                .expect("the page asked the host")
+        };
+        let answer = |id, total, cx: &mut VisualTestContext| {
+            let entry = ControlActivityEntry {
+                target_thread_id: "target".into(),
+                target_title: "Target".into(),
+                at: 1,
+                action: agent::ControlAction {
+                    actor_thread_id: "actor".into(),
+                    actor_title: "Actor".into(),
+                    action: "send_message".into(),
+                    detail: None,
+                },
+            };
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::QueryResult {
+                        id,
+                        result: Ok(QueryResponse::ControlActivity(ControlActivityPage {
+                            entries: vec![entry],
+                            total,
+                            threads: vec![ControlActivityThread {
+                                id: "target".into(),
+                                title: "Target".into(),
+                            }],
+                            actions: vec!["send_message".into()],
+                        })),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            cx.run_until_parked();
+            crate::test_frames::draw_settled(cx);
+        };
+
+        page.update(cx, |page, cx| page.select_section(Section::Control, cx));
+        crate::test_frames::draw(cx);
+        let (id, limit, filter) = asked(cx);
+        assert_eq!((limit, &filter), (50, &ControlActivityFilter::default()));
+
+        answer(id, 1, cx);
+        assert!(
+            cx.debug_bounds("control-activity-more").is_none(),
+            "every match is listed"
+        );
+
+        let refresh = cx.debug_bounds("control-activity-refresh").unwrap();
+        cx.simulate_click(refresh.center(), Default::default());
+        let (id, ..) = asked(cx);
+        answer(id, 60, cx);
+        let more = cx
+            .debug_bounds("control-activity-more")
+            .expect("more match");
+        cx.simulate_click(more.center(), Default::default());
+        let (id, limit, _) = asked(cx);
+        assert_eq!(limit, 100);
+        answer(id, 60, cx);
+
+        let thread = cx.debug_bounds("control-activity-thread").unwrap();
+        cx.simulate_click(thread.center(), Default::default());
+        crate::test_frames::draw_settled(cx);
+        let option = cx
+            .debug_bounds("control-activity-thread-Target")
+            .expect("the log's threads are offered");
+        cx.simulate_click(option.center(), Default::default());
+        let (_, limit, filter) = asked(cx);
+        assert_eq!(limit, 50, "a filter starts over at the first page");
+        assert_eq!(filter.thread_id.as_deref(), Some("target"));
+    }
+
     #[gpui::test]
     fn control_page_answers_every_threads_requests_and_revokes_grants(cx: &mut TestAppContext) {
         use tcode_core::control::{

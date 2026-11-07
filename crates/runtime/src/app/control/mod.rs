@@ -7,7 +7,10 @@ use tcode_core::control::{
     ControlAction, ControlCategory, ControlGrant, ControlGrantSource, ControlScope, action,
 };
 use tcode_core::settings::SettingsPatch;
-use tcode_protocol::{ControlActivityEntry, ControlStatus, ThreadReferenceStatus};
+use tcode_protocol::{
+    ControlActivityEntry, ControlActivityFilter, ControlActivityPage, ControlActivityThread,
+    ControlStatus, ThreadReferenceStatus,
+};
 
 mod content;
 mod grants;
@@ -559,8 +562,37 @@ impl AppState {
         self.enqueue_store_write(StoreWrite::WriteControlActivity(entries), cx);
     }
 
-    pub(crate) fn control_activity(&self, limit: usize) -> Vec<ControlActivityEntry> {
-        self.control.activity.iter().take(limit).cloned().collect()
+    pub(crate) fn control_activity(
+        &self,
+        filter: &ControlActivityFilter,
+        limit: usize,
+    ) -> ControlActivityPage {
+        let log = &self.control.activity;
+        let matching = || log.iter().filter(|entry| filter.matches(entry));
+        let mut threads = Vec::<ControlActivityThread>::new();
+        let mut actions = Vec::<String>::new();
+        for entry in log {
+            for (id, title) in [
+                (&entry.target_thread_id, &entry.target_title),
+                (&entry.action.actor_thread_id, &entry.action.actor_title),
+            ] {
+                if !threads.iter().any(|thread| thread.id == *id) {
+                    threads.push(ControlActivityThread {
+                        id: id.clone(),
+                        title: title.clone(),
+                    });
+                }
+            }
+            if !actions.contains(&entry.action.action) {
+                actions.push(entry.action.action.clone());
+            }
+        }
+        ControlActivityPage {
+            entries: matching().take(limit).cloned().collect(),
+            total: matching().count() as u32,
+            threads,
+            actions,
+        }
     }
 
     pub(crate) fn review_records(&self, limit: usize) -> Vec<tcode_core::control::ReviewRecord> {

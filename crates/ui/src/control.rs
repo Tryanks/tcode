@@ -11,7 +11,8 @@ use gpui::{
 };
 use gpui_base::v_flex;
 use tcode_core::control::{
-    ControlCategory, ControlGrant, ControlGrantRequest, ControlScope, ControlTier,
+    ControlCategory, ControlGrant, ControlGrantRequest, ControlGrantSource, ControlScope,
+    ControlSettings, ControlTier,
 };
 use tcode_core::project::{Project, SessionMeta};
 
@@ -187,6 +188,28 @@ pub(crate) fn grant_summary(grant: &ControlGrant) -> String {
         GrantPreset::label,
     );
     format!("{name} · {}", scope_label(&grant.scope))
+}
+
+/// The grant `meta` holds and where it comes from, as the thread menu names
+/// it; `None` while `tcode_control` is off.
+pub(crate) fn thread_grant_line(control: &ControlSettings, meta: &SessionMeta) -> Option<String> {
+    control.enabled.then(|| {
+        let (grant, source) =
+            control.resolve(meta.control_grant.as_ref(), meta.project_id.as_deref());
+        let grant = grant_summary(&grant);
+        match source {
+            ControlGrantSource::Default => {
+                crate::tr!("control.settings.thread_grant_default", grant = grant)
+            }
+            ControlGrantSource::Project => {
+                crate::tr!("control.settings.thread_grant_project", grant = grant)
+            }
+            ControlGrantSource::Thread => {
+                crate::tr!("control.settings.thread_grant_own", grant = grant)
+            }
+        }
+        .into_owned()
+    })
 }
 
 /// One way a thread's own grant differs from the grant it would have
@@ -743,6 +766,39 @@ fn switch_row(
                 .on_click(move |next, window, cx| on_toggle(*next, window, cx)),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod grant_line_tests {
+    use super::*;
+
+    #[test]
+    fn the_thread_menu_names_the_grant_in_force_and_where_it_comes_from() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let mut control = ControlSettings::default();
+        let mut meta = SessionMeta::new(agent::ProviderKind::Codex, "/repo".into(), None);
+        meta.project_id = Some("infra".into());
+        assert_eq!(
+            thread_grant_line(&control, &meta).unwrap(),
+            "Control (default): Standard · own project",
+        );
+        control
+            .project_overrides
+            .insert("infra".into(), ControlGrant::none());
+        assert!(
+            thread_grant_line(&control, &meta)
+                .unwrap()
+                .starts_with("Control (project): ")
+        );
+        meta.control_grant = Some(ControlGrant::default_grant());
+        assert!(
+            thread_grant_line(&control, &meta)
+                .unwrap()
+                .starts_with("Control (this thread): Standard")
+        );
+        control.enabled = false;
+        assert_eq!(thread_grant_line(&control, &meta), None);
+    }
 }
 
 #[cfg(test)]

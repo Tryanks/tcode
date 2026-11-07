@@ -482,7 +482,76 @@ fn an_approved_grant_request_widens_the_grant_and_wakes_the_thread() {
             )
         });
         assert!(audited, "the request is recorded in the thread");
-        assert_eq!(state.control_activity(10).len(), 1);
+        assert_eq!(
+            state
+                .control_activity(&Default::default(), 10)
+                .entries
+                .len(),
+            1
+        );
+    });
+}
+
+/// The filter narrows the entries and their count, a thread matching as
+/// actor or target, while the threads and kinds offered stay the whole log's.
+#[test]
+fn activity_filters_by_thread_or_kind_and_offers_the_whole_log() {
+    use tcode_protocol::{ControlActivityEntry, ControlActivityFilter};
+    let entry = |at, actor: &str, target: &str, action: &str| ControlActivityEntry {
+        target_thread_id: target.into(),
+        target_title: target.to_uppercase(),
+        at,
+        action: ControlAction {
+            actor_thread_id: actor.into(),
+            actor_title: actor.to_uppercase(),
+            action: action.into(),
+            detail: None,
+        },
+    };
+    let log = vec![
+        entry(3, "a", "b", "send_message"),
+        entry(2, "c", "a", "rename"),
+        entry(1, "c", "c", "rename"),
+    ];
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-control-activity-filter");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        state.control = ControlState::new(Vec::new(), log);
+    });
+    state.read(|app| {
+        let filter = |thread: Option<&str>, action: Option<&str>| ControlActivityFilter {
+            thread_id: thread.map(str::to_owned),
+            action: action.map(str::to_owned),
+        };
+        let at = |page: tcode_protocol::ControlActivityPage| {
+            (
+                page.entries.iter().map(|e| e.at).collect::<Vec<_>>(),
+                page.total,
+            )
+        };
+        assert_eq!(
+            at(app.control_activity(&filter(None, None), 2)),
+            (vec![3, 2], 3)
+        );
+        assert_eq!(
+            at(app.control_activity(&filter(Some("a"), None), 10)),
+            (vec![3, 2], 2),
+            "as actor and as target"
+        );
+        assert_eq!(
+            at(app.control_activity(&filter(None, Some("rename")), 1)),
+            (vec![2], 2),
+        );
+        assert_eq!(
+            at(app.control_activity(&filter(Some("c"), Some("send_message")), 10)),
+            (vec![], 0)
+        );
+        let page = app.control_activity(&filter(Some("a"), Some("rename")), 10);
+        let threads: Vec<_> = page.threads.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(threads, ["b", "a", "c"]);
+        assert_eq!(page.threads[1].title, "A");
+        assert_eq!(page.actions, ["send_message", "rename"]);
     });
 }
 
@@ -762,7 +831,7 @@ fn watches_survive_a_restart_fire_once_and_cancel() {
         assert_eq!(state.find_meta("caller").unwrap().control_watches.len(), 2);
         assert_eq!(
             state
-                .control_activity(10)
+                .control_activity(&Default::default(), 10).entries
                 .iter()
                 .map(|entry| entry.action.action.as_str())
                 .collect::<Vec<_>>(),

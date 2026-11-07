@@ -1413,8 +1413,8 @@ fn dispatch_query(
             let archived = app.scoped_archived_sessions(&cx.principal);
             cx.spawn_background(async move { Ok(QueryResponse::ArchivedSessions(archived)) })
         }
-        Query::ControlActivity { limit } => {
-            let activity = app.control_activity(limit as usize);
+        Query::ControlActivity { limit, filter } => {
+            let activity = app.control_activity(&filter, limit as usize);
             cx.spawn_background(async move { Ok(QueryResponse::ControlActivity(activity)) })
         }
         Query::ReviewRecords { limit } => {

@@ -3,6 +3,46 @@ use std::path::PathBuf;
 use agent::FileChange;
 use serde::{Deserialize, Serialize};
 
+/// Which `tcode_control` writes a [`Query::ControlActivity`] asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlActivityFilter {
+    /// A thread that made the write or was its target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    /// The write's `ControlAction::action`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+}
+
+impl ControlActivityFilter {
+    pub fn matches(&self, entry: &crate::ControlActivityEntry) -> bool {
+        self.thread_id.as_ref().is_none_or(|thread| {
+            entry.target_thread_id == *thread || entry.action.actor_thread_id == *thread
+        }) && self
+            .action
+            .as_ref()
+            .is_none_or(|action| entry.action.action == *action)
+    }
+}
+
+/// A thread the activity log names, under the title it last had there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlActivityThread {
+    pub id: String,
+    pub title: String,
+}
+
+/// The newest writes a filter matches, and what the whole log offers to
+/// filter by.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlActivityPage {
+    pub entries: Vec<crate::ControlActivityEntry>,
+    /// How many writes the filter matches, of which `entries` is the newest.
+    pub total: u32,
+    pub threads: Vec<ControlActivityThread>,
+    pub actions: Vec<String>,
+}
+
 /// Read-only or result-bearing host operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
@@ -141,6 +181,8 @@ pub enum Query {
     /// The latest `tcode_control` writes across every thread, newest first.
     ControlActivity {
         limit: u32,
+        #[serde(default)]
+        filter: ControlActivityFilter,
     },
     /// Review records stored by `record_review`, newest first.
     ReviewRecords {
@@ -221,7 +263,7 @@ pub enum QueryResponse {
     /// `None` when no entry was recorded at or before the position.
     ThreadAnchorTurn(Option<usize>),
     ArchivedSessions(crate::ArchivedSessions),
-    ControlActivity(Vec<crate::ControlActivityEntry>),
+    ControlActivity(ControlActivityPage),
     ReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     PullRequest {
         response: Box<crate::PullRequestReadResponse>,

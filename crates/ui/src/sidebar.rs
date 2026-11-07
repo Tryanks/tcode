@@ -3381,6 +3381,8 @@ impl SessionsSidebar {
         let parked = meta.parked_at.is_some();
         let hover = self.hover.clone();
         let row_key = state.row_key.clone();
+        let grant =
+            crate::control::thread_grant_line(&self.store.read(cx).settings().control, meta);
         let menu = row
             .context_menu(move |menu, window, cx| {
                 let id = session_id.clone();
@@ -3391,6 +3393,8 @@ impl SessionsSidebar {
                     .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
                 let open_beside = crate::shell::pane_controls(window, cx)
                     .map(|panes| panes.split_right || crate::shell::shown_in_pane(&id, cx));
+                let menu =
+                    menu.when_some(grant.clone(), |menu, grant| menu.label(grant).separator());
                 menu.when_some(open_beside, |menu, enabled| {
                     menu.menu_with_enable(
                         crate::tr!("panes.open_beside").into_owned(),
@@ -6616,7 +6620,7 @@ mod tests {
                 "the row a long press opened the menu from stays marked once the finger lifts"
             );
             let rename = cx
-                .debug_bounds("menu-item-0")
+                .debug_bounds("menu-item-2")
                 .expect("thread menu opens")
                 .center();
             touch(cx, gpui::TouchPhase::Started, rename);
@@ -6693,7 +6697,7 @@ mod tests {
                 "nothing moves as the menu opens under the pointer"
             );
             let item = cx
-                .debug_bounds("menu-item-0")
+                .debug_bounds("menu-item-2")
                 .expect("thread menu opens")
                 .center();
             pointer(cx, item);
