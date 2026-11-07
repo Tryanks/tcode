@@ -1893,15 +1893,15 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
     }
 }
 
-/// The fork from a message as clients and hosts of one release exchange it.
+/// The fork through a turn as clients and hosts of one release exchange it.
 #[test]
-fn a_fork_from_a_message_has_its_wire_shape() {
+fn a_fork_through_a_turn_has_its_wire_shape() {
     assert_eq!(
         serde_json::to_value(Command::ForkThread {
             id: "source".into(),
             at: Some(ForkAt {
                 turn: 2,
-                checkpoint_id: "prompt-3".into(),
+                checkpoint_id: Some("prompt-3".into()),
             }),
         })
         .unwrap(),
@@ -1918,16 +1918,5 @@ fn a_fork_from_a_message_has_its_wire_shape() {
             id: "source".into(),
             at: None,
         }
-    );
-    assert_eq!(
-        serde_json::to_value(CommandResponse::ForkedAt {
-            session_id: "fork".into(),
-            text: "the third prompt".into(),
-            attachments: Vec::new(),
-        })
-        .unwrap(),
-        serde_json::json!({"type": "forked_at", "content": {
-            "session_id": "fork", "text": "the third prompt",
-        }})
     );
 }

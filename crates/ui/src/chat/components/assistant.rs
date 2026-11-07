@@ -3,9 +3,10 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
 
+use crate::icon::IconName;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
-use crate::widgets::copy::copy_button;
+use crate::widgets::copy::{action_button, copy_button};
 use crate::widgets::menu::{ContextMenuExt as _, CopyText, PopupMenu};
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Div, ElementId, Entity,
@@ -18,6 +19,7 @@ use crate::markdown::parse::ParsedDocument;
 use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 use tcode_core::session::TimelineEntry;
 
+use super::super::ForkThroughTurn;
 use super::super::model::{MdSync, md_sync};
 
 /// How long what is drawn here only some of the time takes to come in or go.
@@ -118,11 +120,30 @@ pub(crate) struct AssistantData<'a> {
     pub(crate) pinned: bool,
     pub(crate) compact: bool,
     pub(crate) actions: MessageActions,
+    /// The fork its turn offers, when this is the turn's answer.
+    pub(crate) fork: Option<TurnFork>,
     pub(crate) copied: bool,
     /// The timeline's hover, which reveals the message's actions.
     pub(crate) hover: crate::motion::ListHover,
     /// The chat's motion, which keeps the action row's fold.
     pub(crate) motion: crate::motion::owned::Owned,
+}
+
+/// The fork a finished turn offers: through which turn, whether it can start
+/// now, and what asks for it.
+#[derive(Clone)]
+pub(crate) struct TurnFork {
+    pub(crate) turn: usize,
+    pub(crate) blocked: bool,
+    pub(crate) on_fork: ForkHandler,
+}
+
+type ForkHandler = Rc<dyn Fn(usize, &mut App)>;
+
+impl PartialEq for TurnFork {
+    fn eq(&self, other: &Self) -> bool {
+        (self.turn, self.blocked) == (other.turn, other.blocked)
+    }
 }
 
 /// Where a message's actions are drawn.
@@ -151,6 +172,7 @@ pub(crate) struct EndingActions {
     pub(crate) id: String,
     pub(crate) copied: bool,
     pub(crate) compact: bool,
+    pub(crate) fork: Option<TurnFork>,
 }
 
 impl EndingActions {
@@ -170,10 +192,20 @@ impl EndingActions {
             window,
             cx,
         );
+        let fork_selector = format!("fork-{}", self.id);
+        let (fork_focus, fork_focused) = crate::motion::focus_ring::focus_reveal(
+            &ElementId::from(SharedString::from(fork_selector)),
+            true,
+            window,
+            cx,
+        );
         let reveal = if self.compact {
             1.
         } else {
-            hover.reveal(&hover_key(&self.id), window, cx).max(focused)
+            hover
+                .reveal(&hover_key(&self.id), window, cx)
+                .max(focused)
+                .max(fork_focused)
         };
         let copy = copy_button(&key, self.copied, self.compact, on_copy, cx)
             .track_focus(&focus)
@@ -181,9 +213,24 @@ impl EndingActions {
             .debug_selector(move || selector);
         // Out by opacity alone, unlike [`reserve_action_row`]: an invisible
         // control is no tab stop, and focus is what brings it in.
+        let fork = fork_action(
+            &self.id,
+            self.fork.clone(),
+            Some(fork_focus),
+            self.compact,
+            motion,
+            window,
+            cx,
+        );
         action_row(self.compact)
             .opacity(reveal)
-            .child(h_flex().gap(px(2.)).items_center().child(copy))
+            .child(
+                h_flex()
+                    .gap(ACTION_GAP)
+                    .items_center()
+                    .child(copy)
+                    .children(fork),
+            )
             .into_any_element()
     }
 
@@ -194,6 +241,54 @@ impl EndingActions {
     ) -> Option<impl Fn(&bool, &mut Window, &mut App) + 'static> {
         (!self.compact).then(|| hover.on_hover(hover_key(&self.id)))
     }
+}
+
+/// The turn's fork action beside Copy, folding in once it is offered.
+fn fork_action(
+    id: &str,
+    fork: Option<TurnFork>,
+    focus: Option<gpui::FocusHandle>,
+    compact: bool,
+    motion: &crate::motion::owned::Owned,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let selector = format!("fork-{id}");
+    motion
+        .shown(
+            SharedString::from(format!("fork-fold-{id}")),
+            fork,
+            SHOW,
+            window,
+            cx,
+        )
+        .map(|shown| {
+            let TurnFork {
+                turn,
+                blocked,
+                on_fork,
+            } = shown.value.clone();
+            let button = action_button(
+                SharedString::from(selector.clone()),
+                IconName::GitBranch,
+                if blocked {
+                    crate::tr!("fork.blocked").into_owned()
+                } else {
+                    crate::tr!("fork.action").into_owned()
+                },
+                cx,
+            )
+            .disabled(blocked)
+            .touch(compact)
+            .motion(motion)
+            .debug_selector(move || selector)
+            .on_click(move |_, _, cx| on_fork(turn, cx));
+            let button = match &focus {
+                Some(focus) => button.track_focus(focus),
+                None => button,
+            };
+            shown.fold_across_gap(ACTION_GAP, button.into_any_element())
+        })
 }
 
 /// The message's own context-menu item: the whole text, as the hover Copy
@@ -208,8 +303,27 @@ pub(crate) fn copy_message_items(text: Arc<str>) -> MenuExtension {
     })
 }
 
+/// An answer's context-menu items: copy it, then its turn's fork.
+fn answer_menu_items(text: Arc<str>, fork: Option<TurnFork>) -> MenuExtension {
+    let copy = copy_message_items(text);
+    Rc::new(move |menu: PopupMenu, window: &mut Window, cx: &mut App| {
+        let menu = copy(menu, window, cx);
+        match &fork {
+            Some(fork) => menu.separator().menu_with_enable(
+                crate::tr!("fork.action").into_owned(),
+                Box::new(ForkThroughTurn { turn: fork.turn }),
+                !fork.blocked,
+            ),
+            None => menu,
+        }
+    })
+}
+
 /// Between a message's text, its summary note and its action row.
 const MESSAGE_GAP: f32 = 2.;
+
+/// Between the actions of a row.
+const ACTION_GAP: gpui::Pixels = px(2.);
 
 /// An assistant message: rendered markdown plus a hover-revealed Copy action.
 pub(crate) fn assistant(
@@ -227,11 +341,12 @@ pub(crate) fn assistant(
         pinned,
         compact,
         actions,
+        fork,
         copied,
         hover,
         motion,
     } = data;
-    let menu_items = copy_message_items(copy_text);
+    let menu_items = answer_menu_items(copy_text, fork.clone());
     let content = markdown.map_or_else(
         || div().child(text.to_string()).into_any_element(),
         |markdown| {
@@ -269,6 +384,7 @@ pub(crate) fn assistant(
     // when it moves on.
     let hover_key = hover_key(id);
     let fold_id = SharedString::from(format!("assistant-actions-{id}"));
+    let fork_id = id.to_owned();
     let key = format!("assistant:{id}");
     let below = actions == MessageActions::Below;
     // Only a message with actions takes the timeline's hover, so a row
@@ -291,9 +407,18 @@ pub(crate) fn assistant(
                 Some(fold) => {
                     let reveal = hover.reveal(&hover_key, window, cx);
                     let actions = h_flex()
-                        .gap(px(2.))
+                        .gap(ACTION_GAP)
                         .items_center()
-                        .child(copy_button(&key, copied, compact, on_copy, cx).motion(&motion));
+                        .child(copy_button(&key, copied, compact, on_copy, cx).motion(&motion))
+                        .children(fork_action(
+                            &fork_id,
+                            fork.clone(),
+                            None,
+                            compact,
+                            &motion,
+                            window,
+                            cx,
+                        ));
                     fold.fold(
                         div()
                             .pt(px(MESSAGE_GAP))

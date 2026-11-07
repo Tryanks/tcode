@@ -951,14 +951,10 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             let Some(forked) = app.fork_thread_at(&id, &at, cx) else {
                 return CommandOutcome::Immediate(Err(ProtocolError {
                     code: "fork_unavailable".into(),
-                    message: "This thread cannot be forked from that message now.".into(),
+                    message: "This thread cannot be forked through that turn now.".into(),
                 }));
             };
-            response = CommandResponse::ForkedAt {
-                session_id: forked.id,
-                text: forked.text,
-                attachments: forked.attachments,
-            };
+            response = CommandResponse::SessionId(Some(forked));
         }
         Command::MoveSession {
             session_id,

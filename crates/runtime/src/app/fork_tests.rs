@@ -50,6 +50,14 @@ fn turn(state: &mut AppState, cx: &mut HostCx, index: usize, prompt: &str, attac
             turn_id: turn_id.clone(),
             checkpoint_id: format!("checkpoint-{index}"),
         },
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: format!("answer-{index}"),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: format!("answer to {prompt}"),
+                summarized: false,
+            },
+        }),
         AgentEvent::TurnCompleted {
             turn_id,
             status: TurnStatus::Completed,
@@ -95,6 +103,14 @@ fn fork_at(turn: usize, checkpoint: &str) -> Value {
     }})
 }
 
+/// The thread a fork answers with.
+fn forked(response: Result<CommandResponse, ProtocolError>) -> String {
+    match response {
+        Ok(CommandResponse::SessionId(Some(id))) => id,
+        other => panic!("{other:?}"),
+    }
+}
+
 fn open_branch(turn: usize, checkpoint: &str) -> Value {
     json!({"type": "open_rewound_branch", "content": {
         "session_id": SOURCE, "turn": turn, "checkpoint_id": checkpoint,
@@ -119,12 +135,13 @@ fn settled(cx: &mut TestAppContext, id: &str) {
     cx.run_until_parked();
 }
 
-/// From a message: the new thread holds exactly the turns before it and gives
-/// the message back to the client that asked; the source, with a turn running
-/// in it, is as it was; the Harness makes the fork at the first send, from
-/// the restore point; and the thread says where it came from.
+/// Through a turn: the new thread holds exactly the turns through it, its
+/// answer included, with nothing for a composer; the source, with a turn
+/// running in it, is as it was; the Harness makes the fork at the first send,
+/// from the next prompt's restore point; and the thread says where it came
+/// from.
 #[test]
-fn a_fork_from_a_message_holds_the_turns_before_it_and_leaves_the_source_alone() {
+fn a_fork_through_a_turn_holds_it_and_what_came_before_and_leaves_the_source_alone() {
     let cx = &mut TestAppContext::default();
     let store = TestStore::new("tcode-fork-at");
     let cwd = store.root().join("project");
@@ -153,26 +170,22 @@ fn a_fork_from_a_message_holds_the_turns_before_it_and_leaves_the_source_alone()
     cx.run_until_parked();
     let source_log = store.read_event_log(SOURCE).unwrap();
 
-    let CommandResponse::ForkedAt {
-        session_id,
-        text,
-        attachments,
-    } = send(&state, cx, 1, fork_at(1, "checkpoint-1")).unwrap()
-    else {
-        panic!("a fork from a message answers with the message");
-    };
-    assert_eq!(text, "second");
-    assert_eq!(attachments, ["/images/second.png"]);
+    let session_id = forked(send(&state, cx, 1, fork_at(1, "checkpoint-1")));
     settled(cx, &session_id);
 
     state.read(|state| {
         let fork = &state.residents.live[&session_id];
-        assert_eq!(prompts(fork), ["first"]);
-        assert_eq!(fork.timeline.turns.len(), 1);
+        assert_eq!(prompts(fork), ["first", "second"]);
+        assert!(matches!(
+            &fork.timeline.entries.last().unwrap().content,
+            EntryContent::Item(ItemContent::AssistantMessage { text, .. })
+                if text == "answer to second"
+        ));
+        assert_eq!(fork.timeline.turns.len(), 2);
         assert_eq!(
             fork.meta.pending_fork,
             Some(ForkPoint::Before {
-                checkpoint_id: "checkpoint-1".into()
+                checkpoint_id: "checkpoint-2".into()
             })
         );
         let origin = fork.meta.fork_origin.as_ref().unwrap();
@@ -192,7 +205,7 @@ fn a_fork_from_a_message_holds_the_turns_before_it_and_leaves_the_source_alone()
     );
     assert_eq!(
         store.turn_index(&session_id).unwrap().unwrap().starts.len(),
-        1,
+        2,
         "windows of the fork's log begin at its own turns"
     );
 
@@ -201,7 +214,7 @@ fn a_fork_from_a_message_holds_the_turns_before_it_and_leaves_the_source_alone()
         cx,
         2,
         json!({"type": "send_turn", "content": {
-            "session_id": session_id, "text": "second, edited", "attachment_paths": [],
+            "session_id": session_id, "text": "something else", "attachment_paths": [],
         }}),
     )
     .unwrap();
@@ -210,7 +223,7 @@ fn a_fork_from_a_message_holds_the_turns_before_it_and_leaves_the_source_alone()
     assert_eq!(
         launch.fork,
         Some(ForkPoint::Before {
-            checkpoint_id: "checkpoint-1".into()
+            checkpoint_id: "checkpoint-2".into()
         })
     );
     assert_eq!(
@@ -220,17 +233,94 @@ fn a_fork_from_a_message_holds_the_turns_before_it_and_leaves_the_source_alone()
     drop(events);
 }
 
-/// Where a fork is refused: a restore point other than the client saw, a
-/// message the Harness cannot fork before, and a Harness that has no fork
-/// from a message. The first message counts only where the Harness says so.
+/// With no prompt after it the turn's fork is all of the session, for every
+/// Harness that forks through a turn.
 #[test]
-fn a_fork_from_a_message_goes_only_where_the_harness_can() {
-    for (provider, turn_index, checkpoint, forks) in [
-        (ProviderKind::ClaudeCode, 1, "checkpoint-1", true),
-        (ProviderKind::ClaudeCode, 1, "checkpoint-stale", false),
-        (ProviderKind::ClaudeCode, 0, "checkpoint-0", false),
-        (ProviderKind::Pi, 0, "checkpoint-0", true),
-        (ProviderKind::Cursor, 1, "checkpoint-1", false),
+fn a_fork_through_the_latest_turn_is_the_whole_session() {
+    for provider in [
+        ProviderKind::ClaudeCode,
+        ProviderKind::Codex,
+        ProviderKind::Pi,
+        ProviderKind::OpenCode,
+        ProviderKind::Grok,
+    ] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("tcode-fork-latest");
+        let cwd = store.root().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = host(&store, cx);
+        state.update(cx, |state, cx| {
+            install(state, provider, cwd, cx);
+            turn(state, cx, 0, "first", &[]);
+            turn(state, cx, 1, "second", &[]);
+        });
+        cx.run_until_parked();
+        let fork = forked(send(&state, cx, 1, fork_at(1, "checkpoint-1")));
+        settled(cx, &fork);
+        state.read(|state| {
+            let fork = &state.residents.live[&fork];
+            assert_eq!(prompts(fork), ["first", "second"], "{provider:?}");
+            assert_eq!(
+                fork.meta.pending_fork,
+                Some(ForkPoint::Tail),
+                "{provider:?}"
+            );
+        });
+    }
+}
+
+/// Where a fork is refused: a restore point other than the client saw, a
+/// Harness that has no fork through a turn, a turn still running, a turn
+/// whose next prompt has no restore point yet, and a last turn with a prompt
+/// on its way to the Harness.
+#[test]
+fn a_fork_through_a_turn_goes_only_where_the_harness_can() {
+    #[derive(Clone, Copy)]
+    enum Then {
+        Nothing,
+        Prompt { point: bool },
+        InFlight,
+    }
+    const RUNNING: Then = Then::Prompt { point: true };
+    for (provider, turn_index, checkpoint, then, forks) in [
+        (
+            ProviderKind::ClaudeCode,
+            0,
+            "checkpoint-0",
+            Then::Nothing,
+            true,
+        ),
+        (
+            ProviderKind::ClaudeCode,
+            1,
+            "checkpoint-stale",
+            Then::Nothing,
+            false,
+        ),
+        (ProviderKind::Pi, 0, "checkpoint-0", Then::Nothing, true),
+        (
+            ProviderKind::Cursor,
+            1,
+            "checkpoint-1",
+            Then::Nothing,
+            false,
+        ),
+        (ProviderKind::ClaudeCode, 2, "checkpoint-2", RUNNING, false),
+        (ProviderKind::ClaudeCode, 1, "checkpoint-1", RUNNING, true),
+        (
+            ProviderKind::ClaudeCode,
+            1,
+            "checkpoint-1",
+            Then::Prompt { point: false },
+            false,
+        ),
+        (
+            ProviderKind::ClaudeCode,
+            1,
+            "checkpoint-1",
+            Then::InFlight,
+            false,
+        ),
     ] {
         let cx = &mut TestAppContext::default();
         let store = TestStore::new("tcode-fork-at-refused");
@@ -241,10 +331,37 @@ fn a_fork_from_a_message_goes_only_where_the_harness_can() {
             install(state, provider, cwd, cx);
             turn(state, cx, 0, "first", &[]);
             turn(state, cx, 1, "second", &[]);
+            match then {
+                Then::Nothing => {}
+                Then::InFlight => state.resident_mut(SOURCE).unwrap().turn_in_flight = true,
+                Then::Prompt { point } => {
+                    let prompt = AgentEvent::ItemCompleted(ThreadItem {
+                        id: "user-2".into(),
+                        parent_item_id: None,
+                        content: ItemContent::UserMessage {
+                            text: "third".into(),
+                            context_len: None,
+                            attachments: Vec::new(),
+                        },
+                    });
+                    state.record_event(SOURCE, &prompt, cx);
+                    let started = AgentEvent::TurnStarted {
+                        turn_id: "turn-2".into(),
+                    };
+                    state.record_event(SOURCE, &started, cx);
+                    if point {
+                        let checkpoint = AgentEvent::TurnCheckpoint {
+                            turn_id: "turn-2".into(),
+                            checkpoint_id: "checkpoint-2".into(),
+                        };
+                        state.record_event(SOURCE, &checkpoint, cx);
+                    }
+                }
+            }
         });
         cx.run_until_parked();
         match send(&state, cx, 1, fork_at(turn_index, checkpoint)) {
-            Ok(CommandResponse::ForkedAt { .. }) => assert!(forks, "{provider:?} {turn_index}"),
+            Ok(CommandResponse::SessionId(Some(_))) => assert!(forks, "{provider:?} {turn_index}"),
             Err(error) => {
                 assert!(!forks, "{provider:?} {turn_index}");
                 assert_eq!(error.code, "fork_unavailable");
@@ -254,8 +371,10 @@ fn a_fork_from_a_message_goes_only_where_the_harness_can() {
     }
 }
 
-/// A turn a rewind's divider opened starts after the rows of what the rewind
-/// took out: a fork from its message holds what the rewind left, not them.
+/// The turn a rewind's divider opened starts after the rows of what the rewind
+/// took out: a fork through the turn before it holds what the rewind left,
+/// not them. With nothing sent after the rewind that is the whole session,
+/// unless the Harness keeps the removed turns until the next send.
 #[test]
 fn a_fork_after_a_rewind_holds_what_the_rewind_left() {
     let cx = &mut TestAppContext::default();
@@ -275,11 +394,7 @@ fn a_fork_after_a_rewind_holds_what_the_rewind_left() {
         turn(state, cx, 2, "sent again", &[]);
     });
     cx.run_until_parked();
-    let CommandResponse::ForkedAt { session_id, .. } =
-        send(&state, cx, 1, fork_at(1, "checkpoint-2")).unwrap()
-    else {
-        panic!("a fork from a message answers with the message");
-    };
+    let session_id = forked(send(&state, cx, 1, fork_at(0, "checkpoint-0")));
     settled(cx, &session_id);
     state.read(|state| {
         let fork = &state.residents.live[&session_id];
@@ -290,11 +405,35 @@ fn a_fork_after_a_rewind_holds_what_the_rewind_left() {
             "the divider's turn, then the next"
         );
     });
+
+    for (later_history, undo, forks) in [
+        (agent::LaterHistory::Truncated, None, true),
+        (
+            agent::LaterHistory::HiddenUntilNextSend,
+            Some("revert"),
+            false,
+        ),
+    ] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("tcode-fork-after-rewind-unsent");
+        let cwd = store.root().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = host(&store, cx);
+        state.update(cx, |state, cx| {
+            install(state, ProviderKind::ClaudeCode, cwd, cx);
+            turn(state, cx, 0, "first", &[]);
+            turn(state, cx, 1, "taken out", &[]);
+            state.record_event(SOURCE, &rewound("checkpoint-1", later_history, undo), cx);
+        });
+        cx.run_until_parked();
+        let answer = send(&state, cx, 1, fork_at(0, "checkpoint-0"));
+        assert_eq!(answer.is_ok(), forks, "{later_history:?}");
+    }
 }
 
 /// A forked thread that has not started yet stands at the point it was made
-/// from: forking it again starts from there, not from the end of the session
-/// both resume.
+/// from: forking it again, whole or through its last turn, starts from there,
+/// not from the end of the session both resume.
 #[test]
 fn a_fork_of_a_fork_not_started_keeps_its_point() {
     let cx = &mut TestAppContext::default();
@@ -308,30 +447,24 @@ fn a_fork_of_a_fork_not_started_keeps_its_point() {
         turn(state, cx, 1, "second", &[]);
     });
     cx.run_until_parked();
-    let CommandResponse::ForkedAt { session_id, .. } =
-        send(&state, cx, 1, fork_at(1, "checkpoint-1")).unwrap()
-    else {
-        panic!("a fork from a message answers with the message");
-    };
+    let session_id = forked(send(&state, cx, 1, fork_at(0, "checkpoint-0")));
     settled(cx, &session_id);
-    let CommandResponse::SessionId(Some(again)) = send(
-        &state,
-        cx,
-        2,
+    let again = [
         json!({"type": "fork_thread", "content": {"id": session_id}}),
-    )
-    .unwrap() else {
-        panic!("a whole fork answers with the thread");
-    };
-    settled(cx, &again);
-    state.read(|state| {
-        assert_eq!(
-            state.residents.live[&again].meta.pending_fork,
-            Some(ForkPoint::Before {
-                checkpoint_id: "checkpoint-1".into()
-            })
-        );
-    });
+        json!({"type": "fork_thread", "content": {"id": session_id, "at": {"turn": 0}}}),
+    ];
+    for (id, command) in (2..).zip(again) {
+        let again = forked(send(&state, cx, id, command));
+        settled(cx, &again);
+        state.read(|state| {
+            assert_eq!(
+                state.residents.live[&again].meta.pending_fork,
+                Some(ForkPoint::Before {
+                    checkpoint_id: "checkpoint-1".into()
+                })
+            );
+        });
+    }
 }
 
 /// The branch a rewind left is the thread's to return to until the next send,
@@ -402,11 +535,7 @@ fn the_branch_a_rewind_left_opens_as_a_thread_of_its_own_after_the_next_send() {
         CommandResponse::SessionId(Some(branch.clone())),
     );
 
-    let CommandResponse::ForkedAt { session_id, .. } =
-        send(&state, cx, 4, fork_at(2, "checkpoint-4")).unwrap()
-    else {
-        panic!("a fork from a message answers with the message");
-    };
+    let session_id = forked(send(&state, cx, 4, fork_at(1, "checkpoint-3")));
     settled(cx, &session_id);
     state.read(|state| {
         let carried = state.residents.live[&session_id]
@@ -555,7 +684,7 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
     }
     let forks = [
         json!({"type": "fork_thread", "content": {"id": SOURCE}}),
-        fork_at(1, "checkpoint-1"),
+        fork_at(0, "checkpoint-0"),
     ];
     for command in forks {
         let cx = &mut TestAppContext::default();
@@ -613,11 +742,7 @@ fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
         cx.run_until_parked();
         let source_log = store.read_event_log(SOURCE).unwrap();
 
-        let fork = match send(&state, cx, 1, command).unwrap() {
-            CommandResponse::SessionId(Some(id)) => id,
-            CommandResponse::ForkedAt { session_id, .. } => session_id,
-            other => panic!("{other:?}"),
-        };
+        let fork = forked(send(&state, cx, 1, command));
         settled(cx, &fork);
 
         state.read(|state| {

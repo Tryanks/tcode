@@ -788,14 +788,17 @@ impl AppState {
                     .timeline
                     .turns
                     .get(turn)
-                    .and_then(|turn| turn.provider_checkpoint_id.clone())
-                    .ok_or_else(|| failed(format!("turn {turn} has no restore point")))?;
+                    .ok_or_else(|| failed(format!("there is no turn {turn}")))?
+                    .provider_checkpoint_id
+                    .clone();
                 let at = tcode_protocol::ForkAt {
                     turn,
                     checkpoint_id,
                 };
-                if self.fork_checkpoint(active, &at).is_none() {
-                    return Err(failed(format!("this thread cannot fork from turn {turn}")));
+                if self.fork_plan(active, &at).is_none() {
+                    return Err(failed(format!(
+                        "this thread cannot fork through turn {turn}"
+                    )));
                 }
                 (
                     Command::ForkThread {
@@ -884,7 +887,7 @@ impl AppState {
             }
             Command::ForkThread { at, .. } => {
                 let fork = match at {
-                    Some(at) => self.fork_thread_at(target, &at, cx).map(|fork| fork.id),
+                    Some(at) => self.fork_thread_at(target, &at, cx),
                     None => self.fork_thread(target, cx),
                 };
                 new_thread_id =

@@ -700,7 +700,7 @@ fn control_thread_guards_human_queued_messages_and_forks() {
                 state,
                 cx,
                 "caller",
-                change("queued", RunOp::ForkAt { turn: 1 }),
+                change("queued", RunOp::ForkAt { turn: 0 }),
             )
         })
         .unwrap();

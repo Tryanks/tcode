@@ -491,7 +491,7 @@ pub struct RunChange {
     #[schemars(description = "The thread id.")]
     pub thread_id: String,
     #[schemars(
-        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"fork_at\": {\"turn\"}} (a new thread holding the turns before that one, as outline numbers them, where the provider of the thread forks from a message), {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}, or cancel (your own subagent only: stop it and drop its queue without delivering its result). Dropping a queued human message needs history_edit."
+        description = "One of interrupt, {\"retry\": {\"turn\"}}, compact, {\"set_model\": {\"model\"}} (a model of the thread's own provider and profile), {\"set_option\": {\"id\", \"value\"}}, fork, {\"fork_at\": {\"turn\"}} (a new thread holding everything through that finished turn, answer included, as outline numbers them, where the provider of the thread forks at a turn), {\"steer_queued\": {\"id\"}}, {\"drop_queued\": {\"id\"}}, or cancel (your own subagent only: stop it and drop its queue without delivering its result). Dropping a queued human message needs history_edit."
     )]
     pub op: RunOp,
 }

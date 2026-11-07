@@ -1,22 +1,14 @@
 use agent::ForkPoint;
 use tcode_core::project::ForkOrigin;
-use tcode_core::session::EntryContent;
+use tcode_core::session::{EntryContent, ForkEdge};
 use tcode_protocol::{ForkAt, ForkStatus};
 use tcode_services::store::CloneBound;
 
-use super::rewind::stored_prompt;
 use super::sessions::fork_refusal;
 use super::*;
 
-/// A thread made from a message, and that message to edit or resend.
-pub struct ForkedAt {
-    pub id: String,
-    pub text: String,
-    pub attachments: Vec<String>,
-}
-
 /// How [`AppState::make_fork`] makes a thread from another.
-struct ForkPlan {
+pub(super) struct ForkPlan {
     point: ForkPoint,
     bound: Option<CloneBound>,
     /// The branch the new thread takes up, which is the session the restore
@@ -25,10 +17,10 @@ struct ForkPlan {
 }
 
 impl AppState {
-    /// What a fork from a message does in this thread and whether one can
-    /// start now.
+    /// Whether this thread can fork through a turn and whether one can start
+    /// now.
     pub(super) fn fork_status(&self, active: &ActiveSession) -> Option<ForkStatus> {
-        let control = active.meta.provider.caps().fork_at?;
+        active.meta.provider.caps().fork_at?;
         // A branch not started yet holds the source's cursor, not its session's.
         if Self::conversation_read_only(&active.meta)
             || active.meta.resume_cursor.is_none()
@@ -37,25 +29,50 @@ impl AppState {
             return None;
         }
         Some(ForkStatus {
-            first_turn: control.first_turn,
             blocked: self.rewind_requests.contains_key(&active.meta.id),
         })
     }
 
-    /// The harness's restore point for the prompt `at` names, when a fork can
-    /// begin before it now.
-    pub(super) fn fork_checkpoint(&self, active: &ActiveSession, at: &ForkAt) -> Option<String> {
-        let status = self.fork_status(active)?;
-        if status.blocked || !status.offers(at.turn) {
+    /// How a fork through the finished turn `at` names can be made now: from
+    /// the next prompt's restore point, or as all of the session when no
+    /// prompt follows and none is on its way.
+    pub(super) fn fork_plan(&self, active: &ActiveSession, at: &ForkAt) -> Option<ForkPlan> {
+        if self.fork_status(active)?.blocked {
             return None;
         }
-        active
-            .timeline
-            .turns
-            .get(at.turn)?
-            .provider_checkpoint_id
-            .clone()
-            .filter(|checkpoint| *checkpoint == at.checkpoint_id)
+        let timeline = &active.timeline;
+        if timeline.turns.get(at.turn)?.provider_checkpoint_id != at.checkpoint_id {
+            return None;
+        }
+        let (point, bound) = match timeline.fork_edge(at.turn)? {
+            ForkEdge::BeforePrompt {
+                turn,
+                checkpoint_id,
+            } => {
+                let opens_with_divider = timeline
+                    .entries
+                    .iter()
+                    .find(|entry| entry.turn == turn)
+                    .is_some_and(|entry| matches!(entry.content, EntryContent::Rewound(_)));
+                let bound = if opens_with_divider {
+                    CloneBound::ThroughTurnOpening(turn)
+                } else {
+                    CloneBound::BeforeTurn(turn)
+                };
+                (ForkPoint::Before { checkpoint_id }, Some(bound))
+            }
+            ForkEdge::End if active.turn_in_flight => return None,
+            // A fork not started yet still names the point it was made from.
+            ForkEdge::End => (
+                active.meta.pending_fork.clone().unwrap_or(ForkPoint::Tail),
+                None,
+            ),
+        };
+        Some(ForkPlan {
+            point,
+            bound,
+            branch: None,
+        })
     }
 
     /// Duplicate a stored transcript and arrange for its next provider start to
@@ -84,40 +101,15 @@ impl AppState {
         ))
     }
 
-    /// A new thread holding what came before the prompt `at` names, through
-    /// the harness's own fork from that message. The source goes on as it is,
-    /// a turn running there included: the fork is made by a process of its
-    /// own at the new thread's first send.
-    pub fn fork_thread_at(&mut self, id: &str, at: &ForkAt, cx: &mut HostCx) -> Option<ForkedAt> {
+    /// A new thread holding everything through the finished turn `at` names,
+    /// through the harness's own fork. The source goes on as it is, a later
+    /// turn running there included: the fork is made by a process of its own
+    /// at the new thread's first send.
+    pub fn fork_thread_at(&mut self, id: &str, at: &ForkAt, cx: &mut HostCx) -> Option<String> {
         let active = self.resident(id)?;
-        let checkpoint_id = self.fork_checkpoint(active, at)?;
-        let (text, attachments) = stored_prompt(&active.timeline, &checkpoint_id)?;
-        let opens_with_divider = active
-            .timeline
-            .entries
-            .iter()
-            .find(|entry| entry.turn == at.turn)
-            .is_some_and(|entry| matches!(entry.content, EntryContent::Rewound(_)));
-        let bound = if opens_with_divider {
-            CloneBound::ThroughTurnOpening(at.turn)
-        } else {
-            CloneBound::BeforeTurn(at.turn)
-        };
+        let plan = self.fork_plan(active, at)?;
         let source = active.meta.clone();
-        let id = self.make_fork(
-            &source,
-            ForkPlan {
-                point: ForkPoint::Before { checkpoint_id },
-                bound: Some(bound),
-                branch: None,
-            },
-            cx,
-        );
-        Some(ForkedAt {
-            id,
-            text,
-            attachments,
-        })
+        Some(self.make_fork(&source, plan, cx))
     }
 
     /// The branch the rewind whose divider opened `turn` left, once it can no

@@ -94,10 +94,10 @@ pub(crate) struct OpenRewind {
     pub(crate) steer: Option<String>,
 }
 
-/// A message's fork: a new thread holding what came before it.
+/// A finished turn's fork: a new thread holding everything through it.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_chat, no_json)]
-pub(crate) struct ForkFromMessage {
+pub(crate) struct ForkThroughTurn {
     pub(crate) turn: usize,
 }
 
@@ -1132,7 +1132,7 @@ impl ChatView {
             }))
             .on_action(cx.listener(|this, action, _, cx| {
                 this.timeline
-                    .update(cx, |timeline, cx| timeline.on_fork_from_message(action, cx))
+                    .update(cx, |timeline, cx| timeline.on_fork_through_turn(action, cx))
             }))
             .on_action(cx.listener(|this, action, window, cx| {
                 this.timeline.update(cx, |timeline, cx| {

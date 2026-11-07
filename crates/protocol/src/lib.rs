@@ -358,6 +358,9 @@ pub use wire::{
 // native_mcp_config and permission, the NativeMcpServers query is new, and
 // ProfileSettingsPatch gains SetDefaultPermission.
 // AgentEvent::RewindUndoClosed is new.
+// ForkAt names a finished turn to fork through and its checkpoint_id is
+// optional, CommandResponse::ForkedAt is gone (ForkThread answers SessionId)
+// and ForkStatus drops first_turn.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]
