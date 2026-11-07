@@ -1067,6 +1067,7 @@ impl SessionActor for Actor {
                     .await;
                 Ok(())
             }
+            SessionCommand::ApplySettings { .. } => Ok(()),
             SessionCommand::SetOption { id, value } => {
                 if id == "permissions" {
                     let value = value.as_str().ok_or("Codex permissions must be a string")?;

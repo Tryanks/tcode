@@ -1267,6 +1267,7 @@ async fn handle_command<D: Dialect>(
                 .await;
         }
         SessionCommand::RetryTurn { .. }
+        | SessionCommand::ApplySettings { .. }
         | SessionCommand::SetGoal { .. }
         | SessionCommand::ClearGoal
         | SessionCommand::ReadAccountUsage { .. } => {}

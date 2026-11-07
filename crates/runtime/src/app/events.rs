@@ -48,6 +48,13 @@ impl AppState {
                 }
                 return;
             }
+            AgentEvent::SettingsApplied { applied } => {
+                if let Some(resident) = self.resident_mut(session_id) {
+                    resident.settle_settings_apply(*applied);
+                }
+                self.queue_automatic_turn(session_id, |_| {}, cx);
+                return;
+            }
             AgentEvent::BackgroundTasksChanged { count } => {
                 let should_mark_idle = self.resident_mut(session_id).is_some_and(|resident| {
                     resident.background_task_count = *count;
@@ -502,7 +509,7 @@ impl AppState {
                 restart = restartable
                     && !active.queue.is_empty()
                     && !active.queue_held
-                    && active.launch_settings_changed_while_live();
+                    && active.restart_required();
                 // A thread that moved during this turn leaves the old directory now,
                 // whether or not anything waits to go.
                 let moved = restartable && active.cwd_changed_while_live();

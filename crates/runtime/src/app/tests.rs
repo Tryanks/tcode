@@ -7103,6 +7103,17 @@ fn settings_restart_waits_for_background_follow_up() {
     };
 
     send(&state, cx, 1, "goes out beside the task");
+    assert!(matches!(
+        next_command(&actor),
+        Ok(SessionCommand::ApplySettings { .. })
+    ));
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "background-restart",
+            AgentEvent::SettingsApplied { applied: false },
+            cx,
+        );
+    });
     let delivery_id = match next_command(&actor) {
         Ok(SessionCommand::SendTurn {
             delivery_id, text, ..
@@ -7160,6 +7171,125 @@ fn settings_restart_waits_for_background_follow_up() {
     state.read(|state| assert_eq!(state.selected_session().unwrap().queue.len(), 1));
 }
 
+/// A harness that can take a new model and effort where it runs is asked to,
+/// and the message that asked goes out behind its answer, on the same process,
+/// background work or none.
+#[test]
+fn a_new_model_is_taken_on_the_running_process() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-live-settings-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::ClaudeCode, commands);
+    session.meta.id = "live-settings".into();
+    session.live_model = Some("claude-opus-4-8".into());
+    session.meta.model = Some("claude-sonnet-4-6".into());
+    session.background_task_count = 1;
+    let effort = OptionSelection {
+        id: "reasoningEffort".into(),
+        value: serde_json::json!("low"),
+    };
+    session.meta.option_selections.push(effort.clone());
+
+    state.update(cx, |state, _| {
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::SendTurn {
+            session_id: "live-settings".into(),
+            text: "on the new model".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    match next_command(&actor) {
+        Ok(SessionCommand::ApplySettings {
+            model,
+            option_selections,
+        }) => {
+            assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+            assert_eq!(option_selections, [effort]);
+        }
+        other => panic!("expected the settings to go first: {other:?}"),
+    }
+    assert!(
+        next_command(&actor).is_err(),
+        "the message waits its answer"
+    );
+
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "live-settings",
+            AgentEvent::SettingsApplied { applied: true },
+            cx,
+        );
+    });
+    let delivery_id = match next_command(&actor) {
+        Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+        other => panic!("the message goes out behind the answer: {other:?}"),
+    };
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "live-settings",
+            AgentEvent::TurnAccepted { delivery_id },
+            cx,
+        );
+        let session = state.selected_session().unwrap();
+        assert!(
+            !session
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.content, EntryContent::SettingsKept)),
+            "the message ran on the settings it asked for"
+        );
+        assert!(!session.launch_settings_changed_while_live());
+    });
+}
+
+/// What the process refuses takes a restart: at once when nothing would be
+/// killed, and otherwise after the background work, with the message going out
+/// on the old settings in the meantime.
+#[test]
+fn a_refused_settings_change_falls_back_to_the_restart() {
+    for background in [0, 1] {
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("tcode-refused-settings-test");
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        let (commands, actor) = smol::channel::unbounded();
+        let mut session = live_session(ProviderKind::ClaudeCode, commands);
+        session.meta.id = "refused-settings".into();
+        session.live_model = Some("claude-opus-4-8".into());
+        session.meta.model = Some("claude-sonnet-4-6".into());
+        session.background_task_count = background;
+
+        state.update(cx, |state, cx| {
+            state
+                .settings
+                .provider_mut(ProviderKind::ClaudeCode)
+                .binary_path = Some("/nonexistent/tcode-test-claude".into());
+            state.sessions.push(session.meta.clone());
+            state.install_selected(session);
+            state.send_turn("refused-settings", "go".into(), Vec::new(), cx);
+            assert!(matches!(
+                next_command(&actor),
+                Ok(SessionCommand::ApplySettings { .. })
+            ));
+            state.on_event(
+                "refused-settings",
+                AgentEvent::SettingsApplied { applied: false },
+                cx,
+            );
+        });
+        match (background, next_command(&actor)) {
+            (0, Ok(SessionCommand::Shutdown)) | (1, Ok(SessionCommand::SendTurn { .. })) => {}
+            other => panic!("with {background} background task(s): {other:?}"),
+        }
+    }
+}
+
 /// A report arriving while a restart waits on background work, with no turn to
 /// steer into, wakes the lead on its running process.
 #[test]
@@ -7178,6 +7308,13 @@ fn a_report_reaches_a_lead_whose_restart_waits_for_background_work() {
         state.sessions.push(lead.meta.clone());
         state.install_selected(lead);
         state.deliver_orchestrate_callback_to_parent("lead", "the report".into(), cx);
+    });
+    assert!(matches!(
+        next_command(&actor),
+        Ok(SessionCommand::ApplySettings { .. })
+    ));
+    state.update(cx, |state, cx| {
+        state.on_event("lead", AgentEvent::SettingsApplied { applied: false }, cx);
     });
     assert!(matches!(
         next_command(&actor),
@@ -7280,16 +7417,14 @@ fn settings_restart_waits_for_the_running_turn() {
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::ClaudeCode, commands);
+    let mut session = live_session(ProviderKind::Codex, commands);
     session.meta.id = "running-turn-restart".into();
-    session.live_model = Some("claude-opus-4-8".into());
-    session.meta.model = Some("claude-sonnet-4-6".into());
+    session.live_model = Some("gpt-5.4".into());
+    session.meta.model = Some("gpt-5.5".into());
 
     state.update(cx, |state, cx| {
-        state
-            .settings
-            .provider_mut(ProviderKind::ClaudeCode)
-            .binary_path = Some("/nonexistent/tcode-test-claude".into());
+        state.settings.provider_mut(ProviderKind::Codex).binary_path =
+            Some("/nonexistent/tcode-test-codex".into());
         state.install_selected(session);
         state.on_event(
             "running-turn-restart",

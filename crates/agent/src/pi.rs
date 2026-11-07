@@ -572,6 +572,7 @@ impl SessionActor for PiActor {
             .map_err(|err| err.to_string()),
             SessionCommand::RetryTurn { .. }
             | SessionCommand::SetOption { .. }
+            | SessionCommand::ApplySettings { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
             | SessionCommand::ReadAccountUsage { .. }

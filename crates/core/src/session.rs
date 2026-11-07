@@ -1192,6 +1192,7 @@ impl Timeline {
             AgentEvent::TurnAccepted { .. }
             | AgentEvent::McpServersNotAttached
             | AgentEvent::BackgroundTasksChanged { .. }
+            | AgentEvent::SettingsApplied { .. }
             | AgentEvent::ModelFallbackDetected { .. }
             | AgentEvent::TurnBlocked { .. } => {}
             AgentEvent::TurnChangesUpdated {
