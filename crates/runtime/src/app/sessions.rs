@@ -1736,14 +1736,7 @@ impl AppState {
         }
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
-        let directories = self.user_directories.clone();
-        let session_ids = ids.to_vec();
-        let uploads = cx.unblock(move || directories.remove_thread_uploads(&session_ids));
-        HostCx::spawn_detached(cx, async move {
-            if let Err(error) = uploads.await {
-                log::warn!("could not remove a deleted thread's uploads: {error}");
-            }
-        });
+        self.remove_thread_uploads(ids.to_vec(), cx);
         for (deleted_id, root, cwd) in worktree_removals {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
@@ -1784,9 +1777,10 @@ impl AppState {
             .filter(|s| s.draft && s.meta.project_id.as_deref() == Some(project_id))
             .map(|s| s.meta.id.clone())
             .collect();
-        for id in drafts {
-            self.shutdown_active(&id, cx);
+        for id in &drafts {
+            self.shutdown_active(id, cx);
         }
+        self.remove_thread_uploads(drafts, cx);
         let draft_destination = ConversationDestination::ProjectDraft(project_id.to_string());
         self.terminal_workspaces.remove(&draft_destination);
         let mut ids = Vec::new();
@@ -1809,6 +1803,16 @@ impl AppState {
         self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
         self.replace_external_import_status(project_id, None, cx);
+    }
+
+    fn remove_thread_uploads(&self, session_ids: Vec<String>, cx: &mut HostCx) {
+        let directories = self.user_directories.clone();
+        let uploads = cx.unblock(move || directories.remove_thread_uploads(&session_ids));
+        HostCx::spawn_detached(cx, async move {
+            if let Err(error) = uploads.await {
+                log::warn!("could not remove a deleted thread's uploads: {error}");
+            }
+        });
     }
 
     /// Whether `session_id` owns live or queued work.
