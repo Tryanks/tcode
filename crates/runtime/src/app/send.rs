@@ -153,30 +153,24 @@ impl AppState {
                 continue;
             }
 
-            let (settings_changed, restart_deferred, is_live, has_queue) = self
+            let (restart, is_live, has_queue) = self
                 .residents
                 .parked
                 .get(&session_id)
                 .map(|parked| {
                     (
-                        parked.launch_settings_changed_while_live(),
-                        parked.background_task_count > 0,
+                        parked.launch_settings_changed_while_live()
+                            && parked.background_task_count == 0,
                         matches!(parked.runtime, Runtime::Live(_)),
                         !parked.queue.is_empty(),
                     )
                 })
-                .unwrap_or((false, false, false, false));
-            if settings_changed {
-                if restart_deferred {
-                    log::info!(
-                        "parked session {session_id}: deferring scheduled-send settings restart"
-                    );
-                } else {
-                    if let Some(parked) = self.residents.parked.get_mut(&session_id) {
-                        parked.shutdown_to_idle();
-                    }
-                    self.ensure_session_started(&session_id, cx);
+                .unwrap_or((false, false, false));
+            if restart {
+                if let Some(parked) = self.residents.parked.get_mut(&session_id) {
+                    parked.shutdown_to_idle();
                 }
+                self.ensure_session_started(&session_id, cx);
             } else if is_live {
                 if self.dispatch_next_queued(&session_id, cx).is_err() {
                     log::warn!(
@@ -279,8 +273,7 @@ impl AppState {
             }
         }
         let should_start = matches!(active.runtime, Runtime::Idle);
-        let dispatch_failed =
-            !restart_deferred && self.dispatch_next_queued(target_id, cx).is_err();
+        let dispatch_failed = self.dispatch_next_queued(target_id, cx).is_err();
         if should_start {
             self.ensure_started(target_id, cx);
         }
@@ -302,15 +295,13 @@ impl AppState {
             push(session);
 
             // Match ordinary sends when a launch-time selection changed while
-            // the provider was live. Background work keeps the old process
-            // alive; its final follow-up completion performs the restart.
-            let settings_changed = session.launch_settings_changed_while_live();
-            let restart_deferred = session.settings_restart_deferred();
-            if settings_changed && !restart_deferred {
+            // the provider was live.
+            if session.launch_settings_changed_while_live() && !session.settings_restart_deferred()
+            {
                 session.shutdown_to_idle();
             }
             let should_start = matches!(session.runtime, Runtime::Idle);
-            if !restart_deferred && self.dispatch_next_queued(id, cx).is_err() {
+            if self.dispatch_next_queued(id, cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
             if should_start {
@@ -613,7 +604,9 @@ impl AppState {
         if let QueuedMessageKind::PullRequestWake { key, id } = &message.kind {
             self.acknowledge_pull_request_wake(session_id, key, id, &message.text, cx);
         }
-        if let Some(window) = message.context_window_changed {
+        if message.kept_settings {
+            self.record_event(session_id, &AgentEvent::SettingsKept, cx);
+        } else if let Some(window) = message.context_window_changed {
             self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
         }
         self.maybe_generate_title(session_id, &message.text, &message.attachments, cx);
@@ -627,14 +620,10 @@ impl AppState {
         };
         parked.turn_in_flight = false;
         let waiting = !parked.queue.is_empty() && !parked.queue_held;
-        if waiting && parked.launch_settings_changed_while_live() {
-            if parked.background_task_count > 0 {
-                log::info!(
-                    "parked session {session_id}: deferring settings restart for {} background task(s)",
-                    parked.background_task_count
-                );
-                return;
-            }
+        if waiting
+            && parked.launch_settings_changed_while_live()
+            && parked.background_task_count == 0
+        {
             parked.shutdown_to_idle();
             self.ensure_session_started(session_id, cx);
             return;
@@ -774,22 +763,65 @@ impl AppState {
                 // Persist the pending request before handing it to the provider.
                 let request_id = self.record_steer_request(&session_id, &text, &attachments, cx);
 
-                let Some(active) = self.resident_mut(target_id) else {
-                    return;
-                };
-                active.pending_steers.push(PendingSteer {
-                    request_id: request_id.clone(),
-                    text,
+                let steer = PendingSteer {
+                    request_id,
+                    text: text.clone(),
                     attachments: attachments.clone(),
                     author: cx.author.clone(),
                     origin: cx.origin,
-                });
-                if active
-                    .steer_now(request_id, wire_text, attachments)
-                    .is_err()
-                {
+                };
+                if !self.hand_over_steer(target_id, steer, wire_text, cx) {
                     self.report_error(RuntimeError::ProcessGone, cx);
+                    self.send_turn_assembled(target_id, text, attachments, cx);
                 }
+            }
+        }
+    }
+
+    /// Give the provider a recorded steer, kept until it confirms so the words
+    /// survive a rejection or the process going away. `false` when the provider
+    /// is gone, with the steer withdrawn for the caller to send another way.
+    pub(super) fn hand_over_steer(
+        &mut self,
+        target_id: &str,
+        steer: PendingSteer,
+        wire_text: String,
+        cx: &mut HostCx,
+    ) -> bool {
+        let Some(active) = self.resident_mut(target_id) else {
+            return false;
+        };
+        let request_id = steer.request_id.clone();
+        let attachments = steer.attachments.clone();
+        active.pending_steers.push(steer);
+        if active
+            .steer_now(request_id.clone(), wire_text, attachments)
+            .is_ok()
+        {
+            return true;
+        }
+        active.pending_steers.pop();
+        self.record_event(target_id, &AgentEvent::SteerRejected { request_id }, cx);
+        false
+    }
+
+    /// Steers the provider took and never confirmed died with its process: the
+    /// model did not see them, so they go out as ordinary turns.
+    pub(super) fn requeue_unconfirmed_steers(&mut self, session_id: &str, cx: &mut HostCx) {
+        let steers = self
+            .resident_mut(session_id)
+            .map(|resident| std::mem::take(&mut resident.pending_steers))
+            .unwrap_or_default();
+        for steer in steers {
+            self.record_event(
+                session_id,
+                &AgentEvent::SteerRejected {
+                    request_id: steer.request_id.clone(),
+                },
+                cx,
+            );
+            if let Some(resident) = self.resident_mut(session_id) {
+                resident.requeue_steer(steer);
             }
         }
     }

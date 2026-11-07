@@ -7066,6 +7066,9 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
     }
 }
 
+/// A restart would kill a background task, so it waits for the task; a message
+/// does not. It goes out on the running process, says it kept the old settings,
+/// and the message after the work ends takes the restart.
 #[test]
 fn settings_restart_waits_for_background_follow_up() {
     let cx = &mut TestAppContext::default();
@@ -7079,47 +7082,192 @@ fn settings_restart_waits_for_background_follow_up() {
     session.meta.model = Some("claude-sonnet-4-6".into());
     session.background_task_count = 1;
 
-    state.update(cx, |state, cx| {
+    state.update(cx, |state, _| {
         state
             .settings
             .provider_mut(ProviderKind::ClaudeCode)
             .binary_path = Some("/nonexistent/tcode-test-claude".into());
+        state.sessions.push(session.meta.clone());
         state.install_selected(session);
-        state.send_turn(
-            "background-restart",
-            "use the new model later".into(),
-            Vec::new(),
+    });
+    let send = |state: &TestEntity, cx: &mut TestAppContext, id, text: &str| {
+        state.dispatch_command(
             cx,
-        );
-        assert!(next_command(&actor).is_err());
-        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
-
-        // Even an early background-task drain cannot restart the provider
-        // before its self-invoked follow-up turn closes.
-        state.on_event(
-            "background-restart",
-            AgentEvent::BackgroundTasksChanged { count: 0 },
-            cx,
-        );
-        assert!(next_command(&actor).is_err());
-        state.on_event(
-            "background-restart",
-            AgentEvent::TurnStarted {
-                turn_id: "task-follow-up".into(),
+            id,
+            Command::SendTurn {
+                session_id: "background-restart".into(),
+                text: text.into(),
+                attachment_paths: Vec::new(),
             },
+        );
+    };
+
+    send(&state, cx, 1, "goes out beside the task");
+    let delivery_id = match next_command(&actor) {
+        Ok(SessionCommand::SendTurn {
+            delivery_id, text, ..
+        }) => {
+            assert_eq!(text, "goes out beside the task");
+            delivery_id
+        }
+        other => panic!("the message must go out on the running process: {other:?}"),
+    };
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "background-restart",
+            AgentEvent::TurnAccepted { delivery_id },
             cx,
+        );
+        let session = state.selected_session().unwrap();
+        assert!(session.queue.is_empty());
+        let entries = &session.timeline.entries;
+        assert!(
+            matches!(entries.last().unwrap().content, EntryContent::SettingsKept),
+            "the message says it kept the old settings: {:?}",
+            entries
+                .iter()
+                .map(|entry| &entry.content)
+                .collect::<Vec<_>>()
         );
         state.on_event(
             "background-restart",
             AgentEvent::TurnCompleted {
-                turn_id: "task-follow-up".into(),
+                turn_id: "beside-the-task".into(),
                 status: TurnStatus::Completed,
                 usage: None,
             },
             cx,
         );
-        assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
-        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
+    });
+    assert!(
+        next_command(&actor).is_err(),
+        "the running task keeps its process"
+    );
+
+    // An early drain still cannot restart the provider: its self-invoked
+    // follow-up turn may be about to start.
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "background-restart",
+            AgentEvent::BackgroundTasksChanged { count: 0 },
+            cx,
+        );
+    });
+    assert!(next_command(&actor).is_err());
+
+    send(&state, cx, 2, "takes the new model");
+    assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
+    state.read(|state| assert_eq!(state.selected_session().unwrap().queue.len(), 1));
+}
+
+/// A report arriving while a restart waits on background work, with no turn to
+/// steer into, wakes the lead on its running process.
+#[test]
+fn a_report_reaches_a_lead_whose_restart_waits_for_background_work() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-background-report-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut lead = live_session(ProviderKind::ClaudeCode, commands);
+    lead.meta.id = "lead".into();
+    lead.live_model = Some("claude-opus-4-8".into());
+    lead.meta.model = Some("claude-sonnet-4-6".into());
+    lead.background_task_count = 1;
+
+    state.update(cx, |state, cx| {
+        state.sessions.push(lead.meta.clone());
+        state.install_selected(lead);
+        state.deliver_orchestrate_callback_to_parent("lead", "the report".into(), cx);
+    });
+    assert!(matches!(
+        next_command(&actor),
+        Ok(SessionCommand::SendTurn { text, .. }) if text.contains("the report")
+    ));
+}
+
+/// A provider that refuses a steer because the turn just ended has not seen it:
+/// a child's report steered into that turn goes out as a turn of its own.
+#[test]
+fn a_rejected_steer_of_a_report_goes_out_as_a_turn() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-rejected-report-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut lead = live_session(ProviderKind::Codex, commands);
+    lead.meta.id = "lead".into();
+
+    state.update(cx, |state, cx| {
+        state.sessions.push(lead.meta.clone());
+        state.install_selected(lead);
+        state.on_event(
+            "lead",
+            AgentEvent::TurnStarted {
+                turn_id: "ending".into(),
+            },
+            cx,
+        );
+        state.deliver_orchestrate_callback_to_parent("lead", "the report".into(), cx);
+        let Ok(SessionCommand::Steer { request_id, .. }) = next_command(&actor) else {
+            panic!("a running turn takes the report as a steer");
+        };
+        state.on_event(
+            "lead",
+            AgentEvent::TurnCompleted {
+                turn_id: "ending".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+            cx,
+        );
+        state.on_event("lead", AgentEvent::SteerRejected { request_id }, cx);
+    });
+    assert!(matches!(
+        next_command(&actor),
+        Ok(SessionCommand::SendTurn { text, .. }) if text == "the report"
+    ));
+}
+
+/// A steer the provider never confirmed died with its process, so a restart
+/// sends it to the next one.
+#[test]
+fn a_steer_lost_with_its_process_goes_to_the_next_one() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-lost-steer-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut lead = live_session(ProviderKind::ClaudeCode, commands);
+    lead.meta.id = "lead".into();
+
+    state.update(cx, |state, cx| {
+        state
+            .settings
+            .provider_mut(ProviderKind::ClaudeCode)
+            .binary_path = Some("/nonexistent/tcode-test-claude".into());
+        state.sessions.push(lead.meta.clone());
+        state.install_selected(lead);
+        state.on_event(
+            "lead",
+            AgentEvent::TurnStarted {
+                turn_id: "running".into(),
+            },
+            cx,
+        );
+        state.deliver_orchestrate_callback_to_parent("lead", "the report".into(), cx);
+        assert!(matches!(
+            next_command(&actor),
+            Ok(SessionCommand::Steer { .. })
+        ));
+        state.on_event(
+            "lead",
+            AgentEvent::SessionClosed {
+                reason: Some("claude exited".into()),
+            },
+            cx,
+        );
+        let session = state.selected_session().unwrap();
+        assert_eq!(session.queue.len(), 1);
+        assert_eq!(session.queue[0].text, "the report");
+        assert_eq!(session.queue[0].origin, MessageOrigin::Agent);
     });
 }
 

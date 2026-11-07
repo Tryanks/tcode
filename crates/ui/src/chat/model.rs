@@ -35,6 +35,7 @@ pub(crate) enum Segment<'a> {
     ModelChange(&'a TimelineEntry),
     ContextCompacted(&'a TimelineEntry),
     ContextWindowChanged(&'a TimelineEntry),
+    SettingsKept(&'a TimelineEntry),
     ControlAction(&'a TimelineEntry),
     /// A rewind's divider, or a rewind the harness did not make.
     Rewind(&'a TimelineEntry),
@@ -259,6 +260,9 @@ pub(crate) fn segment_entries<'a>(
                     &mut ranges,
                     Segment::ContextWindowChanged(entry),
                 );
+            }
+            EntryContent::SettingsKept => {
+                single(&mut segments, &mut ranges, Segment::SettingsKept(entry));
             }
             EntryContent::ControlAction(_) => {
                 single(&mut segments, &mut ranges, Segment::ControlAction(entry));

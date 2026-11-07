@@ -544,6 +544,8 @@ pub enum EntryContent {
     ContextWindowChanged {
         window: u64,
     },
+    /// The message before this ran on the live process's old settings.
+    SettingsKept,
     /// Another thread's model acted on this thread through `tcode_control`
     /// (a system row naming the actor and the action).
     ControlAction(agent::ControlAction),
@@ -1627,6 +1629,18 @@ impl Timeline {
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ContextWindowChanged { window: *window },
+                    ts,
+                    finished_ts: None,
+                    background: false,
+                    turn,
+                }));
+            }
+            AgentEvent::SettingsKept => {
+                let turn = self.ensure_turn();
+                let id = self.synthetic_id("settings-kept", ts);
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::SettingsKept,
                     ts,
                     finished_ts: None,
                     background: false,

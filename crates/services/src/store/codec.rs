@@ -71,6 +71,7 @@ const TYPES: &[&str] = &[
     "provider_commands",
     "context_compacted",
     "context_window_changed",
+    "settings_kept",
     "control_action",
     "plan_updated",
     "goal_updated",

@@ -2353,6 +2353,11 @@ pub enum AgentEvent {
     ContextWindowChanged {
         window: u64,
     },
+    /// The message before this ran on the settings the live process started
+    /// with: the restart that takes the thread's new ones waits for its
+    /// background work. Never emitted by an adapter; the runtime persists it
+    /// after the user message it describes.
+    SettingsKept,
     /// Another thread's model acted on this thread through `tcode_control`. This is
     /// never emitted by an adapter; the runtime records it in the target thread.
     ControlAction(ControlAction),

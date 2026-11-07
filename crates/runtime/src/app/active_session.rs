@@ -29,6 +29,8 @@ pub struct QueuedMessage {
     pub(super) options: TurnOptions,
     /// Context-window selection changed while the provider was live.
     pub(super) context_window_changed: Option<u64>,
+    /// Sent on a process still running the settings the thread has since left.
+    pub(super) kept_settings: bool,
     /// Orchestration callbacks arriving during the same provider-start window
     /// are folded into one wake-up turn. Once that turn is live, later callbacks
     /// are steered into it instead of becoming more queued turns.
@@ -412,8 +414,10 @@ impl ActiveSession {
     }
 
     /// A settings restart must not kill a running turn (a `/compact` included),
-    /// Claude-owned background work, or a turn whose provider delivery
-    /// acknowledgement has not landed yet.
+    /// provider-owned background work, or a turn whose provider delivery
+    /// acknowledgement has not landed yet. Only the first and last also hold
+    /// the queue: background work runs for as long as it likes, so a message
+    /// goes out beside it on the process as it is ([`Self::dispatch_next_pending`]).
     pub(super) fn settings_restart_deferred(&self) -> bool {
         self.launch_settings_changed_while_live()
             && (self.turn_in_flight
@@ -426,7 +430,6 @@ impl ActiveSession {
         if self.queue_held
             || self.turn_in_flight
             || self.delivery_in_flight.is_some()
-            || self.settings_restart_deferred()
             || !matches!(self.runtime, Runtime::Live(_))
         {
             return None;
@@ -603,9 +606,20 @@ impl ActiveSession {
             not_before: None,
             options,
             context_window_changed: None,
+            kept_settings: false,
             kind: QueuedMessageKind::User,
         });
         id
+    }
+
+    /// Put a steer the provider never took back in the queue, under its own
+    /// author and origin.
+    pub(super) fn requeue_steer(&mut self, steer: PendingSteer) {
+        self.push_queued(steer.text, steer.attachments);
+        if let Some(message) = self.queue.last_mut() {
+            message.author = steer.author;
+            message.origin = steer.origin.unwrap_or(MessageOrigin::Human);
+        }
     }
 
     /// Append a delayed user turn while capturing the same per-send settings
@@ -653,6 +667,7 @@ impl ActiveSession {
             not_before: None,
             options,
             context_window_changed: None,
+            kept_settings: false,
             kind: QueuedMessageKind::OrchestrateCallback,
         });
         id
@@ -675,6 +690,7 @@ impl ActiveSession {
             not_before: None,
             options,
             context_window_changed: None,
+            kept_settings: false,
             kind,
         });
         id
@@ -703,7 +719,8 @@ impl ActiveSession {
     /// be passed by ordinary work. A turn already in flight blocks dispatch for EVERY provider: a
     /// queued message is by definition one that waits for the running turn to
     /// finish. (Steering — the other way to send mid-turn — never goes through
-    /// here; see [`AppState::steer`].)
+    /// here; see [`AppState::steer`].) A restart background work defers does not
+    /// block it: the message runs on the live process's settings and says so.
     pub(super) fn dispatch_next_pending(&mut self) -> Result<bool, ()> {
         let Some(send) = self.next_dispatchable().cloned() else {
             return Ok(false);
@@ -720,6 +737,10 @@ impl ActiveSession {
                 attachments: send.attachments,
             })
             .map_err(|_| ())?;
+        let kept_settings = self.launch_settings_changed_while_live();
+        if let Some(message) = self.queue.iter_mut().find(|message| message.id == send.id) {
+            message.kept_settings = kept_settings;
+        }
         self.idle_since = None;
         self.delivery_in_flight = Some(send.id);
         Ok(true)

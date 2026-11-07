@@ -423,7 +423,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         // markers that tell the CLI it is nested so the child behaves like a
         // top-level invocation.
         .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT");
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
+        .env("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1");
     for (key, value) in opts.launch_env.pairs(ProviderKind::ClaudeCode) {
         cmd.env(key, value);
     }
@@ -1905,9 +1906,12 @@ pub(crate) struct Mapper {
     /// Tasks still owned by this Claude process, whatever their `task_type`:
     /// a Monitor watch or a backgrounded subagent keeps the process busy
     /// exactly like a background Bash command. When the list becomes empty
-    /// Claude immediately re-invokes itself with the completion notification,
-    /// so zero is not published until that follow-up result.
+    /// Claude normally re-invokes itself with the completion notification, so
+    /// zero is not published until that follow-up result, or until the CLI
+    /// goes idle without one, as it does for a stopped task.
     background_tasks: HashSet<String>,
+    /// The list emptied and its zero has not been published.
+    background_drain_withheld: bool,
     /// Native rewind control requests awaiting Claude's correlated response.
     pending_rewinds: HashMap<String, PendingRewind>,
     /// What the latest dry run of each restore point found: Claude answers a
@@ -1967,6 +1971,7 @@ impl Mapper {
             pending_steers: VecDeque::new(),
             saw_requesting: false,
             background_tasks: HashSet::new(),
+            background_drain_withheld: false,
             pending_rewinds: HashMap::new(),
             rewind_previews: HashMap::new(),
             steer_uuids: HashMap::new(),
@@ -2380,6 +2385,13 @@ impl Mapper {
             Some("task_updated") => return self.on_task_updated(msg),
             Some("task_notification") => return self.on_task_notification(msg),
             Some("background_tasks_changed") => return self.on_background_tasks_changed(msg),
+            Some("session_state_changed")
+                if msg.get("state").and_then(Value::as_str) == Some("idle")
+                    && self.background_drain_withheld =>
+            {
+                self.background_drain_withheld = false;
+                return vec![AgentEvent::BackgroundTasksChanged { count: 0 }];
+            }
             Some("model_refusal_fallback") => return self.on_model_refusal_fallback(msg),
             Some("api_retry") => return vec![api_retry_notice(msg)],
             other => {
@@ -2479,12 +2491,15 @@ impl Mapper {
             .collect::<HashSet<_>>();
         let had_background_tasks = !self.background_tasks.is_empty();
         self.background_tasks = current;
-        if self.background_tasks.is_empty() && had_background_tasks {
+        self.background_drain_withheld = self.background_tasks.is_empty() && had_background_tasks;
+        if self.background_drain_withheld {
             // `background_tasks_changed []` arrives next to the final
             // task_notification (recorded traces have it on either side) and
             // before the provider's self-invoked follow-up turn. Keep the last
             // non-zero liveness until that turn's result so the runtime cannot
-            // park/restart the process in this handoff window.
+            // park/restart the process in this handoff window. A task stopped
+            // through `stop_task` starts no such turn; the CLI goes idle
+            // instead, which `session_state_changed` reports (2.1.318).
             Vec::new()
         } else {
             vec![AgentEvent::BackgroundTasksChanged {
@@ -3758,6 +3773,7 @@ impl Mapper {
         // follow-up result arrived with a different origin. Re-publishing an
         // unchanged count is harmless; a parked runtime still observes zero
         // only after all completion output has landed.
+        self.background_drain_withheld = false;
         events.push(AgentEvent::BackgroundTasksChanged {
             count: self.background_tasks.len(),
         });
@@ -6281,6 +6297,41 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false}"#,
         );
         turn_completed_after_count(&second, 0);
+    }
+
+    /// A task stopped through `stop_task` starts no follow-up turn: the CLI
+    /// empties its list and goes idle, and that idle is the zero's only chance.
+    /// Shapes recorded from Claude Code 2.1.318.
+    #[test]
+    fn a_stopped_task_publishes_zero_when_the_cli_goes_idle() {
+        let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","task_type":"local_bash","description":"wait"}]}"#,
+        );
+        for line in [
+            r#"{"type":"system","subtype":"task_updated","task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","patch":{"status":"killed","end_time":1794082805458}}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","tool_use_id":"toolu_0025","status":"stopped","summary":"wait"}"#,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+        ] {
+            assert!(feed(&mut m, line).is_empty());
+        }
+        assert!(matches!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"session_state_changed","state":"idle"}"#,
+            )
+            .as_slice(),
+            [AgentEvent::BackgroundTasksChanged { count: 0 }]
+        ));
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"session_state_changed","state":"idle"}"#,
+            )
+            .is_empty(),
+            "a turn's own idle says nothing about background work"
+        );
     }
 
     /// Every task the CLI lists keeps the process busy, not only background

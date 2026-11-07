@@ -128,6 +128,10 @@ impl TimelineView {
                         &entry.id, window, cx,
                     ));
                 }
+                Segment::SettingsKept(entry) => {
+                    column =
+                        column.child(components::dividers::settings_kept_divider(&entry.id, cx));
+                }
                 Segment::ControlAction(entry) => {
                     let EntryContent::ControlAction(action) = &entry.content else {
                         unreachable!();

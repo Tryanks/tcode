@@ -36,6 +36,7 @@ impl AppState {
         if !idle {
             return;
         }
+        self.requeue_unconfirmed_steers(session_id, cx);
         self.next_start_generation = self
             .next_start_generation
             .checked_add(1)
