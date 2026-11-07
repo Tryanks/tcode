@@ -118,6 +118,11 @@ chat:
   report_reminder: "Reminded to report"
   orchestrate_callback_empty: "(no output)"
   error_label: "Error"
+fork:
+  action: "Fork from here"
+  blocked: "Wait for the rewind to finish."
+  forked_from: "Forked from “%{title}”"
+
 rewind:
   queue_held: "Held after the rewind until you send your next message"
   action: "Rewind to here"
@@ -130,6 +135,7 @@ rewind:
   cancel: "Cancel"
   undo: "Undo"
   return_to_branch: "Return to the original branch"
+  open_branch: "Open the original branch"
   restore: "Restore"
   you: "You"
   blocked:
@@ -145,7 +151,7 @@ rewind:
     truncated_one: "This message and its turn will be removed from the conversation."
     hidden: "This message and everything after it (%{count} turns) will be hidden. You can undo until you send your next message."
     hidden_one: "This message and its turn will be hidden. You can undo until you send your next message."
-    branch: "The conversation continues on a new branch from before this message. The current branch is kept, and you can return to it until you send your next message."
+    branch: "The conversation continues on a new branch from before this message. The current branch is kept: you can return to it until you send your next message, and open it as its own thread after that."
     steer: "This added prompt and what followed it will be removed from the conversation."
     files_only: "The conversation stays as it is; files go back to how they were before this message."
     prompt_back: "The message goes back into the composer, before anything you have typed."

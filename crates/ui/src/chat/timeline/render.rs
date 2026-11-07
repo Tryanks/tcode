@@ -672,8 +672,31 @@ impl TimelineView {
         self.open_rewind(key, turn, steer, cx);
     }
 
+    pub(in crate::chat) fn on_fork_from_message(
+        &mut self,
+        action: &ForkFromMessage,
+        cx: &mut Context<Self>,
+    ) {
+        self.fork_from_message(action.turn, cx);
+    }
+
+    fn fork_from_message(&mut self, turn: usize, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session_id.clone() else {
+            return;
+        };
+        self.workspace_store.update(cx, |store, cx| {
+            let target = store
+                .chat_fork_target_for(Some(&session_id), turn, cx)
+                .filter(|target| !target.blocked);
+            if let Some(target) = target {
+                store.fork_from_message(session_id, target.turn, target.checkpoint_id, cx);
+            }
+        });
+    }
+
     /// A rewind's divider, with its removed turns to read and the Harness's
-    /// undo while it lasts; or a rewind the Harness did not make.
+    /// undo while it lasts, then the branch it left where the Harness keeps
+    /// one; or a rewind the Harness did not make.
     fn compose_rewound(
         &self,
         turn: usize,
@@ -690,28 +713,48 @@ impl TimelineView {
             .and_then(|status| status.rewind.as_ref());
         let checkpoint = rewound.checkpoint_id.clone();
         let this = cx.entity().downgrade();
-        let undo =
-            rewound
-                .undo_token
-                .as_ref()
-                .and(status)
-                .and_then(|status| match &status.pending {
-                    Some(pending) if pending.undo && pending.checkpoint_id == checkpoint => {
-                        Some(components::rewind::DividerUndo::InProgress)
-                    }
-                    _ if status.blocked.is_none() => {
-                        let this = this.clone();
-                        Some(components::rewind::DividerUndo::Available(Rc::new(
-                            move |_, cx| {
-                                let checkpoint = checkpoint.clone();
-                                let _ = this.update(cx, |timeline, cx| {
-                                    timeline.undo_rewind(checkpoint, cx)
-                                });
-                            },
-                        )))
-                    }
-                    _ => None,
-                });
+        let undo = rewound
+            .undo_token
+            .as_ref()
+            .and(status)
+            .and_then(|status| match &status.pending {
+                Some(pending) if pending.undo && pending.checkpoint_id == checkpoint => {
+                    Some(components::rewind::DividerUndo::InProgress)
+                }
+                _ if status.blocked.is_none() => {
+                    let this = this.clone();
+                    Some(components::rewind::DividerUndo::Available(Rc::new(
+                        move |_, cx| {
+                            let checkpoint = checkpoint.clone();
+                            let _ = this
+                                .update(cx, |timeline, cx| timeline.undo_rewind(checkpoint, cx));
+                        },
+                    )))
+                }
+                _ => None,
+            })
+            .or_else(|| {
+                rewound
+                    .branch
+                    .as_ref()
+                    .filter(|_| rewound.undo_token.is_none())?;
+                let absolute = store.absolute_turn_for(self.session_id.as_deref(), turn);
+                let session_id = self.session_id.clone()?;
+                let checkpoint = rewound.checkpoint_id.clone();
+                let store = self.workspace_store.clone();
+                Some(components::rewind::DividerUndo::OpenBranch(Rc::new(
+                    move |_, cx| {
+                        store.update(cx, |store, cx| {
+                            store.open_rewound_branch(
+                                session_id.clone(),
+                                absolute,
+                                checkpoint.clone(),
+                                cx,
+                            )
+                        });
+                    },
+                )))
+            });
         let key = format!("rewound:{}", entry.id);
         let expanded = self.expanded.contains(&key);
         let on_toggle: components::rewind::Handler = Rc::new(move |_, cx| {
@@ -849,6 +892,20 @@ impl TimelineView {
         let rewind = rewind_menu
             .as_ref()
             .map(|menu| self.compose_rewind(menu, cx));
+        let fork = steering
+            .is_none()
+            .then(|| {
+                self.workspace_store.read(cx).chat_fork_target_for(
+                    self.session_id.as_deref(),
+                    turn,
+                    cx,
+                )
+            })
+            .flatten()
+            .map(|target| components::bubble::ForkMenu {
+                turn,
+                blocked: target.blocked,
+            });
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
         let copied = self.copied.is(&copy_key);
@@ -905,6 +962,7 @@ impl TimelineView {
                 markdown,
                 rewind,
                 rewind_menu,
+                fork,
                 hover: self.hover.clone(),
                 motion: self.motion.clone(),
             },
@@ -914,6 +972,13 @@ impl TimelineView {
                     this.mark_copied(mark.clone(), cx);
                 })),
                 images,
+                fork: Some(Rc::new({
+                    let this = cx.entity().downgrade();
+                    move |turn, cx| {
+                        let _ =
+                            this.update(cx, |timeline, cx| timeline.fork_from_message(turn, cx));
+                    }
+                })),
             },
             window,
             cx,
@@ -3128,6 +3193,98 @@ This begins after the hard break."#;
         }
     }
 
+    /// A message's fork is there where its Harness declares one, for the
+    /// messages it can fork before, whatever the Harness is called; a steer
+    /// has none. Used, it opens a thread the asking client's composer holds
+    /// the message for, and that thread names where it came from.
+    #[gpui::test]
+    fn the_fork_a_message_offers_follows_its_harness(cx: &mut TestAppContext) {
+        use agent::ProviderKind;
+        use gpui::{Modifiers, VisualTestContext, px, size};
+
+        for (provider, turn, offered) in [
+            (ProviderKind::ClaudeCode, 0, false),
+            (ProviderKind::ClaudeCode, 1, true),
+            (ProviderKind::Pi, 0, true),
+            (ProviderKind::Cursor, 1, false),
+        ] {
+            let mut timeline = Timeline::default();
+            timeline.turns = (0..2)
+                .map(|index| TurnMeta {
+                    provider_checkpoint_id: Some(format!("checkpoint-{index}")),
+                    ..TurnMeta::default()
+                })
+                .collect();
+            timeline.entries.extend([
+                at_turn(entry("user-0", user_item("first")), 0),
+                at_turn(entry("assistant-0", assistant("One.")), 0),
+                at_turn(entry("user-1", user_item("second")), 1),
+                at_turn(entry("assistant-1", assistant("Two.")), 1),
+            ]);
+            let (store, window_state, session_id, mut driver) =
+                seed_chat_with_history_on(cx, timeline, false, Some(provider));
+            let (_view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+                ChatView::new(
+                    store.clone(),
+                    window_state.clone(),
+                    Some(session_id.clone()),
+                    window,
+                    cx,
+                )
+            });
+            let window: &mut VisualTestContext = window;
+            window.simulate_resize(size(px(1_024.), px(700.)));
+            draw_settled(window);
+            let bubble = window
+                .debug_bounds(["user-bubble-user-0", "user-bubble-user-1"][turn])
+                .expect("the user bubble is drawn");
+            window.simulate_mouse_move(bubble.center(), None, Modifiers::default());
+            draw_settled(window);
+            let action = window.debug_bounds(["fork-user-0", "fork-user-1"][turn]);
+            assert_eq!(action.is_some(), offered, "{provider:?} turn {turn}");
+            let Some(action) = action.filter(|_| turn == 1) else {
+                continue;
+            };
+
+            window.simulate_click(action.center(), Modifiers::default());
+            let fork = |cx: &App| {
+                store
+                    .read(cx)
+                    .sidebar_sessions()
+                    .iter()
+                    .find(|meta| meta.fork_origin.is_some())
+                    .map(|meta| meta.id.clone())
+            };
+            driver.wait_until(window, &store, "the fork", |cx| {
+                cx.update(|cx| fork(cx).is_some())
+            });
+            let fork = window.update(|_, cx| fork(cx)).unwrap();
+            let fork_id = fork.clone();
+            window.update(|_, cx| store.update(cx, |store, cx| store.show_alone(fork_id, cx)));
+            driver.wait_until(window, &store, "the message for the composer", |cx| {
+                cx.update(|cx| store.read(cx).composer_text_waiting_for(Some(&fork), cx))
+            });
+            let (view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+                ChatView::new(store.clone(), window_state, Some(fork.clone()), window, cx)
+            });
+            let window: &mut VisualTestContext = window;
+            window.simulate_resize(size(px(1_024.), px(700.)));
+            draw_settled(window);
+            // The composer takes the message once the thread's status reaches
+            // this window, which redraws it.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while view.read_with(window, |view, cx| view.composer.read(cx).draft(cx)) != "second" {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the message reaches the composer"
+                );
+                driver.wait_until(window, &store, "the host's answers", |_| true);
+                draw_settled(window);
+            }
+            assert!(window.debug_bounds("fork-origin").is_some());
+        }
+    }
+
     /// A rewind's divider says what the rewind did; a truncating one only
     /// lets the removed turns be read back, an undoable one adds Undo, and a
     /// branch adds the way back to the branch it left.
@@ -3136,17 +3293,31 @@ This begins after the hard break."#;
         use agent::{LaterHistory, ProviderKind, RewindMode};
         use gpui::{Modifiers, VisualTestContext, px, size};
 
-        for (later_history, undo_token, undo) in [
-            (LaterHistory::Truncated, None, None),
+        for (later_history, undo_token, sent_after, undo) in [
+            (LaterHistory::Truncated, None, false, None),
             (
                 LaterHistory::HiddenUntilNextSend,
                 Some("revert"),
+                false,
                 Some("rewound-undo"),
+            ),
+            (
+                LaterHistory::HiddenUntilNextSend,
+                Some("revert"),
+                true,
+                None,
             ),
             (
                 LaterHistory::Branch,
                 Some("/sessions/original.jsonl"),
+                false,
                 Some("rewound-return"),
+            ),
+            (
+                LaterHistory::Branch,
+                Some("/sessions/original.jsonl"),
+                true,
+                Some("rewound-open-branch"),
             ),
         ] {
             let mut events = Vec::new();
@@ -3182,10 +3353,23 @@ This begins after the hard break."#;
                 incomplete: None,
                 undo_token: undo_token.map(str::to_owned),
             });
+            if sent_after {
+                events.push(agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: "user-after".into(),
+                    parent_item_id: None,
+                    content: agent::ItemContent::UserMessage {
+                        text: "sent after".into(),
+                        context_len: None,
+                        attachments: Vec::new(),
+                    },
+                }));
+            }
             let timeline = Timeline::fold_events(events);
             let divider = timeline
                 .entries
-                .last()
+                .iter()
+                .rev()
+                .find(|entry| matches!(entry.content, EntryContent::Rewound(_)))
                 .map(|entry| entry.id.clone())
                 .unwrap();
             let (workspace_store, window_state, session_id, _driver) =
@@ -3199,7 +3383,7 @@ This begins after the hard break."#;
             let toggle = window
                 .debug_bounds(format!("rewound-toggle-{divider}").leak())
                 .unwrap_or_else(|| panic!("{later_history:?}: the removed turn can be read"));
-            for action in ["rewound-undo", "rewound-return"] {
+            for action in ["rewound-undo", "rewound-return", "rewound-open-branch"] {
                 assert_eq!(
                     window
                         .debug_bounds(format!("{action}-{divider}").leak())
