@@ -17,10 +17,11 @@ is derived from it. **Process** is how to build, check and submit work.
    tools, prompts, transcripts — is visible to the user. Capabilities a harness
    does not have (for example rewind outside Claude Code) are not synthesized.
 
-2. **Host and client.** One Tcode host owns all state: providers, threads,
+2. **Host and client.** A Tcode host owns all of its state: providers, threads,
    terminals, projects. Every client — the desktop window, a phone, a tablet, a
-   browser tab — is a screen for that host and speaks the same protocol whether
-   it runs on the same machine or across a network. Layers depend strictly
+   browser tab — is a screen for one or more hosts and speaks the same protocol
+   to each, whether it runs on the same machine or across a network; it shows
+   their state side by side and never merges it. Layers depend strictly
    downward: `app → ui/runtime/services`, `ui → runtime/core`,
    `runtime → services/core` and lower adapters, `services → core`.
 
