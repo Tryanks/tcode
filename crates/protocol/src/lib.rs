@@ -363,6 +363,8 @@ pub use wire::{
 // and ForkStatus drops first_turn.
 // AgentEvent::SettingsKept and EntryContent::SettingsKept are new.
 // AgentEvent::SettingsApplied is new.
+// AgentEvent::BackgroundTaskList and Command::StopBackgroundTask are new, and
+// SessionStatus carries background_tasks.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

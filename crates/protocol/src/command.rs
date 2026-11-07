@@ -582,6 +582,12 @@ pub enum Command {
     Interrupt {
         session_id: String,
     },
+    /// Stop one piece of the thread's background work, or all of it with no
+    /// `task_id`; only offered where the provider has `Caps::background_tasks`.
+    StopBackgroundTask {
+        session_id: String,
+        task_id: Option<String>,
+    },
     /// Ask the provider to compact the session's context now; only offered
     /// where the provider has a native operation (`Caps::manual_compaction`).
     CompactContext {
@@ -794,6 +800,7 @@ impl Command {
             | Self::MoveQueued { session_id, .. }
             | Self::RetryTurn { session_id, .. }
             | Self::Interrupt { session_id, .. }
+            | Self::StopBackgroundTask { session_id, .. }
             | Self::CompactContext { session_id, .. }
             | Self::SetGoal { session_id, .. }
             | Self::ClearGoal { session_id, .. }

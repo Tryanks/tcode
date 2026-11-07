@@ -573,6 +573,7 @@ impl SessionActor for PiActor {
             SessionCommand::RetryTurn { .. }
             | SessionCommand::SetOption { .. }
             | SessionCommand::ApplySettings { .. }
+            | SessionCommand::StopBackgroundTask { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
             | SessionCommand::ReadAccountUsage { .. }

@@ -994,6 +994,9 @@ palette:
   select: "Enter Select"
   close: "Esc Close"
 composer:
+  background_tasks: "Background tasks"
+  background_stop: "Stop this task"
+  background_stop_all: "Stop all"
   relay_title: "Thread relay"
   relay_description: "%{to} cannot natively resume this %{from} session. Tcode will hand off the accumulated context before sending your message."
   relay_confirm: "Confirm & send"

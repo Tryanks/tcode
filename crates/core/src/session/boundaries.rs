@@ -362,6 +362,7 @@ impl TurnBoundaries {
             | AgentEvent::McpServersNotAttached
             | AgentEvent::BackgroundTasksChanged { .. }
             | AgentEvent::SettingsApplied { .. }
+            | AgentEvent::BackgroundTaskList { .. }
             | AgentEvent::ItemBackgrounded { .. }
             | AgentEvent::ModelFallbackDetected { .. }
             | AgentEvent::RewindCompleted { .. }

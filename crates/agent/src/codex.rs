@@ -596,6 +596,13 @@ fn thread_config(selections: &[OptionSelection]) -> Option<Value> {
     Some(json!({ "model_context_window": window }))
 }
 
+/// How soon after a turn ends the list is read, so a command ending with it
+/// is not listed.
+const BACKGROUND_TERMINAL_TURN_END_READ: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How often a thread with a running background terminal reads the list again.
+const BACKGROUND_TERMINAL_READ_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 enum PendingRequest {
     /// `thread/revert` for [`SessionCommand::Rewind`]; the checkpoint is the
     /// native id of the turn reverted with everything after it.
@@ -628,6 +635,8 @@ enum PendingRequest {
     GoalSnapshot,
     /// [`SessionCommand::ReadAccountUsage`]: the result goes to its asker.
     AccountUsage(Sender<Result<Value, String>>),
+    BackgroundTerminalList,
+    BackgroundTerminalStop,
 }
 
 struct PendingApproval {
@@ -696,6 +705,9 @@ struct Actor {
     subagents: HashMap<String, CodexSubagent>,
     /// Subagents a completed turn left running, reported as backgrounded.
     backgrounded_subagents: HashSet<String>,
+    background_terminals: Vec<crate::BackgroundTask>,
+    /// When to read the list again, while any terminal runs.
+    background_terminal_read: Option<std::time::Instant>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
     /// gives completion activities a fresh item id, so the activity id cannot
     /// be the lifecycle identity after spawn.
@@ -796,6 +808,8 @@ async fn run_actor(
         items: HashMap::new(),
         subagents: HashMap::new(),
         backgrounded_subagents: HashSet::new(),
+        background_terminals: Vec::new(),
+        background_terminal_read: None,
         subagent_parent_by_thread: HashMap::new(),
         seen_subagent_activities: HashSet::new(),
         usage_by_turn: HashMap::new(),
@@ -1068,6 +1082,20 @@ impl SessionActor for Actor {
                 Ok(())
             }
             SessionCommand::ApplySettings { .. } => Ok(()),
+            SessionCommand::StopBackgroundTask { task_id } => {
+                let thread_id = self.thread_id.clone();
+                let (method, params) = match task_id {
+                    Some(process_id) => (
+                        "thread/backgroundTerminals/terminate",
+                        json!({ "threadId": thread_id, "processId": process_id }),
+                    ),
+                    None => (
+                        "thread/backgroundTerminals/clean",
+                        json!({ "threadId": thread_id }),
+                    ),
+                };
+                self.request(method, params, PendingRequest::BackgroundTerminalStop)
+            }
             SessionCommand::SetOption { id, value } => {
                 if id == "permissions" {
                     let value = value.as_str().ok_or("Codex permissions must be a string")?;
@@ -1204,10 +1232,20 @@ impl SessionActor for Actor {
     }
 
     fn wake_at(&self) -> Option<std::time::Instant> {
-        self.retry_deadline
+        [self.retry_deadline, self.background_terminal_read]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     async fn wake(&mut self) -> Result<(), String> {
+        if self
+            .background_terminal_read
+            .is_some_and(|at| at <= std::time::Instant::now())
+        {
+            self.background_terminal_read = None;
+            return self.read_background_terminals();
+        }
         if self.retry.is_none()
             || self
                 .pending_requests
@@ -1897,6 +1935,53 @@ impl Actor {
         }
     }
 
+    /// Codex says nothing when a terminal ends, so the list is read when a
+    /// turn ends and again while any runs (`background_terminal_read`).
+    fn read_background_terminals(&mut self) -> Result<(), String> {
+        let thread_id = self.thread_id.clone();
+        self.request(
+            "thread/backgroundTerminals/list",
+            json!({ "threadId": thread_id }),
+            PendingRequest::BackgroundTerminalList,
+        )
+    }
+
+    async fn on_background_terminals(&mut self, result: &Value) {
+        let now = crate::now_unix_millis();
+        let tasks: Vec<crate::BackgroundTask> = result
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|terminal| {
+                let id = terminal.get("processId").and_then(Value::as_str)?;
+                let known = self.background_terminals.iter().find(|task| task.id == id);
+                Some(crate::BackgroundTask {
+                    id: id.to_owned(),
+                    name: terminal
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id)
+                        .to_owned(),
+                    started_at: known.map_or(now, |known| known.started_at),
+                })
+            })
+            .collect();
+        self.background_terminal_read = (!tasks.is_empty())
+            .then(|| std::time::Instant::now() + BACKGROUND_TERMINAL_READ_INTERVAL);
+        if tasks == self.background_terminals {
+            return;
+        }
+        self.background_terminals = tasks.clone();
+        let count = tasks.len();
+        self.events
+            .emit(AgentEvent::BackgroundTaskList { tasks })
+            .await;
+        self.events
+            .emit(AgentEvent::BackgroundTasksChanged { count })
+            .await;
+    }
+
     fn request(&mut self, method: &str, params: Value, kind: PendingRequest) -> Result<(), String> {
         let id = self.next_id;
         self.next_id += 1;
@@ -2006,6 +2091,21 @@ impl Actor {
             }
             if let Some(PendingRequest::Revert { checkpoint_id }) = pending {
                 self.finish_revert(checkpoint_id, &value).await;
+                return;
+            }
+            // An experimental API: a build without it simply lists nothing.
+            if let Some(PendingRequest::BackgroundTerminalList) = &pending {
+                match value.get("result") {
+                    Some(result) => self.on_background_terminals(result).await,
+                    None => log::debug!("Codex background terminals unavailable: {value}"),
+                }
+                return;
+            }
+            if let Some(PendingRequest::BackgroundTerminalStop) = &pending {
+                if value.get("error").is_some() {
+                    log::warn!("Codex background terminal stop failed: {value}");
+                }
+                let _ = self.read_background_terminals();
                 return;
             }
             if let Some(PendingRequest::GoalSnapshot) = &pending {
@@ -2505,6 +2605,8 @@ impl Actor {
                 }
             }
             "turn/completed" => {
+                self.background_terminal_read =
+                    Some(std::time::Instant::now() + BACKGROUND_TERMINAL_TURN_END_READ);
                 let turn = params.get("turn").unwrap_or(&Value::Null);
                 let id = turn
                     .get("id")
@@ -3401,6 +3503,8 @@ fn user_message_text(item: &Value) -> String {
 fn pending_name(request: Option<&PendingRequest>) -> &'static str {
     match request {
         Some(PendingRequest::TurnStart { .. }) => "turn/start",
+        Some(PendingRequest::BackgroundTerminalList) => "thread/backgroundTerminals/list",
+        Some(PendingRequest::BackgroundTerminalStop) => "thread/backgroundTerminals/stop",
         Some(PendingRequest::Interrupt) => "turn/interrupt",
         Some(PendingRequest::Steer { .. }) => "turn/steer",
         Some(PendingRequest::SubagentMetadata { .. }) => "thread/read",
@@ -4893,6 +4997,8 @@ mod tests {
                 items: HashMap::new(),
                 subagents: HashMap::new(),
                 backgrounded_subagents: HashSet::new(),
+                background_terminals: Vec::new(),
+                background_terminal_read: None,
                 subagent_parent_by_thread: HashMap::new(),
                 seen_subagent_activities: HashSet::new(),
                 pending_steers: Vec::new(),
@@ -5878,6 +5984,101 @@ mod tests {
                 .handle_line(&json!({"id": request["id"], "result": result}).to_string())
                 .await;
             assert_eq!(answer.recv().await.unwrap().unwrap(), result);
+        });
+    }
+
+    #[test]
+    fn background_terminals_are_listed_read_again_and_stopped() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let next_request = async |actor: &mut Actor| {
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("missing request")
+                };
+                serde_json::from_str::<Value>(&request).unwrap()
+            };
+            let answer = async |actor: &mut Actor, request: &Value, result: Value| {
+                let response = json!({"id": request["id"], "result": result}).to_string();
+                actor.handle_line(&response).await;
+            };
+
+            actor
+                .handle_notification(
+                    "turn/completed",
+                    &json!({"turn":{"id":"T1","status":"completed"}}),
+                )
+                .await;
+            while events.try_recv().is_ok() {}
+            actor.background_terminal_read = Some(std::time::Instant::now());
+            actor.wake().await.unwrap();
+            let list = next_request(&mut actor).await;
+            assert_eq!(list["method"], "thread/backgroundTerminals/list");
+            assert_eq!(list["params"], json!({"threadId": "thread-1"}));
+            // Recorded from 0.167.0.
+            let running = json!({"data":[{
+                "itemId":"call_1","processId":"98412","command":"sleep 40",
+                "cwd":"/tmp/project","osPid":null,"cpuPercent":null,"rssKb":null
+            }],"nextCursor":null});
+            answer(&mut actor, &list, running.clone()).await;
+            assert!(
+                actor.background_terminal_read.is_some(),
+                "it keeps watching"
+            );
+            let listed = events.try_recv().unwrap();
+            let AgentEvent::BackgroundTaskList { tasks } = &listed else {
+                panic!("expected the list: {listed:?}");
+            };
+            assert_eq!(
+                (tasks[0].id.as_str(), tasks[0].name.as_str()),
+                ("98412", "sleep 40")
+            );
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::BackgroundTasksChanged { count: 1 })
+            ));
+
+            actor.background_terminal_read = Some(std::time::Instant::now());
+            actor.wake().await.unwrap();
+            let again = next_request(&mut actor).await;
+            answer(&mut actor, &again, running).await;
+            assert!(events.try_recv().is_err(), "an unchanged list says nothing");
+
+            actor
+                .handle_command(SessionCommand::StopBackgroundTask {
+                    task_id: Some("98412".into()),
+                })
+                .await
+                .unwrap();
+            let terminate = next_request(&mut actor).await;
+            assert_eq!(terminate["method"], "thread/backgroundTerminals/terminate");
+            assert_eq!(
+                terminate["params"],
+                json!({"threadId": "thread-1", "processId": "98412"})
+            );
+            answer(&mut actor, &terminate, json!({"terminated": true})).await;
+
+            let list = next_request(&mut actor).await;
+            assert_eq!(list["method"], "thread/backgroundTerminals/list");
+            answer(&mut actor, &list, json!({"data":[],"nextCursor":null})).await;
+            assert!(actor.background_terminal_read.is_none());
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::BackgroundTaskList { tasks }) if tasks.is_empty()
+            ));
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::BackgroundTasksChanged { count: 0 })
+            ));
+
+            actor
+                .handle_command(SessionCommand::StopBackgroundTask { task_id: None })
+                .await
+                .unwrap();
+            let clean = next_request(&mut actor).await;
+            assert_eq!(clean["method"], "thread/backgroundTerminals/clean");
+            assert_eq!(clean["params"], json!({"threadId": "thread-1"}));
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
         });
     }
 

@@ -894,12 +894,13 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<(), tcode_protocol::ProtocolError> {
         self.pause_pull_request_watches(target_id, cx);
-        // An idle provider never answers an interrupt, which would leave the thread stopping.
+        // An idle provider never answers an interrupt, which would leave the thread
+        // stopping, and background work takes no interrupt: Claude Code acknowledges it
+        // and the task runs on (2.1.318); `stop_background_task` is what stops one.
         let Some(active) = self.resident(target_id).filter(|active| {
             active.turn_in_flight
                 || active.delivery_in_flight.is_some()
                 || active.timeline.turn_running
-                || active.background_task_count > 0
         }) else {
             return Ok(());
         };
@@ -915,6 +916,28 @@ impl AppState {
         self.cancel_computer_use_feedback(target_id);
         self.withdraw_foreground_prompts(target_id);
         Ok(())
+    }
+
+    /// Stop one piece of the thread's background work, or all of it with `None`.
+    pub fn stop_background_task(
+        &mut self,
+        target_id: &str,
+        task_id: Option<String>,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let active = self
+            .resident(target_id)
+            .ok_or_else(|| provider_command_error("The thread is not open."))?;
+        if !active.meta.provider.caps().background_tasks {
+            return Err(provider_command_error(
+                "This provider cannot stop background work.",
+            ));
+        }
+        let Runtime::Live(commands) = &active.runtime else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        commands
+            .try_send(SessionCommand::StopBackgroundTask { task_id })
+            .map_err(provider_command_error)
     }
 
     /// Compaction is the provider's own turn: it is not started over one that

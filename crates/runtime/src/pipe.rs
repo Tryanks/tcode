@@ -1028,6 +1028,15 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
+        Command::StopBackgroundTask {
+            session_id,
+            task_id,
+        } => {
+            return CommandOutcome::Immediate(
+                app.stop_background_task(&session_id, task_id)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::CompactContext { session_id } => {
             return CommandOutcome::Immediate(
                 app.compact_context(&session_id, cx)

@@ -994,6 +994,9 @@ palette:
   select: "Enter 選択"
   close: "Esc 閉じる"
 composer:
+  background_tasks: "バックグラウンドタスク"
+  background_stop: "このタスクを停止"
+  background_stop_all: "すべて停止"
   relay_title: "スレッドの引き継ぎ"
   relay_description: "%{to} はこの %{from} セッションをネイティブに再開できません。Tcode はメッセージを送信する前に、これまでのコンテキストを引き継ぎます。"
   relay_confirm: "確認して送信"

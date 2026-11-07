@@ -269,6 +269,7 @@ impl AppState {
                 | Command::SetPullRequestWatchesPaused { session_id, .. }
                 | Command::RetryTurn { session_id, .. }
                 | Command::Interrupt { session_id }
+                | Command::StopBackgroundTask { session_id, .. }
                 | Command::CompactContext { session_id }
                 | Command::SetGoal { session_id, .. }
                 | Command::ClearGoal { session_id }

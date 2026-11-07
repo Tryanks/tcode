@@ -1,4 +1,5 @@
 mod approval;
+pub(super) mod background_strip;
 mod checkout;
 mod context_window;
 mod control;
