@@ -318,6 +318,7 @@ async fn run_actor(
         pending_dialogs: HashSet::new(),
         pending_steers: HashMap::new(),
         requested_model: opts.model.clone(),
+        pending_settings: None,
         fork_at: fork_at.zip(Some(thinking.map(str::to_owned))),
         stderr_tail,
         requests: HashMap::new(),
@@ -364,6 +365,7 @@ struct PiActor {
     /// acknowledging the stdin write.
     pending_steers: HashMap<String, String>,
     requested_model: Option<String>,
+    pending_settings: Option<PendingSettings>,
     /// The entry to fork before at startup, or `None` to clone at the leaf,
     /// and the thinking level to set in the fork.
     fork_at: Option<(Option<String>, Option<String>)>,
@@ -379,6 +381,13 @@ struct PiActor {
 }
 
 /// What a pi RPC response settles.
+/// A live settings change pi has yet to answer in full.
+struct PendingSettings {
+    model: Option<String>,
+    outstanding: HashSet<String>,
+    applied: bool,
+}
+
 enum PiRequest {
     /// The session's new entries: the first user message after the cursor is
     /// the prompt of `turn`, when one just finished.
@@ -570,9 +579,12 @@ impl SessionActor for PiActor {
                 &json!({"id":"tcode-compact","type":"compact"}),
             )
             .map_err(|err| err.to_string()),
+            SessionCommand::ApplySettings {
+                model,
+                option_selections,
+            } => self.apply_settings(model, &option_selections),
             SessionCommand::RetryTurn { .. }
             | SessionCommand::SetOption { .. }
-            | SessionCommand::ApplySettings { .. }
             | SessionCommand::StopBackgroundTask { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
@@ -948,6 +960,15 @@ impl PiActor {
             }
         };
         if message.get("type").and_then(Value::as_str) == Some("response") {
+            let success = message.get("success").and_then(Value::as_bool) == Some(true);
+            if let Some(event) = message
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| self.settle_settings(id, success))
+            {
+                self.events.emit(event).await;
+                return;
+            }
             if let Some(request) = message
                 .get("id")
                 .and_then(Value::as_str)
@@ -1102,6 +1123,74 @@ impl PiActor {
                 ],
             }))
             .await;
+    }
+
+    /// `set_model`, then `set_thinking_level`, which pi clamps to the model:
+    /// its RPC answers each in turn, and the last answer settles the change.
+    fn apply_settings(
+        &mut self,
+        model: Option<String>,
+        selections: &[OptionSelection],
+    ) -> Result<(), String> {
+        let mut requests = Vec::new();
+        if model != self.requested_model {
+            let Some((provider, model_id)) = model.as_deref().and_then(|m| m.split_once('/'))
+            else {
+                // The default model is chosen at start; a running process
+                // cannot be asked for it.
+                self.pending_settings = None;
+                let _ = self
+                    .events
+                    .try_send(AgentEvent::SettingsApplied { applied: false });
+                return Ok(());
+            };
+            let id = self.request_id();
+            requests.push((
+                id.clone(),
+                json!({"id":id,"type":"set_model","provider":provider,"modelId":model_id}),
+            ));
+        }
+        if let Some(level) = crate::selection_str(selections, "reasoningEffort") {
+            let id = self.request_id();
+            requests.push((
+                id.clone(),
+                json!({"id":id,"type":"set_thinking_level","level":level}),
+            ));
+        }
+        if requests.is_empty() {
+            let _ = self
+                .events
+                .try_send(AgentEvent::SettingsApplied { applied: true });
+            return Ok(());
+        }
+        self.pending_settings = Some(PendingSettings {
+            model,
+            outstanding: requests.iter().map(|(id, _)| id.clone()).collect(),
+            applied: true,
+        });
+        for (_, request) in requests {
+            send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// One answer to [`Self::apply_settings`]; `None` when `id` is not one.
+    fn settle_settings(&mut self, id: &str, success: bool) -> Option<AgentEvent> {
+        let pending = self.pending_settings.as_mut()?;
+        if !pending.outstanding.remove(id) {
+            return None;
+        }
+        pending.applied &= success;
+        if !pending.outstanding.is_empty() {
+            return None;
+        }
+        let pending = self.pending_settings.take()?;
+        if pending.applied {
+            self.requested_model = pending.model;
+        }
+        Some(AgentEvent::SettingsApplied {
+            applied: pending.applied,
+        })
     }
 
     fn request_id(&mut self) -> String {
@@ -2525,6 +2614,84 @@ while IFS= read -r line; do
   esac
 done
 "#;
+
+    /// A new model and thinking level go to the running process with
+    /// `set_model`, then `set_thinking_level`, and the change is applied once
+    /// pi answered both; pi has no way back to its default model. Verified
+    /// against pi 1.5.0 with a stand-in provider: the next prompt runs on the
+    /// new model with the new thinking budget.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_model_and_thinking_level_go_to_the_running_process() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("agent-pi-live-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("pi");
+        let requests = dir.join("requests");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n{stand_in}",
+                stand_in = RPC_STAND_IN.trim_start_matches("#!/bin/sh\n").replace(
+                    "  id=$(printf",
+                    &format!(
+                        "  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf",
+                        requests.display()
+                    )
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        smol::block_on(async {
+            let handle = start(SessionOptions {
+                cwd: dir.clone(),
+                model: Some("provider/model".into()),
+                resume: None,
+                fork: None,
+                binary_path: Some(bin.clone()),
+                option_selections: Vec::new(),
+                mcp_servers: Vec::new(),
+                launch_env: LaunchEnv::default(),
+                extra_args: Vec::new(),
+                acp: None,
+                instructions: None,
+            })
+            .await
+            .unwrap();
+            let applied = |events: Receiver<AgentEvent>| async move {
+                loop {
+                    if let AgentEvent::SettingsApplied { applied } = events.recv().await.unwrap() {
+                        return applied;
+                    }
+                }
+            };
+            for (model, expected) in [(Some("provider/other"), true), (None, false)] {
+                handle
+                    .commands
+                    .send(SessionCommand::ApplySettings {
+                        model: model.map(str::to_owned),
+                        option_selections: vec![OptionSelection {
+                            id: "reasoningEffort".into(),
+                            value: json!("high"),
+                        }],
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(applied(handle.events.clone()).await, expected, "{model:?}");
+            }
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            let log = std::fs::read_to_string(&requests).unwrap();
+            let lines: Vec<&str> = log.lines().collect();
+            let position = |needle: &str| lines.iter().rposition(|line| line.contains(needle));
+            assert!(position("\"modelId\":\"other\"").is_some(), "{log}");
+            assert!(
+                position("\"modelId\":\"other\"") < position("set_thinking_level"),
+                "{log}"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A forked thread starts on the source's file, forks there, before a
     /// prompt or at the leaf, before anything else that writes to the session

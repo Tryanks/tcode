@@ -654,8 +654,18 @@ impl SessionActor for OpenCodeActor {
                     self.events.emit(event).await;
                 }
             }
+            SessionCommand::ApplySettings {
+                model,
+                option_selections,
+            } => {
+                let applied = self
+                    .apply_settings(model.as_deref(), &option_selections)
+                    .await;
+                self.events
+                    .emit(AgentEvent::SettingsApplied { applied })
+                    .await;
+            }
             SessionCommand::RetryTurn { .. }
-            | SessionCommand::ApplySettings { .. }
             | SessionCommand::StopBackgroundTask { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
@@ -769,6 +779,47 @@ impl OpenCodeActor {
                 "mention": { "start": 0, "end": id.len() + 1, "text": format!("${id}") },
             }]);
         }
+    }
+
+    /// The session's model is `POST /session/{id}/model`, the route that also
+    /// sets its variant before a turn (2.2.5); the variant and agent are the
+    /// live options they always were. A session cannot be put back on the
+    /// server's default model.
+    async fn apply_settings(
+        &mut self,
+        model: Option<&str>,
+        selections: &[OptionSelection],
+    ) -> bool {
+        let Some(mut target) = model.and_then(ModelRef::parse) else {
+            return model.is_none() && self.model.is_none();
+        };
+        for selection in selections {
+            if matches!(selection.id.as_str(), EFFORT | AGENT)
+                && self
+                    .set_option(&selection.id, selection.value.clone())
+                    .await
+                    .is_err()
+            {
+                return false;
+            }
+        }
+        target.variant = self.variant.clone();
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|current| current.provider == target.provider && current.id == target.id)
+        {
+            return true;
+        }
+        if let Err(error) = self.http.post_empty(
+            &self.session_path("model"),
+            &json!({ "model": target.wire() }),
+        ) {
+            log::warn!("opencode: model change refused: {error}");
+            return false;
+        }
+        self.model = Some(target);
+        true
     }
 
     async fn set_option(&mut self, id: &str, value: Value) -> Result<(), String> {
@@ -3924,6 +3975,45 @@ cat > /dev/null
                         json!({"text": "$opencode how do agents work?", "delivery": "queue", "skills": [{"id": "opencode", "mention": {"start": 0, "end": 9, "text": "$opencode"}}]})
                     ),
                 ]
+            );
+        });
+    }
+
+    /// A new model goes to the running session through the route that sets
+    /// its variant, keeping the variant; a request for the server's default
+    /// cannot be made there and takes a restart. Verified against 2.2.5 with
+    /// a stand-in provider: the next prompt runs on the new model.
+    #[test]
+    fn a_new_model_is_set_on_the_running_session() {
+        smol::block_on(async {
+            let fixture = fixture(Vec::new(), Vec::new());
+            let handle = open(fixture.options.clone()).await;
+            let effort = OptionSelection {
+                id: EFFORT.into(),
+                value: json!("high"),
+            };
+            for model in [Some("opencode/deepseek-v4.2"), None] {
+                send(
+                    &handle,
+                    SessionCommand::ApplySettings {
+                        model: model.map(str::to_owned),
+                        option_selections: vec![effort.clone()],
+                    },
+                )
+                .await;
+                let applied = recv(&handle).await;
+                assert!(
+                    matches!(applied, AgentEvent::SettingsApplied { applied } if applied == model.is_some()),
+                    "{model:?}: {applied:?}"
+                );
+            }
+            shut_down(handle).await;
+            assert_eq!(
+                fixture.server.writes()[2..],
+                [(
+                    "POST /api/session/ses_root/model".into(),
+                    json!({"model": {"providerID": "opencode", "id": "deepseek-v4.2", "variant": "high"}})
+                )]
             );
         });
     }
