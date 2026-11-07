@@ -188,3 +188,105 @@ fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+/// An upload lands in today's scratch directory, the one quick threads work
+/// in, under the name the user gave it and nowhere else whatever the name
+/// says. Chunks are taken only in order and only for that thread's reserved
+/// files, and the files leave with the thread while the day's folder stays.
+#[test]
+fn uploads_land_in_the_scratch_directory_and_leave_with_their_thread() {
+    let (host, root) = fixture(true, false);
+    let link = host.link();
+    let session_id = smol::block_on(host.update_state_for_test(|state, cx| {
+        state.start_draft("uploads".into(), std::env::temp_dir(), cx)
+    }))
+    .unwrap();
+    let query = |query| smol::block_on(link.query(query));
+    let begin = |name: &str| {
+        let Ok(QueryResponse::UploadBegun(path)) = query(Query::BeginUpload {
+            session_id: session_id.clone(),
+            name: name.into(),
+            size: 6,
+        }) else {
+            panic!("upload refused");
+        };
+        path
+    };
+    let today = root
+        .join("documents/Tcode")
+        .join(chrono::Local::now().date_naive().to_string());
+
+    let path = begin("../../notes.txt");
+    assert!(path.starts_with(today.join("uploads").join(&session_id)));
+    assert_eq!(path.file_name().unwrap(), "notes.txt");
+    let write = |path: &std::path::Path, offset, bytes: &[u8]| {
+        query(Query::WriteUpload {
+            session_id: session_id.clone(),
+            path: path.to_owned(),
+            offset,
+            bytes: bytes.to_vec(),
+        })
+    };
+    assert_eq!(write(&path, 0, b"abc"), Ok(QueryResponse::UploadWritten));
+    assert_eq!(write(&path, 3, b"def"), Ok(QueryResponse::UploadWritten));
+    assert!(
+        write(&path, 3, b"def").is_err(),
+        "a stale offset is refused"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"abcdef");
+
+    let outside = root.join("documents/Tcode/secret.txt");
+    std::fs::write(&outside, "secret").unwrap();
+    assert!(write(&outside, 6, b"!").is_err());
+    assert!(
+        query(Query::DiscardUpload {
+            session_id: session_id.clone(),
+            path: outside.clone(),
+        })
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"secret");
+    assert!(
+        query(Query::BeginUpload {
+            session_id: "no-such-thread".into(),
+            name: "a".into(),
+            size: 1,
+        })
+        .is_err()
+    );
+    assert!(
+        query(Query::BeginUpload {
+            session_id: session_id.clone(),
+            name: "a".into(),
+            size: tcode_core::attachments::MAX_UPLOAD_BYTES + 1,
+        })
+        .is_err()
+    );
+
+    let discarded = begin("discarded.txt");
+    assert_eq!(
+        query(Query::DiscardUpload {
+            session_id: session_id.clone(),
+            path: discarded.clone(),
+        }),
+        Ok(QueryResponse::UploadDiscarded)
+    );
+    assert!(!discarded.parent().unwrap().exists());
+
+    smol::block_on(host.update_state_for_test({
+        let session_id = session_id.clone();
+        move |state, cx| {
+            state.delete_session(&session_id, false, cx);
+        }
+    }))
+    .unwrap();
+    let uploads = today.join("uploads").join(&session_id);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while uploads.exists() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(!uploads.exists(), "the thread's uploads leave with it");
+    assert!(today.is_dir(), "quick threads work in the day's folder");
+    host.shutdown_blocking().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}

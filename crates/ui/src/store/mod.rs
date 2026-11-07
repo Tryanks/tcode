@@ -3905,6 +3905,79 @@ impl WorkspaceStore {
         )
     }
 
+    /// Reserve the host path a client-only file uploads to.
+    pub fn begin_upload(
+        &self,
+        session_id: String,
+        name: String,
+        size: u64,
+        cx: &mut App,
+    ) -> Task<std::io::Result<PathBuf>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::BeginUpload {
+                    session_id,
+                    name,
+                    size,
+                })
+                .await
+            {
+                Ok(QueryResponse::UploadBegun(path)) => Ok(path),
+                Ok(other) => Err(protocol_io_error(format!(
+                    "unexpected begin-upload response: {other:?}"
+                ))),
+                Err(error) => Err(protocol_io_error(error.message)),
+            }
+        })
+    }
+
+    pub fn write_upload(
+        &self,
+        session_id: String,
+        path: PathBuf,
+        offset: u64,
+        bytes: Vec<u8>,
+        cx: &mut App,
+    ) -> Task<std::io::Result<()>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::WriteUpload {
+                    session_id,
+                    path,
+                    offset,
+                    bytes,
+                })
+                .await
+            {
+                Ok(QueryResponse::UploadWritten) => Ok(()),
+                Ok(other) => Err(protocol_io_error(format!(
+                    "unexpected write-upload response: {other:?}"
+                ))),
+                Err(error) => Err(protocol_io_error(error.message)),
+            }
+        })
+    }
+
+    pub fn discard_upload(
+        &self,
+        session_id: String,
+        path: PathBuf,
+        cx: &mut App,
+    ) -> Task<std::io::Result<()>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::DiscardUpload { session_id, path }).await {
+                Ok(QueryResponse::UploadDiscarded) => Ok(()),
+                Ok(other) => Err(protocol_io_error(format!(
+                    "unexpected discard-upload response: {other:?}"
+                ))),
+                Err(error) => Err(protocol_io_error(error.message)),
+            },
+        )
+    }
+
     pub fn remove_user_file(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<()>> {
         let host = self.host.clone();
         cx.spawn(

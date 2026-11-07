@@ -142,6 +142,74 @@ public func tcodeIosHostPickImages(_ requestId: UInt64, _ limit: Int) {
     presenter.present(picker, animated: true)
 }
 
+/// Delegates of document pickers on screen, keyed by request; a document
+/// picker does not retain its delegate.
+private var filePickers: [UInt64: FilePickerDelegate] = [:]
+
+@_cdecl("tcode_ios_host_pick_files")
+public func tcodeIosHostPickFiles(_ requestId: UInt64) {
+    guard let presenter = topPresenter() else {
+        finishImagePick(requestId, error: "无法显示文件选择器")
+        return
+    }
+    let delegate = FilePickerDelegate(requestId: requestId)
+    filePickers[requestId] = delegate
+    let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+    picker.allowsMultipleSelection = true
+    picker.delegate = delegate
+    presenter.present(picker, animated: true)
+}
+
+private final class FilePickerDelegate: NSObject, UIDocumentPickerDelegate {
+    private let requestId: UInt64
+
+    init(requestId: UInt64) {
+        self.requestId = requestId
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        filePickers[requestId] = nil
+        finishImagePick(requestId, error: nil)
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        let requestId = self.requestId
+        filePickers[requestId] = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            var loaded: [(String, String, Data)] = []
+            var failure: String?
+            for url in urls {
+                do {
+                    let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType
+                    loaded.append((url.lastPathComponent, mime ?? "application/octet-stream", try Data(contentsOf: url)))
+                } catch {
+                    failure = error.localizedDescription
+                }
+            }
+            DispatchQueue.main.async {
+                for (name, mime, data) in loaded {
+                    withUTF8(name) { nameBytes, nameLength in
+                        withUTF8(mime) { mimeBytes, mimeLength in
+                            data.withUnsafeBytes { buffer in
+                                tcode_ios_image_picked(
+                                    requestId,
+                                    nameBytes,
+                                    nameLength,
+                                    mimeBytes,
+                                    mimeLength,
+                                    buffer.bindMemory(to: UInt8.self).baseAddress,
+                                    buffer.count
+                                )
+                            }
+                        }
+                    }
+                }
+                finishImagePick(requestId, error: failure)
+            }
+        }
+    }
+}
+
 private func finishImagePick(_ requestId: UInt64, error: String?) {
     imagePickers[requestId] = nil
     if let error {

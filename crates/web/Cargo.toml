@@ -30,7 +30,7 @@ web-sys = { version = "=0.3.104", features = [
     "Window", "Performance", "Document", "Element", "HtmlCanvasElement", "HtmlAnchorElement", "Node",
     "MutationObserver", "MutationObserverInit", "MutationRecord", "NodeList",
     "Location", "Navigator", "Storage", "WebSocket", "Event", "EventTarget", "MessageEvent",
-    "Blob", "BlobPropertyBag", "Url",
+    "Blob", "BlobPropertyBag", "Url", "File", "FileList", "HtmlInputElement",
     "AbortController", "AbortSignal", "Request", "RequestInit", "Response", "Headers",
     "ReadableStream", "ReadableStreamDefaultReader",
     "PointerEvent", "MouseEvent", "UiEvent", "HtmlElement", "HtmlTextAreaElement", "VisualViewport",

@@ -611,53 +611,76 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The phone composer's "+" : a sheet of ways to add to the message.
-    /// Only the photo library for now; more rows go here, not in the row.
+    /// The "+" of clients with a platform picker: a menu of ways to add to
+    /// the message.
     pub(in super::super) fn render_attach_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = cx.entity();
-        // Only a phone composer offers the photo library, so the control is
-        // always a touch one.
+        let compact = self.compact;
+        let (photos, files) =
+            cx.try_global::<crate::remote::ClientAttachment>()
+                .map_or((false, false), |client| {
+                    let host = client.host();
+                    (host.supports_image_picker(), host.supports_file_picker())
+                });
         let trigger = crate::material::toolbar_icon_button(
             "attach-menu",
             IconName::Plus,
             crate::tr!("attach.add"),
-            true,
+            compact,
         )
         .debug_selector(|| "attach-menu".into());
 
         crate::material::overlay_popover("attach-popover", cx)
             .anchor(Anchor::BottomLeft)
-            .bottom_sheet(crate::tr!("attach.add"))
+            .when(compact, |popover| {
+                popover.bottom_sheet(crate::tr!("attach.add"))
+            })
             .trigger(trigger)
             .content(move |_, _window, cx| {
-                let composer = composer.clone();
                 let popover = cx.entity();
-                let muted = cx.theme().muted_foreground;
-                v_flex()
-                    .w_full()
-                    .p_1()
-                    .gap_0p5()
-                    .child(
-                        crate::material::menu_item_frame(
-                            true,
-                            crate::material::ItemFill::Hover,
-                            cx,
-                        )
-                        .id("attach-photo-library")
+                let row = |id: &'static str,
+                           icon: Icon,
+                           label: std::borrow::Cow<'static, str>,
+                           pick: fn(&mut Composer, &mut Window, &mut Context<Composer>),
+                           cx: &mut Context<PopoverState>| {
+                    let composer = composer.clone();
+                    let popover = popover.clone();
+                    crate::material::menu_item_frame(true, crate::material::ItemFill::Hover, cx)
+                        .id(id)
                         .w_full()
                         .items_center()
                         .cursor_pointer()
                         .text_body(true, cx)
-                        .text_color(muted)
-                        .child(Icon::empty().path("icons/image.svg"))
-                        .child(crate::tr!("attach.photo_library"))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(icon)
+                        .child(label)
                         .on_click(move |_, window, cx| {
                             popover.update(cx, |state, cx| state.dismiss(window, cx));
-                            composer.update(cx, |composer, cx| {
-                                composer.pick_images_from_library(window, cx)
-                            });
-                        }),
-                    )
+                            composer.update(cx, |composer, cx| pick(composer, window, cx));
+                        })
+                };
+                v_flex()
+                    .w_full()
+                    .p_1()
+                    .gap_0p5()
+                    .when(photos, |menu| {
+                        menu.child(row(
+                            "attach-photo-library",
+                            Icon::empty().path("icons/image.svg"),
+                            crate::tr!("attach.photo_library"),
+                            Composer::pick_images_from_library,
+                            cx,
+                        ))
+                    })
+                    .when(files, |menu| {
+                        menu.child(row(
+                            "attach-files",
+                            Icon::new(IconName::File),
+                            crate::tr!("attach.files"),
+                            Composer::pick_files,
+                            cx,
+                        ))
+                    })
                     .into_any_element()
             })
             .into_any_element()

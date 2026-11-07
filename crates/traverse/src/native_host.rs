@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, PickedImage, Transport};
+use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, PickedFile, Transport};
 use tcode_client::pairing::{PairInvite, PairedHost};
 
 use crate::{
@@ -16,7 +16,8 @@ use crate::{
 };
 
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<String, String>>;
-type ImagePicker = dyn Fn(usize) -> HostFuture<'static, Result<Vec<PickedImage>, String>>;
+type ImagePicker = dyn Fn(usize) -> HostFuture<'static, Result<Vec<PickedFile>, String>>;
+type FilePicker = dyn Fn() -> HostFuture<'static, Result<Vec<PickedFile>, String>>;
 type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
 type MulticastLock = dyn Fn(bool) + Send + Sync;
 
@@ -30,6 +31,7 @@ pub struct NativeClientHost {
     platform: Option<String>,
     qr_scanner: Option<Box<QrScanner>>,
     image_picker: Option<Box<ImagePicker>>,
+    file_picker: Option<Box<FilePicker>>,
     editor: Option<Box<EditorOpener>>,
     multicast_lock: Option<Arc<MulticastLock>>,
     system_browser: Option<Arc<SystemBrowser>>,
@@ -48,6 +50,7 @@ impl NativeClientHost {
             platform: default_device_platform(),
             qr_scanner: None,
             image_picker: None,
+            file_picker: None,
             editor: None,
             multicast_lock: None,
             system_browser: None,
@@ -130,9 +133,18 @@ impl NativeClientHost {
     /// The platform's own media picker; see [`ClientHost::pick_images`].
     pub fn with_image_picker(
         mut self,
-        picker: impl Fn(usize) -> HostFuture<'static, Result<Vec<PickedImage>, String>> + 'static,
+        picker: impl Fn(usize) -> HostFuture<'static, Result<Vec<PickedFile>, String>> + 'static,
     ) -> Self {
         self.image_picker = Some(Box::new(picker));
+        self
+    }
+
+    /// The platform's own file picker; see [`ClientHost::pick_files`].
+    pub fn with_file_picker(
+        mut self,
+        picker: impl Fn() -> HostFuture<'static, Result<Vec<PickedFile>, String>> + 'static,
+    ) -> Self {
+        self.file_picker = Some(Box::new(picker));
         self
     }
 
@@ -387,10 +399,21 @@ impl ClientHost for NativeClientHost {
         self.image_picker.is_some()
     }
 
-    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedImage>, String>> {
+    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
         self.image_picker.as_ref().map_or_else(
             || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
             |picker| picker(limit),
+        )
+    }
+
+    fn supports_file_picker(&self) -> bool {
+        self.file_picker.is_some()
+    }
+
+    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
+        self.file_picker.as_ref().map_or_else(
+            || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
+            |picker| picker(),
         )
     }
 }

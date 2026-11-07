@@ -1058,7 +1058,7 @@ impl AppState {
         self.residents.resident_mut(id)
     }
 
-    pub(super) fn find_meta(&self, id: &str) -> Option<SessionMeta> {
+    pub(crate) fn find_meta(&self, id: &str) -> Option<SessionMeta> {
         self.sessions
             .by_id(id)
             .cloned()
@@ -1068,6 +1068,10 @@ impl AppState {
     /// Directory where one session's image attachments are persisted.
     pub(crate) fn attachments_dir_for(&self, session_id: &str) -> PathBuf {
         user_files::attachment_dir(self.store.root(), session_id)
+    }
+
+    pub(crate) fn user_directories(&self) -> &user_files::UserDirectories {
+        &self.user_directories
     }
 
     /// Whether a client may save an attachment into `dir` with extension
@@ -1732,6 +1736,14 @@ impl AppState {
         }
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);
+        let directories = self.user_directories.clone();
+        let session_ids = ids.to_vec();
+        let uploads = cx.unblock(move || directories.remove_thread_uploads(&session_ids));
+        HostCx::spawn_detached(cx, async move {
+            if let Err(error) = uploads.await {
+                log::warn!("could not remove a deleted thread's uploads: {error}");
+            }
+        });
         for (deleted_id, root, cwd) in worktree_removals {
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
