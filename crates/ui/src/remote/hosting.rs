@@ -609,10 +609,128 @@ impl Render for HostingPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
 
     /// The transport publishes to the enabled sources, in order. A
     /// self-hosted instance is named by the base URL its manifest is served
     /// from; anything a browser would not fetch is refused.
+    /// Settings → Remote, driven as a user does: the pairing switch exists
+    /// only while hosting; with it on, the invitation is on the same page,
+    /// and turning it off reaches the transport, which drops the invitation.
+    /// A typed name is saved when its field is left.
+    #[gpui::test]
+    fn the_remote_page_shows_the_invitation_while_accepting_devices(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        // The machine's host runs on its own threads and tells the window
+        // of hosting changes from there, as it does in the app.
+        cx.executor().allow_parking();
+        let root = crate::store::tests::scratch_root("hosting-pairing");
+        std::fs::create_dir_all(&root).unwrap();
+        // Idle pipes: the host is never attached to here.
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let (attachments, _attachment_rx) = async_channel::unbounded();
+        let mux = HostMux::new(attachments, from_host.clone());
+        cx.update(crate::theme::init);
+        cx.update(|cx| {
+            cx.set_global(RemoteController::new(
+                mux.clone(),
+                root.clone(),
+                HostLink::new(to_host.clone(), from_host.clone()),
+                Settings::default(),
+            ))
+        });
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    HostLink::new(to_host.clone(), from_host.clone()),
+                    crate::store::WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    false,
+                    cx,
+                )
+            });
+            HostingPanel::new(store, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(900.), px(1200.)));
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("remote-pairing").is_none(),
+            "no pairing switch while not hosting"
+        );
+        assert!(cx.debug_bounds("remote-invitation").is_none());
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.host_name_input.update(cx, |input, cx| {
+                input.set_value("Studio", window, cx);
+                cx.emit(InputEvent::Blur);
+            });
+        });
+        cx.read(|cx| {
+            assert_eq!(
+                cx.global::<RemoteController>()
+                    .local_settings()
+                    .remote_host_name
+                    .as_deref(),
+                Some("Studio")
+            );
+        });
+
+        // A random port: the desktop's fixed one may be taken on this machine.
+        let host = TraverseHost::start(
+            mux,
+            HostConfig {
+                host_name: "Studio".into(),
+                data_dir: root.clone(),
+                traverse: Vec::new(),
+                pairing_enabled: true,
+                bind_port: None,
+            },
+        )
+        .unwrap();
+        host.new_invitation();
+        cx.update(|_, cx| {
+            cx.update_global::<RemoteController, _>(|controller, _| controller.adopt_host(host));
+        });
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("remote-pairing").is_some());
+        assert!(
+            cx.debug_bounds("remote-invitation").is_some(),
+            "hosting and accepting devices, the invitation is beside its switch"
+        );
+
+        let switch = cx.debug_bounds("remote-pairing").unwrap();
+        cx.simulate_click(switch.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        cx.read(|cx| {
+            let controller = cx.global::<RemoteController>();
+            assert!(!controller.pairing_enabled());
+            assert_eq!(
+                controller.invitation_offer(),
+                InvitationOffer::PairingOff,
+                "no invitation is offered while pairing is off"
+            );
+        });
+        assert!(cx.debug_bounds("remote-invitation").is_none());
+
+        let switch = cx.debug_bounds("remote-pairing").unwrap();
+        cx.simulate_click(switch.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        assert!(
+            cx.debug_bounds("remote-invitation").is_some(),
+            "turning pairing on mints an invitation at once"
+        );
+
+        cx.update(|_, cx| {
+            cx.update_global::<RemoteController, _>(|controller, _| controller.stop_hosting());
+        });
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("remote-pairing").is_none());
+        assert!(cx.debug_bounds("remote-invitation").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_self_hosted_traverse_needs_a_fetchable_base_url() {
         let custom = |url: &str, enabled| TraverseSource {

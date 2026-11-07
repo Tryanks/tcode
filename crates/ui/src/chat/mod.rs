@@ -1600,6 +1600,67 @@ pub(crate) mod tests {
         }
     }
 
+    /// A reader scrolled up from a running turn reads still history: the
+    /// turn's clock ticks in a view of its own while it is drawn, and out of
+    /// view it has no timer at all, so neither ever invalidates the timeline.
+    #[gpui::test]
+    fn a_running_turn_out_of_view_leaves_the_timeline_still(cx: &mut TestAppContext) {
+        use gpui::{IntoElement, ParentElement as _, Render, Styled as _, Window, div, px};
+        use std::{cell::Cell, rc::Rc, time::Duration};
+        struct Frame(Entity<ChatView>);
+        impl Render for Frame {
+            fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.read(cx).frame())
+            }
+        }
+        let mut timeline = synthetic_markdown_timeline(30);
+        timeline.turn_running = true;
+        let running = timeline.turns.last_mut().unwrap();
+        running.running = true;
+        running.start_ts = Some(crate::time::now_millis() / 1000);
+        let (store, window_state, session_id) = seed_chat(cx, timeline);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            Frame(cx.new(|cx| ChatView::new(store, window_state, Some(session_id), window, cx)))
+        });
+        cx.simulate_resize(gpui::size(px(1024.), px(800.)));
+        let chat = root.read_with(cx, |root, _| root.0.clone());
+        let list = chat.read_with(cx, |chat, _| chat.list_state.clone());
+        list.scroll_to_end();
+        draw_settled(cx);
+        assert!(cx.debug_bounds("working-status-29").is_some());
+
+        let invalidations = Rc::new(Cell::new(0));
+        let _observer = cx.update(|_, cx| {
+            let invalidations = invalidations.clone();
+            cx.observe(&chat, move |_, _| {
+                invalidations.set(invalidations.get() + 1)
+            })
+        });
+        // Past every second a clock can be waiting for, whatever the wall
+        // clock read when it started.
+        let seconds = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..3 {
+                cx.executor().advance_clock(Duration::from_millis(1100));
+                cx.run_until_parked();
+                draw_settled(cx);
+            }
+        };
+        seconds(cx);
+        assert_eq!(invalidations.get(), 0, "the clock invalidated the timeline");
+
+        cx.simulate_event(gpui::ScrollEvent {
+            position: list.viewport_bounds().center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(20_000.))),
+            ..Default::default()
+        });
+        draw_settled(cx);
+        assert!(cx.debug_bounds("working-status-29").is_none());
+        invalidations.set(0);
+        seconds(cx);
+        assert_eq!(invalidations.get(), 0, "the clock invalidated the timeline");
+    }
+
     /// A thread with nothing new to show is drawn again from what it drew
     /// when the view around it renders again, as the shell does for its own
     /// reasons, and asks for no frame of its own.
