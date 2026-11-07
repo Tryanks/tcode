@@ -59,6 +59,7 @@ pub(crate) fn show(
         let cancel = dialog.clone();
         let name = store.read(cx).provider_profile_display_name(&profile_id);
         builder
+            .sheet()
             .title(crate::tr!("providers.login.title", name = name).into_owned())
             .content(move |body, _, _| body.child(content.clone()))
             .on_cancel(move |_, _, cx| {

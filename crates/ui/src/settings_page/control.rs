@@ -1213,6 +1213,7 @@ pub(crate) fn open_grant_editor(
             );
         }
         dialog
+            .sheet()
             .title(title.clone())
             .content(move |body, _, _| body.child(content.clone()))
             .footer(

@@ -50,6 +50,7 @@ pub(crate) fn open(
     window.open_dialog(cx, move |builder, _, cx| {
         let content = dialog.clone();
         builder
+            .sheet()
             .title(crate::tr!("sidebar.move_thread_title").into_owned())
             .content(move |body, _, _| body.child(content.clone()))
             .footer(render_footer(&dialog, cx))

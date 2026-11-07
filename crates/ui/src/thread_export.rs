@@ -77,6 +77,7 @@ fn open_delivery_dialog(
         let download_store = store.clone();
         let directory = directory.clone();
         builder
+            .sheet()
             .title(crate::tr!("export.title").into_owned())
             .content(move |content, _, cx| {
                 content.child(
