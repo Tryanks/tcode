@@ -77,6 +77,13 @@ struct InstallDraft {
     scope: PluginScope,
 }
 
+/// What the source dialog adds.
+#[derive(Clone, Copy, PartialEq)]
+enum AddedSource {
+    Marketplace,
+    Package,
+}
+
 /// Run an action the host offered, chosen from a row's menu.
 #[derive(Action, Clone, PartialEq, serde::Deserialize)]
 #[action(namespace = plugins_settings, no_json)]
@@ -128,6 +135,8 @@ pub struct PluginsSettingsPanel {
     touch: bool,
     marketplace_source: Entity<InputState>,
     marketplace_accounts: BTreeSet<String>,
+    /// The package being added goes in the open project, not the account.
+    package_in_project: bool,
     /// The challenge whose dialog is open.
     challenge: Option<RuntimeOperationId>,
     /// Challenges this client already answered; the replica keeps showing
@@ -314,6 +323,7 @@ impl PluginsSettingsPanel {
             touch: false,
             marketplace_source,
             marketplace_accounts: BTreeSet::new(),
+            package_in_project: false,
             challenge: None,
             answered: HashSet::new(),
             motion: Default::default(),
@@ -572,21 +582,35 @@ impl PluginsSettingsPanel {
     }
 
     /// Ask for a marketplace source and the accounts to add it to.
-    fn open_add_marketplace(
+    /// A dialog taking a source and the accounts it goes to. `project` is
+    /// where a package can go instead of its accounts.
+    fn open_add_source(
         &mut self,
+        added: AddedSource,
         accounts: Vec<Account>,
+        project: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let first = self.default_account(&accounts, cx);
         self.marketplace_accounts = first.into_iter().collect();
+        self.package_in_project = false;
+        let (title, help, placeholder) = match added {
+            AddedSource::Marketplace => (
+                crate::tr!("providers.plugins.add_marketplace_title"),
+                crate::tr!("providers.plugins.marketplace_source_help"),
+                crate::tr!("providers.plugins.marketplace_source_placeholder"),
+            ),
+            AddedSource::Package => (
+                crate::tr!("providers.plugins.add_package_title"),
+                crate::tr!("providers.plugins.package_source_help"),
+                crate::tr!("providers.plugins.package_source_placeholder"),
+            ),
+        };
+        let (title, help) = (title.into_owned(), help.into_owned());
         self.marketplace_source.update(cx, |input, cx| {
             input.set_value("", window, cx);
-            input.set_placeholder(
-                crate::tr!("providers.plugins.marketplace_source_placeholder"),
-                window,
-                cx,
-            );
+            input.set_placeholder(placeholder, window, cx);
         });
         let panel = cx.entity();
         let input = self.marketplace_source.clone();
@@ -598,11 +622,17 @@ impl PluginsSettingsPanel {
             let submit_panel = panel.clone();
             let accounts = accounts.clone();
             let store = store.clone();
+            let help = help.clone();
+            let project = project.clone();
+            let in_project = project.clone();
+            let submit_project = project.clone();
             dialog
                 .wide()
-                .title(crate::tr!("providers.plugins.add_marketplace_title").into_owned())
+                .title(title.clone())
                 .content(move |content, _, cx| {
                     let chosen = panel.read(cx).marketplace_accounts.clone();
+                    let here = panel.read(cx).package_in_project;
+                    let toggle = panel.clone();
                     content.child(
                         v_flex()
                             .w_full()
@@ -613,11 +643,21 @@ impl PluginsSettingsPanel {
                                     .child(crate::tr!("providers.plugins.marketplace_source")),
                             )
                             .child(Input::new(&field))
-                            .child(
-                                div()
-                                    .text_secondary(false, cx)
-                                    .child(crate::tr!("providers.plugins.marketplace_source_help")),
-                            )
+                            .child(div().text_secondary(false, cx).child(help.clone()))
+                            .when(in_project.is_some(), |column| {
+                                column.child(
+                                    Checkbox::new("plugin-package-in-project")
+                                        .label(crate::tr!("providers.plugins.package_in_project"))
+                                        .checked(here)
+                                        .on_click(move |checked, _, cx| {
+                                            let checked = *checked;
+                                            toggle.update(cx, |panel, cx| {
+                                                panel.package_in_project = checked;
+                                                cx.notify();
+                                            });
+                                        }),
+                                )
+                            })
                             .child(
                                 div()
                                     .pt_2()
@@ -671,13 +711,28 @@ impl PluginsSettingsPanel {
                                     if source.is_empty() || chosen.is_empty() {
                                         return;
                                     }
+                                    let here = submit_panel.read(cx).package_in_project;
+                                    let (scope, cwd) = match (here, submit_project.clone()) {
+                                        (true, Some(root)) => (PluginScope::Project, Some(root)),
+                                        _ => (PluginScope::User, None),
+                                    };
                                     store.update(cx, |store, _| {
                                         for profile_id in chosen {
-                                            store.add_provider_marketplace(
-                                                profile_id,
-                                                source.clone(),
-                                                None,
-                                            );
+                                            match added {
+                                                AddedSource::Marketplace => store
+                                                    .add_provider_marketplace(
+                                                        profile_id,
+                                                        source.clone(),
+                                                        None,
+                                                    ),
+                                                AddedSource::Package => store
+                                                    .run_provider_plugin_action(
+                                                        profile_id,
+                                                        source.clone(),
+                                                        PluginAction::Install { scope },
+                                                        cwd.clone(),
+                                                    ),
+                                            }
                                         }
                                     });
                                     window.close_dialog(cx);
@@ -921,20 +976,7 @@ impl PluginsSettingsPanel {
             .filter_map(|kind| {
                 let unmanaged = kind.caps().plugin_management.unmanaged?;
                 let name = kind.display_name();
-                let command = unmanaged.command.unwrap_or_default();
                 let line = match unmanaged.kind {
-                    UnmanagedPluginsKind::Packages => {
-                        crate::tr!(
-                            "providers.plugins.unmanaged.packages",
-                            name = name,
-                            command = command
-                        )
-                    }
-                    UnmanagedPluginsKind::SharedConfig => crate::tr!(
-                        "providers.plugins.unmanaged.shared_config",
-                        name = name,
-                        command = command
-                    ),
                     UnmanagedPluginsKind::EditorOnly => {
                         crate::tr!("providers.plugins.unmanaged.editor_only", name = name)
                     }
@@ -1071,7 +1113,7 @@ impl PluginsSettingsPanel {
             if listing {
                 note_card(crate::tr!("providers.plugins.listing").into_owned(), cx)
             } else {
-                self.empty_user(kind, cx)
+                self.empty_user(kind, &accounts, cx)
             }
         } else {
             self.plugin_rows(
@@ -1129,24 +1171,27 @@ impl PluginsSettingsPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let chips = accounts.iter().map(|account| {
-            let state: AnyElement = if account.loading() {
-                Spinner::new().xsmall().color(muted).into_any_element()
-            } else if account.failure().is_some() {
-                Icon::new(IconName::TriangleAlert)
-                    .xsmall()
-                    .text_color(cx.theme().danger)
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            };
-            let id = format!("plugins-account-{}", account.id);
-            material::chip_surface(cx.theme().secondary, cx.theme().foreground, cx)
-                .debug_selector(move || id.clone())
-                .child(material::status_dot(account.color))
-                .child(account.name.clone())
-                .child(state)
-        });
+        let chips: Vec<_> = accounts
+            .iter()
+            .map(|account| {
+                let state: AnyElement = if account.loading() {
+                    Spinner::new().xsmall().color(muted).into_any_element()
+                } else if account.failure().is_some() {
+                    Icon::new(IconName::TriangleAlert)
+                        .xsmall()
+                        .text_color(cx.theme().danger)
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                };
+                let id = format!("plugins-account-{}", account.id);
+                material::chip_surface(cx.theme().secondary, cx.theme().foreground, cx)
+                    .debug_selector(move || id.clone())
+                    .child(material::status_dot(account.color))
+                    .child(account.name.clone())
+                    .child(state)
+            })
+            .collect();
         let refresh = Button::new("plugins-refresh")
             .debug_selector(|| "plugins-refresh".into())
             .ghost()
@@ -1162,18 +1207,20 @@ impl PluginsSettingsPanel {
             .plugin_management
             .supports(PluginActionKind::Install);
         let browse = installs.then(|| {
-            Button::new("plugins-browse")
+            self.install_button("plugins-browse", kind, accounts, compact, cx)
                 .debug_selector(|| "plugins-browse".into())
-                .primary()
-                .when(!compact, |button| button.small())
-                .when(compact, |button| button.w_full())
-                .icon(IconName::Search)
-                .label(crate::tr!("providers.plugins.browse").into_owned())
-                .on_click(cx.listener(move |this, _, _, cx| this.open(Page::Browse, kind, cx)))
         });
         let description = div()
             .text_secondary(self.touch, cx)
-            .child(crate::tr!("providers.plugins.where_kept").into_owned());
+            .child(if kind.caps().home_path {
+                crate::tr!("providers.plugins.where_kept").into_owned()
+            } else {
+                crate::tr!(
+                    "providers.plugins.where_kept_shared",
+                    name = kind.display_name()
+                )
+                .into_owned()
+            });
         if compact {
             v_flex()
                 .w_full()
@@ -1312,7 +1359,59 @@ impl PluginsSettingsPanel {
         notices
     }
 
-    fn empty_user(&self, kind: ProviderKind, cx: &mut Context<Self>) -> AnyElement {
+    /// The way into installing: a harness without a catalog takes a package
+    /// source, any other browses its catalog.
+    fn install_button(
+        &self,
+        id: &'static str,
+        kind: ProviderKind,
+        accounts: &[Account],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let management = kind.caps().plugin_management;
+        let by_source = management.source_install;
+        let accounts = accounts.to_vec();
+        let project = management
+            .scopes
+            .contains(&PluginScope::Project)
+            .then(|| self.project_root(cx))
+            .flatten();
+        Button::new(id)
+            .primary()
+            .when(!compact, |button| button.small())
+            .when(compact, |button| button.w_full())
+            .icon(if by_source {
+                IconName::Plus
+            } else {
+                IconName::Search
+            })
+            .label(if by_source {
+                crate::tr!("providers.plugins.add_package").into_owned()
+            } else {
+                crate::tr!("providers.plugins.browse").into_owned()
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if by_source {
+                    this.open_add_source(
+                        AddedSource::Package,
+                        accounts.clone(),
+                        project.clone(),
+                        window,
+                        cx,
+                    );
+                } else {
+                    this.open(Page::Browse, kind, cx);
+                }
+            }))
+    }
+
+    fn empty_user(
+        &self,
+        kind: ProviderKind,
+        accounts: &[Account],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let installs = kind
             .caps()
             .plugin_management
@@ -1335,16 +1434,13 @@ impl PluginsSettingsPanel {
                             ),
                     )
                     .when(installs, |col| {
-                        col.child(
-                            Button::new("plugins-empty-browse")
-                                .primary()
-                                .small()
-                                .icon(IconName::Search)
-                                .label(crate::tr!("providers.plugins.browse").into_owned())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open(Page::Browse, kind, cx)
-                                })),
-                        )
+                        col.child(self.install_button(
+                            "plugins-empty-browse",
+                            kind,
+                            accounts,
+                            false,
+                            cx,
+                        ))
                     })
                     .into_any_element(),
             ],
@@ -2414,7 +2510,13 @@ impl PluginsSettingsPanel {
                             .icon(IconName::Plus)
                             .label(crate::tr!("providers.plugins.add_marketplace").into_owned())
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_add_marketplace(accounts.clone(), window, cx)
+                                this.open_add_source(
+                                    AddedSource::Marketplace,
+                                    accounts.clone(),
+                                    None,
+                                    window,
+                                    cx,
+                                )
                             })),
                     )
                     .into_any_element(),

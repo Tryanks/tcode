@@ -19,9 +19,9 @@ pub fn plugin_op_command(
         // Codex is driven over its app server, so the request stands in
         // for a command line.
         ProviderKind::Codex => ("codex", codex_request(op)?),
-        ProviderKind::Pi | ProviderKind::OpenCode | ProviderKind::Cursor | ProviderKind::Acp => {
-            return None;
-        }
+        ProviderKind::Pi => ("pi", pi::op_args(op).ok()?),
+        ProviderKind::OpenCode => ("opencode", opencode::op_args(op).ok()?),
+        ProviderKind::Cursor | ProviderKind::Acp => return None,
     };
     let program = program.map_or_else(|| default.to_string(), |path| path.display().to_string());
     Some(shell_words::join(std::iter::once(program).chain(argv)))
@@ -193,6 +193,99 @@ pub(crate) mod grok {
     }
 }
 
+pub(crate) mod pi {
+    use crate::{AgentError, PluginOp, PluginScope};
+
+    /// `--approve` trusts the project for this one command; pi refuses
+    /// project packages without it and asks nothing of user ones.
+    pub(crate) fn list_args(project: bool) -> Vec<String> {
+        let mut args = vec!["list".to_string()];
+        if project {
+            args.push("--approve".into());
+        }
+        args
+    }
+
+    fn package(verb: &str, source: &str, scope: PluginScope) -> Result<Vec<String>, AgentError> {
+        let mut args = vec![verb.to_string(), source_operand(source)?];
+        match scope {
+            PluginScope::User => {}
+            PluginScope::Project => args.extend(["-l".into(), "--approve".into()]),
+            other => {
+                return Err(AgentError::Protocol(format!(
+                    "pi keeps packages for the user or the project, not in the {other:?} scope"
+                )));
+            }
+        }
+        Ok(args)
+    }
+
+    pub(crate) fn op_args(op: &PluginOp) -> Result<Vec<String>, AgentError> {
+        match op {
+            PluginOp::Install { id, scope, .. } => package("install", id, *scope),
+            PluginOp::Uninstall { id, scope } => package("remove", id, *scope),
+            // `pi update <source>` would read a package named `pi` or `self`
+            // as pi itself. The update has no scope flag; it finds the source.
+            PluginOp::Update { id, scope, .. } => {
+                let mut args = vec![
+                    "update".to_string(),
+                    "--extension".to_string(),
+                    source_operand(id)?,
+                ];
+                if *scope == PluginScope::Project {
+                    args.push("--approve".into());
+                }
+                Ok(args)
+            }
+            PluginOp::SetEnabled { .. } => Err(AgentError::Protocol(
+                "pi enables package resources only in its `pi config` TUI".into(),
+            )),
+            PluginOp::AddMarketplace { .. } | PluginOp::RemoveMarketplace { .. } => Err(
+                AgentError::Protocol("pi installs packages by source, without marketplaces".into()),
+            ),
+        }
+    }
+
+    pub(super) fn source_operand(value: &str) -> Result<String, AgentError> {
+        if value.trim().is_empty() || value.starts_with('-') {
+            return Err(AgentError::Protocol(format!(
+                "refusing to pass {value:?} as a package source"
+            )));
+        }
+        Ok(value.to_string())
+    }
+}
+
+pub(crate) mod opencode {
+    use super::pi::source_operand;
+    use crate::{AgentError, PluginOp, PluginScope};
+
+    /// `opencode plugin` changes the global configuration only.
+    pub(crate) fn op_args(op: &PluginOp) -> Result<Vec<String>, AgentError> {
+        let (verb, id, scope) = match op {
+            PluginOp::Install { id, scope, .. } => ("add", id, scope),
+            PluginOp::Uninstall { id, scope } => ("remove", id, scope),
+            PluginOp::Update { id, scope, .. } => ("update", id, scope),
+            PluginOp::SetEnabled { .. } => {
+                return Err(AgentError::Protocol(
+                    "`opencode plugin` has no way to disable a plugin".into(),
+                ));
+            }
+            PluginOp::AddMarketplace { .. } | PluginOp::RemoveMarketplace { .. } => {
+                return Err(AgentError::Protocol(
+                    "OpenCode installs plugins by package, without marketplaces".into(),
+                ));
+            }
+        };
+        if *scope != PluginScope::User {
+            return Err(AgentError::Protocol(
+                "`opencode plugin` changes the global configuration only".into(),
+            ));
+        }
+        Ok(vec!["plugin".into(), verb.into(), source_operand(id)?])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +324,6 @@ mod tests {
             plugin_op_command(ProviderKind::Grok, None, &user).as_deref(),
             Some("grok plugin install alpha@tcode-probe")
         );
-        assert_eq!(plugin_op_command(ProviderKind::Pi, None, &user), None);
+        assert_eq!(plugin_op_command(ProviderKind::Cursor, None, &user), None);
     }
 }
