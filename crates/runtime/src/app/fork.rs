@@ -20,7 +20,7 @@ impl AppState {
     /// Whether this thread can fork through a turn and whether one can start
     /// now.
     pub(super) fn fork_status(&self, active: &ActiveSession) -> Option<ForkStatus> {
-        active.meta.provider.caps().fork_at?;
+        active.meta.provider.caps().fork_at.then_some(())?;
         // A branch not started yet holds the source's cursor, not its session's.
         if Self::conversation_read_only(&active.meta)
             || active.meta.resume_cursor.is_none()
