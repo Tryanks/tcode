@@ -198,14 +198,6 @@ pub(crate) mod pi {
 
     /// `--approve` trusts the project for this one command; pi refuses
     /// project packages without it and asks nothing of user ones.
-    pub(crate) fn list_args(project: bool) -> Vec<String> {
-        let mut args = vec!["list".to_string()];
-        if project {
-            args.push("--approve".into());
-        }
-        args
-    }
-
     fn package(verb: &str, source: &str, scope: PluginScope) -> Result<Vec<String>, AgentError> {
         let mut args = vec![verb.to_string(), source_operand(source)?];
         match scope {
