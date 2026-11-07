@@ -183,6 +183,7 @@ pub(crate) fn content_type(path: &str) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("wasm") => "application/wasm",
+        Some("otf") => "font/otf",
         _ => "application/octet-stream",
     }
 }

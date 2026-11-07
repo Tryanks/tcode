@@ -66,13 +66,16 @@ fn system_locale() -> Option<String> {
 /// system; the UI language decides instead. English names nothing and leaves
 /// CJK text to the system language, the best guess at what the user writes,
 /// except on Android, whose fallback has no script preferences and would
-/// otherwise reach for arbitrary serif faces. gpui-base has no locale-aware
-/// font selection; this is it until it does.
+/// otherwise reach for arbitrary serif faces, and in a browser, whose fallback
+/// would take whichever of its two Han faces loaded first. gpui-base has no
+/// locale-aware font selection; this is it until it does.
 pub(crate) fn cjk_fallback_families() -> &'static [&'static str] {
     let locale = rust_i18n::locale();
     if &*locale == LANGUAGE_JAPANESE {
         cjk_families::JAPANESE
-    } else if &*locale == LANGUAGE_SIMPLIFIED_CHINESE || cfg!(target_os = "android") {
+    } else if &*locale == LANGUAGE_SIMPLIFIED_CHINESE
+        || cfg!(any(target_os = "android", target_family = "wasm"))
+    {
         cjk_families::CHINESE
     } else {
         &[]
@@ -91,8 +94,10 @@ mod cjk_families {
     pub(super) const CHINESE: &[&str] = &["Microsoft YaHei UI"];
 }
 
-/// The browser draws only glyphs the bundled fonts lack (Noto Sans SC covers
-/// Han and kana), taking these as a CSS font-family list.
+/// Text takes the first of these that is loaded: Noto Sans JP once
+/// [`fetch_locale_font`] has it and bundled Noto Sans SC otherwise. The system
+/// fonts here serve the browser, which draws what those two lack and reads
+/// this as a CSS font-family list.
 #[cfg(target_family = "wasm")]
 mod cjk_families {
     pub(super) const JAPANESE: &[&str] = &[
@@ -102,7 +107,7 @@ mod cjk_families {
         "Noto Sans CJK JP",
         "Noto Sans JP",
     ];
-    pub(super) const CHINESE: &[&str] = &[];
+    pub(super) const CHINESE: &[&str] = &["Noto Sans SC"];
 }
 
 #[cfg(not(any(
@@ -123,6 +128,66 @@ pub(crate) fn cjk_font_fallbacks() -> Option<gpui::FontFallbacks> {
     (!families.is_empty()).then(|| {
         gpui::FontFallbacks::from_fonts(families.iter().map(|&family| family.into()).collect())
     })
+}
+
+/// The fonts [`crate::ShellOptions::locale_fonts`] still has to fetch.
+struct LocaleFonts(Vec<(&'static str, String)>);
+
+impl gpui::Global for LocaleFonts {}
+
+pub(crate) fn set_locale_fonts(fonts: Vec<(&'static str, String)>, cx: &mut gpui::App) {
+    if !fonts.is_empty() {
+        cx.set_global(LocaleFonts(fonts));
+    }
+}
+
+/// Fetches the current language's font, if it has one still to fetch. A font
+/// that fails is not retried in this session: its language keeps the forms it
+/// fell back to.
+pub(crate) fn fetch_locale_font(cx: &mut gpui::App) {
+    let locale = rust_i18n::locale();
+    let Some(fonts) = cx.try_global::<LocaleFonts>() else {
+        return;
+    };
+    let Some(index) = fonts.0.iter().position(|(font, _)| *font == &*locale) else {
+        return;
+    };
+    let (_, url) = cx.global_mut::<LocaleFonts>().0.swap_remove(index);
+    let client = cx.http_client();
+    cx.spawn(async move |cx| {
+        let font = read_font(client, &url).await;
+        cx.update(|cx| match font {
+            Ok(font) => {
+                if let Err(error) = cx.text_system().add_fonts(vec![font.into()]) {
+                    log::warn!("could not install the font at {url}: {error:#}");
+                }
+                cx.refresh_windows();
+            }
+            Err(error) => log::warn!("could not fetch the font at {url}: {error}"),
+        })
+    })
+    .detach();
+}
+
+async fn read_font(
+    client: std::sync::Arc<dyn gpui::http_client::HttpClient>,
+    url: &str,
+) -> Result<Vec<u8>, String> {
+    use futures_lite::AsyncReadExt as _;
+    let mut response = client
+        .get(url, gpui::http_client::AsyncBody::empty(), true)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    if !response.status().is_success() {
+        return Err(response.status().to_string());
+    }
+    let mut font = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut font)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(font)
 }
 
 /// The items of a list read inside a sentence, joined as the current language
@@ -271,6 +336,8 @@ macro_rules! tr {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext as _;
+
     use std::collections::BTreeSet;
 
     use super::*;
@@ -301,6 +368,58 @@ mod tests {
             }
         }
         keys
+    }
+
+    /// A language's font is fetched when that language is first shown, by any
+    /// frame after the switch, and never for another language or twice.
+    #[gpui::test]
+    fn a_language_font_is_fetched_once_when_its_language_shows(cx: &mut gpui::TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let fetched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = gpui::http_client::FakeHttpClient::create({
+            let fetched = fetched.clone();
+            move |request| {
+                fetched.lock().unwrap().push(request.uri().to_string());
+                async move {
+                    Ok(gpui::http_client::Response::builder()
+                        .status(200)
+                        .body(b"font".to_vec().into())?)
+                }
+            }
+        });
+        cx.update(|cx| {
+            cx.set_http_client(client);
+            crate::theme::init(cx);
+            set_locale_fonts(
+                vec![(LANGUAGE_JAPANESE, "https://host/ja.otf".to_owned())],
+                cx,
+            );
+        });
+        struct Empty;
+        impl gpui::Render for Empty {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::Empty
+            }
+        }
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| Empty);
+            gpui_base::Root::new(view, window, cx)
+        });
+        let frame = |locale: &str, cx: &mut gpui::VisualTestContext| {
+            set_locale(locale);
+            crate::test_frames::draw(cx);
+            cx.run_until_parked();
+            fetched.lock().unwrap().len()
+        };
+        assert_eq!(frame(LANGUAGE_ENGLISH, cx), 0);
+        assert_eq!(frame(LANGUAGE_SIMPLIFIED_CHINESE, cx), 0);
+        assert_eq!(frame(LANGUAGE_JAPANESE, cx), 1);
+        assert_eq!(frame(LANGUAGE_ENGLISH, cx), 1);
+        assert_eq!(frame(LANGUAGE_JAPANESE, cx), 1);
     }
 
     #[test]

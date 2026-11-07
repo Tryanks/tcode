@@ -30,6 +30,10 @@ const STATIC_BUNDLE: Option<StaticBundle> = Some(&[
         "/tcode_web_bg.wasm",
         include_bytes!("../../web/dist/tcode_web_bg.wasm"),
     ),
+    (
+        "/NotoSansJP-Regular.otf",
+        include_bytes!("../../web/dist/NotoSansJP-Regular.otf"),
+    ),
 ]);
 #[cfg(not(feature = "web"))]
 const STATIC_BUNDLE: Option<StaticBundle> = None;

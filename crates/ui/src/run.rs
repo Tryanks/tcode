@@ -49,6 +49,9 @@ pub struct ShellOptions {
     /// The title the window carries until an attachment names one.
     pub title: SharedString,
     pub fonts: Vec<Cow<'static, [u8]>>,
+    /// Fonts left out of `fonts` because one language alone needs them, as
+    /// (language, URL): fetched the first time that language is shown.
+    pub locale_fonts: Vec<(&'static str, String)>,
     /// The palette this client renders with. Clients whose window is opaque
     /// hand over a theme with the translucent canvas already flattened.
     pub theme_json: Cow<'static, str>,
@@ -71,6 +74,7 @@ impl Default for ShellOptions {
             window: WindowOptions::default(),
             title: crate::tr!("app.name").into(),
             fonts: vec![Cow::Borrowed(crate::assets::DM_SANS)],
+            locale_fonts: Vec::new(),
             theme_json: Cow::Borrowed(THEME_JSON),
             activate: false,
             system_locale: None,
@@ -136,6 +140,7 @@ pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) 
     cx.text_system()
         .add_fonts(options.fonts.clone())
         .expect("failed to register bundled application fonts");
+    crate::i18n::set_locale_fonts(options.locale_fonts.clone(), cx);
     theme::init_with_json(&options.theme_json, cx);
     crate::markdown::init(cx);
     crate::image_viewer::init(cx);
