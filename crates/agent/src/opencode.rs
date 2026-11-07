@@ -248,7 +248,15 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
         (Some(session_id), Some(point)) => {
             let body = match point {
                 ForkPoint::Before { checkpoint_id } => json!({ "before": checkpoint_id }),
-                _ => json!({}),
+                // A staged revert only hides what it removes: a whole fork
+                // would copy those messages back.
+                _ => {
+                    let source = http.get(&format!("/api/session/{session_id}"))?;
+                    match source["data"]["revert"]["messageID"].as_str() {
+                        Some(message_id) => json!({ "before": message_id }),
+                        None => json!({}),
+                    }
+                }
             };
             http.post(&format!("/api/session/{session_id}/fork"), &body)?
         }
@@ -3630,7 +3638,12 @@ cat > /dev/null
                 ),
                 (ForkPoint::Tail, json!({})),
             ] {
-                let mut fixture = fixture(Vec::new(), vec![(FORK, 200, SESSION.into())]);
+                let source = (
+                    "GET /api/session/ses_source",
+                    200,
+                    session_with_revert(None),
+                );
+                let mut fixture = fixture(Vec::new(), vec![source, (FORK, 200, SESSION.into())]);
                 fixture.options.resume = Some(ResumeCursor(json!({"session_id": "ses_source"})));
                 fixture.options.fork = Some(point);
                 let handle = open(fixture.options.clone()).await;
@@ -3643,6 +3656,32 @@ cat > /dev/null
                 assert_eq!(fork.body, body);
                 send(&handle, SessionCommand::Shutdown).await;
             }
+        });
+    }
+
+    /// A rewind left staged only hides the messages it removes, so a whole
+    /// fork stops where the rewind did instead of copying them back.
+    #[test]
+    fn a_whole_fork_leaves_out_what_a_staged_rewind_removed() {
+        smol::block_on(async {
+            const FORK: &str = "POST /api/session/ses_source/fork";
+            let source = (
+                "GET /api/session/ses_source",
+                200,
+                session_with_revert(Some("msg_rewound")),
+            );
+            let mut fixture = fixture(Vec::new(), vec![source, (FORK, 200, SESSION.into())]);
+            fixture.options.resume = Some(ResumeCursor(json!({"session_id": "ses_source"})));
+            fixture.options.fork = Some(ForkPoint::Tail);
+            let handle = open(fixture.options.clone()).await;
+            let fork = fixture
+                .server
+                .requests()
+                .into_iter()
+                .find(|request| request.key == FORK)
+                .unwrap();
+            assert_eq!(fork.body, json!({"before": "msg_rewound"}));
+            send(&handle, SessionCommand::Shutdown).await;
         });
     }
 
