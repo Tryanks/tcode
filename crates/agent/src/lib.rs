@@ -2214,6 +2214,11 @@ pub enum AgentEvent {
     /// session (the thread was forked into a new one); none of them is a
     /// rewind target any more.
     CheckpointsCleared,
+    /// The latest rewind can no longer be undone here, though nothing was
+    /// sent after it: its log was carried into a thread that goes on in
+    /// another of the Harness's sessions, so the branch it left is reached
+    /// only as a thread of its own, which one thread at a time can go on in.
+    RewindUndoClosed,
     /// Whether this thread's harness session can be rewound at all, where
     /// that differs between sessions of one harness (Codex's legacy history).
     RewindAvailability {

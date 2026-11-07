@@ -410,6 +410,7 @@ impl AppState {
             | AgentEvent::TurnCheckpoint { .. }
             | AgentEvent::SteerCheckpoint { .. }
             | AgentEvent::CheckpointsCleared
+            | AgentEvent::RewindUndoClosed
             | AgentEvent::RewindAvailability { .. }
             | AgentEvent::ItemStarted(_)
             | AgentEvent::ItemUpdated(_)

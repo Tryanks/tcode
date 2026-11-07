@@ -124,6 +124,7 @@ impl TurnBoundaries {
                 | AgentEvent::RewindUndone { .. }
                 | AgentEvent::SteerCheckpoint { .. }
                 | AgentEvent::CheckpointsCleared
+                | AgentEvent::RewindUndoClosed
                 | AgentEvent::SteerRequested { .. }
                 | AgentEvent::SteerAccepted { .. }
                 | AgentEvent::SteerRejected { .. }
@@ -178,6 +179,7 @@ impl TurnBoundaries {
                 self.steer_checkpoints.clear();
                 self.undo = None;
             }
+            AgentEvent::RewindUndoClosed => self.undo = None,
             AgentEvent::RewindCompleted {
                 checkpoint_id,
                 mode,
@@ -368,6 +370,7 @@ impl TurnBoundaries {
             | AgentEvent::RewindAvailability { .. }
             | AgentEvent::SteerCheckpoint { .. }
             | AgentEvent::CheckpointsCleared
+            | AgentEvent::RewindUndoClosed
             | AgentEvent::ApprovalRequested(_)
             | AgentEvent::ApprovalResolved { .. }
             | AgentEvent::UserInputRequested { .. }

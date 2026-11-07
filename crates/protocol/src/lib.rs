@@ -357,6 +357,7 @@ pub use wire::{
 // threads and actions the log offers to filter by. HarnessDescription gains
 // native_mcp_config and permission, the NativeMcpServers query is new, and
 // ProfileSettingsPatch gains SetDefaultPermission.
+// AgentEvent::RewindUndoClosed is new.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

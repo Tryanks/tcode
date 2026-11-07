@@ -1168,6 +1168,7 @@ impl Timeline {
                     }
                 }
             }
+            AgentEvent::RewindUndoClosed => self.close_undo(),
             AgentEvent::RewindAvailability { unavailable } => {
                 self.rewind_unavailable = *unavailable;
             }
