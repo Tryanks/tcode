@@ -149,10 +149,26 @@ pub struct PickedFile {
     pub bytes: Vec<u8>,
 }
 
+/// A platform's notification center. Each notification is keyed by the
+/// thread it is about; a later one replaces it.
+pub trait SystemNotifier {
+    /// Show a notification, asking the user for permission the first time.
+    fn post(&self, thread_id: &str, title: &str, body: &str);
+    /// Take back the thread's notification once nothing waits on it.
+    fn withdraw(&self, thread_id: &str);
+    /// The threads whose notifications the user clicks, as they do.
+    fn opened(&self) -> async_channel::Receiver<String>;
+}
+
 /// Persistence, pairing, transport, and platform facilities for a tcode client.
 pub trait ClientHost: 'static {
     /// Native dictation supplied by this client platform, when available.
     fn speech_recognizer(&self) -> Option<std::rc::Rc<dyn crate::speech::SpeechRecognizer>> {
+        None
+    }
+
+    /// The operating system's notifications, on a platform that has them.
+    fn system_notifier(&self) -> Option<std::rc::Rc<dyn SystemNotifier>> {
         None
     }
 
