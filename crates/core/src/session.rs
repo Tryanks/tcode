@@ -584,6 +584,15 @@ pub struct Rewound {
     cut_steers: Option<(usize, Vec<(String, String)>)>,
 }
 
+/// Where a fork through a finished turn stops ([`Timeline::fork_edge`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkEdge {
+    /// Before the next prompt, the one that opened `turn`.
+    BeforePrompt { turn: usize, checkpoint_id: String },
+    /// Nothing comes after it: all of the session.
+    End,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SteeringStatus {
     Pending,
@@ -988,6 +997,39 @@ impl Timeline {
                 })
             })
             .collect()
+    }
+
+    /// Where a fork through finished turn `turn` ends in the harness's
+    /// session, if it can be named now: a later prompt not yet taken up or
+    /// held by a rewind leaves that turn with nothing to anchor on.
+    pub fn fork_edge(&self, turn: usize) -> Option<ForkEdge> {
+        self.turns
+            .get(turn)
+            .filter(|meta| !meta.running && meta.status.is_some())?;
+        let next = turn + 1;
+        let Some(meta) = self.turns.get(next) else {
+            return Some(ForkEdge::End);
+        };
+        if let Some(checkpoint_id) = &meta.provider_checkpoint_id {
+            return Some(ForkEdge::BeforePrompt {
+                turn: next,
+                checkpoint_id: checkpoint_id.clone(),
+            });
+        }
+        let holds_more = self.turns.len() > next + 1
+            || self
+                .entries
+                .iter()
+                .filter(|entry| entry.turn == next)
+                .any(|entry| match &entry.content {
+                    EntryContent::Rewound(rewound) => {
+                        rewound.later_history == agent::LaterHistory::HiddenUntilNextSend
+                    }
+                    EntryContent::Item(ItemContent::UserMessage { .. })
+                    | EntryContent::Steer { .. } => true,
+                    _ => false,
+                });
+        (!holds_more).then_some(ForkEdge::End)
     }
 
     /// The running turn of a fold that holds the whole log.

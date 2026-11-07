@@ -449,13 +449,12 @@ impl WorkspaceStore {
         self.create_and_show(Command::ForkThread { id, at: None }, true, cx);
     }
 
-    /// A new thread holding what came before the message at absolute `turn`,
-    /// with that message in this client's composer.
-    pub fn fork_from_message(
+    /// A new thread holding everything through the finished absolute `turn`.
+    pub fn fork_through_turn(
         &mut self,
         id: String,
         turn: usize,
-        checkpoint_id: String,
+        checkpoint_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let at = Some(tcode_protocol::ForkAt {
@@ -1055,20 +1054,6 @@ impl WorkspaceStore {
             let _ = this.update(cx, |store, cx| {
                 let created = match response {
                     Ok(CommandResponse::SessionId(id)) => id,
-                    Ok(CommandResponse::ForkedAt {
-                        session_id,
-                        text,
-                        attachments,
-                    }) => {
-                        // Waits for the composer whenever this client opens the
-                        // thread, as a rewind's prompt does.
-                        store.native_rewind_prefills.insert(
-                            session_id.clone(),
-                            super::RewindPrefill { text, attachments },
-                        );
-                        cx.notify();
-                        Some(session_id)
-                    }
                     _ => None,
                 };
                 if store.creation_request_generation != request_generation {

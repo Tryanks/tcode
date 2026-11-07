@@ -314,12 +314,12 @@ pub struct RewindTarget {
     pub harness: String,
 }
 
-/// A message the thread can be forked from.
+/// A finished turn the thread can be forked through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkTarget {
-    /// The turn it opened, counted from the thread's first.
+    /// Counted from the thread's first.
     pub turn: usize,
-    pub checkpoint_id: String,
+    pub checkpoint_id: Option<String>,
     pub blocked: bool,
 }
 
@@ -4166,8 +4166,8 @@ impl WorkspaceStore {
         })
     }
 
-    /// The fork the thread's Harness offers from the prompt that opened
-    /// `turn` (local to the held window).
+    /// The fork the thread's Harness offers through finished `turn` (local to
+    /// the held window).
     pub fn chat_fork_target_for(
         &self,
         session_id: Option<&str>,
@@ -4175,17 +4175,16 @@ impl WorkspaceStore {
         cx: &App,
     ) -> Option<ForkTarget> {
         let fork = self.thread_status(session_id, cx)?.fork_at?;
-        let absolute = self.absolute_turn_for(session_id, turn);
-        if !fork.offers(absolute) {
-            return None;
-        }
         let checkpoint_id = self.with_timeline_for(
             session_id,
-            |timeline| timeline.turns.get(turn)?.provider_checkpoint_id.clone(),
+            |timeline| {
+                timeline.fork_edge(turn)?;
+                Some(timeline.turns[turn].provider_checkpoint_id.clone())
+            },
             cx,
         )??;
         Some(ForkTarget {
-            turn: absolute,
+            turn: self.absolute_turn_for(session_id, turn),
             checkpoint_id,
             blocked: fork.blocked,
         })

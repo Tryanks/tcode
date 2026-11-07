@@ -489,7 +489,7 @@ pub enum Command {
         session_id: String,
     },
     /// Fork the whole thread, or what came before the message `at` names.
-    /// From a message, answered with [`CommandResponse::ForkedAt`].
+    /// With `at`, holding everything through a finished turn.
     ForkThread {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -676,13 +676,14 @@ pub enum Command {
     },
 }
 
-/// The prompt that opened absolute turn `turn`, with the restore point the
-/// client saw there: the host refuses when its own differs, a turn index being
-/// reused once a rewind cuts.
+/// The finished absolute turn `turn`, with its restore point as the client
+/// saw it: the host refuses when its own differs, a turn index being reused
+/// once a rewind cuts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkAt {
     pub turn: usize,
-    pub checkpoint_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
 }
 
 /// Correlated result of a [`Command`].
@@ -716,14 +717,6 @@ pub enum CommandResponse {
     /// `VerifyHostToken`: what the host answered; the token was saved only when accepted.
     TokenCheck(tcode_core::settings::TokenCheck),
     RewindPreview(agent::RewindPreviewResult),
-    /// `ForkThread` from a message: the new thread and, for the composer of
-    /// the client that asked alone, the message to edit or resend.
-    ForkedAt {
-        session_id: String,
-        text: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        attachments: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

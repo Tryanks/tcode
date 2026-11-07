@@ -203,12 +203,16 @@ impl TimelineView {
                         (false, true, false) => components::assistant::MessageActions::Below,
                         _ => components::assistant::MessageActions::None,
                     };
+                    let fork = (actions != components::assistant::MessageActions::None)
+                        .then(|| self.turn_fork(index, cx))
+                        .flatten();
                     if actions == components::assistant::MessageActions::InFooter {
                         ending = Some((
                             components::assistant::EndingActions {
                                 id: entry.id.clone(),
                                 copied,
                                 compact,
+                                fork: fork.clone(),
                             },
                             copy_text.clone(),
                         ));
@@ -224,6 +228,7 @@ impl TimelineView {
                             compact,
                             pinned,
                             actions,
+                            fork,
                             copied,
                             hover: self.hover.clone(),
                             motion: self.motion.clone(),
@@ -672,15 +677,15 @@ impl TimelineView {
         self.open_rewind(key, turn, steer, cx);
     }
 
-    pub(in crate::chat) fn on_fork_from_message(
+    pub(in crate::chat) fn on_fork_through_turn(
         &mut self,
-        action: &ForkFromMessage,
+        action: &ForkThroughTurn,
         cx: &mut Context<Self>,
     ) {
-        self.fork_from_message(action.turn, cx);
+        self.fork_through_turn(action.turn, cx);
     }
 
-    fn fork_from_message(&mut self, turn: usize, cx: &mut Context<Self>) {
+    fn fork_through_turn(&mut self, turn: usize, cx: &mut Context<Self>) {
         let Some(session_id) = self.session_id.clone() else {
             return;
         };
@@ -689,9 +694,30 @@ impl TimelineView {
                 .chat_fork_target_for(Some(&session_id), turn, cx)
                 .filter(|target| !target.blocked);
             if let Some(target) = target {
-                store.fork_from_message(session_id, target.turn, target.checkpoint_id, cx);
+                store.fork_through_turn(session_id, target.turn, target.checkpoint_id, cx);
             }
         });
+    }
+
+    /// The fork finished turn `turn` offers beside its answer's Copy.
+    fn turn_fork(
+        &self,
+        turn: usize,
+        cx: &Context<Self>,
+    ) -> Option<components::assistant::TurnFork> {
+        let target = self.workspace_store.read(cx).chat_fork_target_for(
+            self.session_id.as_deref(),
+            turn,
+            cx,
+        )?;
+        let this = cx.entity().downgrade();
+        Some(components::assistant::TurnFork {
+            turn,
+            blocked: target.blocked,
+            on_fork: Rc::new(move |turn, cx| {
+                let _ = this.update(cx, |timeline, cx| timeline.fork_through_turn(turn, cx));
+            }),
+        })
     }
 
     /// A rewind's divider, with its removed turns to read and the Harness's
@@ -892,20 +918,6 @@ impl TimelineView {
         let rewind = rewind_menu
             .as_ref()
             .map(|menu| self.compose_rewind(menu, cx));
-        let fork = steering
-            .is_none()
-            .then(|| {
-                self.workspace_store.read(cx).chat_fork_target_for(
-                    self.session_id.as_deref(),
-                    turn,
-                    cx,
-                )
-            })
-            .flatten()
-            .map(|target| components::bubble::ForkMenu {
-                turn,
-                blocked: target.blocked,
-            });
         let markdown = self.md_states.get(entry_id).map(|md| md.state.clone());
         let copy_key = format!("user:{entry_id}");
         let copied = self.copied.is(&copy_key);
@@ -962,7 +974,6 @@ impl TimelineView {
                 markdown,
                 rewind,
                 rewind_menu,
-                fork,
                 hover: self.hover.clone(),
                 motion: self.motion.clone(),
             },
@@ -972,13 +983,6 @@ impl TimelineView {
                     this.mark_copied(mark.clone(), cx);
                 })),
                 images,
-                fork: Some(Rc::new({
-                    let this = cx.entity().downgrade();
-                    move |turn, cx| {
-                        let _ =
-                            this.update(cx, |timeline, cx| timeline.fork_from_message(turn, cx));
-                    }
-                })),
             },
             window,
             cx,
@@ -3193,28 +3197,34 @@ This begins after the hard break."#;
         }
     }
 
-    /// A message's fork is there where its Harness declares one, for the
-    /// messages it can fork before, whatever the Harness is called; a steer
-    /// has none. Used, it opens a thread the asking client's composer holds
-    /// the message for, and that thread names where it came from.
+    /// A finished turn's fork is beside its answer's Copy where the Harness
+    /// has one, whatever it is called, and never on a user message or a turn
+    /// still running. Used, it opens a thread that names where it came from,
+    /// with nothing in the composer: no message was dropped.
     #[gpui::test]
-    fn the_fork_a_message_offers_follows_its_harness(cx: &mut TestAppContext) {
-        use agent::ProviderKind;
+    fn a_finished_turn_offers_its_fork_beside_the_answer(cx: &mut TestAppContext) {
+        use agent::{ProviderKind, TurnStatus};
         use gpui::{Modifiers, VisualTestContext, px, size};
 
-        for (provider, turn, offered) in [
-            (ProviderKind::ClaudeCode, 0, false),
-            (ProviderKind::ClaudeCode, 1, true),
-            (ProviderKind::Pi, 0, true),
-            (ProviderKind::Cursor, 1, false),
+        // The running turn's indicator rests only with motion reduced.
+        cx.update(|cx| cx.set_reduce_motion(true));
+        for (provider, running, offered) in [
+            (ProviderKind::ClaudeCode, false, true),
+            (ProviderKind::Pi, false, true),
+            (ProviderKind::Cursor, false, false),
+            (ProviderKind::ClaudeCode, true, false),
         ] {
             let mut timeline = Timeline::default();
             timeline.turns = (0..2)
                 .map(|index| TurnMeta {
                     provider_checkpoint_id: Some(format!("checkpoint-{index}")),
+                    status: Some(TurnStatus::Completed),
                     ..TurnMeta::default()
                 })
                 .collect();
+            timeline.turns[1].status = (!running).then_some(TurnStatus::Completed);
+            timeline.turns[1].running = running;
+            timeline.turn_running = running;
             timeline.entries.extend([
                 at_turn(entry("user-0", user_item("first")), 0),
                 at_turn(entry("assistant-0", assistant("One.")), 0),
@@ -3236,15 +3246,31 @@ This begins after the hard break."#;
             window.simulate_resize(size(px(1_024.), px(700.)));
             draw_settled(window);
             let bubble = window
-                .debug_bounds(["user-bubble-user-0", "user-bubble-user-1"][turn])
+                .debug_bounds("user-bubble-user-1")
                 .expect("the user bubble is drawn");
             window.simulate_mouse_move(bubble.center(), None, Modifiers::default());
             draw_settled(window);
-            let action = window.debug_bounds(["fork-user-0", "fork-user-1"][turn]);
-            assert_eq!(action.is_some(), offered, "{provider:?} turn {turn}");
-            let Some(action) = action.filter(|_| turn == 1) else {
+            assert!(window.debug_bounds("fork-user-1").is_none());
+            if let Some(copy) = window.debug_bounds("copy-assistant:assistant-1") {
+                window.simulate_mouse_move(copy.center(), None, Modifiers::default());
+                draw_settled(window);
+            }
+            assert_eq!(
+                window.debug_bounds("fork-assistant-1").is_some(),
+                offered,
+                "{provider:?} running {running}"
+            );
+            if !offered {
                 continue;
-            };
+            }
+            let copy = window
+                .debug_bounds("copy-assistant:assistant-0")
+                .expect("the finished turn's answer has its actions");
+            window.simulate_mouse_move(copy.center(), None, Modifiers::default());
+            draw_settled(window);
+            let action = window
+                .debug_bounds("fork-assistant-0")
+                .expect("the fork is beside Copy");
 
             window.simulate_click(action.center(), Modifiers::default());
             let fork = |cx: &App| {
@@ -3261,27 +3287,26 @@ This begins after the hard break."#;
             let fork = window.update(|_, cx| fork(cx)).unwrap();
             let fork_id = fork.clone();
             window.update(|_, cx| store.update(cx, |store, cx| store.show_alone(fork_id, cx)));
-            driver.wait_until(window, &store, "the message for the composer", |cx| {
-                cx.update(|cx| store.read(cx).composer_text_waiting_for(Some(&fork), cx))
-            });
             let (view, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store.clone(), window_state, Some(fork.clone()), window, cx)
             });
             let window: &mut VisualTestContext = window;
             window.simulate_resize(size(px(1_024.), px(700.)));
-            draw_settled(window);
-            // The composer takes the message once the thread's status reaches
-            // this window, which redraws it.
+            // The origin comes with the thread's metadata, once its status
+            // reaches this window, which redraws it.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while view.read_with(window, |view, cx| view.composer.read(cx).draft(cx)) != "second" {
+            while window.debug_bounds("fork-origin").is_none() {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "the message reaches the composer"
+                    "the fork names its source"
                 );
                 driver.wait_until(window, &store, "the host's answers", |_| true);
                 draw_settled(window);
             }
-            assert!(window.debug_bounds("fork-origin").is_some());
+            assert_eq!(
+                view.read_with(window, |view, cx| view.composer.read(cx).draft(cx)),
+                ""
+            );
         }
     }
 

@@ -33,11 +33,6 @@ pub fn agent_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
 }
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    if opts.fork == Some(ForkPoint::Tail) {
-        return Err(AgentError::Protocol(
-            "session fork is not supported for this provider".into(),
-        ));
-    }
     crate::spawn_session(
         ProviderKind::Pi,
         opts,
@@ -228,14 +223,16 @@ async fn run_actor(
     };
     let mut cmd = crate::process::command(&binary);
     cmd.args(&opts.extra_args).arg("--mode").arg("rpc");
-    let fork_before = match &opts.fork {
-        Some(ForkPoint::Before { checkpoint_id }) => Some(checkpoint_id.clone()),
-        _ => None,
+    // Which entry to fork before, or `None` for the leaf.
+    let fork_at = match &opts.fork {
+        Some(ForkPoint::Before { checkpoint_id }) => Some(Some(checkpoint_id.clone())),
+        Some(ForkPoint::Tail) => Some(None),
+        Some(ForkPoint::Branch { .. }) | None => None,
     };
     // A level set at launch is written to the session opened, which a fork
     // must leave as it found it: it goes to the fork once that is made.
     let thinking = selected_thinking(&opts.option_selections);
-    if let Some(thinking) = thinking.filter(|_| fork_before.is_none()) {
+    if let Some(thinking) = thinking.filter(|_| fork_at.is_none()) {
         cmd.arg("--thinking").arg(thinking);
     }
     let session = match &opts.fork {
@@ -321,7 +318,7 @@ async fn run_actor(
         pending_dialogs: HashSet::new(),
         pending_steers: HashMap::new(),
         requested_model: opts.model.clone(),
-        fork_before: fork_before.zip(Some(thinking.map(str::to_owned))),
+        fork_at: fork_at.zip(Some(thinking.map(str::to_owned))),
         stderr_tail,
         requests: HashMap::new(),
         entries_cursor: None,
@@ -367,9 +364,9 @@ struct PiActor {
     /// acknowledging the stdin write.
     pending_steers: HashMap<String, String>,
     requested_model: Option<String>,
-    /// The entry to fork before at startup, and the thinking level to set in
-    /// the fork.
-    fork_before: Option<(String, Option<String>)>,
+    /// The entry to fork before at startup, or `None` to clone at the leaf,
+    /// and the thinking level to set in the fork.
+    fork_at: Option<(Option<String>, Option<String>)>,
     stderr_tail: crate::process::StderrTail,
     /// RPC requests whose responses carry a rewind's or a restore point's
     /// next step, by request id.
@@ -611,11 +608,12 @@ impl SessionActor for PiActor {
 impl PiActor {
     async fn initialize(&mut self) -> Result<(), AgentError> {
         // Before anything that writes to the session open now, the source.
-        if let Some((entry_id, thinking)) = self.fork_before.take() {
-            send_json(
-                &mut self.stdin,
-                &json!({"id":"tcode-fork","type":"fork","entryId":entry_id}),
-            )?;
+        if let Some((entry_id, thinking)) = self.fork_at.take() {
+            let request = match entry_id {
+                Some(entry_id) => json!({"id":"tcode-fork","type":"fork","entryId":entry_id}),
+                None => json!({"id":"tcode-fork","type":"clone"}),
+            };
+            send_json(&mut self.stdin, &request)?;
             let forked = self.wait_response("tcode-fork").await?;
             if forked.pointer("/data/cancelled") == Some(&json!(true)) {
                 return Err(AgentError::Provider(
@@ -2516,6 +2514,9 @@ while IFS= read -r line; do
       printf '{"id":"%s","type":"response","command":"fork","success":true,"data":{"text":"first prompt","cancelled":false}}\n' "$id" ;;
     *'"fork"'*)
       printf '{"id":"%s","type":"response","command":"fork","success":false,"error":"Invalid entry ID for forking"}\n' "$id" ;;
+    *'"clone"'*)
+      file=/s/b.jsonl; session=b
+      printf '{"id":"%s","type":"response","command":"clone","success":true,"data":{"cancelled":false}}\n' "$id" ;;
     *'"sessionPath":"/s/a.jsonl"'*)
       file=/s/a.jsonl; session=a
       printf '{"id":"%s","type":"response","command":"switch_session","success":true,"data":{"cancelled":false}}\n' "$id" ;;
@@ -2523,9 +2524,9 @@ while IFS= read -r line; do
 done
 "#;
 
-    /// A thread forked from a message starts on the source's file, forks
-    /// before anything else that writes to the session open, and goes on in
-    /// the session pi made; a branch a rewind left is opened as it is, with
+    /// A forked thread starts on the source's file, forks there, before a
+    /// prompt or at the leaf, before anything else that writes to the session
+    /// open, and goes on in the session pi made; a branch a rewind left is opened as it is, with
     /// no fork, and one pi no longer has fails the start.
     #[cfg(unix)]
     #[test]
@@ -2603,6 +2604,20 @@ done
             );
             assert!(
                 position("set_thinking_level") < position("set_model"),
+                "{log}"
+            );
+
+            std::fs::remove_file(&requests).unwrap();
+            let handle = start(options(Some(ForkPoint::Tail))).await.unwrap();
+            assert_eq!(
+                session(handle.events.clone()).await,
+                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
+            );
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            let log = std::fs::read_to_string(&requests).unwrap();
+            let position = |needle: &str| log.lines().position(|line| line.contains(needle));
+            assert!(
+                position("\"type\":\"clone\"") < position("set_model"),
                 "{log}"
             );
 

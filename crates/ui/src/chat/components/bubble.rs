@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use tcode_core::session::SteeringStatus;
 
-use super::super::{ForkFromMessage, OpenRewind};
+use super::super::OpenRewind;
 use super::assistant;
 use crate::markdown::{MarkdownState, MarkdownView, MenuExtension};
 use crate::widgets::copy::{action_button, copy_button};
@@ -55,8 +55,6 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) rewind: Option<AnyElement>,
     /// The rewind the context menu offers, when the harness has one.
     pub(crate) rewind_menu: Option<RewindMenu>,
-    /// The fork the message offers, when the harness has one.
-    pub(crate) fork: Option<ForkMenu>,
     /// The timeline's hover, which reveals the message's actions.
     pub(crate) hover: crate::motion::ListHover,
     /// The chat's motion, which keeps the rewind's fold and the pictures'
@@ -77,34 +75,18 @@ pub(crate) struct RewindMenu {
     pub(crate) in_progress: bool,
 }
 
-/// The fork a message offers: where it goes, and whether it can start now.
-#[derive(Clone, PartialEq)]
-pub(crate) struct ForkMenu {
-    pub(crate) turn: usize,
-    pub(crate) blocked: bool,
-}
-
 /// The bubble's context-menu items: copy the message, then the rewind,
-/// which opens the panel the bubble's rewind action opens, and the fork.
+/// which opens the panel the bubble's rewind action opens.
 /// Shared by the Markdown inside the bubble and the bubble's own margin.
-fn bubble_menu_items(
-    copy_text: Arc<str>,
-    rewind: Option<RewindMenu>,
-    fork: Option<ForkMenu>,
-) -> MenuExtension {
+fn bubble_menu_items(copy_text: Arc<str>, rewind: Option<RewindMenu>) -> MenuExtension {
     Rc::new(move |menu: PopupMenu, window: &mut Window, cx: &mut App| {
         let menu = if copy_text.trim().is_empty() {
             menu
         } else {
             assistant::copy_message_items(copy_text.clone())(menu, window, cx)
         };
-        let menu = if rewind.is_some() || fork.is_some() {
-            menu.separator()
-        } else {
-            menu
-        };
-        let menu = match &rewind {
-            Some(rewind) => menu.menu_with_enable(
+        match &rewind {
+            Some(rewind) => menu.separator().menu_with_enable(
                 crate::tr!("rewind.action_menu").into_owned(),
                 Box::new(OpenRewind {
                     key: rewind.key.clone(),
@@ -114,25 +96,13 @@ fn bubble_menu_items(
                 rewind.blocked.is_none() && !rewind.in_progress,
             ),
             None => menu,
-        };
-        match &fork {
-            Some(fork) => menu.menu_with_enable(
-                crate::tr!("fork.action").into_owned(),
-                Box::new(ForkFromMessage { turn: fork.turn }),
-                !fork.blocked,
-            ),
-            None => menu,
         }
     })
 }
 
-/// Fork from the message that opened the turn.
-pub(crate) type ForkHandler = Rc<dyn Fn(usize, &mut App)>;
-
 pub(crate) struct BubbleHandlers {
     pub(crate) copy: ClickHandler,
     pub(crate) images: Vec<ClickHandler>,
-    pub(crate) fork: Option<ForkHandler>,
 }
 
 /// The message's rewind action, which opens the panel.
@@ -155,38 +125,6 @@ pub(crate) fn rewind_button(
     .touch(compact)
     .motion(motion)
     .debug_selector(move || format!("rewind-{key}"))
-}
-
-/// The message's fork action.
-pub(crate) fn fork_button(
-    key: &str,
-    menu: &ForkMenu,
-    on_fork: Option<ForkHandler>,
-    compact: bool,
-    motion: &crate::motion::owned::Owned,
-    cx: &App,
-) -> crate::widgets::Button {
-    let turn = menu.turn;
-    let selector = format!("fork-{key}");
-    action_button(
-        SharedString::from(selector.clone()),
-        IconName::GitBranch,
-        if menu.blocked {
-            crate::tr!("fork.blocked").into_owned()
-        } else {
-            crate::tr!("fork.action").into_owned()
-        },
-        cx,
-    )
-    .disabled(menu.blocked)
-    .touch(compact)
-    .motion(motion)
-    .debug_selector(move || selector)
-    .on_click(move |_, _, cx| {
-        if let Some(on_fork) = &on_fork {
-            on_fork(turn, cx);
-        }
-    })
 }
 
 /// What the action row shows while the rewind to this message is made.
@@ -225,16 +163,11 @@ pub(crate) fn user_bubble(
         markdown,
         rewind,
         rewind_menu,
-        fork,
         hover,
         motion,
     } = data;
-    let BubbleHandlers {
-        copy,
-        images,
-        fork: on_fork,
-    } = handlers;
-    let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu.clone(), fork.clone());
+    let BubbleHandlers { copy, images } = handlers;
+    let menu_items = bubble_menu_items(Arc::from(visible), rewind_menu.clone());
     let prose = cx.theme().tokens.typography.md;
     let spacing = &cx.theme().tokens.spacing;
     let text_style = window.text_style();
@@ -266,25 +199,10 @@ pub(crate) fn user_bubble(
     let rewind_id = SharedString::from(format!("rewind-fold-{entry_id}"));
     let offered = rewind_menu.clone().filter(|_| rewind.is_some());
     let mut rewind = rewind;
-    let fork_id = SharedString::from(format!("fork-fold-{entry_id}"));
-    let fork_key = entry_id.to_owned();
     let actions = crate::motion::Sampled::new({
         let motion = motion.clone();
         move |window, cx| {
             let gap = px(2.);
-            let fork = motion
-                .shown(fork_id.clone(), fork.clone(), SHOW, window, cx)
-                .map(|shown| {
-                    let button = fork_button(
-                        &fork_key,
-                        &shown.value,
-                        on_fork.clone(),
-                        compact,
-                        &motion,
-                        cx,
-                    );
-                    shown.fold_across_gap(gap, button.into_any_element())
-                });
             let rewind = motion
                 .shown(rewind_id, offered, SHOW, window, cx)
                 .map(|shown| {
@@ -300,7 +218,6 @@ pub(crate) fn user_bubble(
                 .justify_end()
                 .children(copy)
                 .children(rewind)
-                .children(fork)
                 .into_any_element()
         }
     });

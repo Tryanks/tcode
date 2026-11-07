@@ -84,8 +84,9 @@ pub enum ProviderKind {
 pub struct Caps {
     pub supports_steering: bool,
     pub supports_fork: bool,
-    /// What the harness's own fork from an earlier message does
-    /// ([`ForkPoint::Before`]), when it has one.
+    /// What the harness's own fork through a finished turn does
+    /// ([`ForkPoint::Before`] the next prompt, [`ForkPoint::Tail`] from the
+    /// last turn), when it has one.
     pub fork_at: Option<ForkControl>,
     /// What the harness's own rewind does ([`SessionCommand::Rewind`]), when
     /// it has one. A thread can withdraw it ([`AgentEvent::RewindAvailability`])
@@ -119,7 +120,7 @@ pub struct Caps {
     pub session_transfer: bool,
 }
 
-/// What a harness's own fork from an earlier message does. It leaves the
+/// What a harness's own fork through a finished turn does. It leaves the
 /// session it forks as it is, a turn running there included.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForkControl {
@@ -133,7 +134,8 @@ pub struct ForkControl {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForkPoint {
-    /// A new session holding all of the resumed one ([`Caps::supports_fork`]).
+    /// A new session holding all of the resumed one ([`Caps::supports_fork`],
+    /// and [`Caps::fork_at`] from its last turn).
     Tail,
     /// A new session holding what came before the message of the restore
     /// point `checkpoint_id` ([`Caps::fork_at`]).
