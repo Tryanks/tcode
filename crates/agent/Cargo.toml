@@ -8,6 +8,7 @@ default = ["process"]
 process = [
     "dep:agent-client-protocol",
     "dep:dirs",
+    "dep:toml",
     "dep:sha2",
     "dep:smol",
     "dep:ureq",
@@ -28,6 +29,7 @@ serde_json = "1"
 shell-words = "1"
 sha2 = { version = "0.11", optional = true }
 smol = { version = "2", optional = true }
+toml = { version = "1.1", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
@@ -36,7 +38,6 @@ windows = { version = "=0.62.2", features = ["Win32_Foundation"], optional = tru
 
 [dev-dependencies]
 env_logger = "0.11"
-toml = "1.1"
 
 [[example]]
 name = "probe"

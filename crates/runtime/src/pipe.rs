@@ -1417,6 +1417,18 @@ fn dispatch_query(
             let activity = app.control_activity(&filter, limit as usize);
             cx.spawn_background(async move { Ok(QueryResponse::ControlActivity(activity)) })
         }
+        Query::NativeMcpServers { profile_id } => {
+            let servers = app.native_mcp_servers(profile_id, cx);
+            cx.spawn_background(async move {
+                servers
+                    .await
+                    .map(QueryResponse::NativeMcpServers)
+                    .map_err(|message| ProtocolError {
+                        code: "native_mcp_unreadable".into(),
+                        message,
+                    })
+            })
+        }
         Query::ReviewRecords { limit } => {
             let records = app.review_records(limit as usize);
             cx.spawn_background(async move { Ok(QueryResponse::ReviewRecords(records)) })

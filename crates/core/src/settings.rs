@@ -282,6 +282,10 @@ pub struct ProviderSettings {
     pub launch_args: Option<String>,
     #[serde(flatten)]
     pub pi: PiProviderSettings,
+    /// On a built-in card, the permission value a new thread of the harness
+    /// starts with where its project names none (`None` = the recommended one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_permission: Option<String>,
     /// Model slugs added by hand in the Models section.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_models: Vec<String>,
@@ -316,6 +320,7 @@ pub enum ProfileSettingsPatch {
         id: String,
         enabled: bool,
     },
+    SetDefaultPermission(Option<String>),
     SetCustomModels(Vec<String>),
     SetHiddenModels(Vec<String>),
 }
@@ -343,6 +348,7 @@ impl Default for ProviderSettings {
             home_path: None,
             launch_args: None,
             pi: PiProviderSettings::default(),
+            default_permission: None,
             custom_models: Vec::new(),
             hidden_models: Vec::new(),
         }

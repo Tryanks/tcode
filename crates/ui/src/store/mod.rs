@@ -3575,6 +3575,21 @@ impl WorkspaceStore {
     }
 
     /// The latest `tcode_control` writes across every thread, newest first.
+    pub fn native_mcp_servers(
+        &self,
+        profile_id: String,
+        cx: &mut App,
+    ) -> Task<Result<Vec<agent::NativeMcpServer>, String>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::NativeMcpServers { profile_id }).await {
+                Ok(QueryResponse::NativeMcpServers(servers)) => Ok(servers),
+                Ok(_) => Err("unexpected MCP server response".into()),
+                Err(error) => Err(error.message),
+            },
+        )
+    }
+
     pub fn control_activity(
         &self,
         limit: u32,

@@ -903,6 +903,13 @@ providers:
     trust_project_extensions: "Trust project extensions"
     trust_project_extensions_help: "Launch pi with --approve so extensions, settings, and skills in the project's .pi directory are loaded."
   harness:
+    default_permission: "Default permissions"
+    default_permission_help: "What a new thread may do without asking, where its project doesn't say."
+    native_mcp: "MCP servers"
+    native_mcp_empty: "None in its configuration"
+    native_mcp_failed: "Couldn't read its configuration"
+    native_mcp_off: "%{target} · off"
+    native_mcp_help: "From %{name}'s own user configuration, for its default account. Change them there; project servers aren't listed."
     account: "Account"
     accounts: "Accounts and profiles"
     accounts_only: "Accounts"

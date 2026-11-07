@@ -1988,13 +1988,20 @@ impl AppState {
                 project
                     .permission_defaults
                     .get(tcode_core::settings::provider_key(provider))
+            })
+            .cloned()
+            .or_else(|| {
+                let builtin = self
+                    .settings
+                    .resolved_profile(Settings::builtin_profile_id(provider))?;
+                builtin.settings.default_permission
             });
         match descriptor {
             OptionDescriptor::Select {
                 id, recommended, ..
             } => Some(OptionSelection {
                 id,
-                value: serde_json::Value::String(configured.cloned().or(recommended)?),
+                value: serde_json::Value::String(configured.or(recommended)?),
             }),
             OptionDescriptor::Boolean {
                 id, recommended, ..

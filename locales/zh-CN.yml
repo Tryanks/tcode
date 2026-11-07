@@ -896,6 +896,13 @@ providers:
     trust_project_extensions: "信任项目扩展"
     trust_project_extensions_help: "以 --approve 启动 pi，加载项目 .pi 目录中的扩展、设置与技能。"
   harness:
+    default_permission: "默认权限"
+    default_permission_help: "项目未指定时，新线程无需询问即可执行的操作。"
+    native_mcp: "MCP 服务器"
+    native_mcp_empty: "配置中没有"
+    native_mcp_failed: "无法读取其配置"
+    native_mcp_off: "%{target} · 已关闭"
+    native_mcp_help: "来自 %{name} 自身的用户配置（默认账户）。请在那里修改；不列出项目级服务器。"
     account: "账号"
     accounts: "账号与配置档"
     accounts_only: "账号"

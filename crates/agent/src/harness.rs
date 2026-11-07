@@ -3,6 +3,8 @@
 //! native settings Tcode presents for it. Hosts describe each harness to their
 //! clients from these facts, so no client decides anything by provider kind.
 
+use serde::{Deserialize, Serialize};
+
 use crate::ProviderKind;
 
 /// A harness CLI's facts, as its adapter knows them.
@@ -30,6 +32,29 @@ pub struct HarnessFacts {
     pub endpoint: Option<Endpoint>,
     /// Native on/off switches Tcode presents for the harness, by id.
     pub toggles: &'static [&'static str],
+    /// The file its user-level MCP servers are configured in, where that
+    /// file is a documented format Tcode has checked against the CLI.
+    pub native_mcp: Option<NativeMcpConfig>,
+}
+
+/// The format of a harness's MCP configuration (`native_mcp::servers`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeMcpConfig {
+    /// A JSON file with an `mcpServers` map.
+    McpServersJson,
+    /// `[mcp_servers.*]` in a TOML config.
+    CodexToml,
+}
+
+/// An MCP server a harness is configured with on its own, outside Tcode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeMcpServer {
+    pub name: String,
+    /// Reached over the network rather than started as a local command.
+    pub remote: bool,
+    /// The command it runs, or the origin it is reached at.
+    pub target: String,
+    pub enabled: bool,
 }
 
 /// The variables a CLI reads to reach a model API other than its vendor's
@@ -109,6 +134,7 @@ impl ProviderKind {
             logout_args: &[],
             endpoint: None,
             toggles: &[],
+            native_mcp: None,
         };
         match self {
             ProviderKind::ClaudeCode => HarnessFacts {
@@ -126,6 +152,7 @@ impl ProviderKind {
                 logout_args: &["auth", "logout"],
                 endpoint: Some(CLAUDE_ENDPOINT),
                 toggles: &[],
+                native_mcp: Some(NativeMcpConfig::McpServersJson),
             },
             ProviderKind::Codex => HarnessFacts {
                 binary_name: "codex",
@@ -140,6 +167,7 @@ impl ProviderKind {
                 logout_args: &["logout"],
                 endpoint: Some(CODEX_ENDPOINT),
                 toggles: &[],
+                native_mcp: Some(NativeMcpConfig::CodexToml),
             },
             ProviderKind::Pi => HarnessFacts {
                 binary_name: "pi",
@@ -147,6 +175,7 @@ impl ProviderKind {
                 config_dir_env: Some("PI_CODING_AGENT_DIR"),
                 default_config_dir: Some("~/.pi/agent"),
                 toggles: &[TRUST_PROJECT_EXTENSIONS],
+                native_mcp: Some(NativeMcpConfig::McpServersJson),
                 ..none
             },
             ProviderKind::OpenCode => HarnessFacts {

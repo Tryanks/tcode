@@ -184,6 +184,10 @@ pub enum Query {
         #[serde(default)]
         filter: ControlActivityFilter,
     },
+    /// The MCP servers a profile's harness is configured with in its own files.
+    NativeMcpServers {
+        profile_id: String,
+    },
     /// Review records stored by `record_review`, newest first.
     ReviewRecords {
         limit: u32,
@@ -264,6 +268,7 @@ pub enum QueryResponse {
     ThreadAnchorTurn(Option<usize>),
     ArchivedSessions(crate::ArchivedSessions),
     ControlActivity(ControlActivityPage),
+    NativeMcpServers(Vec<agent::NativeMcpServer>),
     ReviewRecords(Vec<tcode_core::control::ReviewRecord>),
     PullRequest {
         response: Box<crate::PullRequestReadResponse>,
