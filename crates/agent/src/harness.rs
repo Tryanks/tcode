@@ -44,6 +44,8 @@ pub enum NativeMcpConfig {
     McpServersJson,
     /// `[mcp_servers.*]` in a TOML config.
     CodexToml,
+    /// `mcp.servers` in what `opencode debug config` resolves.
+    OpenCodeResolved,
 }
 
 /// An MCP server a harness is configured with on its own, outside Tcode.
@@ -186,6 +188,7 @@ impl ProviderKind {
                     "curl -fsSL https://opencode.ai/install | bash"
                 }),
                 sign_in_command: Some("opencode auth login"),
+                native_mcp: Some(NativeMcpConfig::OpenCodeResolved),
                 ..none
             },
             ProviderKind::Cursor => HarnessFacts {

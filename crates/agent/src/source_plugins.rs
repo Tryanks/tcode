@@ -221,14 +221,14 @@ struct ConfigSource {
     info: Option<Value>,
 }
 
-/// The plugins the global configuration names, from `opencode debug config`.
-/// An entry may be a specifier or a `[specifier, options]` pair.
-fn parse_opencode_config(stdout: &str, config_dir: &Path) -> Result<Vec<String>, AgentError> {
+/// What each document of the global configuration resolves to, from
+/// `opencode debug config`, which needs no server and masks secrets.
+pub(crate) fn global_documents(stdout: &str, config_dir: &Path) -> Result<Vec<Value>, AgentError> {
     let sources: Vec<ConfigSource> = serde_json::from_str(stdout).map_err(|error| {
         AgentError::Protocol(format!("`opencode debug config` output: {error}"))
     })?;
     Ok(sources
-        .iter()
+        .into_iter()
         .filter(|source| {
             source.kind == "document"
                 && source
@@ -236,7 +236,37 @@ fn parse_opencode_config(stdout: &str, config_dir: &Path) -> Result<Vec<String>,
                     .as_deref()
                     .is_some_and(|path| path.parent() == Some(config_dir))
         })
-        .filter_map(|source| source.info.as_ref()?.get("plugins")?.as_array())
+        .filter_map(|source| source.info)
+        .collect())
+}
+
+pub(crate) async fn opencode_global_config(
+    context: &PluginContext,
+) -> Result<Vec<Value>, AgentError> {
+    let run = |args: &[&str]| {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+        async move {
+            run_cli(
+                ProviderKind::OpenCode,
+                "opencode",
+                context,
+                &args,
+                LIST_TIMEOUT,
+            )
+            .await
+        }
+    };
+    let config_dir = run(&["debug", "paths", "config"]).await?;
+    let config = run(&["debug", "config", "--standalone"]).await?;
+    global_documents(&config, Path::new(config_dir.trim()))
+}
+
+/// The plugins the documents name. An entry may be a specifier or a
+/// `[specifier, options]` pair.
+fn configured_plugins(documents: &[Value]) -> Vec<String> {
+    documents
+        .iter()
+        .filter_map(|document| document.get("plugins")?.as_array())
         .flatten()
         .filter_map(|plugin| {
             plugin
@@ -244,7 +274,7 @@ fn parse_opencode_config(stdout: &str, config_dir: &Path) -> Result<Vec<String>,
                 .or_else(|| plugin.as_array()?.first()?.as_str())
         })
         .map(str::to_string)
-        .collect())
+        .collect()
 }
 
 /// `(id, version, source)` per row of `opencode plugin list`'s table.
@@ -294,9 +324,7 @@ pub(crate) async fn list_opencode(context: &PluginContext) -> Result<PluginListi
             .await
         }
     };
-    let config_dir = run(&["debug", "paths", "config"]).await?;
-    let config = run(&["debug", "config", "--standalone"]).await?;
-    let configured = parse_opencode_config(&config, Path::new(config_dir.trim()))?;
+    let configured = configured_plugins(&opencode_global_config(context).await?);
     if configured.is_empty() {
         return Ok(PluginListing {
             entries: Vec::new(),
@@ -413,7 +441,9 @@ mod tests {
             {"type":"directory","path":"/home/me/.config/opencode"}
         ]"#;
         assert_eq!(
-            parse_opencode_config(config, Path::new("/home/me/.config/opencode")).unwrap(),
+            configured_plugins(
+                &global_documents(config, Path::new("/home/me/.config/opencode")).unwrap()
+            ),
             ["opencode-wakatime", "with-options@1.0.0"]
         );
     }
