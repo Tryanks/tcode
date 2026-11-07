@@ -94,6 +94,13 @@ pub(crate) struct OpenRewind {
     pub(crate) steer: Option<String>,
 }
 
+/// A message's fork: a new thread holding what came before it.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_chat, no_json)]
+pub(crate) struct ForkFromMessage {
+    pub(crate) turn: usize,
+}
+
 gpui::actions!(tcode_chat, [OpenMoveThreadDialog, RevokeSelfSettle]);
 
 /// A window's context-menu "Copy output" for an output the record holds only
@@ -1123,6 +1130,10 @@ impl ChatView {
                     timeline.on_open_rewind(action, window, cx)
                 })
             }))
+            .on_action(cx.listener(|this, action, _, cx| {
+                this.timeline
+                    .update(cx, |timeline, cx| timeline.on_fork_from_message(action, cx))
+            }))
             .on_action(cx.listener(|this, action, window, cx| {
                 this.timeline.update(cx, |timeline, cx| {
                     timeline.on_copy_whole_output(action, window, cx)
@@ -1141,6 +1152,7 @@ impl ChatView {
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .children(self.fork_origin(cx))
                     .child(self.timeline.clone())
                     .children(phone_strip),
             )
@@ -1817,6 +1829,9 @@ pub(crate) mod tests {
                 active.draft = false;
                 if let Some(provider) = provider {
                     active.meta.provider = provider;
+                    active.meta.resume_cursor = Some(agent::ResumeCursor(
+                        serde_json::json!({"session_id": "seeded"}),
+                    ));
                 }
                 let result = (active.meta.id.clone(), active.timeline.clone());
                 let meta = active.meta.clone();

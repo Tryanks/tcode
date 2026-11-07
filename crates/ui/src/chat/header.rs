@@ -408,6 +408,49 @@ impl ChatView {
         )
     }
 
+    /// The thread this one was forked from, which it opens while it exists.
+    pub(super) fn fork_origin(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let store = self.workspace_store.read(cx);
+        let origin = store
+            .thread_meta(self.session_id.as_deref()?)?
+            .fork_origin
+            .as_ref()?;
+        let source = store.thread_meta(&origin.thread_id);
+        let title = source.map_or(origin.title.clone(), |source| source.title.clone());
+        let thread_id = source.map(|source| source.id.clone());
+        let label = crate::tr!("fork.forked_from", title = title).into_owned();
+        let link = Button::new("fork-origin")
+            .motion(&self.motion)
+            .debug_selector(|| "fork-origin".into())
+            .ghost()
+            .xsmall()
+            .icon(IconName::GitBranch)
+            .disabled(thread_id.is_none())
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(SharedString::from(label))),
+            )
+            .on_click({
+                let store = self.workspace_store.clone();
+                move |_, _, cx| {
+                    if let Some(thread_id) = thread_id.clone() {
+                        store.update(cx, |store, cx| store.show_thread(thread_id, cx));
+                    }
+                }
+            });
+        Some(
+            h_flex()
+                .w_full()
+                .flex_none()
+                .justify_center()
+                .px_2()
+                .child(link)
+                .into_any_element(),
+        )
+    }
+
     fn active_pull_requests(
         &self,
         cx: &App,

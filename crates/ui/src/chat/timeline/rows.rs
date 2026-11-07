@@ -546,6 +546,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
         EntryContent::Rewound(rewound) => {
             rewound.removed.len().hash(hash);
             rewound.undo_token.is_some().hash(hash);
+            rewound.branch.is_some().hash(hash);
             rewound.incomplete.is_some().hash(hash);
         }
         EntryContent::RewindFailed { failure, .. } => failure.reason.hash(hash),

@@ -118,6 +118,11 @@ chat:
   report_reminder: "已提醒汇报"
   orchestrate_callback_empty: "（无输出）"
   error_label: "错误"
+fork:
+  action: "从这里派生"
+  blocked: "请等回退完成。"
+  forked_from: "派生自《%{title}》"
+
 rewind:
   queue_held: "回退后暂停，等你发送下一条消息后继续"
   action: "回退到这里"
@@ -130,6 +135,7 @@ rewind:
   cancel: "取消"
   undo: "撤销"
   return_to_branch: "回到原分支"
+  open_branch: "打开原分支"
   restore: "恢复内容"
   you: "你"
   blocked:
@@ -145,7 +151,7 @@ rewind:
     truncated_one: "这条消息所在的这一轮将从对话中移除。"
     hidden: "这条消息及之后的内容（%{count} 轮）将被隐藏。在你发送下一条消息前可以撤销。"
     hidden_one: "这条消息所在的这一轮将被隐藏。在你发送下一条消息前可以撤销。"
-    branch: "对话将从这条消息之前另起分支继续。原分支会保留，在你发送下一条消息前可以回到原分支。"
+    branch: "对话将从这条消息之前另起分支继续。原分支会保留：发送下一条消息前可以回到原分支，之后可以把它作为单独的线程打开。"
     steer: "这条追加提示及之后的内容将从对话中移除。"
     files_only: "对话保持不变，文件恢复到这条消息之前的状态。"
     prompt_back: "这条消息会放回输入框，排在你已输入的内容之前。"

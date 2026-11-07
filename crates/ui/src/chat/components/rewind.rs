@@ -518,10 +518,12 @@ fn preview_block(
     }
 }
 
-/// The divider's undo, while the Harness keeps the rewind undoable.
+/// The way back a divider offers: the undo while the Harness keeps the rewind
+/// undoable, then the branch it left, in a thread of its own.
 pub(crate) enum DividerUndo {
     Available(Handler),
     InProgress,
+    OpenBranch(Handler),
 }
 
 /// The divider a rewind leaves: what it did, the turns it removed to read
@@ -605,6 +607,21 @@ pub(crate) fn rewound_divider(
                         } else {
                             format!("rewound-undo-{key}")
                         };
+                        move || selector
+                    })
+                    .into_any_element()
+            }
+            DividerUndo::OpenBranch(on_open) => {
+                Button::new(SharedString::from(format!("rewound-open-branch-{key}")))
+                    .text()
+                    .xsmall()
+                    .label(crate::tr!("rewind.open_branch").into_owned())
+                    .on_click({
+                        let on_open = on_open.clone();
+                        move |_, window, cx| on_open(window, cx)
+                    })
+                    .debug_selector({
+                        let selector = format!("rewound-open-branch-{key}");
                         move || selector
                     })
                     .into_any_element()

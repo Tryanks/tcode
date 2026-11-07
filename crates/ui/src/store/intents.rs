@@ -448,6 +448,42 @@ impl WorkspaceStore {
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
         self.create_and_show(Command::ForkThread { id, at: None }, true, cx);
     }
+
+    /// A new thread holding what came before the message at absolute `turn`,
+    /// with that message in this client's composer.
+    pub fn fork_from_message(
+        &mut self,
+        id: String,
+        turn: usize,
+        checkpoint_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let at = Some(tcode_protocol::ForkAt {
+            turn,
+            checkpoint_id,
+        });
+        self.create_and_show(Command::ForkThread { id, at }, true, cx);
+    }
+
+    /// Show the thread going on in the branch the rewind of the divider at
+    /// absolute `turn` left.
+    pub fn open_rewound_branch(
+        &mut self,
+        session_id: String,
+        turn: usize,
+        checkpoint_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.create_and_show(
+            Command::OpenRewoundBranch {
+                session_id,
+                turn,
+                checkpoint_id,
+            },
+            true,
+            cx,
+        );
+    }
     pub fn merge_worktree(&mut self, session_id: String) {
         self.dispatch(Command::MergeWorktree { session_id });
     }
@@ -1017,12 +1053,30 @@ impl WorkspaceStore {
         cx.spawn(async move |this, cx| {
             let response = request.await;
             let _ = this.update(cx, |store, cx| {
+                let created = match response {
+                    Ok(CommandResponse::SessionId(id)) => id,
+                    Ok(CommandResponse::ForkedAt {
+                        session_id,
+                        text,
+                        attachments,
+                    }) => {
+                        // Waits for the composer whenever this client opens the
+                        // thread, as a rewind's prompt does.
+                        store.native_rewind_prefills.insert(
+                            session_id.clone(),
+                            super::RewindPrefill { text, attachments },
+                        );
+                        cx.notify();
+                        Some(session_id)
+                    }
+                    _ => None,
+                };
                 if store.creation_request_generation != request_generation {
                     return;
                 }
                 store.draft_fallback_pending = false;
                 if store.selection_generation == selection_generation
-                    && let Ok(CommandResponse::SessionId(Some(id))) = response
+                    && let Some(id) = created
                 {
                     store.place_thread(id, None, asked, cx);
                 }
