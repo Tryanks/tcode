@@ -182,6 +182,21 @@ impl AppState {
         ))
     }
 
+    /// A fork no process has run yet copied its log from a thread whose
+    /// process may still be working: what was open there ends here, the
+    /// source's own log and the harness's session being left as they are.
+    pub(super) fn interrupt_inherited_background_work(&mut self, id: &str, cx: &mut HostCx) {
+        let Some(fork) = self
+            .resident(id)
+            .filter(|session| session.meta.pending_fork.is_some())
+        else {
+            return;
+        };
+        for item in fork.timeline.interrupted_background_items() {
+            self.record_event(id, &AgentEvent::ItemCompleted(item), cx);
+        }
+    }
+
     fn make_fork(&mut self, source: &SessionMeta, plan: ForkPlan, cx: &mut HostCx) -> String {
         let mut fork = SessionMeta::new(source.provider, source.cwd.clone(), source.model.clone());
         fork.title = format!("{} (fork)", source.title);
