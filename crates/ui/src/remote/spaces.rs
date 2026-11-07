@@ -110,11 +110,11 @@ impl Spaces {
                     .and_then(RemoteController::hosting_events)
                     .map(|events| {
                         let task = cx.spawn(async move |this, cx| {
-                            while let Ok(state) = events.recv().await {
-                                if this
-                                    .update(cx, |spaces, cx| spaces.set_state(Some(state), cx))
-                                    .is_err()
-                                {
+                            // An event says something changed, as of a read
+                            // made a moment ago: a change made here since
+                            // would be put back by its copy of the state.
+                            while events.recv().await.is_ok() {
+                                if this.update(cx, |spaces, cx| spaces.refresh(cx)).is_err() {
                                     return;
                                 }
                             }
@@ -2154,6 +2154,68 @@ mod tests {
             .unwrap_or_else(|| panic!("{selector} is drawn"));
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
         draw(cx);
+    }
+
+    /// The machine's events carry a read taken a moment before they arrive.
+    /// One delivered after a change made since says only that something
+    /// changed: the change stands, instead of going back until the next event.
+    #[gpui::test]
+    fn a_late_hosting_event_leaves_a_change_made_since(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.executor().allow_parking();
+        let root = crate::store::tests::scratch_root("spaces-late-event");
+        std::fs::create_dir_all(&root).unwrap();
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let (attachments, _attachment_rx) = async_channel::unbounded();
+        let mux = HostMux::new(attachments, from_host.clone());
+        let host = TraverseHost::start(
+            mux.clone(),
+            HostConfig {
+                host_name: "Studio".into(),
+                data_dir: root.clone(),
+                traverse: Vec::new(),
+                pairing_enabled: true,
+                bind_port: None,
+            },
+        )
+        .unwrap();
+        let spaces = cx.update(|cx| {
+            let mut controller = crate::remote::RemoteController::new(
+                mux,
+                root.clone(),
+                tcode_client::HostLink::new(to_host, from_host),
+                Default::default(),
+            );
+            controller.adopt_host(host);
+            cx.set_global(controller);
+            local(cx).expect("hosting")
+        });
+        // Listening after the view, so an event reached here reached it.
+        let events = cx.update(|cx| {
+            cx.global::<crate::remote::RemoteController>()
+                .hosting_events()
+                .unwrap()
+        });
+        let set_pairing = |enabled, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.global::<crate::remote::RemoteController>()
+                    .set_pairing_enabled(enabled)
+            })
+        };
+        set_pairing(false, cx);
+        let late = smol::block_on(events.recv()).unwrap();
+        assert!(!late.enabled);
+        set_pairing(true, cx);
+
+        cx.run_until_parked();
+        assert!(spaces.read_with(cx, |spaces, _| spaces.accepting()));
+        cx.update(|cx| {
+            cx.update_global::<crate::remote::RemoteController, _>(|controller, _| {
+                controller.stop_hosting()
+            })
+        });
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Removing a member from Settings → Remote unpairs the device and, with

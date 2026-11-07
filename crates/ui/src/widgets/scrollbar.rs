@@ -849,3 +849,133 @@ impl Element for Scrollbar {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollDelta,
+        ScrollHandle, StatefulInteractiveElement as _, Styled as _, TestAppContext,
+        VisualTestContext, div, size,
+    };
+
+    use super::*;
+    use crate::test_frames::{draw, draw_settled, painted_quads};
+
+    /// A list whose view is drawn under another parent in each size class, as
+    /// a page is when the window turns compact or wide.
+    struct Page {
+        motion: Owned,
+        scroll: ScrollHandle,
+        compact: bool,
+    }
+
+    impl Render for Page {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let list = div()
+                .id("list")
+                .debug_selector(|| "list".into())
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .child(div().h(px(4000.)));
+            let page = div()
+                .id("page")
+                .relative()
+                .size_full()
+                .child(list)
+                .child(Scrollbar::vertical(&self.scroll).motion(&self.motion));
+            if self.compact {
+                div()
+                    .id("compact")
+                    .size_full()
+                    .child(page)
+                    .into_any_element()
+            } else {
+                div()
+                    .id("wide")
+                    .size_full()
+                    .child(div().id("column").size_full().child(page))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// How far in the thumb was painted in the last frame, from 0 to 1.
+    fn thumb(cx: &mut VisualTestContext) -> f32 {
+        draw(cx);
+        cx.update(|window, cx| {
+            let thumb = cx.theme().scrollbar_thumb;
+            painted_quads(window)
+                .iter()
+                .filter_map(|quad| quad.background.as_solid())
+                .filter(|fill| (fill.h - thumb.h).abs() < 0.01 && (fill.l - thumb.l).abs() < 0.01)
+                .map(|fill| fill.a / thumb.a)
+                .fold(0., f32::max)
+        })
+    }
+
+    fn scroll(by: f32, cx: &mut VisualTestContext) {
+        let list = cx.debug_bounds("list").unwrap();
+        cx.simulate_event(ScrollEvent {
+            position: list.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(by))),
+            touch_phase: TouchPhase::Moved,
+            ..Default::default()
+        });
+    }
+
+    /// A scrollbar fading out as the window changes size class fades on from
+    /// where it was under its new parent, rather than starting over hidden,
+    /// and with motion reduced it is gone at once. Every step moves the
+    /// executor's clock, the one this scrollbar samples.
+    #[gpui::test]
+    fn a_fading_scrollbar_carries_on_when_the_window_turns_compact(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (page, cx) = cx.add_window_view(|_, _| Page {
+            motion: Default::default(),
+            scroll: ScrollHandle::new(),
+            compact: false,
+        });
+        cx.simulate_resize(size(px(600.), px(400.)));
+        draw_settled(cx);
+        assert_eq!(thumb(cx), 0., "hidden until the list scrolls");
+
+        scroll(-120., cx);
+        draw_settled(cx);
+        assert_eq!(thumb(cx), 1., "shown as the list scrolls");
+
+        // The hold runs from the scroll, and the frames since took part of it.
+        let motion = cx.update(|_, cx| cx.global::<gpui_base::Theme>().scrollbar.motion());
+        let step = motion.exit() / 16;
+        let mut fading = 1.;
+        for _ in 0..(motion.idle().as_millis() / step.as_millis()) {
+            cx.executor().advance_clock(step);
+            fading = thumb(cx);
+            if fading < 0.9 {
+                break;
+            }
+        }
+        assert!(fading > 0.05 && fading < 0.9, "fading out: {fading}");
+
+        page.update(cx, |page, cx| {
+            page.compact = true;
+            cx.notify();
+        });
+        cx.executor().advance_clock(step);
+        let carried = thumb(cx);
+        assert!(
+            carried > 0.01 && carried < fading,
+            "the scrollbar restarted under its new parent: {carried}, from {fading}"
+        );
+        draw_settled(cx);
+        assert_eq!(thumb(cx), 0., "faded out");
+
+        scroll(120., cx);
+        draw_settled(cx);
+        assert_eq!(thumb(cx), 1.);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.executor().advance_clock(motion.idle());
+        cx.run_until_parked();
+        assert_eq!(thumb(cx), 0., "reduced motion: gone at once");
+    }
+}

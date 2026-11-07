@@ -13378,6 +13378,205 @@ pub(crate) mod tests {
         });
     }
 
+    /// Choosing a project in the chooser closes it and shows the draft the
+    /// host names, the same one when asked again; a phone goes to it. The
+    /// chooser and the draft raise the keyboard only off a phone, where it is
+    /// typed into at once; there a tap does, and keeps it across a rotation.
+    /// One project needs no choosing.
+    #[gpui::test]
+    fn project_choice_reuses_drafts_and_focuses_only_on_desktop(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        for (mobile, compact, projects) in [
+            (false, false, 2),
+            (true, false, 2),
+            (true, true, 2),
+            (true, true, 1),
+        ] {
+            new_thread_from_projects(cx, mobile, compact, projects);
+        }
+    }
+
+    fn new_thread_from_projects(
+        cx: &mut TestAppContext,
+        mobile: bool,
+        compact: bool,
+        project_count: usize,
+    ) {
+        let (shell, host, cx) = mount(cx);
+        cx.update(|_, cx| {
+            crate::window_seam::override_mobile_for_test(cx, mobile);
+            cx.set_reduce_motion(true);
+        });
+        // Establish the viewport before the workspace can select a draft:
+        // shrinking a populated wide layout opens its thread.
+        cx.simulate_resize(size(px(if compact { 393. } else { 1024. }), px(852.)));
+        crate::test_frames::draw_settled(cx);
+        let projects: Vec<_> = (0..project_count)
+            .map(|index| tcode_core::project::Project {
+                id: format!("project-{index}"),
+                name: format!("Project {index}"),
+                root: PANES_CWD.into(),
+                quick_chat: false,
+                icon_path: None,
+                permission_defaults: Default::default(),
+                created_at: index as u64,
+            })
+            .collect();
+        let chosen = projects.last().unwrap().id.clone();
+        send_events(
+            &host,
+            vec![
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(Default::default()),
+                ),
+                (
+                    Topic::Index,
+                    ServerEvent::IndexSnapshot(IndexSnapshot {
+                        summary: Default::default(),
+                        sessions: Vec::new(),
+                        projects,
+                    }),
+                ),
+            ],
+        );
+        await_restore_update(&shell, cx, |store, _| store.index_hydrated());
+        draw(cx);
+        let ack_start_draft = |project: Option<&str>, draft: &str| {
+            let request = std::iter::from_fn(|| host.outgoing.try_recv().ok())
+                .map(|line| decode_client_line(&line).expect("client line"))
+                .find_map(|message| match message.payload {
+                    ClientPayload::Command(Command::StartDraft { project_id, .. }) => {
+                        Some((message.id, project_id))
+                    }
+                    _ => None,
+                })
+                .expect("a draft was asked for");
+            if let Some(project) = project {
+                assert_eq!(request.1, project);
+            }
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Ack {
+                        id: request.0,
+                        result: Ok(tcode_protocol::CommandResponse::SessionId(Some(
+                            draft.into(),
+                        ))),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+        // The empty workspace's own draft, which nobody asked for.
+        ack_start_draft(None, "fallback");
+        await_restore_update(&shell, cx, |store, _| store.is_thread_open("fallback"));
+        crate::test_frames::draw_settled(cx);
+
+        for reopen in [false, true] {
+            if reopen && compact {
+                cx.update(|window, cx| {
+                    shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
+                });
+                crate::test_frames::draw_settled(cx);
+            }
+            if compact {
+                let plus = cx
+                    .debug_bounds("compact-new-thread")
+                    .expect("Threads new-thread button");
+                cx.simulate_click(plus.center(), gpui::Modifiers::default());
+            } else {
+                shell
+                    .read_with(cx, |shell, _| shell.window_state())
+                    .update(cx, |state, cx| state.open_palette(cx));
+            }
+            crate::test_frames::draw_settled(cx);
+            if project_count > 1 {
+                cx.update(|window, cx| {
+                    let palette = &shell.read(cx).attachment.as_ref().unwrap().palette;
+                    assert_eq!(
+                        palette.read(cx).query_focus_handle(cx).is_focused(window),
+                        !(compact && mobile),
+                        "the chooser raises the keyboard only off a phone"
+                    );
+                    assert!(
+                        palette
+                            .read(cx)
+                            .focus_handle(cx)
+                            .contains_focused(window, cx),
+                        "the palette owns focus so Escape closes it"
+                    );
+                });
+                let row = cx
+                    .debug_bounds("palette-new-thread-project-1")
+                    .expect("project choice");
+                cx.simulate_click(row.center(), gpui::Modifiers::default());
+            }
+            draw(cx);
+            shell.read_with(cx, |shell, cx| {
+                assert!(
+                    !shell.window_state.read(cx).palette_open,
+                    "choosing a project closes the chooser"
+                );
+            });
+
+            ack_start_draft(Some(&chosen), "draft");
+            await_restore_update(&shell, cx, |store, _| store.is_thread_open("draft"));
+            serve_thread(&host, "draft");
+            serve_status(&host, "draft", true);
+            await_restore_update(&shell, cx, |store, cx| {
+                !store.chat_loading_for(Some("draft"), cx)
+            });
+            crate::test_frames::draw_settled(cx);
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(shell.page_thread(cx).as_deref(), Some("draft"));
+                let state = shell.window_state.read(cx);
+                if compact {
+                    assert_eq!(
+                        state.history().last(),
+                        Some(&Destination::Thread),
+                        "the host's answer navigates to the draft, reused or new"
+                    );
+                } else {
+                    assert_eq!(state.route(), Route::Chat);
+                }
+            });
+
+            let focus = shell.read_with(cx, |shell, cx| {
+                shell
+                    .attachment
+                    .as_ref()
+                    .unwrap()
+                    .chat(cx)
+                    .read(cx)
+                    .composer()
+                    .read(cx)
+                    .input_focus_handle(cx)
+            });
+            cx.update(|window, _| assert_eq!(focus.is_focused(window), !mobile));
+            if mobile {
+                let card = cx.debug_bounds("composer-card").expect("draft composer");
+                cx.simulate_click(
+                    gpui::point(card.center().x, card.top() + px(24.)),
+                    gpui::Modifiers::default(),
+                );
+                draw(cx);
+                cx.update(|window, _| assert!(focus.is_focused(window), "an explicit tap focuses"));
+                let rotation = if compact {
+                    [1024., 393.]
+                } else {
+                    [393., 1024.]
+                };
+                for width in rotation {
+                    cx.simulate_resize(size(px(width), px(852.)));
+                    crate::test_frames::draw_settled(cx);
+                    cx.update(|window, _| {
+                        assert!(focus.is_focused(window), "rotation keeps editing focus")
+                    });
+                }
+            }
+        }
+    }
+
     /// The draft an empty workspace falls back on comes up in its pane and
     /// leaves a phone on its threads list: nobody asked to go there.
     #[gpui::test]
