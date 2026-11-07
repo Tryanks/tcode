@@ -434,6 +434,7 @@ impl AppState {
                 Query::Hosting { .. }
                 | Query::ComputerUsePermissions
                 | Query::ControlActivity { .. }
+                | Query::NativeMcpServers { .. }
                 | Query::ReviewRecords { .. }
                 | Query::ScanExternalHistory => Err(refusal("query")),
             },

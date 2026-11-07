@@ -42,15 +42,16 @@ pub use event::{
     ControlStatus, DiskUsage, DiskUsagePart, DiskUsageState, EndpointDescription,
     EndpointPresetDescription, EventEnvelope, ExternalImportState, ExternalImportStatus,
     ForkAvailability, ForkStatus, GitActionRequest, GitStatusStatus, HarnessDescription,
-    IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer,
-    InjectedTools, MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState,
-    PluginChallenge, PluginChallengeKind, PluginOperationTarget, PluginStaleReason,
-    ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
-    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus,
-    RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId,
-    RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord,
-    SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus,
-    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, Topic,
+    HarnessPermission, IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions,
+    InjectedServer, InjectedTools, MergeWorktreeFailure, NoticeSeverity, PendingRewind,
+    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
+    PluginStaleReason, ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable,
+    ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RewindBlocked,
+    RewindStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
+    RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity,
+    SessionEventRecord, SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    ThreadReferenceStatus, Topic,
 };
 pub use query::{
     ControlActivityFilter, ControlActivityPage, ControlActivityThread, DeviceAccess,
@@ -353,7 +354,9 @@ pub use wire::{
 // has fork_origin and pending_fork is a ForkPoint (a stored bool still reads).
 // are new. Query::ControlActivity takes a filter (ControlActivityFilter) and
 // answers a ControlActivityPage: the matching entries, how many match, and the
-// threads and actions the log offers to filter by.
+// threads and actions the log offers to filter by. HarnessDescription gains
+// native_mcp_config and permission, the NativeMcpServers query is new, and
+// ProfileSettingsPatch gains SetDefaultPermission.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

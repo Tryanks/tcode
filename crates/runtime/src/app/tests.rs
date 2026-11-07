@@ -6264,6 +6264,36 @@ fn provider_config_options_remove_retired_wire_controls() {
     });
 }
 
+/// A new thread starts at what its project names, else at what its Harness
+/// names, else at the permission Tcode recommends for that Harness.
+#[test]
+fn a_new_threads_permission_is_its_projects_then_its_harness_then_the_recommended() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-permission-default");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let value = |state: &AppState| {
+        state
+            .initial_permission_selection(Some("project"), ProviderKind::ClaudeCode)
+            .unwrap()
+            .value
+    };
+    state.update(cx, |state, _| {
+        let mut project = tcode_core::project::Project::from_root("/project".into());
+        project.id = "project".into();
+        state.projects.push(project);
+        assert_eq!(value(state), "auto");
+        state
+            .settings
+            .provider_mut(ProviderKind::ClaudeCode)
+            .default_permission = Some("acceptEdits".into());
+        assert_eq!(value(state), "acceptEdits");
+        state.projects[0]
+            .permission_defaults
+            .insert("claude".into(), "default".into());
+        assert_eq!(value(state), "default");
+    });
+}
+
 #[test]
 fn native_permission_selection_stays_pending_until_provider_confirmation() {
     for (provider, id, initial, requested, restart) in [

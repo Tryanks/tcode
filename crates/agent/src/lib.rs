@@ -32,13 +32,15 @@ pub mod claude {
 #[cfg(feature = "process")]
 mod cmd_shim;
 pub mod harness;
-pub use harness::{Endpoint, EndpointPreset, HarnessFacts};
+pub use harness::{Endpoint, EndpointPreset, HarnessFacts, NativeMcpServer};
 #[cfg(feature = "process")]
 pub mod codex;
 #[cfg(feature = "process")]
 pub mod cursor;
 #[cfg(feature = "process")]
 pub mod grok;
+#[cfg(feature = "process")]
+pub mod native_mcp;
 #[cfg(feature = "process")]
 pub mod opencode;
 #[cfg(feature = "process")]
@@ -1295,7 +1297,7 @@ pub enum ApplyTiming {
     Restart,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectOption {
     pub value: String,
     pub label: String,

@@ -490,8 +490,12 @@ impl AppState {
             ProfileSettingsPatch::SetHomePath(home) if builtin.is_some() => {
                 target.home_path = text(home.map(|home| home.display().to_string())).map(Into::into)
             }
+            ProfileSettingsPatch::SetDefaultPermission(value) if builtin.is_some() => {
+                target.default_permission = text(value)
+            }
             ProfileSettingsPatch::SetSharedEnv(_)
             | ProfileSettingsPatch::SetToggle { .. }
+            | ProfileSettingsPatch::SetDefaultPermission(_)
             | ProfileSettingsPatch::SetHomePath(_) => return,
             ProfileSettingsPatch::SetBinaryPath(path) => {
                 target.binary_path =
@@ -1759,6 +1763,33 @@ async fn await_secret_writes(
 
 /// A profile's launch environment: its harness's shared variables, then its
 /// own, whose values win.
+impl AppState {
+    /// The MCP servers `profile_id`'s harness is configured with in its own
+    /// files, as a host task: the read happens off the state.
+    pub(crate) fn native_mcp_servers(
+        &self,
+        profile_id: String,
+        cx: &HostCx,
+    ) -> crate::host::HostTask<Result<Vec<agent::NativeMcpServer>, String>> {
+        let settings = self.settings.clone();
+        let secrets = self.settings_store.clone();
+        cx.unblock(move || {
+            let provider = settings
+                .resolved_profile(&profile_id)
+                .ok_or("unknown profile")?
+                .kind;
+            let launch_env = launch_env_for_profile(
+                &settings,
+                &profile_id,
+                secrets.profile_secrets(&Settings::harness_secret_id(provider)),
+                secrets.profile_secrets(&profile_id),
+            );
+            agent::native_mcp::servers(provider, &launch_env)
+                .unwrap_or_else(|| Err("no MCP configuration to read".to_owned()))
+        })
+    }
+}
+
 pub(super) fn launch_env_for_profile(
     settings: &Settings,
     profile_id: &str,

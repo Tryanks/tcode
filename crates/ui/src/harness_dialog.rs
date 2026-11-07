@@ -222,6 +222,10 @@ pub(crate) struct HarnessDialog {
     adding: bool,
     add_error: Option<String>,
     copied: crate::widgets::copy::CopiedMark,
+    motion: crate::motion::owned::Owned,
+    /// What the harness's own configuration lists, once the host has read it.
+    native_mcp: Option<Result<Vec<agent::NativeMcpServer>, String>>,
+    native_mcp_read: Option<gpui::Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -245,7 +249,7 @@ impl HarnessDialog {
                 }
             },
         )];
-        Self {
+        let mut dialog = Self {
             store,
             harness,
             page: Page::Overview,
@@ -263,8 +267,33 @@ impl HarnessDialog {
             adding: false,
             add_error: None,
             copied: Default::default(),
+            motion: Default::default(),
+            native_mcp: None,
+            native_mcp_read: None,
             _subscriptions: subscriptions,
+        };
+        dialog.read_native_mcp(cx);
+        dialog
+    }
+
+    /// Asks the host what the harness's own configuration lists, each time
+    /// the dialog opens: the CLI changes that file on its own.
+    fn read_native_mcp(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        if !describe(store, &self.harness).native_mcp_config || !store.scope().is_full() {
+            return;
         }
+        let profile = self.builtin_id().to_owned();
+        let read = self
+            .store
+            .update(cx, |store, cx| store.native_mcp_servers(profile, cx));
+        self.native_mcp_read = Some(cx.spawn(async move |this, cx| {
+            let servers = read.await;
+            let _ = this.update(cx, |this, cx| {
+                this.native_mcp = Some(servers);
+                cx.notify();
+            });
+        }));
     }
 
     pub(crate) fn harness(&self) -> &HarnessId {
@@ -1577,6 +1606,7 @@ impl HarnessDialog {
             }
         }
         column = column.child(self.render_run(&description, window, cx));
+        column = column.children(self.render_native_mcp(cx));
         if let Some(integrations) = self.render_integrations(&description, cx) {
             column = column.child(integrations);
         }
@@ -2305,6 +2335,7 @@ impl HarnessDialog {
     ) -> AnyElement {
         let shared = self.lists_accounts(cx);
         let mut rows = Vec::new();
+        rows.extend(self.default_permission_row(description, cx));
         if let Some(binary) = description.binary_name.clone() {
             rows.push(
                 self.field_row(
@@ -2407,6 +2438,148 @@ impl HarnessDialog {
                 cx,
             ))
             .into_any_element()
+    }
+
+    /// What a new thread may do without asking, in the harness's own terms,
+    /// where it has a choice and the thread's project names none.
+    fn default_permission_row(
+        &self,
+        description: &HarnessDescription,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let tcode_protocol::HarnessPermission {
+            id,
+            options,
+            recommended,
+        } = description.permission.clone()?;
+        let builtin = self.builtin_id().to_owned();
+        let chosen = self
+            .store
+            .read(cx)
+            .provider_profile_settings(&builtin)
+            .default_permission
+            .clone();
+        let current = chosen.clone().or(recommended);
+        let label = |option: &agent::SelectOption| {
+            crate::i18n::translate_english("permission.current.label", &option.label).into_owned()
+        };
+        let selected = options
+            .iter()
+            .find(|option| Some(&option.value) == current.as_ref())
+            .map(label)
+            .unwrap_or_default();
+        let options = options
+            .iter()
+            .map(|option| crate::settings_rows::SelectRowOption {
+                value: option.value.clone(),
+                id: SharedString::from(format!("harness-permission-{}", option.value)),
+                label: label(option).into(),
+                description: option.description.as_ref().map(|description| {
+                    crate::i18n::translate_permission_description(
+                        &format!("permission.values.{id}.{}", option.value),
+                        description,
+                    )
+                    .into()
+                }),
+                selected: Some(&option.value) == current.as_ref(),
+            })
+            .collect();
+        let reset = crate::settings_rows::reset_action(
+            "harness-permission-reset",
+            chosen.is_some(),
+            cx.listener({
+                let builtin = builtin.clone();
+                move |this, _, _, cx| {
+                    this.update_profile(
+                        builtin.clone(),
+                        ProfileSettingsPatch::SetDefaultPermission(None),
+                        cx,
+                    )
+                }
+            }),
+        );
+        let dialog = cx.entity();
+        Some(crate::settings_rows::select_row(
+            "harness-permission",
+            "harness-permission-popover",
+            "harness-permission-menu",
+            320.,
+            crate::tr!("providers.harness.default_permission")
+                .into_owned()
+                .into(),
+            Some(
+                crate::tr!("providers.harness.default_permission_help")
+                    .into_owned()
+                    .into(),
+            ),
+            selected.into(),
+            options,
+            reset,
+            crate::settings_rows::flip_row(&self.motion, "harness-permission", self.compact()),
+            move |value, _, cx| {
+                dialog.update(cx, |this, cx| {
+                    this.update_profile(
+                        builtin.clone(),
+                        ProfileSettingsPatch::SetDefaultPermission(Some(value)),
+                        cx,
+                    )
+                })
+            },
+            cx,
+        ))
+    }
+
+    /// The servers the harness's own configuration lists, read-only: Tcode
+    /// shows them and leaves them to the harness.
+    fn render_native_mcp(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let rows = match self.native_mcp.as_ref()? {
+            Ok(servers) if servers.is_empty() => vec![self.row(
+                crate::tr!("providers.harness.native_mcp_empty").into_owned(),
+                None,
+                None,
+                cx,
+            )],
+            Ok(servers) => servers
+                .iter()
+                .map(|server| {
+                    let selector = format!("harness-native-mcp-{}", server.name);
+                    let target = if server.enabled {
+                        server.target.clone()
+                    } else {
+                        crate::tr!("providers.harness.native_mcp_off", target = server.target)
+                            .into_owned()
+                    };
+                    div()
+                        .w_full()
+                        .debug_selector(move || selector.clone())
+                        .child(self.row(server.name.clone(), Some(target), None, cx))
+                        .into_any_element()
+                })
+                .collect(),
+            Err(error) => vec![self.row(
+                crate::tr!("providers.harness.native_mcp_failed").into_owned(),
+                Some(error.clone()),
+                None,
+                cx,
+            )],
+        };
+        let name = harness_name(self.store.read(cx), &self.harness);
+        Some(
+            v_flex()
+                .w_full()
+                .debug_selector(|| "harness-native-mcp".into())
+                .child(self.group(
+                    Some(crate::tr!("providers.harness.native_mcp").into_owned()),
+                    rows,
+                    cx,
+                ))
+                .child(crate::settings_rows::footnote(
+                    crate::tr!("providers.harness.native_mcp_help", name = name),
+                    self.compact(),
+                    cx,
+                ))
+                .into_any_element(),
+        )
     }
 
     fn render_integrations(
@@ -3028,6 +3201,7 @@ mod tests {
     struct Host {
         store: Entity<WorkspaceStore>,
         outgoing: async_channel::Receiver<String>,
+        incoming: async_channel::Sender<String>,
         _pump: gpui::Task<()>,
     }
 
@@ -3085,6 +3259,7 @@ mod tests {
             Self {
                 store,
                 outgoing,
+                incoming,
                 _pump: pump,
             }
         }
@@ -3233,6 +3408,7 @@ mod tests {
                     "harness-field-Binary",
                     "harness-field-LaunchArgs",
                     "harness-plugins",
+                    "harness-permission",
                 ][..],
                 &[
                     "harness-models",
@@ -3242,7 +3418,12 @@ mod tests {
             ),
             (
                 HarnessId::Native(ProviderKind::Codex),
-                &["harness-accounts", "harness-add-account", "harness-plugins"][..],
+                &[
+                    "harness-accounts",
+                    "harness-add-account",
+                    "harness-plugins",
+                    "harness-permission",
+                ][..],
                 &["harness-add-endpoint", "harness-field-LaunchArgs"][..],
             ),
             (
@@ -3253,7 +3434,7 @@ mod tests {
                     "harness-toggle-trust_project_extensions",
                     "harness-plugins",
                 ][..],
-                &["harness-accounts"][..],
+                &["harness-accounts", "harness-permission"][..],
             ),
             (
                 HarnessId::Acp("gemini".into()),
@@ -3263,6 +3444,7 @@ mod tests {
                     "harness-models",
                     "harness-field-Binary",
                     "harness-plugins",
+                    "harness-permission",
                 ][..],
             ),
         ] {
@@ -3274,6 +3456,78 @@ mod tests {
                 assert!(!shown(cx, selector), "{harness:?} must not show {selector}");
             }
         }
+    }
+
+    /// The dialog lists what the host read from the harness's own files and
+    /// offers nothing to change there; the default permission it does offer
+    /// goes to the host as the harness's patch.
+    #[gpui::test]
+    fn a_harness_shows_its_own_mcp_servers_and_saves_its_default_permission(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_protocol::{ClientPayload, Command, Query, QueryResponse, decode_client_line};
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (settings, status) = settings_and_status();
+        let host = Host::new(settings, status, Vec::new(), cx);
+        let outgoing = host.outgoing.clone();
+        let incoming = host.incoming.clone();
+        let sent = move || -> Vec<(u64, ClientPayload)> {
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .map(|line| decode_client_line(&line).unwrap())
+                .map(|message| (message.id, message.payload))
+                .collect()
+        };
+        sent();
+        let (_dialog, cx) = host.open(HarnessId::Native(ProviderKind::ClaudeCode), cx);
+        assert!(cx.debug_bounds("harness-native-mcp").is_none());
+        let id = sent()
+            .into_iter()
+            .find_map(|(id, payload)| match payload {
+                ClientPayload::Query(Query::NativeMcpServers { profile_id }) => {
+                    assert_eq!(profile_id, "claude");
+                    Some(id)
+                }
+                _ => None,
+            })
+            .expect("opening asks the host");
+        incoming
+            .try_send(
+                encode_line(&HostMessage::QueryResult {
+                    id,
+                    result: Ok(QueryResponse::NativeMcpServers(vec![
+                        agent::NativeMcpServer {
+                            name: "linear".into(),
+                            remote: true,
+                            target: "https://mcp.linear.app".into(),
+                            enabled: true,
+                        },
+                    ])),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        cx.run_until_parked();
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("harness-native-mcp-linear").is_some());
+
+        let trigger = cx.debug_bounds("harness-permission").unwrap();
+        cx.simulate_click(trigger.center(), Default::default());
+        crate::test_frames::draw_settled(cx);
+        let option = cx.debug_bounds("harness-permission-acceptEdits").unwrap();
+        cx.simulate_click(option.center(), Default::default());
+        cx.run_until_parked();
+        let saved = sent().into_iter().any(|(_, payload)| {
+            matches!(
+                payload,
+                ClientPayload::Command(Command::UpdateProfileSettings { profile_id, patch })
+                    if profile_id == "claude"
+                        && patch
+                            == ProfileSettingsPatch::SetDefaultPermission(Some(
+                                "acceptEdits".into()
+                            ))
+            )
+        });
+        assert!(saved, "the choice reaches the host");
     }
 
     /// What is wrong with a harness is said at the top of its settings: off,

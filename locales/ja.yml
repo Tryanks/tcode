@@ -903,6 +903,13 @@ providers:
     trust_project_extensions: "プロジェクトの拡張機能を信頼"
     trust_project_extensions_help: "pi を --approve 付きで起動し、プロジェクトの .pi ディレクトリにある拡張機能、設定、スキルを読み込みます。"
   harness:
+    default_permission: "デフォルトの権限"
+    default_permission_help: "プロジェクトで指定がないとき、新しいスレッドが確認なしで行えることです。"
+    native_mcp: "MCP サーバー"
+    native_mcp_empty: "設定にはありません"
+    native_mcp_failed: "設定を読み取れませんでした"
+    native_mcp_off: "%{target} · オフ"
+    native_mcp_help: "%{name} 自身のユーザー設定（デフォルトのアカウント）からの一覧です。変更はそちらで行います。プロジェクトのサーバーは表示されません。"
     account: "アカウント"
     accounts: "アカウントとプロファイル"
     accounts_only: "アカウント"

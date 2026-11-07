@@ -431,9 +431,43 @@ pub struct HarnessDescription {
     pub mcp_servers: bool,
     #[serde(default)]
     pub native_computer_use: bool,
+    /// Its own configuration can be listed ([`crate::Query::NativeMcpServers`]).
+    #[serde(default)]
+    pub native_mcp_config: bool,
+    /// The choice of what a new thread may do without asking, where the
+    /// harness has more than one.
+    #[serde(default)]
+    pub permission: Option<HarnessPermission>,
     /// A newer version of an ACP agent in the registry.
     #[serde(default)]
     pub registry_update: Option<String>,
+}
+
+/// A harness's permission control, as its adapter publishes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessPermission {
+    pub id: String,
+    pub options: Vec<agent::SelectOption>,
+    #[serde(default)]
+    pub recommended: Option<String>,
+}
+
+impl HarnessPermission {
+    fn of(provider: ProviderKind) -> Option<Self> {
+        match agent::permission_control(provider)? {
+            agent::OptionDescriptor::Select {
+                id,
+                options,
+                recommended,
+                ..
+            } if options.len() > 1 => Some(Self {
+                id,
+                options,
+                recommended,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// The variables a harness reads to reach a model API.
@@ -500,6 +534,8 @@ impl HarnessDescription {
             plugins: caps.plugin_management.manages(),
             mcp_servers: caps.mcp_servers,
             native_computer_use: caps.native_computer_use,
+            native_mcp_config: facts.native_mcp.is_some(),
+            permission: HarnessPermission::of(provider),
             registry_update: None,
         }
     }
