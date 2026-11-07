@@ -3251,8 +3251,9 @@ mod tests {
                     "harness-models",
                     "harness-field-ConfigDir",
                     "harness-toggle-trust_project_extensions",
+                    "harness-plugins",
                 ][..],
-                &["harness-accounts", "harness-plugins"][..],
+                &["harness-accounts"][..],
             ),
             (
                 HarnessId::Acp("gemini".into()),

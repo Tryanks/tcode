@@ -158,14 +158,11 @@ fn parse_pi_list(stdout: &str) -> Vec<(String, PluginScope, Option<PathBuf>)> {
 }
 
 pub(crate) async fn list_pi(context: &PluginContext) -> Result<PluginListing, AgentError> {
-    let stdout = run_cli(
-        ProviderKind::Pi,
-        "pi",
-        context,
-        &pi::list_args(context.project),
-        LIST_TIMEOUT,
-    )
-    .await?;
+    let mut list_args = vec!["list".to_string()];
+    if context.project {
+        list_args.push("--approve".to_string());
+    }
+    let stdout = run_cli(ProviderKind::Pi, "pi", context, &list_args, LIST_TIMEOUT).await?;
     let mut entries: Vec<ProviderPluginEntry> = Vec::new();
     for (source, scope, location) in parse_pi_list(&stdout) {
         // A listing away from a project addresses no project package.
