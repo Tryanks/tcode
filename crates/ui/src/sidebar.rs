@@ -458,6 +458,8 @@ enum UndoKind {
 struct LifecycleUndo {
     kind: UndoKind,
     entries: Vec<UndoEntry>,
+    /// The Harnesses of the threads it covers, each once.
+    harnesses: Vec<String>,
 }
 /// What reverses one undoable action, sent in order.
 struct UndoEntry {
@@ -1592,7 +1594,20 @@ impl SessionsSidebar {
             let _ = this.update(cx, |this, cx| this.lifecycle_answered(&sessions, true, cx));
             if let Some((kind, commands)) = undo {
                 let _ = this.update_in(cx, |this, window, cx| {
-                    this.push_lifecycle_undo(kind, UndoEntry { commands, reopen }, window, cx);
+                    let store = this.store.read(cx);
+                    let harnesses = store
+                        .sidebar_sessions()
+                        .iter()
+                        .filter(|meta| sessions.contains(&meta.id))
+                        .map(|meta| store.harness_name_of(meta))
+                        .collect();
+                    this.push_lifecycle_undo(
+                        kind,
+                        UndoEntry { commands, reopen },
+                        harnesses,
+                        window,
+                        cx,
+                    );
                 });
             }
         })
@@ -1603,6 +1618,7 @@ impl SessionsSidebar {
         &mut self,
         kind: UndoKind,
         entry: UndoEntry,
+        harnesses: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1616,15 +1632,29 @@ impl SessionsSidebar {
             self.lifecycle_undo = Some(LifecycleUndo {
                 kind,
                 entries: vec![],
+                harnesses: vec![],
             });
         }
-        self.lifecycle_undo.as_mut().unwrap().entries.push(entry);
-        let count = self.lifecycle_undo.as_ref().unwrap().entries.len();
+        let undo = self.lifecycle_undo.as_mut().unwrap();
+        undo.entries.push(entry);
+        for harness in harnesses {
+            if !undo.harnesses.contains(&harness) {
+                undo.harnesses.push(harness);
+            }
+        }
+        let count = undo.entries.len();
+        let named = if undo.harnesses.is_empty() {
+            "Harness".to_owned()
+        } else {
+            undo.harnesses.join(", ")
+        };
         let title = match (kind, count) {
-            (UndoKind::Settle, 1) => crate::tr!("sidebar.undo_settled_one"),
+            (UndoKind::Settle, 1) => crate::tr!("sidebar.undo_settled_one", harness = named),
             (UndoKind::Unpin, 1) => crate::tr!("sidebar.undo_unpinned_one"),
             (UndoKind::Archive, 1) => crate::tr!("sidebar.undo_archived_one"),
-            (UndoKind::Settle, _) => crate::tr!("sidebar.undo_settled", count = count),
+            (UndoKind::Settle, _) => {
+                crate::tr!("sidebar.undo_settled", count = count, harnesses = named)
+            }
             (UndoKind::Unpin, _) => crate::tr!("sidebar.undo_unpinned", count = count),
             (UndoKind::Archive, _) => crate::tr!("sidebar.undo_archived", count = count),
         }

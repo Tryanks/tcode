@@ -83,8 +83,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                     crate::tr!("composer.steer_unsupported", agent = agent).into_owned()
                 }
                 RuntimeError::DirtyTree => crate::tr!("notice.dirty_tree").into_owned(),
-                RuntimeError::ProviderStart { error } => {
-                    crate::tr!("errors.provider_start", error = error).into_owned()
+                RuntimeError::ProviderStart { harness, error } => {
+                    crate::tr!("errors.provider_start", harness = harness, error = error)
+                        .into_owned()
                 }
                 RuntimeError::ProviderBatchLineBreak { program } => crate::tr!(
                     "errors.provider_batch_line_break",
@@ -97,11 +98,18 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 )
                 .into_owned(),
                 RuntimeError::ProviderClosed {
+                    harness,
                     reason: Some(reason),
-                } => crate::tr!("errors.provider_closed_reason", reason = reason).into_owned(),
-                RuntimeError::ProviderClosed { reason: None } => {
-                    crate::tr!("errors.provider_closed").into_owned()
-                }
+                } => crate::tr!(
+                    "errors.provider_closed_reason",
+                    harness = harness,
+                    reason = reason
+                )
+                .into_owned(),
+                RuntimeError::ProviderClosed {
+                    harness,
+                    reason: None,
+                } => crate::tr!("errors.provider_closed", harness = harness).into_owned(),
                 RuntimeError::PersistSessionIndex { error } => {
                     crate::tr!("errors.persist_session_index", error = error).into_owned()
                 }

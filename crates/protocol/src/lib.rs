@@ -345,6 +345,8 @@ pub use wire::{
 // Files only a client can read reach the host through the new BeginUpload,
 // WriteUpload and DiscardUpload queries (answered with UploadBegun,
 // UploadWritten and UploadDiscarded).
+// RuntimeError's ProviderStart and ProviderClosed carry `harness`, the
+// display name of the thread's Harness.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

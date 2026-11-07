@@ -239,7 +239,11 @@ impl TimelineView {
                     column = column.child(self.compose_plan(entry, cwd, cx));
                 }
                 Segment::Error(entry) => {
-                    let message = displayed_error_text(&entry.content);
+                    let harness = self
+                        .workspace_store
+                        .read(cx)
+                        .harness_name_for(self.session_id.as_deref(), cx);
+                    let message = displayed_error_text(&entry.content, &harness);
                     let resume = match &entry.content {
                         EntryContent::Error {
                             limit_resets_at: Some(resets_at),

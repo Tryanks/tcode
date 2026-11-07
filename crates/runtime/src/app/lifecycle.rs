@@ -283,6 +283,7 @@ impl AppState {
                                     RuntimeError::ProviderBatchLineBreak { program }
                                 }
                                 (None, err) => RuntimeError::ProviderStart {
+                                    harness: state.thread_harness_name(&session_id),
                                     error: err.to_string(),
                                 },
                             };

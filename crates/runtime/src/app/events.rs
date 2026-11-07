@@ -129,6 +129,7 @@ impl AppState {
                 }
                 self.report_error(
                     RuntimeError::ProviderClosed {
+                        harness: self.thread_harness_name(session_id),
                         reason: reason.clone(),
                     },
                     cx,

@@ -4146,18 +4146,43 @@ impl WorkspaceStore {
         self.preview.client_id()
     }
 
-    /// The product name the thread's Harness goes by: an ACP agent's own
-    /// name, else the native Harness's.
+    /// The name the thread's Harness goes by: an ACP agent's own, else the
+    /// product's with its account.
     pub fn harness_name_for(&self, session_id: Option<&str>, cx: &App) -> String {
         let Some(status) = self.thread_status(session_id, cx) else {
             return "Harness".to_owned();
         };
-        status
-            .acp_agent_id
-            .as_deref()
+        self.harness_name(
+            status.acp_agent_id.as_deref(),
+            status.requested_profile_id.as_deref(),
+            status.provider,
+        )
+    }
+
+    /// As [`Self::harness_name_for`], for a thread known only by its index row.
+    pub fn harness_name_of(&self, meta: &SessionMeta) -> String {
+        self.harness_name(
+            meta.acp_agent_id.as_deref(),
+            meta.profile_id.as_deref(),
+            meta.provider,
+        )
+    }
+
+    fn harness_name(
+        &self,
+        acp_agent_id: Option<&str>,
+        profile_id: Option<&str>,
+        provider: agent::ProviderKind,
+    ) -> String {
+        acp_agent_id
             .and_then(|id| self.installed_acp_agent(id))
             .map(|agent| agent.name)
-            .unwrap_or_else(|| crate::settings::provider_label(status.provider).to_owned())
+            .unwrap_or_else(|| {
+                self.provider_profile_display_name(
+                    profile_id
+                        .unwrap_or(tcode_core::settings::Settings::builtin_profile_id(provider)),
+                )
+            })
     }
 
     /// What a rewind to the target would restore, as its Harness tells
