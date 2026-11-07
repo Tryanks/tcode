@@ -7667,14 +7667,14 @@ fn settings_restart_waits_for_the_running_turn() {
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
-    let mut session = live_session(ProviderKind::Codex, commands);
+    let mut session = live_session(ProviderKind::Grok, commands);
     session.meta.id = "running-turn-restart".into();
-    session.live_model = Some("gpt-5.4".into());
-    session.meta.model = Some("gpt-5.5".into());
+    session.live_model = Some("grok-4".into());
+    session.meta.model = Some("grok-5".into());
 
     state.update(cx, |state, cx| {
-        state.settings.provider_mut(ProviderKind::Codex).binary_path =
-            Some("/nonexistent/tcode-test-codex".into());
+        state.settings.provider_mut(ProviderKind::Grok).binary_path =
+            Some("/nonexistent/tcode-test-grok".into());
         state.install_selected(session);
         state.on_event(
             "running-turn-restart",

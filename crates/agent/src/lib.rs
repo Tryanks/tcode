@@ -374,7 +374,7 @@ impl ProviderKind {
                 live_option_push: LiveOptionPush::None,
                 // `thread/backgroundTerminals/*`, experimental (0.167.0).
                 background_tasks: true,
-                live_settings: false,
+                live_settings: true,
                 mcp_servers: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
                 native_computer_use: true,
@@ -447,7 +447,7 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
                 background_tasks: false,
-                live_settings: false,
+                live_settings: true,
                 mcp_servers: false,
                 native_computer_use: false,
                 launch_args: true,
@@ -493,7 +493,7 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["agent"]),
                 background_tasks: false,
-                live_settings: false,
+                live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
                 launch_args: true,

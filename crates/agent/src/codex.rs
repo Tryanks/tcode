@@ -683,6 +683,8 @@ struct Actor {
     effort: Option<String>,
     /// Session service tier (`serviceTier` selection), if any.
     service_tier: Option<String>,
+    /// What the thread started with that only a new thread changes.
+    thread_config: Option<Value>,
     requested_permission: String,
     effective_permission: String,
     permission_descriptor: OptionDescriptor,
@@ -795,6 +797,7 @@ async fn run_actor(
         model: model.clone(),
         effort: codex_effort(&opts.option_selections),
         service_tier: codex_service_tier(&opts.option_selections),
+        thread_config: thread_config(&opts.option_selections),
         requested_permission: requested_permission(&opts.option_selections),
         effective_permission,
         permission_descriptor,
@@ -1081,7 +1084,24 @@ impl SessionActor for Actor {
                     .await;
                 Ok(())
             }
-            SessionCommand::ApplySettings { .. } => Ok(()),
+            // `turn/start` carries the model and effort on every turn, and the
+            // service tier "for this turn and subsequent turns" (0.167.0); the
+            // context window is thread config, set only when the thread starts.
+            SessionCommand::ApplySettings {
+                model,
+                option_selections,
+            } => {
+                let applied = thread_config(&option_selections) == self.thread_config;
+                if applied {
+                    self.model = model;
+                    self.effort = codex_effort(&option_selections);
+                    self.service_tier = codex_service_tier(&option_selections);
+                }
+                self.events
+                    .emit(AgentEvent::SettingsApplied { applied })
+                    .await;
+                Ok(())
+            }
             SessionCommand::StopBackgroundTask { task_id } => {
                 let thread_id = self.thread_id.clone();
                 let (method, params) = match task_id {
@@ -4984,6 +5004,7 @@ mod tests {
                 model: Some("gpt-5-codex".into()),
                 effort: None,
                 service_tier: None,
+                thread_config: None,
                 requested_permission: "ask".into(),
                 effective_permission: "ask".into(),
                 permission_descriptor: permission_descriptor(&[], "ask", &Value::Null),
@@ -6077,6 +6098,54 @@ mod tests {
             let clean = next_request(&mut actor).await;
             assert_eq!(clean["method"], "thread/backgroundTerminals/clean");
             assert_eq!(clean["params"], json!({"threadId": "thread-1"}));
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn a_new_model_and_effort_go_out_with_the_next_turn() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let select = |id: &str, value: Value| OptionSelection {
+                id: id.into(),
+                value,
+            };
+            actor
+                .handle_command(SessionCommand::ApplySettings {
+                    model: Some("gpt-5.5".into()),
+                    option_selections: vec![
+                        select("reasoningEffort", json!("high")),
+                        select("serviceTier", json!("fast")),
+                    ],
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::SettingsApplied { applied: true })
+            ));
+            let params = actor.build_turn_params("next", None, &[]);
+            assert_eq!(params["collaborationMode"]["settings"]["model"], "gpt-5.5");
+            assert_eq!(params["effort"], "high");
+            assert_eq!(params["serviceTier"], "fast");
+
+            // A context window is thread config, fixed when the thread starts.
+            actor
+                .handle_command(SessionCommand::ApplySettings {
+                    model: Some("gpt-5.4".into()),
+                    option_selections: vec![select("contextWindow", json!("272k"))],
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(AgentEvent::SettingsApplied { applied: false })
+            ));
+            assert_eq!(
+                actor.build_turn_params("next", None, &[])["collaborationMode"]["settings"]["model"],
+                "gpt-5.5"
+            );
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
