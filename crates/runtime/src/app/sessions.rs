@@ -2230,6 +2230,7 @@ impl AppState {
                     session.timeline = timeline;
                 }
                 state.repair_orphaned_mirror_turn(&session_id, cx);
+                state.interrupt_inherited_background_work(&session_id, cx);
             });
         });
     }

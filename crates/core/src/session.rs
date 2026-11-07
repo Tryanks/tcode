@@ -959,6 +959,37 @@ impl Timeline {
         }
     }
 
+    /// The completions that end the background work still open here, for a
+    /// log whose process cannot finish it.
+    pub fn interrupted_background_items(&self) -> Vec<ThreadItem> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.background)
+            .filter_map(|entry| {
+                let EntryContent::Item(content) = &entry.content else {
+                    return None;
+                };
+                let mut content = content.clone();
+                let (ItemContent::CommandExecution { status, .. }
+                | ItemContent::FileChange { status, .. }
+                | ItemContent::ToolCall { status, .. }
+                | ItemContent::Subagent { status, .. }) = &mut content
+                else {
+                    return None;
+                };
+                if *status != ItemStatus::InProgress {
+                    return None;
+                }
+                *status = ItemStatus::Interrupted;
+                Some(ThreadItem {
+                    id: entry.id.clone(),
+                    parent_item_id: None,
+                    content,
+                })
+            })
+            .collect()
+    }
+
     /// The running turn of a fold that holds the whole log.
     pub fn running_turn(&self) -> Option<RunningTurn> {
         let turn = self.turns.len().checked_sub(1)?;

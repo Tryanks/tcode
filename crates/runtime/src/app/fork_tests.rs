@@ -1,4 +1,7 @@
-use agent::{AgentEvent, ForkPoint, ItemContent, ProviderKind, RewindMode, ThreadItem, TurnStatus};
+use agent::{
+    AgentEvent, ForkPoint, ItemContent, ItemStatus, ProviderKind, RewindMode, ThreadItem,
+    TurnStatus,
+};
 use serde_json::{Value, json};
 use tcode_core::project::SessionMeta;
 use tcode_core::session::EntryContent;
@@ -530,4 +533,105 @@ fn a_branch_opened_after_two_rewinds_cannot_return_to_the_earlier_one() {
         send(&state, cx, 5, open_earlier).unwrap(),
         CommandResponse::SessionId(Some(earlier)),
     );
+}
+
+/// Work the source left running in the background has no process in a fork:
+/// the fork ends it as interrupted, whichever way it was made, and the
+/// source's item and log stay as they were.
+#[test]
+fn background_work_open_at_a_fork_point_ends_as_interrupted_in_the_fork() {
+    fn status(session: &ActiveSession) -> (ItemStatus, bool) {
+        session
+            .timeline
+            .entries
+            .iter()
+            .find_map(|entry| match &entry.content {
+                EntryContent::Item(ItemContent::CommandExecution { status, .. }) => {
+                    Some((*status, entry.finished_ts.is_some()))
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+    let forks = [
+        json!({"type": "fork_thread", "content": {"id": SOURCE}}),
+        fork_at(1, "checkpoint-1"),
+    ];
+    for command in forks {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("tcode-fork-background");
+        let cwd = store.root().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = host(&store, cx);
+        state.update(cx, |state, cx| {
+            install(state, ProviderKind::ClaudeCode, cwd, cx);
+            state.record_event(
+                SOURCE,
+                &AgentEvent::ItemCompleted(ThreadItem {
+                    id: "user-0".into(),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: "first".into(),
+                        context_len: None,
+                        attachments: Vec::new(),
+                    },
+                }),
+                cx,
+            );
+            for event in [
+                AgentEvent::TurnStarted {
+                    turn_id: "turn-0".into(),
+                },
+                AgentEvent::TurnCheckpoint {
+                    turn_id: "turn-0".into(),
+                    checkpoint_id: "checkpoint-0".into(),
+                },
+                AgentEvent::ItemStarted(ThreadItem {
+                    id: "serve".into(),
+                    parent_item_id: None,
+                    content: ItemContent::CommandExecution {
+                        command: "serve".into(),
+                        output: "listening".into(),
+                        exit_code: None,
+                        status: ItemStatus::InProgress,
+                    },
+                }),
+                AgentEvent::ItemBackgrounded {
+                    item_id: "serve".into(),
+                    parent_item_id: None,
+                },
+                AgentEvent::TurnCompleted {
+                    turn_id: "turn-0".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            ] {
+                state.record_event(SOURCE, &event, cx);
+            }
+            turn(state, cx, 1, "second", &[]);
+        });
+        cx.run_until_parked();
+        let source_log = store.read_event_log(SOURCE).unwrap();
+
+        let fork = match send(&state, cx, 1, command).unwrap() {
+            CommandResponse::SessionId(Some(id)) => id,
+            CommandResponse::ForkedAt { session_id, .. } => session_id,
+            other => panic!("{other:?}"),
+        };
+        settled(cx, &fork);
+
+        state.read(|state| {
+            assert_eq!(
+                status(&state.residents.live[&fork]),
+                (ItemStatus::Interrupted, true)
+            );
+            assert_eq!(
+                status(&state.residents.live[SOURCE]),
+                (ItemStatus::InProgress, false),
+                "the source's work goes on"
+            );
+            assert!(state.residents.live[&fork].meta.pending_fork.is_some());
+        });
+        assert_eq!(store.read_event_log(SOURCE).unwrap(), source_log);
+    }
 }
