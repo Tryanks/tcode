@@ -16256,6 +16256,7 @@ pub(crate) mod tests {
                 latest_activity: None,
             },
             stopping: false,
+            stopping_since: None,
             turn_retry: None,
             goal: None,
             rewind: None,

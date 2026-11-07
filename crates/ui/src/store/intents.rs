@@ -346,6 +346,10 @@ impl WorkspaceStore {
     pub fn interrupt_session(&mut self, session_id: String) {
         self.dispatch(Command::Interrupt { session_id });
     }
+    /// Kill a thread's provider process that no longer answers a stop.
+    pub fn force_terminate(&mut self, session_id: String) {
+        self.dispatch(Command::ForceTerminate { session_id });
+    }
     /// Stop one piece of a thread's background work, or all of it with `None`.
     pub fn stop_background_task(&mut self, session_id: String, task_id: Option<String>) {
         self.dispatch(Command::StopBackgroundTask {

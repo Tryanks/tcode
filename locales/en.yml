@@ -994,6 +994,11 @@ palette:
   select: "Enter Select"
   close: "Esc Close"
 composer:
+  stop_unanswered: "%{harness} is not answering the stop"
+  force_terminate: "Force terminate"
+  force_terminate_title: "Force terminate %{harness}?"
+  force_terminate_description: "This kills the %{harness} process. The turn stops where it is and its unfinished work is lost. Background commands it started may keep running on their own, and their results will not reach this conversation. The conversation so far is kept, and the next message starts %{harness} again."
+  force_terminate_cancel: "Keep waiting"
   background_tasks: "Background tasks"
   background_stop: "Stop this task"
   background_stop_all: "Stop all"

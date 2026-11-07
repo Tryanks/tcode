@@ -4,6 +4,7 @@ mod checkout;
 mod context_window;
 mod control;
 pub(super) mod files;
+pub(super) mod force_terminate;
 mod foreground;
 pub(super) mod goal_strip;
 pub(super) mod images;

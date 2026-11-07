@@ -912,9 +912,31 @@ impl AppState {
             .map_err(provider_command_error)?;
         if let Some(active) = self.resident_mut(target_id) {
             active.interrupt_requested = true;
+            active.interrupt_requested_at.get_or_insert_with(now_millis);
         }
         self.cancel_computer_use_feedback(target_id);
         self.withdraw_foreground_prompts(target_id);
+        Ok(())
+    }
+
+    /// Kill the thread's provider process, for a harness that stops answering:
+    /// its running turn ends where it is and the next message starts it again.
+    pub fn force_terminate(
+        &mut self,
+        target_id: &str,
+        cx: &mut HostCx,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let Some(active) = self.resident_mut(target_id) else {
+            return Err(provider_command_error("The thread is not open."));
+        };
+        let session_id = active.meta.id.clone();
+        if matches!(active.runtime, Runtime::Idle) {
+            return Ok(());
+        }
+        active.shutdown_to_idle();
+        self.requeue_unconfirmed_steers(&session_id, cx);
+        self.clear_approvals(&session_id);
+        self.close_abandoned_turn(&session_id, cx);
         Ok(())
     }
 

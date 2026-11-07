@@ -1028,6 +1028,12 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
+        Command::ForceTerminate { session_id } => {
+            return CommandOutcome::Immediate(
+                app.force_terminate(&session_id, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::StopBackgroundTask {
             session_id,
             task_id,
