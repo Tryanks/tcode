@@ -80,6 +80,16 @@ pub enum ProviderKind {
     Acp,
 }
 
+/// Work a harness runs in the background of a thread, as it names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundTask {
+    pub id: String,
+    pub name: String,
+    /// When the adapter first saw it running (unix ms); no harness reports
+    /// when it started.
+    pub started_at: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Caps {
     pub supports_steering: bool,
@@ -100,6 +110,9 @@ pub struct Caps {
     pub per_turn_effort: bool,
     pub options_apply_live: bool,
     pub live_option_push: LiveOptionPush,
+    /// The harness lists its background work and stops it, one piece or all
+    /// ([`AgentEvent::BackgroundTaskList`], [`SessionCommand::StopBackgroundTask`]).
+    pub background_tasks: bool,
     /// The running process can be asked to take a new model and options
     /// ([`SessionCommand::ApplySettings`]) rather than restart for them.
     pub live_settings: bool,
@@ -306,6 +319,9 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
+                // `background_tasks_changed` and `stop_task`, shells and
+                // subagents alike (2.1.318).
+                background_tasks: true,
                 // `set_model` and `apply_flag_settings` (2.1.318).
                 live_settings: true,
                 mcp_servers: true,
@@ -356,6 +372,8 @@ impl ProviderKind {
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
+                // `thread/backgroundTerminals/*`, experimental (0.167.0).
+                background_tasks: true,
                 live_settings: false,
                 mcp_servers: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
@@ -390,6 +408,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                background_tasks: false,
                 live_settings: false,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
@@ -427,6 +446,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                background_tasks: false,
                 live_settings: false,
                 mcp_servers: false,
                 native_computer_use: false,
@@ -472,6 +492,7 @@ impl ProviderKind {
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["agent"]),
+                background_tasks: false,
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -503,6 +524,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                background_tasks: false,
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -546,6 +568,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
+                background_tasks: false,
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -1962,6 +1985,12 @@ pub enum SessionCommand {
         id: String,
         value: serde_json::Value,
     },
+    /// Stop one piece of background work, or all of it with `None`, on a
+    /// harness with [`Caps::background_tasks`]. Its next
+    /// [`AgentEvent::BackgroundTaskList`] shows the result.
+    StopBackgroundTask {
+        task_id: Option<String>,
+    },
     /// Bring the running process to these settings where it stands, on a
     /// harness whose [`Caps::live_settings`] says it can be asked. Answered by
     /// [`AgentEvent::SettingsApplied`].
@@ -2031,6 +2060,13 @@ pub struct SessionHandle {
     pub provider: ProviderKind,
     pub commands: Sender<SessionCommand>,
     pub events: Receiver<AgentEvent>,
+}
+
+#[cfg(feature = "process")]
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 #[cfg(feature = "process")]
@@ -2198,6 +2234,13 @@ pub enum AgentEvent {
     /// not emit this transient liveness signal.
     BackgroundTasksChanged {
         count: usize,
+    },
+    /// The background work a harness with [`Caps::background_tasks`] is running
+    /// now, replacing the last list. Transient, like
+    /// [`Self::BackgroundTasksChanged`], which goes on carrying the liveness a
+    /// list that just emptied may not yet mean.
+    BackgroundTaskList {
+        tasks: Vec<BackgroundTask>,
     },
     /// The answer to [`SessionCommand::ApplySettings`]; `false` when the change
     /// takes a restart. Transient, like [`Self::TurnAccepted`].

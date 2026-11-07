@@ -770,6 +770,9 @@ pub struct SessionStatus {
     pub acp_agent_id: Option<String>,
     pub project_id: Option<String>,
     pub queued_messages: Vec<QueuedMessageStatus>,
+    /// The background work the thread's harness lists and can stop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<agent::BackgroundTask>,
     /// Backend-owned drafts used by provider-bound send-path assembly.
     pub review_comment_drafts: Vec<ReviewComment>,
     pub terminals: Vec<TerminalStatus>,

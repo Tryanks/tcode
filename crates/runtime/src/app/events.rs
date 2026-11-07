@@ -48,6 +48,12 @@ impl AppState {
                 }
                 return;
             }
+            AgentEvent::BackgroundTaskList { tasks } => {
+                if let Some(resident) = self.resident_mut(session_id) {
+                    resident.background_tasks.clone_from(tasks);
+                }
+                return;
+            }
             AgentEvent::SettingsApplied { applied } => {
                 if let Some(resident) = self.resident_mut(session_id) {
                     resident.settle_settings_apply(*applied);

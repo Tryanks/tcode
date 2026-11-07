@@ -7290,6 +7290,99 @@ fn a_refused_settings_change_falls_back_to_the_restart() {
     }
 }
 
+/// The list a harness publishes reaches the client's status and a stop reaches
+/// the harness; one that lists nothing is refused, not asked.
+#[test]
+fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-background-stop-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let task = agent::BackgroundTask {
+        id: "bl5ti808a".into(),
+        name: "sleep 300".into(),
+        started_at: 1,
+    };
+    state.update(cx, |state, cx| {
+        let mut session = live_session(ProviderKind::ClaudeCode, commands.clone());
+        session.meta.id = "lists".into();
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+        state.on_event(
+            "lists",
+            AgentEvent::BackgroundTaskList {
+                tasks: vec![task.clone()],
+            },
+            cx,
+        );
+        assert_eq!(
+            state
+                .session_status_snapshot("lists")
+                .unwrap()
+                .background_tasks,
+            std::slice::from_ref(&task)
+        );
+
+        let mut session = live_session(ProviderKind::Pi, commands);
+        session.meta.id = "cannot".into();
+        state.sessions.push(session.meta.clone());
+        state
+            .residents
+            .live
+            .insert(session.meta.id.clone(), session);
+    });
+
+    for (id, session_id, task_id) in [
+        (1, "lists", Some(task.id.clone())),
+        (2, "lists", None),
+        (3, "cannot", None),
+    ] {
+        state.dispatch_command(
+            cx,
+            id,
+            Command::StopBackgroundTask {
+                session_id: session_id.into(),
+                task_id,
+            },
+        );
+    }
+    assert!(matches!(
+        next_command(&actor),
+        Ok(SessionCommand::StopBackgroundTask { task_id: Some(id) }) if id == task.id
+    ));
+    assert!(matches!(
+        next_command(&actor),
+        Ok(SessionCommand::StopBackgroundTask { task_id: None })
+    ));
+    assert!(next_command(&actor).is_err());
+}
+
+/// Background work takes no interrupt: Claude Code acknowledges one and the
+/// task runs on, so a thread with nothing else running must not read as stopping.
+#[test]
+fn an_interrupt_leaves_a_thread_with_only_background_work_alone() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-background-interrupt-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::ClaudeCode, commands);
+    session.meta.id = "only-background".into();
+    session.background_task_count = 1;
+    state.update(cx, |state, _| {
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::Interrupt {
+            session_id: "only-background".into(),
+        },
+    );
+    assert!(next_command(&actor).is_err());
+    state.read(|state| assert!(!state.selected_session().unwrap().interrupt_requested));
+}
+
 /// A report arriving while a restart waits on background work, with no turn to
 /// steer into, wakes the lead on its running process.
 #[test]

@@ -16,7 +16,9 @@
 //! run for that long, to see turns the agent starts itself), `--follow-up
 //! <seconds> <prompt>` (send another turn that long after the first completes,
 //! running turn or not), `--apply-settings <model> <effort>` (ask the running
-//! process to take them just before that follow-up), `--interrupt-after
+//! process to take them just before that follow-up), `--stop-background
+//! <seconds>` (stop all background work that long after the first turn
+//! completes), `--interrupt-after
 //! <seconds>`, `--steer <message>`, and
 //! `--image <path>`. Only one of the last three may be used.
 
@@ -271,6 +273,11 @@ fn main() {
             "--goal" => set_mode(&mut probe_mode, ProbeMode::Goal),
             "--leave-questions" => leave_questions = true,
             "--plan-feedback" => plan_feedback = args.next(),
+            "--stop-background" => {
+                let seconds = args.next().and_then(|value| value.parse().ok());
+                continuation.stop_background =
+                    Some(Duration::from_secs(seconds.unwrap_or_else(|| usage())));
+            }
             "--apply-settings" => {
                 let model = args.next().unwrap_or_else(|| usage());
                 let effort = args.next().unwrap_or_else(|| usage());
@@ -385,6 +392,7 @@ struct Continuation {
     linger: Option<Duration>,
     follow_up: Option<(Duration, String)>,
     apply: Option<(String, String)>,
+    stop_background: Option<Duration>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -501,6 +509,7 @@ async fn run_probe(
         .or(continuation.follow_up.as_ref().map(|_| PHANTOM_TURN_GRACE));
     let mut follow_up = continuation.follow_up;
     let mut apply = continuation.apply;
+    let mut stop_background = continuation.stop_background;
     let mut open_until = None;
     let mut running = false;
     let mut closing = false;
@@ -659,6 +668,18 @@ async fn run_probe(
                     eprintln!(
                         "probe: TurnCompleted {turn_id} status={status:?} (#{turns_completed})"
                     );
+                }
+                if let Some(delay) = stop_background.take() {
+                    let commands = handle.commands.clone();
+                    smol::spawn(async move {
+                        smol::Timer::after(delay).await;
+                        eprintln!("probe: STOP BACKGROUND");
+                        commands
+                            .send(SessionCommand::StopBackgroundTask { task_id: None })
+                            .await
+                            .ok();
+                    })
+                    .detach();
                 }
                 if let Some((delay, text)) = follow_up.take() {
                     open_until = Some(Instant::now() + delay + Duration::from_secs(1));

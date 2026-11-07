@@ -16234,6 +16234,7 @@ pub(crate) mod tests {
             acp_agent_id: None,
             project_id: None,
             queued_messages: Vec::new(),
+            background_tasks: Vec::new(),
             review_comment_drafts: Vec::new(),
             terminals: Vec::new(),
             active_terminal_id: None,

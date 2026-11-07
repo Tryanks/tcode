@@ -1396,6 +1396,12 @@ async fn handle_command(
             ControlFlow::Continue(())
         }
         SessionCommand::SetOption { .. } => ControlFlow::Continue(()),
+        SessionCommand::StopBackgroundTask { task_id } => {
+            for request in mapper.stop_task_requests(task_id) {
+                let _ = write_line(stdin, &request).await;
+            }
+            ControlFlow::Continue(())
+        }
         SessionCommand::ApplySettings {
             model,
             option_selections,
@@ -1999,7 +2005,7 @@ pub(crate) struct Mapper {
     /// Claude normally re-invokes itself with the completion notification, so
     /// zero is not published until that follow-up result, or until the CLI
     /// goes idle without one, as it does for a stopped task.
-    background_tasks: HashSet<String>,
+    background_tasks: Vec<crate::BackgroundTask>,
     /// The list emptied and its zero has not been published.
     background_drain_withheld: bool,
     /// What the process runs now.
@@ -2063,7 +2069,7 @@ impl Mapper {
             result_ids: HashSet::new(),
             pending_steers: VecDeque::new(),
             saw_requesting: false,
-            background_tasks: HashSet::new(),
+            background_tasks: Vec::new(),
             background_drain_withheld: false,
             applied_settings: ClaudeLaunchOptions::default(),
             pending_settings: None,
@@ -2212,6 +2218,25 @@ impl Mapper {
         self.pending_permission_modes
             .insert(request_id, mode.to_owned());
         message
+    }
+
+    /// One `stop_task` for `task_id`, or for every task the process runs: the
+    /// CLI has no way to stop them together.
+    fn stop_task_requests(&mut self, task_id: Option<String>) -> Vec<Value> {
+        let tasks = match task_id {
+            Some(id) => vec![id],
+            None => self
+                .background_tasks
+                .iter()
+                .map(|task| task.id.clone())
+                .collect(),
+        };
+        tasks
+            .into_iter()
+            .map(|task_id| {
+                self.control_request(json!({ "subtype": "stop_task", "task_id": task_id }))
+            })
+            .collect()
     }
 
     /// The first request bringing the process to `target`, `None` when it runs
@@ -2640,16 +2665,31 @@ impl Mapper {
     }
 
     fn on_background_tasks_changed(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let now = crate::now_unix_millis();
         let current = msg
             .get("tasks")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|task| task.get("task_id").and_then(Value::as_str))
-            .map(str::to_owned)
-            .collect::<HashSet<_>>();
+            .filter_map(|task| {
+                let id = task.get("task_id").and_then(Value::as_str)?;
+                let known = self.background_tasks.iter().find(|known| known.id == id);
+                Some(crate::BackgroundTask {
+                    id: id.to_owned(),
+                    name: task
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id)
+                        .to_owned(),
+                    started_at: known.map_or(now, |known| known.started_at),
+                })
+            })
+            .collect::<Vec<_>>();
         let had_background_tasks = !self.background_tasks.is_empty();
         self.background_tasks = current;
+        let list = AgentEvent::BackgroundTaskList {
+            tasks: self.background_tasks.clone(),
+        };
         self.background_drain_withheld = self.background_tasks.is_empty() && had_background_tasks;
         if self.background_drain_withheld {
             // `background_tasks_changed []` arrives next to the final
@@ -2659,11 +2699,14 @@ impl Mapper {
             // park/restart the process in this handoff window. A task stopped
             // through `stop_task` starts no such turn; the CLI goes idle
             // instead, which `session_state_changed` reports (2.1.318).
-            Vec::new()
+            vec![list]
         } else {
-            vec![AgentEvent::BackgroundTasksChanged {
-                count: self.background_tasks.len(),
-            }]
+            vec![
+                list,
+                AgentEvent::BackgroundTasksChanged {
+                    count: self.background_tasks.len(),
+                },
+            ]
         }
     }
 
@@ -5093,6 +5136,14 @@ mod tests {
         mapper.on_message(msg)
     }
 
+    /// [`feed`] without the list a task change also publishes, for tests of
+    /// the liveness count.
+    fn feed_count(mapper: &mut Mapper, line: &str) -> Vec<AgentEvent> {
+        let mut events = feed(mapper, line);
+        events.retain(|event| !matches!(event, AgentEvent::BackgroundTaskList { .. }));
+        events
+    }
+
     /// Every `result` publishes the current background-task count immediately
     /// before its `TurnCompleted` (the runtime's only reliable zero signal).
     /// Assert that contract and return the completion event.
@@ -6309,7 +6360,7 @@ mod tests {
                 ..
             })]
         ));
-        let count = feed(
+        let count = feed_count(
             &mut m,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash","description":"Launch background sleep command"}]}"#,
         );
@@ -6355,7 +6406,7 @@ mod tests {
         ));
 
         assert!(
-            feed(
+            feed_count(
                 &mut m,
                 r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
             )
@@ -6438,7 +6489,7 @@ mod tests {
     fn any_result_publishes_zero_after_background_tasks_drain() {
         let mut m = Mapper::new();
         m.start_turn();
-        feed(
+        feed_count(
             &mut m,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash","description":"sleep"}]}"#,
         );
@@ -6450,7 +6501,7 @@ mod tests {
 
         // The drain event withholds its zero (parking guard)...
         assert!(
-            feed(
+            feed_count(
                 &mut m,
                 r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
             )
@@ -6585,13 +6636,64 @@ mod tests {
         );
     }
 
+    /// The list names what runs, keeps when each was first seen, and empties
+    /// at once, ahead of the withheld count. `stop_task` takes one id, so all
+    /// of them is one request each. Shapes recorded from Claude Code 2.1.318,
+    /// a subagent and the shell it started.
+    #[test]
+    fn background_tasks_are_listed_and_stopped_one_request_each() {
+        let tasks = |events: &[AgentEvent]| {
+            events
+                .iter()
+                .find_map(|event| match event {
+                    AgentEvent::BackgroundTaskList { tasks } => Some(tasks.clone()),
+                    _ => None,
+                })
+                .expect("a task change publishes the list")
+        };
+        let mut m = Mapper::new();
+        let first = tasks(&feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a3138d90bec23d1c7","run_id":"0mw6umb2h-0212cc6f","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"}]}"#,
+        ));
+        assert_eq!(first[0].id, "a3138d90bec23d1c7");
+        assert_eq!(first[0].name, "wait helper");
+        let second = tasks(&feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a3138d90bec23d1c7","run_id":"0mw6umb2h-0212cc6f","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"},{"task_id":"bxg56veie","run_id":"0mw6umbct-82b1a926","task_type":"local_bash","description":"wait","parent_task_id":"a3138d90bec23d1c7"}]}"#,
+        ));
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0], first[0]);
+
+        let requests: Vec<Value> = m
+            .stop_task_requests(None)
+            .into_iter()
+            .map(|message| message["request"].clone())
+            .collect();
+        assert_eq!(
+            requests,
+            [
+                json!({"subtype": "stop_task", "task_id": "a3138d90bec23d1c7"}),
+                json!({"subtype": "stop_task", "task_id": "bxg56veie"}),
+            ]
+        );
+
+        let drained = feed(
+            &mut m,
+            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
+        );
+        assert!(
+            matches!(drained.as_slice(), [AgentEvent::BackgroundTaskList { tasks }] if tasks.is_empty())
+        );
+    }
+
     /// A task stopped through `stop_task` starts no follow-up turn: the CLI
     /// empties its list and goes idle, and that idle is the zero's only chance.
     /// Shapes recorded from Claude Code 2.1.318.
     #[test]
     fn a_stopped_task_publishes_zero_when_the_cli_goes_idle() {
         let mut m = Mapper::new();
-        feed(
+        feed_count(
             &mut m,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","task_type":"local_bash","description":"wait"}]}"#,
         );
@@ -6600,7 +6702,7 @@ mod tests {
             r#"{"type":"system","subtype":"task_notification","task_id":"b735c9qiy","run_id":"0mw6umbcx-cb2e7539","tool_use_id":"toolu_0025","status":"stopped","summary":"wait"}"#,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
         ] {
-            assert!(feed(&mut m, line).is_empty());
+            assert!(feed_count(&mut m, line).is_empty());
         }
         assert!(matches!(
             feed(
@@ -6633,7 +6735,7 @@ mod tests {
             &mut m,
             r#"{"type":"assistant","message":{"id":"msg-spawn","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"Run sleep and echo command","subagent_type":"general-purpose","run_in_background":true}}]}}"#,
         );
-        let counted = feed(
+        let counted = feed_count(
             &mut m,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"ae5779035aeb8a94d","run_id":"0mvctgbkr-7639c0ca","task_type":"local_agent","subagent_type":"general-purpose","description":"Run sleep and echo command"}]}"#,
         );
@@ -6676,7 +6778,7 @@ mod tests {
             "a subagent task is settled as a Subagent, never as a command card: {notification:?}"
         );
         assert!(
-            feed(
+            feed_count(
                 &mut m,
                 r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#,
             )
