@@ -588,6 +588,14 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
             path: host.a.root.join("visible.txt"),
         }),
     ));
+    denied(host.request(
+        member.clone(),
+        ClientPayload::Query(Query::BeginUpload {
+            session_id: "b".into(),
+            name: "notes.txt".into(),
+            size: 1,
+        }),
+    ));
     let ServerEvent::SessionStatusReplaced(status) = host
         .event(|event| matches!(&event.event, ServerEvent::SessionStatusReplaced(status) if status.session_id == "a") && event.request_id.is_some())
         .event

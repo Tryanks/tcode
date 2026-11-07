@@ -141,9 +141,9 @@ pub struct ClientPreferences {
     pub right_panel_width: Option<u32>,
 }
 
-/// One image the platform's own picker handed back, already read into memory.
+/// One file a platform picker handed back, already read into memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PickedImage {
+pub struct PickedFile {
     pub name: String,
     pub mime: String,
     pub bytes: Vec<u8>,
@@ -258,8 +258,20 @@ pub trait ClientHost: 'static {
     /// Let the user choose up to `limit` images in the platform's media
     /// picker. Dismissing the picker resolves to an empty list; `Err` is a
     /// real failure to show.
-    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedImage>, String>> {
+    fn pick_images(&self, limit: usize) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
         let _ = limit;
+        Box::pin(async { Err("unsupported".into()) })
+    }
+
+    /// Whether [`pick_files`](Self::pick_files) opens a platform file picker.
+    /// Desktops attach by drop and paste instead.
+    fn supports_file_picker(&self) -> bool {
+        false
+    }
+
+    /// Let the user choose files of any type. Dismissing the picker resolves
+    /// to an empty list; `Err` is a real failure to show.
+    fn pick_files(&self) -> HostFuture<'_, Result<Vec<PickedFile>, String>> {
         Box::pin(async { Err("unsupported".into()) })
     }
 

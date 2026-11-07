@@ -12,15 +12,15 @@ use std::{
     },
 };
 
-use tcode_client::host::{HostFuture, PickedImage};
+use tcode_client::host::{HostFuture, PickedFile};
 use tcode_traverse::{NativeClientHost, lan::SystemBrowser};
 
 type ScanDone = Box<dyn FnOnce(Result<String, String>)>;
 
-/// A photo-picker request in flight: what arrived so far and who awaits it.
+/// A picker request in flight: what arrived so far and who awaits it.
 struct PickRequest {
-    images: Vec<PickedImage>,
-    done: async_channel::Sender<Result<Vec<PickedImage>, String>>,
+    images: Vec<PickedFile>,
+    done: async_channel::Sender<Result<Vec<PickedFile>, String>>,
 }
 
 thread_local! {
@@ -42,6 +42,7 @@ unsafe extern "C" {
     fn tcode_ios_host_system_locale(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_start_camera_scan(request_id: u64);
     fn tcode_ios_host_pick_images(request_id: u64, limit: usize);
+    fn tcode_ios_host_pick_files(request_id: u64);
     fn tcode_ios_host_browse_start(request: u64);
     fn tcode_ios_host_browse_stop(request: u64);
 }
@@ -116,7 +117,7 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
             })
         })
         .with_image_picker(
-            |limit| -> HostFuture<'static, Result<Vec<PickedImage>, String>> {
+            |limit| -> HostFuture<'static, Result<Vec<PickedFile>, String>> {
                 let (done, receiver) = async_channel::bounded(1);
                 let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
                 PICK_REQUESTS.with(|requests| {
@@ -137,7 +138,28 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
                         .unwrap_or_else(|error| Err(error.to_string()))
                 })
             },
-        );
+        )
+        .with_file_picker(|| -> HostFuture<'static, Result<Vec<PickedFile>, String>> {
+            let (done, receiver) = async_channel::bounded(1);
+            let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+            PICK_REQUESTS.with(|requests| {
+                requests.borrow_mut().insert(
+                    request_id,
+                    PickRequest {
+                        images: Vec::new(),
+                        done,
+                    },
+                );
+            });
+            // SAFETY: UIKit retains the id and finishes the request exactly once.
+            unsafe { tcode_ios_host_pick_files(request_id) };
+            Box::pin(async move {
+                receiver
+                    .recv()
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string()))
+            })
+        });
     let host = Rc::new(host);
     HOST.with(|slot| *slot.borrow_mut() = Rc::downgrade(&host));
     (host, system_locale)
@@ -233,7 +255,7 @@ pub extern "C" fn tcode_ios_image_picked(
     };
     PICK_REQUESTS.with(|requests| {
         if let Some(request) = requests.borrow_mut().get_mut(&request_id) {
-            request.images.push(PickedImage { name, mime, bytes });
+            request.images.push(PickedFile { name, mime, bytes });
         } else {
             log::warn!("image for unknown iOS picker request {request_id}");
         }

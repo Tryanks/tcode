@@ -342,6 +342,9 @@ pub use wire::{
 // and prefill_attachments) and SteerCheckpoint, CheckpointsCleared,
 // RewindAvailability, RewindPreviewed, RewindUndone and RewindUndoFailed
 // are new.
+// Files only a client can read reach the host through the new BeginUpload,
+// WriteUpload and DiscardUpload queries (answered with UploadBegun,
+// UploadWritten and UploadDiscarded).
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

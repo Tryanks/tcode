@@ -22,6 +22,14 @@ pub(in super::super) struct PendingImage {
     pub(in super::super) name: String,
 }
 
+/// One slot of the strip under the field.
+#[derive(Clone)]
+enum StripItem {
+    Image(usize, PendingImage),
+    File(usize),
+    Loading,
+}
+
 pub(in super::super) enum PendingImageSource {
     Bytes(Vec<u8>),
     Path(PathBuf),
@@ -101,13 +109,68 @@ pub(crate) fn fit_for_upload(mime: &str, bytes: Vec<u8>) -> image::ImageResult<(
     }
 }
 
+/// Ask before sending `size` bytes across the internet. `proceed` runs on
+/// confirmation; `release` on any other way out, Escape and the backdrop
+/// included.
+pub(super) fn confirm_large_transfer(
+    composer: Entity<Composer>,
+    name: String,
+    size: u64,
+    window: &mut Window,
+    cx: &mut Context<Composer>,
+    proceed: impl FnOnce(&mut Composer, &mut Window, &mut Context<Composer>) + 'static,
+    release: impl FnOnce(&mut Composer, &mut Context<Composer>) + 'static,
+) {
+    // Taken by whichever button fires.
+    let outcome = Rc::new(RefCell::new(Some((proceed, release))));
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let confirmed = composer.clone();
+        let outcome_ok = outcome.clone();
+        let release = {
+            let composer = composer.clone();
+            let outcome = outcome.clone();
+            move |cx: &mut App| {
+                if let Some((_, release)) = outcome.borrow_mut().take() {
+                    composer.update(cx, |composer, cx| release(composer, cx));
+                }
+            }
+        };
+        let on_cancel = release.clone();
+        alert
+            .title(crate::tr!("attach.tunnel_title"))
+            .description(crate::tr!(
+                "attach.tunnel_body",
+                name = name,
+                size = format_size(size)
+            ))
+            .button_props(
+                DialogButtons::default()
+                    .ok_text(crate::tr!("attach.tunnel_confirm"))
+                    .cancel_text(crate::tr!("mobile.cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, window, cx| {
+                if let Some((proceed, _)) = outcome_ok.borrow_mut().take() {
+                    confirmed.update(cx, |composer, cx| proceed(composer, window, cx));
+                }
+                true
+            })
+            .on_cancel(move |_, _, cx| {
+                on_cancel(cx);
+                true
+            })
+            .on_close(move |_, _, cx| release(cx))
+    });
+}
+
 impl Composer {
     /// Reset the thumbnail strip when the active session changes (its pending
     /// images belong to a specific session).
-    pub(in super::super) fn sync_images_session(&mut self) {
+    pub(in super::super) fn sync_images_session(&mut self, cx: &mut App) {
         if self.session_id != self.images_session {
-            self.images_session = self.session_id.clone();
+            let previous = std::mem::replace(&mut self.images_session, self.session_id.clone());
             self.pending_images.clear();
+            self.discard_files_of(previous, cx);
             self.image_load_generation = self.image_load_generation.wrapping_add(1);
             self.pending_image_loads = 0;
         }
@@ -123,7 +186,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.sync_images_session();
+        self.sync_images_session(cx);
         let current_count = self.pending_images.len() + self.pending_image_loads;
         // Type and count are known now; the size is checked once the image is
         // fitted, since a phone photo starts far larger than it is sent.
@@ -220,62 +283,28 @@ impl Composer {
                         );
                     }
                     TransferVerdict::Confirm => {
-                        let composer_entity = cx.entity();
-                        // Taken by whichever button fires; a dialog closed
-                        // by Escape or the backdrop releases the slot too.
-                        let prepared = Rc::new(RefCell::new(Some(prepared)));
-                        let session_id = session_id.clone();
-                        window.open_alert_dialog(cx, move |alert, _, _| {
-                            let composer = composer_entity.clone();
-                            let release_entity = composer_entity.clone();
-                            let prepared = prepared.clone();
-                            let dropped = prepared.clone();
-                            let session_id = session_id.clone();
-                            let result_name = result_name.clone();
-                            let release = move |cx: &mut App| {
-                                if dropped.borrow_mut().take().is_some() {
-                                    release_entity.update(cx, |composer, cx| {
-                                        composer.pending_image_loads =
-                                            composer.pending_image_loads.saturating_sub(1);
-                                        cx.notify();
-                                    });
-                                }
-                            };
-                            let on_cancel = release.clone();
-                            alert
-                                .title(crate::tr!("attach.tunnel_title"))
-                                .description(crate::tr!(
-                                    "attach.tunnel_body",
-                                    name = result_name,
-                                    size = format_size(size as u64)
-                                ))
-                                .button_props(
-                                    DialogButtons::default()
-                                        .ok_text(crate::tr!("attach.tunnel_confirm"))
-                                        .cancel_text(crate::tr!("mobile.cancel"))
-                                        .show_cancel(true),
+                        confirm_large_transfer(
+                            cx.entity(),
+                            result_name.clone(),
+                            size,
+                            window,
+                            cx,
+                            move |composer, window, cx| {
+                                composer.persist_image(
+                                    session_id,
+                                    generation,
+                                    result_name,
+                                    prepared,
+                                    window,
+                                    cx,
                                 )
-                                .on_ok(move |_, window, cx| {
-                                    if let Some(prepared) = prepared.borrow_mut().take() {
-                                        composer.update(cx, |composer, cx| {
-                                            composer.persist_image(
-                                                session_id.clone(),
-                                                generation,
-                                                result_name.clone(),
-                                                prepared,
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                    true
-                                })
-                                .on_cancel(move |_, _, cx| {
-                                    on_cancel(cx);
-                                    true
-                                })
-                                .on_close(move |_, _, cx| release(cx))
-                        });
+                            },
+                            |composer, cx| {
+                                composer.pending_image_loads =
+                                    composer.pending_image_loads.saturating_sub(1);
+                                cx.notify();
+                            },
+                        );
                     }
                 }
             });
@@ -286,7 +315,7 @@ impl Composer {
 
     /// Whether a load started under `generation` for `session_id` still
     /// belongs to the strip on screen.
-    fn owns_image_load(&self, generation: u64, session_id: &Option<String>) -> bool {
+    pub(super) fn owns_image_load(&self, generation: u64, session_id: &Option<String>) -> bool {
         self.image_load_generation == generation
             && &self.images_session == session_id
             && &self.session_id == session_id
@@ -352,7 +381,7 @@ impl Composer {
         else {
             return;
         };
-        self.sync_images_session();
+        self.sync_images_session(cx);
         let remaining =
             MAX_IMAGES.saturating_sub(self.pending_images.len() + self.pending_image_loads);
         if remaining == 0 {
@@ -390,6 +419,22 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> bool {
         self.add_image(name, mime, PendingImageSource::Bytes(bytes), window, cx)
+    }
+
+    /// Attach a dropped or pasted path: as an image when it is one the model
+    /// can see, otherwise as a file. Returns whether it was accepted.
+    pub(in super::super) fn add_path(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if tcode_core::attachments::is_image_attachment(&mime_from_path(&path)) {
+            self.add_image_path(path, window, cx)
+        } else {
+            self.add_file_path(path, window, cx);
+            true
+        }
     }
 
     /// Add an image from a dropped file path.
@@ -443,9 +488,7 @@ impl Composer {
                 }
                 ClipboardEntry::ExternalPaths(paths) => {
                     for path in paths.paths() {
-                        if mime_from_path(path).starts_with("image/") {
-                            accepted_image |= self.add_image_path(path.clone(), window, cx);
-                        }
+                        accepted_image |= self.add_path(path.clone(), window, cx);
                     }
                 }
                 ClipboardEntry::String(_) => {}
@@ -473,19 +516,26 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut thumbs: Vec<(gpui::SharedString, Option<(usize, PendingImage)>)> = self
+        let mut thumbs: Vec<(gpui::SharedString, StripItem)> = self
             .pending_images
             .iter()
             .enumerate()
             .map(|(index, image)| {
                 (
                     image.path.to_string_lossy().into_owned().into(),
-                    Some((index, image.clone())),
+                    StripItem::Image(index, image.clone()),
                 )
             })
             .collect();
         thumbs.extend(
-            (0..self.pending_image_loads).map(|slot| (format!("loading-{slot}").into(), None)),
+            self.pending_files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| (file.key(), StripItem::File(index))),
+        );
+        thumbs.extend(
+            (0..self.pending_image_loads)
+                .map(|slot| (format!("loading-{slot}").into(), StripItem::Loading)),
         );
         let strip = (!thumbs.is_empty()).then(|| (gpui::SharedString::from("strip"), thumbs));
         crate::motion::keyed::keyed_owned(
@@ -507,10 +557,11 @@ impl Composer {
                     cx,
                     |key, thumb, window, cx| {
                         let thumb = match thumb {
-                            Some((index, image)) => {
+                            StripItem::Image(index, image) => {
                                 self.render_thumb(key, *index, image, window, cx)
                             }
-                            None => Button::new(gpui::ElementId::NamedChild(
+                            StripItem::File(index) => self.render_file_chip(key, *index, cx),
+                            StripItem::Loading => Button::new(gpui::ElementId::NamedChild(
                                 std::sync::Arc::new("thumb".into()),
                                 key.clone(),
                             ))

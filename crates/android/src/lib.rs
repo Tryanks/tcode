@@ -405,12 +405,13 @@ mod jni_exports {
         bytes: JByteArray<'local>,
     ) {
         env.with_env(|env| -> jni::errors::Result<()> {
-            let name = optional_string(env, name)?.unwrap_or_else(|| "image".into());
-            let mime = optional_string(env, mime)?.unwrap_or_else(|| "image/jpeg".into());
+            let name = optional_string(env, name)?.unwrap_or_else(|| "file".into());
+            let mime =
+                optional_string(env, mime)?.unwrap_or_else(|| "application/octet-stream".into());
             let bytes = env.convert_byte_array(&bytes)?;
             crate::host::deliver_image_picked(
                 request_id as u64,
-                tcode_client::host::PickedImage { name, mime, bytes },
+                tcode_client::host::PickedFile { name, mime, bytes },
             );
             Ok(())
         })

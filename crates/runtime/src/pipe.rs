@@ -1295,6 +1295,56 @@ fn dispatch_query(
                     .map_err(io_protocol_error)
             })
         }
+        Query::BeginUpload {
+            session_id,
+            name,
+            size,
+        } => {
+            if size > tcode_core::attachments::MAX_UPLOAD_BYTES {
+                return cx.spawn_background(async { Err(upload_refused("file too large")) });
+            }
+            if app.find_meta(&session_id).is_none() {
+                return cx.spawn_background(async { Err(upload_refused("unknown thread")) });
+            }
+            let directories = app.user_directories().clone();
+            let task = cx.unblock(move || directories.reserve_upload(&session_id, &name));
+            cx.spawn_background(async move {
+                task.await
+                    .map(QueryResponse::UploadBegun)
+                    .map_err(io_protocol_error)
+            })
+        }
+        Query::WriteUpload {
+            session_id,
+            path,
+            offset,
+            bytes,
+        } => {
+            let end = offset.saturating_add(bytes.len() as u64);
+            if end > tcode_core::attachments::MAX_UPLOAD_BYTES
+                || !app.user_directories().is_upload_of(&session_id, &path)
+            {
+                return cx.spawn_background(async { Err(upload_refused("not an open upload")) });
+            }
+            let task = cx
+                .unblock(move || tcode_services::user_files::append_upload(&path, offset, &bytes));
+            cx.spawn_background(async move {
+                task.await
+                    .map(|_| QueryResponse::UploadWritten)
+                    .map_err(io_protocol_error)
+            })
+        }
+        Query::DiscardUpload { session_id, path } => {
+            if !app.user_directories().is_upload_of(&session_id, &path) {
+                return cx.spawn_background(async { Err(upload_refused("not an upload")) });
+            }
+            let task = cx.unblock(move || tcode_services::user_files::discard_upload(&path));
+            cx.spawn_background(async move {
+                task.await
+                    .map(|()| QueryResponse::UploadDiscarded)
+                    .map_err(io_protocol_error)
+            })
+        }
         Query::RenderThreadExport { session_id, format } => {
             app.render_thread_export(&session_id, format, cx)
         }
@@ -1346,6 +1396,13 @@ fn dispatch_query(
             let records = app.review_records(limit as usize);
             cx.spawn_background(async move { Ok(QueryResponse::ReviewRecords(records)) })
         }
+    }
+}
+
+fn upload_refused(reason: &str) -> ProtocolError {
+    ProtocolError {
+        code: "invalid_upload".into(),
+        message: reason.into(),
     }
 }
 

@@ -402,6 +402,9 @@ impl AppState {
                 | Query::ThreadAnchorTurn { session_id, .. }
                 | Query::ReadItemImage { session_id, .. }
                 | Query::ReadItemImagePreview { session_id, .. }
+                | Query::BeginUpload { session_id, .. }
+                | Query::WriteUpload { session_id, .. }
+                | Query::DiscardUpload { session_id, .. }
                 | Query::PullRequest { session_id, .. } => session(session_id),
                 Query::ReadProjectIcon { project_id, .. } => self
                     .projects

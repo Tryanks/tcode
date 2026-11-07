@@ -694,6 +694,29 @@ public final class GpuiActivity extends NativeActivity {
         }
     }
 
+    /**
+     * The document picker, any type, several at once. Results arrive as for
+     * {@link #gpuiPickImages}.
+     */
+    public void gpuiPickFiles(long requestId) {
+        if (imageRequest != 0) {
+            nativeImagePickFinished(requestId, HOST_ERROR, "文件选择正在进行");
+            return;
+        }
+        imageRequest = requestId;
+        imageLimit = Integer.MAX_VALUE;
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            intent.setType("*/*");
+            startActivityForResult(intent, REQUEST_IMAGES);
+        } catch (RuntimeException error) {
+            imageRequest = 0;
+            nativeImagePickFinished(requestId, HOST_ERROR, errorMessage(error));
+        }
+    }
+
     private void deliverPickedImages(long request, int resultCode, Intent data, int limit) {
         java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
         if (resultCode == Activity.RESULT_OK && data != null) {
@@ -748,7 +771,7 @@ public final class GpuiActivity extends NativeActivity {
             // Some providers refuse metadata queries; the segment below still names the file.
         }
         String segment = uri.getLastPathSegment();
-        return segment == null || segment.isEmpty() ? "image" : segment;
+        return segment == null || segment.isEmpty() ? "file" : segment;
     }
 
     @Override

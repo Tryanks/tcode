@@ -71,6 +71,28 @@ pub enum Query {
     RemoveUserFile {
         path: PathBuf,
     },
+    /// Reserve a host file for a file only the client can read, in the
+    /// scratch directory quick threads work in. The answer is the path the
+    /// message carries.
+    BeginUpload {
+        session_id: String,
+        name: String,
+        size: u64,
+    },
+    /// The next bytes of a reserved upload; `offset` must equal what has
+    /// arrived so far.
+    WriteUpload {
+        session_id: String,
+        path: PathBuf,
+        offset: u64,
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+    },
+    /// Drop a reserved upload, finished or not.
+    DiscardUpload {
+        session_id: String,
+        path: PathBuf,
+    },
     /// Render a stored thread into a transferable artifact. Rendering belongs to
     /// the host (it owns the event log); where the bytes land belongs to the
     /// client, so nothing is written here.
@@ -183,6 +205,9 @@ pub enum QueryResponse {
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
     SavedAttachment(PathBuf),
     UserFileRemoved,
+    UploadBegun(PathBuf),
+    UploadWritten,
+    UploadDiscarded,
     /// A rendered thread export. `suggested_name` is already safe for a file
     /// name on any client OS; the client picks the destination.
     ThreadExport {

@@ -74,6 +74,7 @@ enum ComposerMenu {
     QueueDrop(u64),
     ImageOpen(usize),
     ImageRemove(usize),
+    FileRemove(usize),
 }
 use gpui_base::{ElementExt as _, h_flex, v_flex};
 
@@ -88,7 +89,7 @@ use crate::settings::provider_label;
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ComposerState, WorkspaceStore};
 use crate::workspace_walk::filter_entries;
-use tcode_core::attachments::{mime_from_path, validate_attachment};
+use tcode_core::attachments::{mime_from_path, text_with_file_paths, validate_attachment};
 use tcode_core::provider_models::{FastLevel, FastMode};
 use tcode_core::ui::WorkspaceMode;
 use tcode_protocol::PathEntry;
@@ -228,6 +229,9 @@ pub struct Composer {
     /// Pending image attachments for the active session, validated + persisted to
     /// disk. Cleared on send and whenever the active session changes.
     pending_images: Vec<PendingImage>,
+    /// Attached non-image files, under the same rules.
+    pending_files: Vec<components::files::PendingFile>,
+    next_file_id: u64,
     /// The session id `pending_images` belongs to (reset the strip on switch).
     images_session: Option<String>,
     /// Invalidates image jobs when the owning session changes or a turn sends.
@@ -497,6 +501,8 @@ impl Composer {
             workspace: None,
             workspace_loading: false,
             pending_images: Vec::new(),
+            pending_files: Vec::new(),
+            next_file_id: 0,
             images_session: None,
             image_load_generation: 0,
             pending_image_loads: 0,
@@ -608,7 +614,7 @@ impl Composer {
         let Some(prefill) = prefill else {
             return;
         };
-        self.sync_images_session();
+        self.sync_images_session(cx);
         for path in prefill.attachments {
             let path = PathBuf::from(path);
             let name = path
@@ -689,6 +695,7 @@ impl Composer {
             }),
             ComposerMenu::ImageOpen(index) => self.open_image_preview(index, window, cx),
             ComposerMenu::ImageRemove(index) => self.remove_image(index, cx),
+            ComposerMenu::FileRemove(index) => self.remove_file(index, cx),
         }
     }
 
@@ -755,6 +762,7 @@ impl Composer {
     fn has_sendable_content(&self, cx: &App) -> bool {
         !self.input.read(cx).value().trim().is_empty()
             || !self.pending_images.is_empty()
+            || !self.pending_files.is_empty()
             || self
                 .workspace_store
                 .read(cx)
@@ -817,6 +825,10 @@ impl Composer {
             window.push_notification(Notification::info(crate::tr!("composer.no_session")), cx);
             return;
         }
+        if self.files_unsettled() {
+            window.push_notification(Notification::info(crate::tr!("attach.wait_for_files")), cx);
+            return;
+        }
         if terminal_contexts.is_empty()
             && let Some(later) = parse_later(&text, Local::now())
         {
@@ -831,7 +843,9 @@ impl Composer {
                 .map(|image| image.path.clone())
                 .collect();
             input.update(cx, |state, cx| state.replace_all("", window, cx));
+            let message = text_with_file_paths(&message, &self.file_paths());
             self.pending_images.clear();
+            self.pending_files.clear();
             self.image_load_generation = self.image_load_generation.wrapping_add(1);
             self.pending_image_loads = 0;
             self.workspace_store.update(cx, |store, _cx| {
@@ -909,11 +923,13 @@ impl Composer {
                 return;
             }
             input.update(cx, |state, cx| state.replace_all("", window, cx));
+            let text = text_with_file_paths(&text, &self.file_paths());
+            self.pending_files.clear();
             self.respond(plan.id, ApprovalDecision::Feedback(text), cx);
             cx.notify();
             return;
         }
-        let sent_text = text.to_string();
+        let sent_text = text_with_file_paths(&text, &self.file_paths());
         let attachment_paths = self
             .pending_images
             .iter()
@@ -975,6 +991,7 @@ impl Composer {
         self.abort_dictation(cx);
         input.update(cx, |state, cx| state.replace_all("", window, cx));
         self.pending_images.clear();
+        self.pending_files.clear();
         self.image_load_generation = self.image_load_generation.wrapping_add(1);
         self.pending_image_loads = 0;
         self.workspace_store.update(cx, |store, _cx| {
@@ -1536,7 +1553,7 @@ impl Render for Composer {
 impl Composer {
     fn render_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.sync_user_input_state(window, cx);
-        self.sync_images_session();
+        self.sync_images_session(cx);
         self.sync_text_destination(window, cx);
         self.sync_queued_refill(window, cx);
         // Taking the text writes the store, which draws every view that
@@ -1586,16 +1603,17 @@ impl Composer {
             )
             .and_then(|shown| mic.map(|mic| shown.fold_across(mic)));
 
-        // The platform picker is the phone's only way in; desktops paste and
-        // drop, and the subagent and offline states have nothing to add to.
-        let attach_shown = self.compact
-            && !subagent
+        // A platform picker is the only way in for phones and browsers;
+        // desktops paste and drop, and the subagent and offline states have
+        // nothing to add to.
+        let attach_shown = !subagent
             && self.interactive(cx)
             && cx
                 .try_global::<crate::remote::ClientAttachment>()
-                .is_some_and(|client| client.host().supports_image_picker());
-        // It narrows away when the host goes offline, and widens back, and
-        // as the window turns wide.
+                .is_some_and(|client| {
+                    client.host().supports_image_picker() || client.host().supports_file_picker()
+                });
+        // It narrows away when the host goes offline, and widens back.
         let attach_menu = self
             .motion
             .shown(
@@ -1991,9 +2009,7 @@ impl Composer {
                             return;
                         }
                         for path in paths {
-                            if mime_from_path(&path).starts_with("image/") {
-                                this.add_image_path(path, window, cx);
-                            }
+                            this.add_path(path, window, cx);
                         }
                     });
                 },
@@ -2225,6 +2241,7 @@ fn column_fold<T>(shown: &crate::motion::Shown<T>, panel: impl IntoElement) -> A
 #[cfg(test)]
 mod replica_tests {
     use super::*;
+    use crate::test_frames::draw_settled;
     use gpui::{Modifiers, TestAppContext};
     use std::time::Duration;
     use tcode_protocol::{
@@ -2232,6 +2249,18 @@ mod replica_tests {
     };
 
     fn attach(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<WorkspaceStore>,
+        async_channel::Sender<String>,
+        async_channel::Receiver<String>,
+        SessionStatus,
+    ) {
+        attach_as(crate::store::WorkspaceAttachment::Local, cx)
+    }
+
+    fn attach_as(
+        attachment: crate::store::WorkspaceAttachment,
         cx: &mut TestAppContext,
     ) -> (
         Entity<WorkspaceStore>,
@@ -2264,21 +2293,276 @@ mod replica_tests {
                 pump.pump_with_timer(|delay| executor.timer(delay)).await;
             })
             .detach();
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link,
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
+        let store =
+            cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, false, cx));
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         store.update(cx, |store, cx| {
             store.show_alone(status.session_id.clone(), cx)
         });
         (store, incoming, outgoing, status)
+    }
+
+    /// A composer in a window, seeded with its thread's status, ready to send.
+    fn composer_on<'a>(
+        store: &Entity<WorkspaceStore>,
+        incoming: &async_channel::Sender<String>,
+        mut status: SessionStatus,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Composer>, &'a mut gpui::VisualTestContext) {
+        status.draft = false;
+        let session_id = status.session_id.clone();
+        replace(
+            incoming,
+            Topic::SessionStatus {
+                session_id: session_id.clone(),
+            },
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let store = store.clone();
+        let slot = std::rc::Rc::new(std::cell::OnceCell::new());
+        let view = slot.clone();
+        let (_root, cx) = cx.add_window_view(move |window, cx| {
+            let composer = cx.new(|cx| Composer::new(store, Some(session_id), window, cx));
+            let _ = view.set(composer.clone());
+            gpui_base::Root::new(composer, window, cx)
+        });
+        let composer: Entity<Composer> = slot.get().unwrap().clone();
+        // An upload's spinner never rests otherwise.
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            composer.update(cx, |composer, cx| composer.focus(window, cx));
+        });
+        draw_settled(cx);
+        (composer, cx)
+    }
+
+    /// Drop `paths` on the composer card, as the platform delivers a drag.
+    fn drop_paths(paths: Vec<PathBuf>, cx: &mut gpui::VisualTestContext) {
+        let position = cx.debug_bounds("composer-card").unwrap().center();
+        cx.simulate_event(gpui::FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths(paths.into()),
+        });
+        cx.simulate_event(gpui::FileDropEvent::Pending { position });
+        cx.simulate_event(gpui::FileDropEvent::Submit { position });
+        draw_settled(cx);
+    }
+
+    fn sent_texts(outgoing: &async_channel::Receiver<String>) -> Vec<String> {
+        std::iter::from_fn(|| outgoing.try_recv().ok())
+            .filter_map(
+                |line| match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                    tcode_protocol::ClientPayload::Command(tcode_protocol::Command::SendTurn {
+                        text,
+                        ..
+                    }) => Some(text),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Answer the next upload query the client sent, returning it.
+    fn answer_upload(
+        outgoing: &async_channel::Receiver<String>,
+        incoming: &async_channel::Sender<String>,
+        answer: impl FnOnce(&tcode_protocol::Query) -> Result<tcode_protocol::QueryResponse, String>,
+    ) -> Option<tcode_protocol::Query> {
+        while let Ok(line) = outgoing.try_recv() {
+            let message = tcode_protocol::decode_client_line(&line).unwrap();
+            if let tcode_protocol::ClientPayload::Query(
+                query @ (tcode_protocol::Query::BeginUpload { .. }
+                | tcode_protocol::Query::WriteUpload { .. }
+                | tcode_protocol::Query::DiscardUpload { .. }),
+            ) = message.payload
+            {
+                let result = answer(&query).map_err(|message| tcode_protocol::ProtocolError {
+                    code: "io_error".into(),
+                    message,
+                });
+                incoming
+                    .try_send(
+                        encode_line(&HostMessage::QueryResult {
+                            id: message.id,
+                            result,
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                return Some(query);
+            }
+        }
+        None
+    }
+
+    fn remote() -> crate::store::WorkspaceAttachment {
+        crate::store::WorkspaceAttachment::Remote {
+            host_id: "laptop".into(),
+            host_name: "Laptop".into(),
+        }
+    }
+
+    /// A file and a folder on the host's own disk are attached in place: the
+    /// message carries their own paths, and nothing is uploaded.
+    #[gpui::test]
+    fn a_local_file_or_folder_is_sent_as_its_own_path(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, status) = attach(cx);
+        let root = crate::store::tests::scratch_root("composer-local-file");
+        std::fs::create_dir_all(&root).unwrap();
+        let notes = root.join("notes.txt");
+        std::fs::write(&notes, "notes").unwrap();
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        drop_paths(vec![notes.clone(), root.clone()], cx);
+        assert!(cx.debug_bounds("attached-file-0").is_some());
+        assert!(cx.debug_bounds("attached-file-1").is_some());
+        while outgoing.try_recv().is_ok() {}
+        cx.simulate_input("read these");
+        cx.simulate_keystrokes("enter");
+        draw_settled(cx);
+        assert_eq!(
+            sent_texts(&outgoing),
+            [format!(
+                "read these\n\n{}\n{}",
+                notes.display(),
+                root.display()
+            )]
+        );
+        assert!(cx.debug_bounds("attached-file-0").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Copying a file in the file manager and pasting it attaches the file.
+    #[gpui::test]
+    fn a_pasted_file_is_attached_rather_than_refused(cx: &mut TestAppContext) {
+        let (store, incoming, _outgoing, status) = attach(cx);
+        let root = crate::store::tests::scratch_root("composer-pasted-file");
+        std::fs::create_dir_all(&root).unwrap();
+        let notes = root.join("notes.txt");
+        std::fs::write(&notes, "notes").unwrap();
+        let (composer, cx) = composer_on(&store, &incoming, status, cx);
+        cx.update(|window, cx| {
+            let item = gpui::ClipboardItem {
+                entries: vec![gpui::ClipboardEntry::ExternalPaths(ExternalPaths(
+                    vec![notes.clone()].into(),
+                ))],
+            };
+            composer.update(cx, |composer, cx| {
+                assert!(composer.paste_images(&item, window, cx));
+            });
+        });
+        draw_settled(cx);
+        assert!(cx.debug_bounds("attached-file-0").is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A remote client uploads the file in chunks and the message carries the
+    /// host's path. Until the last chunk lands a send cannot lose the file; a
+    /// failed chunk holds the message until the retry goes through.
+    #[gpui::test]
+    fn a_remote_file_uploads_in_chunks_and_a_failure_can_be_retried(cx: &mut TestAppContext) {
+        use tcode_protocol::{Query, QueryResponse};
+        let (store, incoming, outgoing, status) = attach_as(remote(), cx);
+        let root = crate::store::tests::scratch_root("composer-remote-file");
+        std::fs::create_dir_all(&root).unwrap();
+        let notes = root.join("notes.txt");
+        let content = vec![7u8; tcode_core::attachments::UPLOAD_CHUNK_BYTES + 3];
+        std::fs::write(&notes, &content).unwrap();
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        let host_path = PathBuf::from("/host/Documents/Tcode/2026-11-08/uploads/s/u/notes.txt");
+
+        drop_paths(vec![notes], cx);
+        let begun = answer_upload(&outgoing, &incoming, |_| {
+            Ok(QueryResponse::UploadBegun(host_path.clone()))
+        })
+        .expect("the client asks the host for a path");
+        assert!(matches!(
+            begun,
+            Query::BeginUpload { ref name, size, .. }
+                if name == "notes.txt" && size == content.len() as u64
+        ));
+        draw_settled(cx);
+
+        cx.simulate_input("read this");
+        cx.simulate_keystrokes("enter");
+        draw_settled(cx);
+        let first = answer_upload(&outgoing, &incoming, |_| Err("connection lost".into()))
+            .expect("the first chunk goes out");
+        assert!(matches!(
+            first,
+            Query::WriteUpload { offset: 0, ref bytes, .. }
+                if bytes.len() == tcode_core::attachments::UPLOAD_CHUNK_BYTES
+        ));
+        draw_settled(cx);
+        assert!(
+            cx.debug_bounds("attached-file-0").is_some(),
+            "the file stays"
+        );
+        cx.simulate_keystrokes("enter");
+        draw_settled(cx);
+        assert_eq!(sent_texts(&outgoing), Vec::<String>::new());
+
+        let retry = cx.debug_bounds("attached-file-retry-0").unwrap().center();
+        cx.simulate_click(retry, gpui::Modifiers::none());
+        draw_settled(cx);
+        let mut received = Vec::new();
+        let mut discarded = false;
+        while let Some(query) = answer_upload(&outgoing, &incoming, |query| {
+            Ok(match query {
+                Query::BeginUpload { .. } => QueryResponse::UploadBegun(host_path.clone()),
+                Query::WriteUpload { .. } => QueryResponse::UploadWritten,
+                _ => QueryResponse::UploadDiscarded,
+            })
+        }) {
+            match query {
+                Query::WriteUpload { offset, bytes, .. } => {
+                    assert_eq!(offset as usize, received.len());
+                    received.extend(bytes);
+                }
+                Query::DiscardUpload { path, .. } => {
+                    assert_eq!(path, host_path);
+                    discarded = true;
+                }
+                _ => {}
+            }
+            draw_settled(cx);
+        }
+        assert!(discarded, "the failed attempt leaves nothing on the host");
+        assert_eq!(received, content);
+
+        let send = cx.debug_bounds("send-message").unwrap().center();
+        cx.simulate_click(send, gpui::Modifiers::none());
+        draw_settled(cx);
+        assert_eq!(
+            sent_texts(&outgoing),
+            [format!("read this\n\n{}", host_path.display())]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A folder has no remote path to carry, and a file over the device's
+    /// ceiling never leaves a link that cannot be trusted with it.
+    #[gpui::test]
+    fn a_remote_client_refuses_folders_and_files_over_the_link_ceiling(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, status) = attach_as(remote(), cx);
+        let root = crate::store::tests::scratch_root("composer-remote-refused");
+        std::fs::create_dir_all(&root).unwrap();
+        let large = root.join("large.bin");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(tcode_core::attachments::DEFAULT_REMOTE_BYTES + 1)
+            .unwrap();
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        drop_paths(vec![root.clone(), large], cx);
+        assert!(cx.debug_bounds("attached-file-0").is_none());
+        assert_eq!(
+            answer_upload(&outgoing, &incoming, |_| Err("unexpected".into())),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn replace(incoming: &async_channel::Sender<String>, topic: Topic, event: ServerEvent) {
