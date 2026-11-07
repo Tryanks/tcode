@@ -8540,6 +8540,10 @@ fn failed_provider_start_keeps_the_queued_message() {
             .settings
             .provider_mut(ProviderKind::ClaudeCode)
             .binary_path = Some("/nonexistent/tcode-test-claude".into());
+        state
+            .settings
+            .provider_mut(ProviderKind::ClaudeCode)
+            .display_name = Some("tryanks".into());
         state.start_draft("proj-fail".into(), cwd.clone(), cx);
         state.host.send_turn(
             state.selected.as_deref().unwrap_or_default(),
@@ -8577,6 +8581,19 @@ fn failed_provider_start_keeps_the_queued_message() {
             "the start failure must be recorded in the timeline"
         );
     });
+    assert!(
+        cx.drain_outgoing().iter().any(|message| matches!(
+            message,
+            HostMessage::Event(EventEnvelope {
+                event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::ProviderStart {
+                    harness,
+                    ..
+                })),
+                ..
+            }) if harness == "Claude Code (tryanks)"
+        )),
+        "the failure names the Harness and its account"
+    );
 
     let _ = std::fs::remove_dir_all(&cwd);
 }

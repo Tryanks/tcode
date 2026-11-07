@@ -1158,6 +1158,8 @@ pub enum RuntimeError {
     },
     DirtyTree,
     ProviderStart {
+        /// The display name of the thread's Harness, with its account.
+        harness: String,
         error: String,
     },
     /// The provider's CLI is a Windows batch file Tcode cannot start as what
@@ -1174,6 +1176,7 @@ pub enum RuntimeError {
         cwd: PathBuf,
     },
     ProviderClosed {
+        harness: String,
         reason: Option<String>,
     },
     PersistSessionIndex {

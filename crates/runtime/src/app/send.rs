@@ -350,6 +350,25 @@ impl AppState {
         }
     }
 
+    /// The name a thread's Harness goes by in what the user reads: an ACP
+    /// agent's own, else the product's with its account.
+    pub(super) fn thread_harness_name(&self, session_id: &str) -> String {
+        let Some(meta) = self.find_meta(session_id) else {
+            return "Harness".to_string();
+        };
+        meta.acp_agent_id
+            .as_deref()
+            .and_then(|id| self.settings.acp_agent(id))
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| {
+                self.profile_display_name(
+                    meta.profile_id
+                        .as_deref()
+                        .unwrap_or(Settings::builtin_profile_id(meta.provider)),
+                )
+            })
+    }
+
     /// Shutting a provider down drops its event pump, so a turn still running
     /// loses the completion that would close it in the timeline and on the
     /// clients' running indicators. Record that close here so the next turn

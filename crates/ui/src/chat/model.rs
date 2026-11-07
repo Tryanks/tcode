@@ -54,11 +54,11 @@ pub(crate) struct SegmentedEntries<'a> {
     pub(crate) pending_steers: Vec<&'a TimelineEntry>,
 }
 
-pub(crate) fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
+pub(crate) fn displayed_error_text<'a>(content: &'a EntryContent, harness: &str) -> Cow<'a, str> {
     match content {
         EntryContent::Error { message, .. } => Cow::Borrowed(message),
         EntryContent::ProviderStartError { error } => {
-            crate::tr!("errors.provider_start", error = error)
+            crate::tr!("errors.provider_start", harness = harness, error = error)
         }
         _ => unreachable!("displayed_error_text requires error timeline content"),
     }
@@ -1078,22 +1078,22 @@ pub(in crate::chat) mod tests {
 
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
-            displayed_error_text(&generic).as_bytes(),
+            displayed_error_text(&generic, "Codex").as_bytes(),
             b"generic\0\xe5\x8e\x9f\xe6\xa0\xb7"
         );
         assert_eq!(
-            displayed_error_text(&provider_start),
-            "Failed to start the Harness: spawn failed"
+            displayed_error_text(&provider_start, "Codex"),
+            "Failed to start Codex: spawn failed"
         );
 
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
-            displayed_error_text(&generic).as_bytes(),
+            displayed_error_text(&generic, "Codex").as_bytes(),
             b"generic\0\xe5\x8e\x9f\xe6\xa0\xb7"
         );
         assert_eq!(
-            displayed_error_text(&provider_start),
-            "无法启动 Harness：spawn failed"
+            displayed_error_text(&provider_start, "Codex"),
+            "无法启动 Codex：spawn failed"
         );
         crate::set_locale(crate::LANGUAGE_ENGLISH);
     }

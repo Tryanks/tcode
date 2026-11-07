@@ -58,16 +58,6 @@ fn project_name<'a>(projects: &'a [Project], meta: &SessionMeta) -> Option<&'a s
         .map(|project| project.name.as_str())
 }
 
-/// The product name of the thread's Harness: an ACP agent's own name, else
-/// the native Harness's.
-fn harness_name(meta: &SessionMeta, store: &WorkspaceStore) -> String {
-    meta.acp_agent_id
-        .as_deref()
-        .and_then(|id| store.installed_acp_agent(id))
-        .map(|agent| agent.name)
-        .unwrap_or_else(|| crate::settings::provider_label(meta.provider).to_owned())
-}
-
 fn open_thread(thread_id: String, window: &mut Window, cx: &mut App) {
     window.dispatch_action(
         Box::new(crate::markdown::OpenThreadAnchor {
@@ -246,7 +236,7 @@ impl SettingsPage {
             .0;
         let now = crate::control::current_grant_sentence(&current, own_project, projects);
         let mut context: Vec<String> = own_project.map(str::to_owned).into_iter().collect();
-        context.push(harness_name(meta, self.store.read(cx)));
+        context.push(self.store.read(cx).harness_name_of(meta));
         context.push(humanize_ago(
             now_secs().saturating_sub(request.requested_at),
         ));
