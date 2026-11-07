@@ -157,6 +157,10 @@ pub fn row_labels(
     cx: &App,
 ) -> gpui::Div {
     v_flex()
+        // A stacked row aligns its parts to the start, which would size these
+        // labels to their content, and a GPUI text's minimum is its unwrapped
+        // line: only a definite width makes a long title wrap.
+        .w_full()
         .flex_1()
         .min_w_0()
         .gap_0p5()
@@ -688,4 +692,52 @@ pub(crate) fn select_row<T: Clone + 'static>(
         cx,
     );
     row.render(layout)
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, IntoElement, Render, TestAppContext, Window, div, px, size};
+
+    use super::*;
+
+    /// A long title over a long description, in a stacked or a side-by-side row.
+    struct Labels {
+        compact: bool,
+    }
+
+    impl Render for Labels {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let labels = row_labels(
+                "インターネット".repeat(10),
+                Some("添付ファイル".repeat(30).into()),
+                None,
+                self.compact,
+                cx,
+            );
+            div().w_full().child(
+                row_frame(self.compact, cx)
+                    .debug_selector(|| "row".into())
+                    .child(labels.debug_selector(|| "labels".into()))
+                    .child(div().flex_none().w(px(80.)).h(px(20.))),
+            )
+        }
+    }
+
+    /// A title longer than its row wraps inside it, and takes the description
+    /// with it: a Japanese title with no break opportunity but between its
+    /// characters ran past a stacked row's edge and clipped both.
+    #[gpui::test]
+    fn a_long_title_stays_inside_its_row(cx: &mut TestAppContext) {
+        for compact in [true, false] {
+            let (_, cx) = cx.add_window_view(|_, _| Labels { compact });
+            cx.simulate_resize(size(px(320.), px(600.)));
+            crate::test_frames::draw_settled(cx);
+            let row = cx.debug_bounds("row").unwrap();
+            let labels = cx.debug_bounds("labels").unwrap();
+            assert!(
+                labels.right() <= row.right(),
+                "compact {compact}: labels {labels:?} past the row {row:?}"
+            );
+        }
+    }
 }
