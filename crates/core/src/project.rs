@@ -265,6 +265,11 @@ pub struct ChildExpectation {
     /// Whether the child was already asked once to report after going quiet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reminded: bool,
+    /// The callback carrying the child's latest report, outcome or failure,
+    /// kept until the lead's provider takes it: the lead's queue does not
+    /// outlive the host, and the next start sends it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undelivered: Option<String>,
 }
 
 impl ChildExpectation {
@@ -274,6 +279,7 @@ impl ChildExpectation {
             opened_at: now_secs,
             delivered_item: None,
             reminded: false,
+            undelivered: None,
         }
     }
 }

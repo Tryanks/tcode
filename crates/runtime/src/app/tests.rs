@@ -7472,6 +7472,106 @@ fn a_report_reaches_a_lead_whose_restart_waits_for_background_work() {
     ));
 }
 
+/// A lead's queue does not outlive the host: a report waiting there when the
+/// host stops goes to the lead when it starts again, and only until the lead's
+/// provider takes it.
+#[test]
+fn a_report_queued_when_the_host_stops_reaches_the_lead_once_after_it_starts() {
+    let test_store = TestStore::new("tcode-report-restart-test");
+    let mut lead = SessionMeta::new(ProviderKind::Acp, test_store.root().clone(), None);
+    lead.id = "lead".into();
+    let mut child = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
+    child.id = "child".into();
+    child.parent_session_id = Some("lead".into());
+    child.expectation = Some(ChildExpectation::opened(1));
+    test_store.upsert_meta(&lead).unwrap();
+    test_store.upsert_meta(&child).unwrap();
+
+    let start = |lead_busy: bool| {
+        let mut cx = TestAppContext::default();
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        let (commands, actor) = smol::channel::unbounded();
+        state.update(&mut cx, |state, cx| {
+            let meta = state.find_meta("lead").unwrap();
+            let mut session = ActiveSession {
+                runtime: Runtime::Live(commands),
+                ..ActiveSession::new(meta, false, Vec::new())
+            };
+            session.turn_in_flight = lead_busy;
+            state.install_selected(session);
+            state.resume_undelivered_reports(cx);
+        });
+        (cx, state, actor)
+    };
+
+    // The lead's turn runs on a harness that cannot steer, so the report waits.
+    let (mut cx, state, actor) = start(true);
+    state.update(&mut cx, |state, cx| {
+        state.fail_child_expectation("child", "the provider closed", cx);
+        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
+    });
+    cx.run_until_parked();
+    assert!(next_command(&actor).is_err());
+    drop((cx, state));
+
+    let (mut cx, state, actor) = start(false);
+    let delivery_id = match next_command(&actor) {
+        Ok(SessionCommand::SendTurn {
+            delivery_id, text, ..
+        }) => {
+            assert!(text.contains("the provider closed"), "{text}");
+            delivery_id
+        }
+        other => panic!("the report goes out after the restart: {other:?}"),
+    };
+    state.update(&mut cx, |state, cx| {
+        state.on_event("lead", AgentEvent::TurnAccepted { delivery_id }, cx);
+    });
+    cx.run_until_parked();
+    drop((cx, state));
+
+    let (_cx, _state, actor) = start(false);
+    assert!(next_command(&actor).is_err(), "taken once, sent once");
+}
+
+/// A report steered into the lead's running turn is delivered once the
+/// provider takes the steer, and a restart does not send it again.
+#[test]
+fn a_steered_report_the_lead_took_is_not_sent_again_after_a_restart() {
+    let test_store = TestStore::new("tcode-steered-report-restart-test");
+    let mut child = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
+    child.id = "child".into();
+    child.parent_session_id = Some("lead".into());
+    child.expectation = Some(ChildExpectation::opened(1));
+    let mut lead = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
+    lead.meta.id = "lead".into();
+    test_store.upsert_meta(&lead.meta).unwrap();
+    test_store.upsert_meta(&child).unwrap();
+
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    lead.runtime = Runtime::Live(commands);
+    lead.turn_in_flight = true;
+    state.update(&mut cx, |state, cx| {
+        state.install_selected(lead);
+        state.fail_child_expectation("child", "the provider closed", cx);
+        let Ok(SessionCommand::Steer { request_id, .. }) = next_command(&actor) else {
+            panic!("a running turn takes the report as a steer");
+        };
+        state.on_event("lead", AgentEvent::SteerAccepted { request_id }, cx);
+    });
+    cx.run_until_parked();
+    drop((cx, state));
+
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.update(&mut cx, |state, _| {
+        let expectation = state.find_meta("child").unwrap().expectation.unwrap();
+        assert_eq!(expectation.undelivered, None);
+    });
+}
+
 /// A provider that refuses a steer because the turn just ended has not seen it:
 /// a child's report steered into that turn goes out as a turn of its own.
 #[test]

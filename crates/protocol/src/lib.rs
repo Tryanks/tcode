@@ -366,6 +366,7 @@ pub use wire::{
 // AgentEvent::BackgroundTaskList and Command::StopBackgroundTask are new, and
 // SessionStatus carries background_tasks.
 // Command::ForceTerminate is new, and SessionStatus carries stopping_since.
+// ChildExpectation carries undelivered.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

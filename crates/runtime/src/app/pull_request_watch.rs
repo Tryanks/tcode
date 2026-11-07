@@ -743,7 +743,7 @@ impl AppState {
             steer_cx.origin = Some(MessageOrigin::Server);
             steer_cx.author = None;
             steer_cx.delivery_key = Some(wake.id.clone());
-            if self.steer_host_message(thread, &wake.text, &mut steer_cx) {
+            if self.steer_host_message(thread, &wake.text, Vec::new(), &mut steer_cx) {
                 self.acknowledge_pull_request_wake(thread, key, &wake.id, &wake.text, cx);
                 return;
             }
