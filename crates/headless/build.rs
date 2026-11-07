@@ -4,7 +4,12 @@ fn main() {
         return;
     }
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    for file in ["index.html", "tcode_web.js", "tcode_web_bg.wasm"] {
+    for file in [
+        "index.html",
+        "tcode_web.js",
+        "tcode_web_bg.wasm",
+        "NotoSansJP-Regular.otf",
+    ] {
         let path = root.join("../web/dist").join(file);
         println!("cargo:rerun-if-changed={}", path.display());
         assert!(

@@ -28,6 +28,18 @@ impl Drop for CanvasObserver {
     }
 }
 
+/// The Japanese face `build.sh` serves beside the page: its kanji forms, which
+/// the bundled Noto Sans SC would draw in Chinese ones, without every other
+/// language paying for them in the wasm.
+fn japanese_font_url() -> Result<String, JsValue> {
+    let base = window()
+        .document()
+        .ok_or("missing document")?
+        .base_uri()?
+        .ok_or("missing base URI")?;
+    Ok(web_sys::Url::new_with_base("NotoSansJP-Regular.otf", &base)?.href())
+}
+
 /// Adopt GPUI's asynchronously prepared canvas, including replacements
 /// created when WebGPU falls back to WebGL.
 fn prepare_canvas(canvas_id: &str) -> Result<(), JsValue> {
@@ -88,6 +100,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
         gpui_web::CanvasFontFallback::EmojiAndCjk,
     ));
     let http_client = std::sync::Arc::new(platform.fetch_http_client());
+    let locale_fonts = vec![(tcode_ui::LANGUAGE_JAPANESE, japanese_font_url()?)];
     let application = gpui::Application::with_platform(platform)
         .with_http_client(http_client)
         .with_assets(tcode_ui::assets::Assets)
@@ -110,6 +123,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                         Cow::Borrowed(include_bytes!("../assets/NotoSansSC-Regular.otf")),
                         Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
                     ],
+                    locale_fonts,
                     theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
                     // `sys_locale` reads nothing in a browser; the browser's

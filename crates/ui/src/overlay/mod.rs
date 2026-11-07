@@ -183,6 +183,7 @@ impl gpui_base::RootPlugin for Overlays {
         // Read on every frame, so a language change re-picks the forms with
         // the window refresh that re-translates the text.
         surface.text_style().font_fallbacks = crate::i18n::cjk_font_fallbacks();
+        crate::i18n::fetch_locale_font(cx);
     }
 }
 
