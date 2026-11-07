@@ -282,7 +282,7 @@ impl AppState {
                     if carried {
                         meta.session_transfer_from = None;
                     }
-                    meta.pending_fork = false;
+                    meta.pending_fork = None;
                     if meta.model.is_none() {
                         meta.model = model.clone();
                         filled_default_model = model.is_some();

@@ -481,7 +481,7 @@ impl AppState {
 /// The words and images of the message the restore point `checkpoint_id`
 /// stands before, as Tcode stored them: the prompt that opened its turn, or
 /// the steer.
-fn stored_prompt(
+pub(super) fn stored_prompt(
     timeline: &tcode_core::session::Timeline,
     checkpoint_id: &str,
 ) -> Option<(String, Vec<String>)> {

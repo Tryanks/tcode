@@ -502,7 +502,7 @@ mod tests {
                     cwd: dir.clone(),
                     model: None,
                     resume: None,
-                    fork: false,
+                    fork: None,
                     binary_path: Some(launcher.clone()),
                     option_selections: Vec::new(),
                     mcp_servers: Vec::new(),

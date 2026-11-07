@@ -582,15 +582,16 @@ pub(super) fn clear(st: &Storage, connection: &Connection, thread: &Thread) -> i
     Ok(())
 }
 
-/// Give `dst` (cleared) a copy of `src`'s rows: those in this file, and the
-/// same unmoved rows of the source.
+/// Give `dst` (cleared) a copy of `src`'s rows before position `end`, or all
+/// of them: those in this file, and the same unmoved rows of the source.
 pub(super) fn copy(
     st: &Storage,
     connection: &Connection,
     src: &Thread,
     dst: &Thread,
+    end: Option<u64>,
 ) -> io::Result<()> {
-    let (lo, hi) = src.keys(0..POSITIONS);
+    let (lo, hi) = src.keys(0..end.unwrap_or(POSITIONS));
     let shift = dst.base() - src.base();
     st.execute(
         connection,
@@ -610,7 +611,7 @@ pub(super) fn copy(
         (
             dst.key,
             src.old_id.as_deref(),
-            src.old_end as i64,
+            end.map_or(src.old_end, |end| src.old_end.min(end)) as i64,
             src.moved as i64,
         ),
     )?;

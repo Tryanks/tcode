@@ -488,8 +488,12 @@ pub enum Command {
     RegenerateSessionTitle {
         session_id: String,
     },
+    /// Fork the whole thread, or what came before the message `at` names.
+    /// From a message, answered with [`CommandResponse::ForkedAt`].
     ForkThread {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<ForkAt>,
     },
     /// Move a thread into another project, continuing in `cwd` (the project root when
     /// absent; a relative path is taken from the root, and the directory must lie inside
@@ -661,6 +665,24 @@ pub enum Command {
         session_id: String,
         checkpoint_id: String,
     },
+    /// Go on in the branch the rewind whose divider opened absolute turn
+    /// `turn` left, in a thread of its own: the one that already took it up,
+    /// or a new one holding that branch's turns. Answered with
+    /// [`CommandResponse::SessionId`].
+    OpenRewoundBranch {
+        session_id: String,
+        turn: usize,
+        checkpoint_id: String,
+    },
+}
+
+/// The prompt that opened absolute turn `turn`, with the restore point the
+/// client saw there: the host refuses when its own differs, a turn index being
+/// reused once a rewind cuts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkAt {
+    pub turn: usize,
+    pub checkpoint_id: String,
 }
 
 /// Correlated result of a [`Command`].
@@ -694,6 +716,14 @@ pub enum CommandResponse {
     /// `VerifyHostToken`: what the host answered; the token was saved only when accepted.
     TokenCheck(tcode_core::settings::TokenCheck),
     RewindPreview(agent::RewindPreviewResult),
+    /// `ForkThread` from a message: the new thread and, for the composer of
+    /// the client that asked alone, the message to edit or resend.
+    ForkedAt {
+        session_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -782,8 +812,9 @@ impl Command {
             | Self::CheckoutBranch { session_id, .. }
             | Self::RewindTurn { session_id, .. }
             | Self::PreviewRewind { session_id, .. }
-            | Self::UndoRewind { session_id, .. } => Some(session_id),
-            Self::ForkThread { id } => Some(id),
+            | Self::UndoRewind { session_id, .. }
+            | Self::OpenRewoundBranch { session_id, .. } => Some(session_id),
+            Self::ForkThread { id, .. } => Some(id),
             _ => None,
         }
     }

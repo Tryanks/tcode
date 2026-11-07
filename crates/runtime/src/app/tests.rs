@@ -7225,7 +7225,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         let active = state.selected_session().unwrap();
         let fork = &active.meta;
         assert_ne!(fork.id, source.id);
-        assert!(fork.pending_fork);
+        assert_eq!(fork.pending_fork, Some(agent::ForkPoint::Tail));
         assert!(fork.pull_requests.is_empty());
         assert_eq!(
             fork.resume_cursor.as_ref().unwrap().0["thread_id"],
@@ -7264,7 +7264,7 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
         let active = state.selected_session().unwrap();
         let fork = &active.meta;
         assert_ne!(fork.id, empty_source.id);
-        assert!(fork.pending_fork);
+        assert_eq!(fork.pending_fork, Some(agent::ForkPoint::Tail));
         assert_eq!(
             fork.title,
             "Native conversation without local events (fork)"

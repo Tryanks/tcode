@@ -71,7 +71,7 @@ impl GoalTranscript {
     }
 }
 
-fn find_session_transcript(claude_dir: &Path, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn find_session_transcript(claude_dir: &Path, session_id: &str) -> Option<PathBuf> {
     let name = format!("{session_id}.jsonl");
     std::fs::read_dir(claude_dir.join("projects"))
         .ok()?

@@ -84,6 +84,36 @@ pub enum SettledOverride {
     Active,
 }
 
+/// The thread a fork or a branch was made from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkOrigin {
+    pub thread_id: String,
+    /// Its title then, which stands in once that thread is gone.
+    pub title: String,
+    /// The branch this thread went on in, by the token of the rewind that left
+    /// it ([`agent::ForkPoint::Branch`]); no other thread may take it up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// `pending_fork` was a bool: a fork of the whole session.
+fn stored_pending_fork<'de, D>(deserializer: D) -> Result<Option<agent::ForkPoint>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Whole(bool),
+        Point(agent::ForkPoint),
+    }
+    Ok(match Stored::deserialize(deserializer)? {
+        Stored::Whole(true) => Some(agent::ForkPoint::Tail),
+        Stored::Whole(false) => None,
+        Stored::Point(point) => Some(point),
+    })
+}
+
 /// Index entry describing one persisted session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -146,10 +176,17 @@ pub struct SessionMeta {
     pub worktree: Option<WorktreeInfo>,
     #[serde(default)]
     pub resume_cursor: Option<ResumeCursor>,
-    /// Whether the next provider start must fork `resume_cursor` rather than
-    /// resume it in place.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub pending_fork: bool,
+    /// Where the next provider start must go on instead of resuming
+    /// `resume_cursor` in place.
+    #[serde(
+        default,
+        deserialize_with = "stored_pending_fork",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pending_fork: Option<agent::ForkPoint>,
+    /// The thread this one was made from, when it is a fork or a branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_origin: Option<ForkOrigin>,
     /// The directory a move to another project took this thread from, until the next turn
     /// hands the conversation to a fresh provider session in `cwd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,7 +414,8 @@ impl SessionMeta {
             active_order: None,
             worktree: None,
             resume_cursor: None,
-            pending_fork: false,
+            pending_fork: None,
+            fork_origin: None,
             moved_from: None,
             session_transfer_from: None,
             imported_from: None,
@@ -711,7 +749,7 @@ mod tests {
             "approval_mode": "read_only"
         });
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert!(!meta.pending_fork);
+        assert_eq!(meta.pending_fork, None);
         assert_eq!(meta.parent_session_id, None);
         assert_eq!(meta.native_subagent, None);
         assert_eq!(meta.archived_at, None);
@@ -730,8 +768,26 @@ mod tests {
             assert!(json.get(omitted).is_none(), "unexpected field: {omitted}");
         }
 
+        for (stored, point) in [
+            (serde_json::json!(true), Some(agent::ForkPoint::Tail)),
+            (serde_json::json!(false), None),
+            (
+                serde_json::json!({"before": {"checkpoint_id": "prompt-2"}}),
+                Some(agent::ForkPoint::Before {
+                    checkpoint_id: "prompt-2".into(),
+                }),
+            ),
+        ] {
+            let meta: SessionMeta = serde_json::from_value(serde_json::json!({
+                "id": "fork", "title": "Fork", "provider": "codex", "cwd": "/work",
+                "created_at": 1, "updated_at": 2, "pending_fork": stored,
+            }))
+            .unwrap();
+            assert_eq!(meta.pending_fork, point);
+        }
+
         let mut meta = meta;
-        meta.pending_fork = true;
+        meta.pending_fork = Some(agent::ForkPoint::Tail);
         meta.parent_session_id = Some("parent".into());
         meta.native_subagent = Some("spawn-1".into());
         meta.archived_at = Some(1234);

@@ -1,7 +1,7 @@
 //! Codex provider: a small client for the newline-delimited JSON protocol used
 //! by `codex app-server`.
 
-use crate::{LaterHistory, RewindFailure, RewindFailureReason, RewindMode};
+use crate::{ForkPoint, LaterHistory, RewindFailure, RewindFailureReason, RewindMode};
 use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
 #[cfg(test)]
@@ -1360,6 +1360,10 @@ struct OpenedThread {
     effective_permission: String,
 }
 
+/// Ids of the startup's `thread/turns/list` pages, clear of the ones
+/// [`initialize_and_open_thread`] numbers one by one.
+const FIRST_TURN_LIST_REQUEST: i64 = 1 << 32;
+
 async fn initialize_and_open_thread(
     opts: &SessionOptions,
     stdin: &mut BufWriter<ChildStdin>,
@@ -1370,7 +1374,22 @@ async fn initialize_and_open_thread(
     let cwd = opts.cwd.to_string_lossy();
     let permission = requested_permission(&opts.option_selections);
     let (method, mut params) = if let Some(resume) = &opts.resume {
-        resume_request(resume, opts.fork, &cwd)?
+        let fork = match &opts.fork {
+            None => None,
+            Some(ForkPoint::Tail) => Some(None),
+            Some(ForkPoint::Before { checkpoint_id }) => {
+                let thread_id = resume_thread_id(resume)?;
+                Some(Some(
+                    turn_before(stdin, lines, thread_id, checkpoint_id).await?,
+                ))
+            }
+            Some(ForkPoint::Branch { .. }) => {
+                return Err(AgentError::Provider(
+                    "Codex keeps no branches to go on in".into(),
+                ));
+            }
+        };
+        resume_request(resume, fork, &cwd)?
     } else {
         (
             "thread/start",
@@ -1450,21 +1469,80 @@ async fn initialize_and_open_thread(
     })
 }
 
+fn resume_thread_id(resume: &ResumeCursor) -> Result<&str, AgentError> {
+    resume.str_field(&["thread_id"]).ok_or_else(|| {
+        AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
+    })
+}
+
+/// `fork` is the thread's resume as a fork, through the turn it names when
+/// it names one.
 fn resume_request(
     resume: &ResumeCursor,
-    fork: bool,
+    fork: Option<Option<String>>,
     cwd: &str,
 ) -> Result<(&'static str, Value), AgentError> {
-    let thread_id = resume.str_field(&["thread_id"]).ok_or_else(|| {
-        AgentError::Protocol("Codex resume cursor is missing string field `thread_id`".into())
-    })?;
+    let mut params = json!({
+        "threadId": resume_thread_id(resume)?,
+        "cwd": cwd,
+    });
+    if let Some(Some(last_turn_id)) = &fork {
+        params["lastTurnId"] = json!(last_turn_id);
+    }
     Ok((
-        if fork { "thread/fork" } else { "thread/resume" },
-        json!({
-            "threadId": thread_id,
-            "cwd": cwd,
-        }),
+        if fork.is_some() {
+            "thread/fork"
+        } else {
+            "thread/resume"
+        },
+        params,
     ))
+}
+
+/// The turn before `turn_id`, which `thread/fork` keeps through: it has no
+/// parameter for a fork before a turn. `thread/turns/list` knows the turns of
+/// the rollout a Tcode turn may not show, such as a compaction's, newest
+/// first.
+async fn turn_before(
+    stdin: &mut BufWriter<ChildStdin>,
+    lines: &Receiver<ChildOutput>,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<String, AgentError> {
+    let mut cursor = Value::Null;
+    let mut found = false;
+    for id in FIRST_TURN_LIST_REQUEST.. {
+        send_json(
+            stdin,
+            &json!({"id": id, "method": "thread/turns/list", "params": {
+                "threadId": thread_id, "cursor": cursor, "sortDirection": "desc",
+            }}),
+        )?;
+        let page = wait_for_response(lines, id).await?;
+        for turn in page
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let id = turn.get("id").and_then(Value::as_str);
+            if found {
+                return id.map(str::to_owned).ok_or_else(|| {
+                    AgentError::Protocol(format!("Codex turn without an id: {turn}"))
+                });
+            }
+            found = id == Some(turn_id);
+        }
+        cursor = page.get("nextCursor").cloned().unwrap_or(Value::Null);
+        if cursor.as_str().is_none_or(str::is_empty) {
+            break;
+        }
+    }
+    Err(AgentError::Provider(if found {
+        "Codex cannot fork before a thread's first turn".into()
+    } else {
+        format!("turn {turn_id} is not in Codex thread {thread_id}")
+    }))
 }
 
 async fn request_permission_profiles(
@@ -4697,11 +4775,11 @@ mod tests {
     #[test]
     fn fork_request_uses_native_method_and_resume_thread_id() {
         let resume = ResumeCursor(json!({"thread_id": "thread-source"}));
-        let (method, params) = resume_request(&resume, true, "/workspace").unwrap();
+        let (method, params) = resume_request(&resume, Some(None), "/workspace").unwrap();
         assert_eq!(method, "thread/fork");
         assert_eq!(params["threadId"], "thread-source");
 
-        let (method, _) = resume_request(&resume, false, "/workspace").unwrap();
+        let (method, _) = resume_request(&resume, None, "/workspace").unwrap();
         assert_eq!(method, "thread/resume");
     }
 
@@ -7582,6 +7660,75 @@ mod tests {
         });
     }
 
+    /// `thread/fork` keeps through a turn, so a fork before a turn asks
+    /// `thread/turns/list` (newest first, as 0.167.0 pages it, across pages)
+    /// for the turn before it. The first turn has none.
+    #[cfg(unix)]
+    #[test]
+    fn a_fork_before_a_turn_keeps_through_the_turn_before_it() {
+        use std::os::unix::fs::PermissionsExt;
+        for (before, forked) in [("turn-3", Some("turn-2")), ("turn-1", None), ("gone", None)] {
+            let dir =
+                std::env::temp_dir().join(format!("agent-codex-fork-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("codex");
+            let requests = dir.join("requests");
+            let script = format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{requests}'
+  id=$(printf '%s' "$line" | sed -n 's/^{{"id":\([0-9]*\).*/\1/p')
+  [ -z "$id" ] && continue
+  case "$line" in
+    *'"thread/turns/list"'*'"cursor":"older"'*) echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"turn-1\"}}]}}}}" ;;
+    *'"thread/turns/list"'*) echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"turn-3\"}},{{\"id\":\"turn-2\"}}],\"nextCursor\":\"older\"}}}}" ;;
+    *'"thread/fork"'*) echo "{{\"id\":$id,\"result\":{{\"thread\":{{\"id\":\"forked\",\"historyMode\":\"paginated\"}}}}}}" ;;
+    *'"initialize"'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *) echo "{{\"id\":$id,\"error\":{{\"code\":-32601,\"message\":\"no\"}}}}" ;;
+  esac
+done
+"#,
+                requests = requests.display()
+            );
+            std::fs::write(&bin, script).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+            smol::block_on(async {
+                let started = start(SessionOptions {
+                    cwd: dir.clone(),
+                    model: None,
+                    resume: Some(ResumeCursor(json!({"thread_id": "source"}))),
+                    fork: Some(ForkPoint::Before {
+                        checkpoint_id: before.into(),
+                    }),
+                    binary_path: Some(bin.clone()),
+                    option_selections: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    launch_env: LaunchEnv::default(),
+                    extra_args: Vec::new(),
+                    acp: None,
+                    instructions: None,
+                })
+                .await;
+                match forked {
+                    Some(forked) => {
+                        let handle = started.unwrap();
+                        let fork = std::fs::read_to_string(&requests)
+                            .unwrap()
+                            .lines()
+                            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                            .find(|request| request["method"] == "thread/fork")
+                            .unwrap();
+                        assert_eq!(fork["params"]["threadId"], "source");
+                        assert_eq!(fork["params"]["lastTurnId"], forked);
+                        let _ = handle.commands.send(SessionCommand::Shutdown).await;
+                    }
+                    None => assert!(matches!(started, Err(AgentError::Provider(_))), "{before}"),
+                }
+            });
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
     /// Only a paginated thread written to disk can be reverted, so each
     /// session says whether its thread can (0.166.0 `Thread.historyMode`,
     /// `Thread.ephemeral`).
@@ -7623,7 +7770,7 @@ done
                     cwd: dir.clone(),
                     model: None,
                     resume: None,
-                    fork: false,
+                    fork: None,
                     binary_path: Some(bin.clone()),
                     option_selections: Vec::new(),
                     mcp_servers: Vec::new(),

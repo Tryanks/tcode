@@ -46,6 +46,16 @@ pub(super) struct Pending {
     dirty: bool,
 }
 
+/// Where a partial copy of a log ends, by the row that opened a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloneBound {
+    /// Before that row.
+    BeforeTurn(usize),
+    /// After it, for a turn a rewind's divider opened: the rows before the
+    /// divider hold what the rewind took out.
+    ThroughTurnOpening(usize),
+}
+
 impl SessionStore {
     pub fn turn_index(&self, id: &str) -> io::Result<Option<TurnIndex>> {
         self.run("read a turn index", |st| {
@@ -151,7 +161,8 @@ impl Pending {
     }
 }
 
-/// Called under the backfill's read snapshot, never under the writer lock.
+/// Costs a fold of the whole log: the backfill calls it under its read
+/// snapshot, and only a user's partial copy under the writer lock.
 pub(super) fn candidate(
     st: &Storage,
     connection: &Connection,
@@ -239,6 +250,40 @@ pub(super) fn copy(
         )?;
     }
     Ok(())
+}
+
+/// The position `bound` names in `thread`'s log.
+pub(super) fn bound_row(
+    st: &Storage,
+    connection: &Connection,
+    thread: &Thread,
+    bound: CloneBound,
+) -> io::Result<u64> {
+    let starts = match read(st, connection, thread)? {
+        Some(index) => index.starts,
+        None => candidate(st, connection, thread)?
+            .map(|pending| pending.index.starts)
+            .unwrap_or_default(),
+    };
+    let (CloneBound::BeforeTurn(turn) | CloneBound::ThroughTurnOpening(turn)) = bound;
+    let row = starts
+        .get(turn)
+        .copied()
+        .ok_or_else(|| io::Error::other(format!("{} has no turn {turn}", thread.key)))?;
+    Ok(match bound {
+        CloneBound::BeforeTurn(_) => row,
+        CloneBound::ThroughTurnOpening(_) => row + 1,
+    })
+}
+
+/// Fold `thread`'s log into its index now. A partial copy cannot take the
+/// source's, and appends only follow an index that exists.
+pub(super) fn rebuild(st: &Storage, connection: &Connection, thread: &Thread) -> io::Result<()> {
+    forget(st, connection, thread)?;
+    match candidate(st, connection, thread)? {
+        Some(pending) => save(st, connection, thread.key, &pending),
+        None => Ok(()),
+    }
 }
 
 pub(super) fn forget(st: &Storage, connection: &Connection, thread: &Thread) -> io::Result<()> {

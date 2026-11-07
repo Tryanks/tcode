@@ -100,7 +100,7 @@ impl Agent {
             cwd: std::env::temp_dir(),
             model: None,
             resume: None,
-            fork: false,
+            fork: None,
             binary_path: Some(stand_in()),
             option_selections: Vec::new(),
             mcp_servers: Vec::new(),

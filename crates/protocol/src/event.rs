@@ -756,6 +756,10 @@ pub struct SessionStatus {
     /// when its harness, or this thread's session, has no rewind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewind: Option<RewindStatus>,
+    /// What a fork from a message does in this thread and whether one can
+    /// start now; none when its harness, or this thread's session, has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_at: Option<ForkStatus>,
     /// Queued messages wait, after a rewind, until the user sends the next
     /// message.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -799,6 +803,23 @@ pub struct SessionStatus {
     /// takes no MCP server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<ControlStatus>,
+}
+
+/// A thread's fork from a message, as its harness declares it and the thread
+/// refines it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkStatus {
+    pub first_turn: bool,
+    /// A rewind is being made, and the turns it touches are not settled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+}
+
+impl ForkStatus {
+    /// Whether a fork can begin before absolute turn `turn`.
+    pub fn offers(&self, turn: usize) -> bool {
+        turn > 0 || self.first_turn
+    }
 }
 
 /// A thread's rewind, as its harness declares it and the thread refines it.

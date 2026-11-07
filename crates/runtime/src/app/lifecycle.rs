@@ -45,7 +45,7 @@ impl AppState {
         if active.meta.moved_from.is_some() {
             // The native session belongs to the directory the thread left.
             active.meta.resume_cursor = None;
-            active.meta.pending_fork = false;
+            active.meta.pending_fork = None;
         }
         active.runtime = Runtime::Starting { generation };
         active.mcp_servers_attached = true;
@@ -137,7 +137,7 @@ impl AppState {
                 opts.instructions = instructions;
                 if transfer_failed.is_some() {
                     opts.resume = None;
-                    opts.fork = false;
+                    opts.fork = None;
                 }
                 provider_launcher.launch(meta.provider, opts).await
             }

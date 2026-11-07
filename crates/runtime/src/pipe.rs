@@ -944,8 +944,21 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::RegenerateSessionTitle { session_id } => {
             app.regenerate_session_title(&session_id, cx)
         }
-        Command::ForkThread { id } => {
+        Command::ForkThread { id, at: None } => {
             response = CommandResponse::SessionId(app.fork_thread(&id, cx));
+        }
+        Command::ForkThread { id, at: Some(at) } => {
+            let Some(forked) = app.fork_thread_at(&id, &at, cx) else {
+                return CommandOutcome::Immediate(Err(ProtocolError {
+                    code: "fork_unavailable".into(),
+                    message: "This thread cannot be forked from that message now.".into(),
+                }));
+            };
+            response = CommandResponse::ForkedAt {
+                session_id: forked.id,
+                text: forked.text,
+                attachments: forked.attachments,
+            };
         }
         Command::MoveSession {
             session_id,
@@ -1129,6 +1142,18 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             checkpoint_id,
         } => {
             app.undo_rewind(&session_id, &checkpoint_id, cx);
+        }
+        Command::OpenRewoundBranch {
+            session_id,
+            turn,
+            checkpoint_id,
+        } => {
+            response = CommandResponse::SessionId(app.open_rewound_branch(
+                &session_id,
+                turn,
+                &checkpoint_id,
+                cx,
+            ));
         }
     }
     CommandOutcome::Immediate(Ok(response))

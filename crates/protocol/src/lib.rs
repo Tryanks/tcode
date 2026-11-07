@@ -34,23 +34,23 @@ pub mod terminal;
 mod wire;
 
 pub use command::{
-    ChildSettlement, Command, CommandResponse, SettingsPatch, SettleChildrenResult,
+    ChildSettlement, Command, CommandResponse, ForkAt, SettingsPatch, SettleChildrenResult,
     TerminalSelection, ThreadExportFormat,
 };
 pub use event::{
     AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry,
     ControlStatus, DiskUsage, DiskUsagePart, DiskUsageState, EndpointDescription,
     EndpointPresetDescription, EventEnvelope, ExternalImportState, ExternalImportStatus,
-    ForkAvailability, GitActionRequest, GitStatusStatus, HarnessDescription, IndexSnapshot,
-    IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools,
-    MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge,
-    PluginChallengeKind, PluginOperationTarget, PluginStaleReason, ProviderDiskUsage,
-    ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus,
-    ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError,
-    RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope,
-    ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord, SessionPlan,
-    SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, Topic,
+    ForkAvailability, ForkStatus, GitActionRequest, GitStatusStatus, HarnessDescription,
+    IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions, InjectedServer,
+    InjectedTools, MergeWorktreeFailure, NoticeSeverity, PendingRewind, PluginCatalogState,
+    PluginChallenge, PluginChallengeKind, PluginOperationTarget, PluginStaleReason,
+    ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable, ProviderUpdateRun,
+    ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RewindBlocked, RewindStatus,
+    RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId,
+    RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity, SessionEventRecord,
+    SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage, TcodeUpdateStatus,
+    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, ThreadReferenceStatus, Topic,
 };
 pub use query::{
     DeviceAccess, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
@@ -347,6 +347,9 @@ pub use wire::{
 // UploadWritten and UploadDiscarded).
 // RuntimeError's ProviderStart and ProviderClosed carry `harness`, the
 // display name of the thread's Harness.
+// Fork from a message: ForkThread takes an optional at (ForkAt), answered with
+// CommandResponse::ForkedAt; SessionStatus has fork_at (ForkStatus); SessionMeta
+// has fork_origin and pending_fork is a ForkPoint (a stored bool still reads).
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

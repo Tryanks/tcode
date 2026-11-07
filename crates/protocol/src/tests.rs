@@ -1892,3 +1892,42 @@ fn scope_subscriptions_and_provider_choices_have_literal_wire_contracts() {
         assert_eq!(decode_host_line(&wire.to_string()).unwrap(), response);
     }
 }
+
+/// The fork from a message as clients and hosts of one release exchange it.
+#[test]
+fn a_fork_from_a_message_has_its_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(Command::ForkThread {
+            id: "source".into(),
+            at: Some(ForkAt {
+                turn: 2,
+                checkpoint_id: "prompt-3".into(),
+            }),
+        })
+        .unwrap(),
+        serde_json::json!({"type": "fork_thread", "content": {
+            "id": "source", "at": {"turn": 2, "checkpoint_id": "prompt-3"},
+        }})
+    );
+    assert_eq!(
+        serde_json::from_value::<Command>(serde_json::json!({
+            "type": "fork_thread", "content": {"id": "source"},
+        }))
+        .unwrap(),
+        Command::ForkThread {
+            id: "source".into(),
+            at: None,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(CommandResponse::ForkedAt {
+            session_id: "fork".into(),
+            text: "the third prompt".into(),
+            attachments: Vec::new(),
+        })
+        .unwrap(),
+        serde_json::json!({"type": "forked_at", "content": {
+            "session_id": "fork", "text": "the third prompt",
+        }})
+    );
+}

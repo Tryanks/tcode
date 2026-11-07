@@ -376,6 +376,16 @@ impl AppState {
                     "This rewind cannot be undone now.",
                 ));
             }
+            Command::OpenRewoundBranch {
+                turn,
+                checkpoint_id,
+                ..
+            } if Self::rewound_branch(active, *turn, checkpoint_id).is_none() => {
+                return Err(error(
+                    "rewind_unavailable",
+                    "This rewind left no branch to open now.",
+                ));
+            }
             Command::ActivateTerminal { terminal_id, .. }
             | Command::CloseTerminal { terminal_id, .. }
             | Command::CaptureTerminalSelection { terminal_id, .. }

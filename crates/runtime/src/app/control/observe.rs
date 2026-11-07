@@ -134,6 +134,7 @@ struct Lineage {
     parent_session_id: Option<String>,
     children: Vec<String>,
     pending_fork: bool,
+    forked_from: Option<String>,
     imported_from: Option<String>,
     native_subagent: bool,
 }
@@ -255,6 +256,7 @@ struct RewindFacts {
 struct CapsFacts {
     steering: bool,
     fork: bool,
+    fork_at: bool,
     /// What a rewind can restore, when the provider has one.
     native_rewind: Option<RewindFacts>,
     manual_compaction: bool,
@@ -890,7 +892,11 @@ impl AppState {
                     .filter(|child| child.parent_session_id.as_deref() == Some(meta.id.as_str()))
                     .map(|child| child.id.clone())
                     .collect(),
-                pending_fork: meta.pending_fork,
+                pending_fork: meta.pending_fork.is_some(),
+                forked_from: meta
+                    .fork_origin
+                    .as_ref()
+                    .map(|origin| origin.thread_id.clone()),
                 imported_from: meta.imported_from.clone(),
                 native_subagent: meta.native_subagent.is_some(),
             },
@@ -898,7 +904,6 @@ impl AppState {
             terminals,
             omitted: vec![
                 "worktree.dirty: read it live with get_git or list_threads include_worktree".into(),
-                "the thread a fork was made from is not recorded".into(),
             ],
             thread,
         };
@@ -1173,6 +1178,7 @@ impl AppState {
                     caps: CapsFacts {
                         steering: caps.supports_steering,
                         fork: caps.supports_fork,
+                        fork_at: caps.fork_at.is_some(),
                         native_rewind: caps.rewind.map(|rewind| RewindFacts {
                             modes: rewind.modes,
                             first_turn_conversation: rewind.first_turn_conversation,

@@ -1893,7 +1893,7 @@ pub(super) fn session_options(
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
         resume: meta.resume_cursor.clone(),
-        fork: meta.pending_fork,
+        fork: meta.pending_fork.clone(),
         binary_path: provider_settings.binary_path.clone(),
         option_selections: meta.option_selections.clone(),
         mcp_servers: [

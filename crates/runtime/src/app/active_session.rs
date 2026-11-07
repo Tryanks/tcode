@@ -287,7 +287,7 @@ impl ActiveSession {
     pub(super) fn resume_cursor_for_fresh_provider(&mut self) {
         self.shutdown_to_idle();
         self.meta.resume_cursor = None;
-        self.meta.pending_fork = false;
+        self.meta.pending_fork = None;
         self.meta.session_transfer_from = None;
         self.pending_relay = None;
     }
@@ -387,7 +387,7 @@ impl ActiveSession {
     /// the next message hands them the conversation from the account that holds it.
     pub(super) fn fail_session_transfer(&mut self) {
         self.meta.resume_cursor = None;
-        self.meta.pending_fork = false;
+        self.meta.pending_fork = None;
     }
 
     /// Whether the thread's native session stays behind in the profile

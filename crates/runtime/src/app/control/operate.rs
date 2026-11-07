@@ -770,7 +770,41 @@ impl AppState {
                 )) {
                     return Err(failed(refusal.into()));
                 }
-                (Command::ForkThread { id: session_id }, action::FORK, None)
+                (
+                    Command::ForkThread {
+                        id: session_id,
+                        at: None,
+                    },
+                    action::FORK,
+                    None,
+                )
+            }
+            RunOp::ForkAt { turn } => {
+                let turn = *turn;
+                let active = self.resident(target).ok_or_else(|| {
+                    failed("this thread's history is not loaded on the host".into())
+                })?;
+                let checkpoint_id = active
+                    .timeline
+                    .turns
+                    .get(turn)
+                    .and_then(|turn| turn.provider_checkpoint_id.clone())
+                    .ok_or_else(|| failed(format!("turn {turn} has no restore point")))?;
+                let at = tcode_protocol::ForkAt {
+                    turn,
+                    checkpoint_id,
+                };
+                if self.fork_checkpoint(active, &at).is_none() {
+                    return Err(failed(format!("this thread cannot fork from turn {turn}")));
+                }
+                (
+                    Command::ForkThread {
+                        id: session_id,
+                        at: Some(at),
+                    },
+                    action::FORK,
+                    Some(turn.to_string()),
+                )
             }
             RunOp::SteerQueued { id } | RunOp::DropQueued { id } => {
                 let id = *id;
@@ -848,11 +882,13 @@ impl AppState {
                 self.set_active_option(target, &id, value, cx);
                 "option set"
             }
-            Command::ForkThread { .. } => {
-                let fork = self
-                    .fork_thread(target, cx)
-                    .ok_or_else(|| failed("the fork could not be made".into()))?;
-                new_thread_id = Some(fork);
+            Command::ForkThread { at, .. } => {
+                let fork = match at {
+                    Some(at) => self.fork_thread_at(target, &at, cx).map(|fork| fork.id),
+                    None => self.fork_thread(target, cx),
+                };
+                new_thread_id =
+                    Some(fork.ok_or_else(|| failed("the fork could not be made".into()))?);
                 "forked"
             }
             Command::SteerQueued { id, .. } => {

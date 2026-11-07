@@ -86,7 +86,7 @@ pub async fn list_models(
         cwd: std::env::temp_dir(),
         model: None,
         resume: None,
-        fork: false,
+        fork: None,
         binary_path,
         option_selections: Vec::new(),
         mcp_servers: Vec::new(),
@@ -252,7 +252,7 @@ impl Dialect for Cursor {
 
     async fn establish(&self, setup: &Setup<'_>) -> Result<Established, AgentError> {
         let (connection, opts) = (setup.connection, setup.opts);
-        if opts.fork {
+        if opts.fork.is_some() {
             return Err(AgentError::Protocol(
                 "session fork is not supported for this provider".into(),
             ));

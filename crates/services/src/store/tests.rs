@@ -1406,6 +1406,24 @@ fn appended_turn_boundaries_match_replay_across_restarts_imports_and_forks() {
         assert_eq!(store.turn_index(id).unwrap(), Some(expected.clone()));
     }
     store
+        .apply(&[
+            Mutation::clone_events_to("thread", "before", CloneBound::BeforeTurn(1)),
+            Mutation::clone_events_to("thread", "through", CloneBound::ThroughTurnOpening(1)),
+        ])
+        .unwrap();
+    let source = rows(&store, "thread");
+    for (id, end, starts) in [("before", 70, vec![60, 66]), ("through", 71, vec![60, 70])] {
+        assert_eq!(rows(&store, id), source[..end], "{id}");
+        assert_eq!(
+            store.turn_index(id).unwrap(),
+            Some(TurnIndex {
+                turns: starts.len() as u64,
+                starts,
+            }),
+            "{id}: its own index, which appends go on from"
+        );
+    }
+    store
         .run("seed an older fold version", |st| {
             st.write(|st, connection| {
                 st.execute(
@@ -2237,6 +2255,7 @@ fn a_thread_written_while_it_moves_loses_nothing() {
     store
         .apply(&[
             Mutation::clone_events("forked", "fork"),
+            Mutation::clone_events_to("forked", "partial", CloneBound::ThroughTurnOpening(0)),
             Mutation::remove_session("forked"),
         ])
         .unwrap();
@@ -2249,6 +2268,13 @@ fn a_thread_written_while_it_moves_loses_nothing() {
         logs[2].1,
         "the fork reads the rows still to move"
     );
+    assert!(
+        logs[2]
+            .1
+            .starts_with(&store.read_event_log("partial").unwrap()),
+        "a partial copy reads only its own of the rows still to move"
+    );
+    assert!(store.read_event_log("partial").unwrap().len() < logs[2].1.len());
 
     storage_pass(&store, usize::MAX);
     assert!(!dir.path().join(source::SOURCE_FILE).exists());

@@ -17,10 +17,11 @@ use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
 use crate::process::{ChildOutput, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
-    ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ItemContent, ItemStatus,
-    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand, ProviderCommandKind,
-    ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle, SessionOptions,
-    ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption, UserInputQuestion,
+    ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ForkPoint, ItemContent,
+    ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, ProviderCommand,
+    ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand, SessionHandle,
+    SessionOptions, ThreadItem, TokenUsage, ToolOutput, UserInputDelivery, UserInputOption,
+    UserInputQuestion,
 };
 
 /// The directory pi launched with `launch_env` keeps its settings, sign-in
@@ -32,7 +33,7 @@ pub fn agent_dir(launch_env: &LaunchEnv) -> Option<PathBuf> {
 }
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    if opts.fork {
+    if opts.fork == Some(ForkPoint::Tail) {
         return Err(AgentError::Protocol(
             "session fork is not supported for this provider".into(),
         ));
@@ -227,10 +228,32 @@ async fn run_actor(
     };
     let mut cmd = crate::process::command(&binary);
     cmd.args(&opts.extra_args).arg("--mode").arg("rpc");
-    if let Some(thinking) = selected_thinking(&opts.option_selections) {
+    let fork_before = match &opts.fork {
+        Some(ForkPoint::Before { checkpoint_id }) => Some(checkpoint_id.clone()),
+        _ => None,
+    };
+    // A level set at launch is written to the session opened, which a fork
+    // must leave as it found it: it goes to the fork once that is made.
+    let thinking = selected_thinking(&opts.option_selections);
+    if let Some(thinking) = thinking.filter(|_| fork_before.is_none()) {
         cmd.arg("--thinking").arg(thinking);
     }
-    if let Some(session) = resume_session(&opts.resume) {
+    let session = match &opts.fork {
+        Some(ForkPoint::Branch { token }) => {
+            // pi would start an empty session at a path it does not find.
+            if !Path::new(token).is_file() {
+                let _ = ready
+                    .send(Err(AgentError::Provider(format!(
+                        "pi no longer has the session {token}"
+                    ))))
+                    .await;
+                return;
+            }
+            Some(token.as_str())
+        }
+        _ => resume_session(&opts.resume),
+    };
+    if let Some(session) = session {
         cmd.arg("--session").arg(session);
     }
     cmd.current_dir(&opts.cwd)
@@ -298,6 +321,7 @@ async fn run_actor(
         pending_dialogs: HashSet::new(),
         pending_steers: HashMap::new(),
         requested_model: opts.model.clone(),
+        fork_before: fork_before.zip(Some(thinking.map(str::to_owned))),
         stderr_tail,
         requests: HashMap::new(),
         entries_cursor: None,
@@ -343,6 +367,9 @@ struct PiActor {
     /// acknowledging the stdin write.
     pending_steers: HashMap<String, String>,
     requested_model: Option<String>,
+    /// The entry to fork before at startup, and the thinking level to set in
+    /// the fork.
+    fork_before: Option<(String, Option<String>)>,
     stderr_tail: crate::process::StderrTail,
     /// RPC requests whose responses carry a rewind's or a restore point's
     /// next step, by request id.
@@ -583,6 +610,26 @@ impl SessionActor for PiActor {
 
 impl PiActor {
     async fn initialize(&mut self) -> Result<(), AgentError> {
+        // Before anything that writes to the session open now, the source.
+        if let Some((entry_id, thinking)) = self.fork_before.take() {
+            send_json(
+                &mut self.stdin,
+                &json!({"id":"tcode-fork","type":"fork","entryId":entry_id}),
+            )?;
+            let forked = self.wait_response("tcode-fork").await?;
+            if forked.pointer("/data/cancelled") == Some(&json!(true)) {
+                return Err(AgentError::Provider(
+                    "an extension cancelled the fork".into(),
+                ));
+            }
+            if let Some(level) = thinking {
+                send_json(
+                    &mut self.stdin,
+                    &json!({"id":"tcode-thinking","type":"set_thinking_level","level":level}),
+                )?;
+                self.wait_response("tcode-thinking").await?;
+            }
+        }
         if let Some(model) = self.requested_model.as_deref() {
             let (provider, model_id) = model.split_once('/').ok_or_else(|| {
                 AgentError::Protocol(format!(
@@ -2458,6 +2505,8 @@ while IFS= read -r line; do
       else
         printf '{"id":"%s","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":null}}\n' "$id"
       fi ;;
+    *'"set_model"'*|*'"set_thinking_level"'*)
+      printf '{"id":"%s","type":"response","command":"set","success":true}\n' "$id" ;;
     *'"prompt"'*)
       prompted=1
       printf '{"id":"%s","type":"response","command":"prompt","success":true}\n' "$id"
@@ -2473,6 +2522,113 @@ while IFS= read -r line; do
   esac
 done
 "#;
+
+    /// A thread forked from a message starts on the source's file, forks
+    /// before anything else that writes to the session open, and goes on in
+    /// the session pi made; a branch a rewind left is opened as it is, with
+    /// no fork, and one pi no longer has fails the start.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_thread_goes_on_where_its_start_says() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("agent-pi-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("pi");
+        let requests = dir.join("requests");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n{stand_in}",
+                log = requests.display(),
+                stand_in = RPC_STAND_IN.trim_start_matches("#!/bin/sh\n").replace(
+                    "  id=$(printf",
+                    &format!(
+                        "  printf '%s\\n' \"$line\" >> '{}'\n  id=$(printf",
+                        requests.display()
+                    )
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let branch = dir.join("left.jsonl");
+        std::fs::write(&branch, "").unwrap();
+        let options = |fork| SessionOptions {
+            cwd: dir.clone(),
+            model: Some("provider/model".into()),
+            resume: Some(ResumeCursor(
+                json!({"session_id": "a", "session_file": "/s/a.jsonl"}),
+            )),
+            fork,
+            binary_path: Some(bin.clone()),
+            option_selections: vec![OptionSelection {
+                id: "reasoningEffort".into(),
+                value: json!("high"),
+            }],
+            mcp_servers: Vec::new(),
+            launch_env: LaunchEnv::default(),
+            extra_args: Vec::new(),
+            acp: None,
+            instructions: None,
+        };
+        smol::block_on(async {
+            let session = |events: Receiver<AgentEvent>| async move {
+                loop {
+                    if let AgentEvent::SessionStarted { resume, .. } = events.recv().await.unwrap()
+                    {
+                        return resume.0;
+                    }
+                }
+            };
+            let handle = start(options(Some(ForkPoint::Before {
+                checkpoint_id: "u1".into(),
+            })))
+            .await
+            .unwrap();
+            assert_eq!(
+                session(handle.events.clone()).await,
+                json!({"session_id": "b", "session_file": "/s/b.jsonl"})
+            );
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            let log = std::fs::read_to_string(&requests).unwrap();
+            let lines: Vec<&str> = log.lines().collect();
+            assert!(
+                lines[0].contains("--session /s/a.jsonl") && !lines[0].contains("--thinking"),
+                "{log}"
+            );
+            let position = |needle: &str| lines.iter().position(|line| line.contains(needle));
+            assert!(
+                position("\"type\":\"fork\"") < position("set_thinking_level"),
+                "{log}"
+            );
+            assert!(
+                position("set_thinking_level") < position("set_model"),
+                "{log}"
+            );
+
+            std::fs::remove_file(&requests).unwrap();
+            let token = branch.to_string_lossy().into_owned();
+            let handle = start(options(Some(ForkPoint::Branch {
+                token: token.clone(),
+            })))
+            .await
+            .unwrap();
+            session(handle.events.clone()).await;
+            let _ = handle.commands.send(SessionCommand::Shutdown).await;
+            let log = std::fs::read_to_string(&requests).unwrap();
+            assert!(log.contains(&format!("--session {token}")), "{log}");
+            assert!(!log.contains("\"type\":\"fork\""), "{log}");
+
+            assert!(matches!(
+                start(options(Some(ForkPoint::Branch {
+                    token: "/s/gone.jsonl".into(),
+                })))
+                .await,
+                Err(AgentError::Provider(_))
+            ));
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// pi rewinds by forking: each finished turn's prompt entry is a restore
     /// point; a rewind forks before it into a new session the thread then
@@ -2496,7 +2652,7 @@ done
                 cwd: dir.clone(),
                 model: None,
                 resume: None,
-                fork: false,
+                fork: None,
                 binary_path: Some(bin.clone()),
                 option_selections: Vec::new(),
                 mcp_servers: Vec::new(),

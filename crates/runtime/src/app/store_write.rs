@@ -1,6 +1,6 @@
 use super::*;
 use tcode_core::session::SupersededStream;
-use tcode_services::store::Mutation;
+use tcode_services::store::{CloneBound, Mutation};
 
 use super::storage_pass::{StorageJob, StorageJobDone};
 
@@ -43,10 +43,11 @@ pub(super) enum StoreWrite {
         kept_worktrees: Vec<PathBuf>,
     },
     RemoveProject(String),
-    /// The source's event log copied to a new thread, committed together with
-    /// the new thread's meta.
+    /// The source's event log copied to a new thread, up to `bound` when one
+    /// is given, committed together with the new thread's meta.
     Fork {
         src: String,
+        bound: Option<CloneBound>,
         meta: Box<SessionMeta>,
         completion: smol::channel::Sender<Result<(), String>>,
     },
@@ -158,8 +159,13 @@ impl StoreWrite {
                 )
                 .collect(),
             StoreWrite::RemoveProject(id) => vec![Mutation::remove_project(id)],
-            StoreWrite::Fork { src, meta, .. } => vec![
-                Mutation::clone_events(src, &meta.id),
+            StoreWrite::Fork {
+                src, bound, meta, ..
+            } => vec![
+                match bound {
+                    Some(bound) => Mutation::clone_events_to(src, &meta.id, *bound),
+                    None => Mutation::clone_events(src, &meta.id),
+                },
                 Mutation::upsert_meta((**meta).clone()),
             ],
             _ => return None,
