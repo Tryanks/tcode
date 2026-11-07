@@ -431,13 +431,7 @@ impl AppState {
             .resident(thread_id)
             .is_some_and(|child| child.turn_in_flight && child.can_steer());
         if can_steer {
-            let request_id = self.record_steer_request(thread_id, &message, &[], cx);
-            let sent = self.resident_mut(thread_id).is_some_and(|child| {
-                child
-                    .steer_now(request_id, message.clone(), Vec::new())
-                    .is_ok()
-            });
-            if sent {
+            if self.steer_host_message(thread_id, &message, cx) {
                 return Ok("steered");
             }
             // Provider channel gone: fall through so the text survives
@@ -473,6 +467,19 @@ impl AppState {
             self.ensure_session_started(thread_id, cx);
         }
         Ok("queued")
+    }
+
+    /// Steer text the host or a child wrote into the running turn.
+    pub(super) fn steer_host_message(&mut self, thread: &str, text: &str, cx: &mut HostCx) -> bool {
+        let request_id = self.record_steer_request(thread, text, &[], cx);
+        let steer = PendingSteer {
+            request_id,
+            text: text.to_owned(),
+            attachments: Vec::new(),
+            author: cx.author.clone(),
+            origin: cx.origin,
+        };
+        self.hand_over_steer(thread, steer, text.to_owned(), cx)
     }
 
     /// Nothing is left inside the thread that could still produce a report
@@ -771,14 +778,10 @@ impl AppState {
         if can_steer {
             // A steered callback is already part of this turn, so persist it just
             // like a user-triggered steer before handing it to the provider.
-            let request_id = self.record_steer_request(parent_id, &text, &[], cx);
-            let sent = self
-                .resident_mut(parent_id)
-                .is_some_and(|parent| parent.steer_now(request_id, text, Vec::new()).is_ok());
-            if !sent {
-                self.report_error(RuntimeError::ProcessGone, cx);
+            if self.steer_host_message(parent_id, &text, cx) {
+                return;
             }
-            return;
+            // Provider channel gone: the callback waits for the next start.
         }
 
         self.reactivate_session(parent_id, cx);

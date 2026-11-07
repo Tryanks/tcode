@@ -482,7 +482,8 @@ impl Activity {
             | EntryContent::ControlAction(_)
             | EntryContent::Rewound(_)
             | EntryContent::RewindFailed { .. }
-            | EntryContent::ContextWindowChanged { .. } => {}
+            | EntryContent::ContextWindowChanged { .. }
+            | EntryContent::SettingsKept => {}
         }
     }
 
@@ -1329,6 +1330,7 @@ pub fn entry_text(content: &EntryContent) -> (&'static str, String) {
         EntryContent::ContextWindowChanged { window } => {
             ("context_window_changed", format!("context window {window}"))
         }
+        EntryContent::SettingsKept => ("settings_kept", "settings kept".to_owned()),
         EntryContent::ControlAction(action) => (
             "control_action",
             match &action.detail {

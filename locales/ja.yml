@@ -38,6 +38,7 @@ chat:
   context_compacted: "コンテキストを圧縮しました"
   control_action: "%{actor}：%{action}"
   context_window_changed: "コンテキストウィンドウを %{window} に設定しました"
+  settings_kept: "このメッセージは以前の設定のままです。バックグラウンドタスクの終了後に新しい設定へ切り替わります"
   previous_logs: "以前のログ %{count} 件"
   hide_previous_logs: "以前のログ %{count} 件を非表示"
   working: "作業中"

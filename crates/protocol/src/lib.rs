@@ -361,6 +361,7 @@ pub use wire::{
 // ForkAt names a finished turn to fork through and its checkpoint_id is
 // optional, CommandResponse::ForkedAt is gone (ForkThread answers SessionId)
 // and ForkStatus drops first_turn.
+// AgentEvent::SettingsKept and EntryContent::SettingsKept are new.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

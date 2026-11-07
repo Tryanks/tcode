@@ -83,6 +83,7 @@ impl AppState {
                     agent::RewindFailureReason::ProcessGone,
                     cx,
                 );
+                self.requeue_unconfirmed_steers(session_id, cx);
                 self.clear_approvals(session_id);
                 self.interrupt_native_subagent_work(session_id, cx);
                 self.close_orchestrator_children(session_id, cx);
@@ -384,6 +385,18 @@ impl AppState {
                     log::warn!("provider rejected unknown steer {request_id} in {session_id}");
                     return;
                 };
+                if steer
+                    .origin
+                    .is_some_and(|origin| origin != MessageOrigin::Human)
+                {
+                    // Not a person's send: it does not ask for a relay's confirmation.
+                    self.queue_automatic_turn(
+                        session_id,
+                        |session| session.requeue_steer(steer),
+                        cx,
+                    );
+                    return;
+                }
                 let previous = (cx.author.take(), cx.origin.take(), cx.delivery_key.take());
                 cx.author = steer.author;
                 cx.origin = steer.origin;
@@ -425,6 +438,7 @@ impl AppState {
             | AgentEvent::TokenUsage(_)
             | AgentEvent::ContextCompacted(_)
             | AgentEvent::ContextWindowChanged { .. }
+            | AgentEvent::SettingsKept
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::GoalUpdated { .. }
             | AgentEvent::ControlAction(_)
@@ -475,7 +489,6 @@ impl AppState {
             // The turn is over: the next queued message (if any) now goes out as
             // an ordinary turn, FIFO, one at a time.
             let mut restart = false;
-            let mut restart_deferred = false;
             // A restart would drop the answer of a rewind that stopped this turn.
             let rewinding = self.rewind_requests.contains_key(session_id);
             let is_active = if let Some(active) = self
@@ -485,21 +498,15 @@ impl AppState {
                 .filter(|active| active.meta.id == session_id)
             {
                 active.turn_in_flight = false;
-                restart = !active.queue.is_empty()
+                let restartable = active.background_task_count == 0 && !rewinding;
+                restart = restartable
+                    && !active.queue.is_empty()
                     && !active.queue_held
                     && active.launch_settings_changed_while_live();
-                restart_deferred = restart && (active.background_task_count > 0 || rewinding);
                 // A thread that moved during this turn leaves the old directory now,
                 // whether or not anything waits to go.
-                let moved = active.cwd_changed_while_live()
-                    && active.background_task_count == 0
-                    && !rewinding;
-                if restart_deferred {
-                    log::info!(
-                        "deferring settings restart for {} background task(s)",
-                        active.background_task_count
-                    );
-                } else if restart || moved {
+                let moved = restartable && active.cwd_changed_while_live();
+                if restart || moved {
                     active.shutdown_to_idle();
                 }
                 true
@@ -507,9 +514,7 @@ impl AppState {
                 false
             };
             if is_active && restart {
-                if !restart_deferred {
-                    self.ensure_started(session_id, cx);
-                }
+                self.ensure_started(session_id, cx);
             } else if is_active {
                 if self.dispatch_next_queued(session_id, cx).is_err() {
                     self.report_error(RuntimeError::ProcessGone, cx);

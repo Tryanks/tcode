@@ -200,6 +200,15 @@ pub(crate) fn context_window_changed_divider(id: &str, window: u64, cx: &App) ->
     )
 }
 
+pub(crate) fn settings_kept_divider(id: &str, cx: &App) -> AnyElement {
+    divider(
+        SharedString::from(format!("settings-kept-{id}")),
+        crate::tr!("chat.settings_kept").into_owned(),
+        cx.theme().muted_foreground,
+        cx,
+    )
+}
+
 /// Why a harness did not rewind, in the user's words.
 pub(crate) fn rewind_reason(reason: agent::RewindFailureReason, harness: &str) -> String {
     use agent::RewindFailureReason as Reason;
