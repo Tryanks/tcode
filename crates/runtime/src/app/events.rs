@@ -376,11 +376,17 @@ impl AppState {
                 }
             }
             AgentEvent::SteerAccepted { request_id } => {
-                if let Some(resident) = self.resident_mut(session_id) {
-                    resident
-                        .pending_steers
-                        .retain(|steer| steer.request_id != *request_id);
-                }
+                let reports = self
+                    .resident_mut(session_id)
+                    .and_then(|resident| {
+                        let position = resident
+                            .pending_steers
+                            .iter()
+                            .position(|steer| steer.request_id == *request_id)?;
+                        Some(resident.pending_steers.remove(position).reports)
+                    })
+                    .unwrap_or_default();
+                self.reports_handed_over(&reports, cx);
             }
             AgentEvent::SteerRejected { request_id } => {
                 // The turn ended before the provider could fold the steer in,

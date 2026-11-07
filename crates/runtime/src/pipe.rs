@@ -221,6 +221,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.pump_foreground_asks(asks, &mut cx);
             }
             state.pump_preview_requests(preview_requests, &mut cx);
+            state.resume_undelivered_reports(&mut cx);
             if services.background_startup_probes {
                 state.recover_orphaned_worktrees(&mut cx);
                 state.refresh_model_catalogs(&mut cx);

@@ -31,10 +31,21 @@ pub struct QueuedMessage {
     pub(super) context_window_changed: Option<u64>,
     /// Sent on a process that still runs settings the thread has left.
     pub(super) kept_settings: bool,
+    /// The children's reports this message carries to the lead.
+    pub(super) reports: Vec<ReportHandover>,
     /// Orchestration callbacks arriving during the same provider-start window
     /// are folded into one wake-up turn. Once that turn is live, later callbacks
     /// are steered into it instead of becoming more queued turns.
     pub(super) kind: QueuedMessageKind,
+}
+
+/// A child's report callback on its way to the lead: the child's
+/// [`tcode_core::project::ChildExpectation::undelivered`] clears once the lead's
+/// provider takes this text.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ReportHandover {
+    pub(super) child: String,
+    pub(super) text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +250,7 @@ pub(super) struct PendingSteer {
     pub(super) attachments: Vec<Attachment>,
     pub(super) author: Option<Author>,
     pub(super) origin: Option<MessageOrigin>,
+    pub(super) reports: Vec<ReportHandover>,
 }
 
 /// The settings a live process can be asked to take without a restart.
@@ -685,6 +697,7 @@ impl ActiveSession {
             options,
             context_window_changed: None,
             kept_settings: false,
+            reports: Vec::new(),
             kind: QueuedMessageKind::User,
         });
         id
@@ -697,6 +710,7 @@ impl ActiveSession {
         if let Some(message) = self.queue.last_mut() {
             message.author = steer.author;
             message.origin = steer.origin.unwrap_or(MessageOrigin::Human);
+            message.reports = steer.reports;
         }
     }
 
@@ -746,6 +760,7 @@ impl ActiveSession {
             options,
             context_window_changed: None,
             kept_settings: false,
+            reports: Vec::new(),
             kind: QueuedMessageKind::OrchestrateCallback,
         });
         id
@@ -769,6 +784,7 @@ impl ActiveSession {
             options,
             context_window_changed: None,
             kept_settings: false,
+            reports: Vec::new(),
             kind,
         });
         id

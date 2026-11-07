@@ -432,7 +432,7 @@ impl AppState {
             .is_some_and(|child| child.turn_in_flight && child.can_steer());
         // Provider channel gone: fall through so the text survives in the
         // queue for the wake-up path.
-        if can_steer && self.steer_host_message(thread_id, &message, cx) {
+        if can_steer && self.steer_host_message(thread_id, &message, Vec::new(), cx) {
             return Ok("steered");
         }
         if !can_steer {
@@ -468,7 +468,13 @@ impl AppState {
     }
 
     /// Steer text the host or a child wrote into the running turn.
-    pub(super) fn steer_host_message(&mut self, thread: &str, text: &str, cx: &mut HostCx) -> bool {
+    pub(super) fn steer_host_message(
+        &mut self,
+        thread: &str,
+        text: &str,
+        reports: Vec<ReportHandover>,
+        cx: &mut HostCx,
+    ) -> bool {
         let request_id = self.record_steer_request(thread, text, &[], cx);
         let steer = PendingSteer {
             request_id,
@@ -476,6 +482,7 @@ impl AppState {
             attachments: Vec::new(),
             author: cx.author.clone(),
             origin: cx.origin,
+            reports,
         };
         self.hand_over_steer(thread, steer, text.to_owned(), cx)
     }
@@ -570,8 +577,7 @@ impl AppState {
             );
             expectation.state = AgentReport::Reported;
             expectation.delivered_item = Some(item);
-            self.set_child_expectation(child_id, Some(expectation), cx);
-            self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+            self.deliver_report_to_parent(child_id, &parent_id, text, expectation, cx);
             return;
         }
         if !expectation.state.pending() {
@@ -609,8 +615,7 @@ impl AppState {
             usage.as_ref(),
         );
         expectation.state = AgentReport::Unreported;
-        self.set_child_expectation(child_id, Some(expectation), cx);
-        self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+        self.deliver_report_to_parent(child_id, &parent_id, text, expectation, cx);
     }
 
     /// The child can no longer deliver what it owes: its lead hears why, once.
@@ -632,8 +637,7 @@ impl AppState {
             usage.as_ref(),
         );
         expectation.state = AgentReport::Failed;
-        self.set_child_expectation(child_id, Some(expectation), cx);
-        self.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
+        self.deliver_report_to_parent(child_id, &parent_id, text, expectation, cx);
     }
 
     pub(super) fn deliver_child_approval_callback(
@@ -760,6 +764,61 @@ impl AppState {
         text: String,
         cx: &mut HostCx,
     ) {
+        self.deliver_callback(parent_id, text, None, cx);
+    }
+
+    /// A child's report, outcome or failure for its lead, kept with the child
+    /// until the lead's provider takes it.
+    fn deliver_report_to_parent(
+        &mut self,
+        child_id: &str,
+        parent_id: &str,
+        text: String,
+        mut expectation: ChildExpectation,
+        cx: &mut HostCx,
+    ) {
+        expectation.undelivered = Some(text.clone());
+        self.set_child_expectation(child_id, Some(expectation), cx);
+        self.deliver_callback(parent_id, text, Some(child_id), cx);
+    }
+
+    /// The lead's provider took these reports: the next start owes them nothing.
+    pub(super) fn reports_handed_over(&mut self, reports: &[ReportHandover], cx: &mut HostCx) {
+        for report in reports {
+            let Some(mut expectation) = self
+                .find_meta(&report.child)
+                .and_then(|meta| meta.expectation)
+                .filter(|expectation| expectation.undelivered.as_ref() == Some(&report.text))
+            else {
+                continue;
+            };
+            expectation.undelivered = None;
+            self.set_child_expectation(&report.child, Some(expectation), cx);
+        }
+    }
+
+    /// After a restart: the reports a lead's queue held when the host stopped.
+    pub fn resume_undelivered_reports(&mut self, cx: &mut HostCx) {
+        let undelivered: Vec<_> = self
+            .sessions
+            .iter()
+            .filter_map(|meta| {
+                let text = meta.expectation.as_ref()?.undelivered.clone()?;
+                Some((meta.id.clone(), meta.parent_session_id.clone()?, text))
+            })
+            .collect();
+        for (child, parent, text) in undelivered {
+            self.deliver_callback(&parent, text, Some(&child), cx);
+        }
+    }
+
+    fn deliver_callback(
+        &mut self,
+        parent_id: &str,
+        text: String,
+        report: Option<&str>,
+        cx: &mut HostCx,
+    ) {
         if !self
             .find_meta(parent_id)
             .is_some_and(|meta| meta.archived_at.is_none())
@@ -776,7 +835,14 @@ impl AppState {
         // A steered callback is already part of this turn, so persist it just
         // like a user-triggered steer before handing it to the provider. With
         // the provider channel gone it waits for the next start instead.
-        if can_steer && self.steer_host_message(parent_id, &text, cx) {
+        let reports: Vec<_> = report
+            .map(|child| ReportHandover {
+                child: child.to_owned(),
+                text: text.clone(),
+            })
+            .into_iter()
+            .collect();
+        if can_steer && self.steer_host_message(parent_id, &text, reports.clone(), cx) {
             return;
         }
 
@@ -784,7 +850,10 @@ impl AppState {
         self.queue_automatic_turn(
             parent_id,
             |parent| {
-                parent.push_or_merge_orchestrate_callback(text);
+                let id = parent.push_or_merge_orchestrate_callback(text);
+                if let Some(message) = parent.queue.iter_mut().find(|message| message.id == id) {
+                    message.reports.extend(reports);
+                }
             },
             cx,
         );

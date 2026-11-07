@@ -594,6 +594,7 @@ impl AppState {
         );
         cx.author = author;
         cx.origin = origin;
+        self.reports_handed_over(&message.reports, cx);
         if let Some(meta) = self.meta_mut(session_id) {
             meta.updated_at = now_secs();
             let meta = meta.clone();
@@ -764,6 +765,7 @@ impl AppState {
                     attachments: attachments.clone(),
                     author: cx.author.clone(),
                     origin: cx.origin,
+                    reports: Vec::new(),
                 };
                 if !self.hand_over_steer(target_id, steer, wire_text, cx) {
                     self.report_error(RuntimeError::ProcessGone, cx);
@@ -844,8 +846,12 @@ impl AppState {
     /// so nothing needs undoing. A submitted entry cannot be removed until its
     /// correlated provider acknowledgement commits it.
     pub fn drop_queued(&mut self, target_id: &str, id: u64, cx: &mut HostCx) {
-        if let Some(active) = self.resident_mut(target_id) {
-            let _ = active.take_queued(id);
+        // A report the user drops is not sent again by the next start.
+        if let Some(message) = self
+            .resident_mut(target_id)
+            .and_then(|active| active.take_queued(id))
+        {
+            self.reports_handed_over(&message.reports, cx);
         }
         self.reschedule_scheduled_wake(cx);
         self.evaluate_thread_settlement(target_id, cx);
