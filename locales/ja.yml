@@ -994,6 +994,11 @@ palette:
   select: "Enter 選択"
   close: "Esc 閉じる"
 composer:
+  stop_unanswered: "%{harness} が停止に応答しません"
+  force_terminate: "強制終了"
+  force_terminate_title: "%{harness} を強制終了しますか？"
+  force_terminate_description: "%{harness} のプロセスを終了します。実行中のターンはその場で止まり、未完了の作業は失われます。起動したバックグラウンドコマンドは単独で動き続けることがあり、その結果はこの会話に届きません。これまでの会話は残り、次のメッセージで %{harness} が再び起動します。"
+  force_terminate_cancel: "待ち続ける"
   background_tasks: "バックグラウンドタスク"
   background_stop: "このタスクを停止"
   background_stop_all: "すべて停止"

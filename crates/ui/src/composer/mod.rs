@@ -240,6 +240,9 @@ pub struct Composer {
     pending_image_loads: usize,
     queued_refill: Option<(String, u64, String)>,
     queue_drag: Option<components::queue_strip::QueueDrag>,
+    /// Redraws the composer when an unanswered stop has waited long enough to
+    /// offer the force terminate, keyed by when that stop went out.
+    stop_wait: Option<(u64, gpui::Task<()>)>,
     queue_scroll: gpui::ScrollHandle,
     /// A touch on the compact Queue button that has not lifted yet.
     steer_gesture: Option<SteerGesture>,
@@ -508,6 +511,7 @@ impl Composer {
             pending_image_loads: 0,
             queued_refill: None,
             queue_drag: None,
+            stop_wait: None,
             queue_scroll: gpui::ScrollHandle::new(),
             steer_gesture: None,
             #[cfg(feature = "voice")]
@@ -2080,6 +2084,7 @@ impl Composer {
             let panel = self.render_goal_strip(&shown.value, window, cx);
             panels.push(column_fold(&shown, panel));
         }
+        panels.extend(self.render_force_terminate(window, cx));
         panels.extend(self.render_background_strip(window, cx));
         panels.extend(self.render_queue_strip(window, cx));
         // The checkout row under the card carries the space above it; it
@@ -3605,6 +3610,62 @@ mod replica_tests {
             )
             .collect();
         assert_eq!(stops, [Some("bl5ti808a".to_owned()), None]);
+    }
+
+    /// A stop the harness has not answered for a while offers to kill its
+    /// process; a fresh one does not, and the offer itself only asks.
+    #[gpui::test]
+    fn an_unanswered_stop_offers_force_terminate_behind_a_confirmation(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, mut status) = attach(cx);
+        let session_id = Some(status.session_id.clone());
+        let topic = Topic::SessionStatus {
+            session_id: status.session_id.clone(),
+        };
+        status.activity.turn_running = true;
+        status.stopping = true;
+        status.stopping_since = Some(chrono::Utc::now().timestamp_millis() as u64);
+        replace(
+            &incoming,
+            topic.clone(),
+            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let composer =
+                cx.new(|cx| Composer::new(store.clone(), session_id.clone(), window, cx));
+            gpui_base::Root::new(composer, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        cx.update(|window, cx| _ = window.draw(cx));
+        assert!(cx.debug_bounds("force-terminate").is_none());
+
+        status.stopping_since = Some(1);
+        replace(
+            &incoming,
+            topic,
+            ServerEvent::SessionStatusReplaced(Box::new(status)),
+        );
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        cx.update(|window, cx| _ = window.draw(cx));
+        while outgoing.try_recv().is_ok() {}
+        let button = cx
+            .debug_bounds("force-terminate")
+            .expect("offered after the wait");
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| crate::overlay::dialog_open(window, cx)));
+        assert!(
+            !std::iter::from_fn(|| outgoing.try_recv().ok()).any(|line| matches!(
+                tcode_protocol::decode_client_line(&line).unwrap().payload,
+                tcode_protocol::ClientPayload::Command(
+                    tcode_protocol::Command::ForceTerminate { .. }
+                )
+            )),
+            "the process is killed only once the user confirms"
+        );
     }
 
     #[gpui::test]

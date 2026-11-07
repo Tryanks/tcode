@@ -1293,6 +1293,9 @@ impl AppState {
             delivery_in_flight: session.delivery_in_flight,
             activity: activity.session_activity(meta, Some(session)),
             stopping: session.interrupt_requested,
+            stopping_since: session
+                .interrupt_requested_at
+                .filter(|_| session.interrupt_requested),
             turn_retry: matches!(session.runtime, Runtime::Live(_))
                 .then(|| session.timeline.turn_retry.clone())
                 .flatten(),

@@ -197,6 +197,8 @@ pub struct ActiveSession {
     pub(super) turn_woken_by_control: bool,
     /// Set once an interrupt reached the provider; cleared when the turn ends.
     pub(super) interrupt_requested: bool,
+    /// When the first interrupt of that wait went out (unix ms).
+    pub(super) interrupt_requested_at: Option<u64>,
     /// A provider command (compaction, a goal change) asked for while the
     /// provider was starting; sent once it is live.
     pub(super) requested_command: Option<SessionCommand>,
@@ -292,6 +294,7 @@ impl ActiveSession {
             turn_in_flight: false,
             turn_woken_by_control: false,
             interrupt_requested: false,
+            interrupt_requested_at: None,
             requested_command: None,
             background_task_count: 0,
             background_tasks: Vec::new(),
@@ -544,6 +547,7 @@ impl ActiveSession {
         self.settings_apply_in_flight = None;
         self.turn_in_flight = false;
         self.interrupt_requested = false;
+        self.interrupt_requested_at = None;
         self.requested_command = None;
         self.background_task_count = 0;
         self.background_tasks.clear();
@@ -558,6 +562,7 @@ impl ActiveSession {
         self.settings_apply_in_flight = None;
         self.turn_in_flight = false;
         self.interrupt_requested = false;
+        self.interrupt_requested_at = None;
         self.requested_command = None;
         self.background_task_count = 0;
         self.background_tasks.clear();

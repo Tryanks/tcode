@@ -270,6 +270,7 @@ impl AppState {
                 | Command::RetryTurn { session_id, .. }
                 | Command::Interrupt { session_id }
                 | Command::StopBackgroundTask { session_id, .. }
+                | Command::ForceTerminate { session_id }
                 | Command::CompactContext { session_id }
                 | Command::SetGoal { session_id, .. }
                 | Command::ClearGoal { session_id }

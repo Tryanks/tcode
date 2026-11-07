@@ -7357,6 +7357,63 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
     assert!(next_command(&actor).is_err());
 }
 
+/// A harness that no longer answers a stop can be killed: its turn ends as
+/// interrupted, the thread stops stopping, and the next message starts it again.
+#[test]
+fn force_terminate_kills_a_harness_that_does_not_answer_a_stop() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-force-terminate-test");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, actor) = smol::channel::unbounded();
+    let mut session = live_session(ProviderKind::ClaudeCode, commands);
+    session.meta.id = "unanswering".into();
+    state.update(cx, |state, cx| {
+        state.sessions.push(session.meta.clone());
+        state.install_selected(session);
+        state.on_event(
+            "unanswering",
+            AgentEvent::TurnStarted {
+                turn_id: "hung".into(),
+            },
+            cx,
+        );
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::Interrupt {
+            session_id: "unanswering".into(),
+        },
+    );
+    assert!(matches!(
+        next_command(&actor),
+        Ok(SessionCommand::Interrupt)
+    ));
+    state.read(|state| {
+        let status = state.session_status_snapshot("unanswering").unwrap();
+        assert!(status.stopping && status.stopping_since.is_some());
+    });
+
+    state.dispatch_command(
+        cx,
+        2,
+        Command::ForceTerminate {
+            session_id: "unanswering".into(),
+        },
+    );
+    assert!(matches!(next_command(&actor), Ok(SessionCommand::Shutdown)));
+    state.read(|state| {
+        let session = state.selected_session().unwrap();
+        assert!(matches!(session.runtime, Runtime::Idle));
+        assert_eq!(
+            session.timeline.turns.last().unwrap().status,
+            Some(TurnStatus::Interrupted)
+        );
+        let status = state.session_status_snapshot("unanswering").unwrap();
+        assert!(!status.stopping && !status.activity.turn_running);
+    });
+}
+
 /// Background work takes no interrupt: Claude Code acknowledges one and the
 /// task runs on, so a thread with nothing else running must not read as stopping.
 #[test]

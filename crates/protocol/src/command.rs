@@ -582,6 +582,10 @@ pub enum Command {
     Interrupt {
         session_id: String,
     },
+    /// Kill the thread's provider process when it no longer answers a stop.
+    ForceTerminate {
+        session_id: String,
+    },
     /// Stop one piece of the thread's background work, or all of it with no
     /// `task_id`; only offered where the provider has `Caps::background_tasks`.
     StopBackgroundTask {
@@ -801,6 +805,7 @@ impl Command {
             | Self::RetryTurn { session_id, .. }
             | Self::Interrupt { session_id, .. }
             | Self::StopBackgroundTask { session_id, .. }
+            | Self::ForceTerminate { session_id }
             | Self::CompactContext { session_id, .. }
             | Self::SetGoal { session_id, .. }
             | Self::ClearGoal { session_id, .. }

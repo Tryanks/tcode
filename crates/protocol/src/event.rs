@@ -786,6 +786,9 @@ pub struct SessionStatus {
     /// An interrupt was accepted by the provider and its turn has not ended yet.
     #[serde(default)]
     pub stopping: bool,
+    /// When that first interrupt went out (unix ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping_since: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_retry: Option<agent::TurnRetry>,
     /// The harness's standing goal (Codex `thread/goal`, Claude Code `/goal`).
