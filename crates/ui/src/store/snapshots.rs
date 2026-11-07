@@ -267,6 +267,7 @@ mod tests {
             turn_retry: None,
             goal: None,
             rewind: None,
+            fork_at: None,
             queue_held: false,
             checkout_blocked: false,
             conversation_read_only: false,
@@ -384,7 +385,7 @@ mod tests {
                     resume: (index > 0).then(|| {
                         agent::ResumeCursor(serde_json::json!({"session_id":"fixture-session"}))
                     }),
-                    fork: false,
+                    fork: None,
                     binary_path: Some(binary.clone()),
                     option_selections: vec![],
                     mcp_servers: vec![],

@@ -767,9 +767,13 @@ fn space_drafts_are_bound_to_workspace_and_device_and_search_filters_before_limi
         panic!("settings snapshot")
     };
     assert!(!settings.last_visited.contains_key("a"));
-    let CommandResponse::SessionId(Some(fork)) =
-        host.command(one.clone(), Command::ForkThread { id: "a".into() })
-    else {
+    let CommandResponse::SessionId(Some(fork)) = host.command(
+        one.clone(),
+        Command::ForkThread {
+            id: "a".into(),
+            at: None,
+        },
+    ) else {
         panic!("fork response")
     };
     host.subscribe(

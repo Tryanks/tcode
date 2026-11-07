@@ -646,6 +646,81 @@ fn control_thread_guards_human_queued_messages_and_forks() {
             "a fork inherits the threads its source may read"
         );
     });
+
+    let refused = state
+        .update(cx, |state, cx| {
+            call(
+                state,
+                cx,
+                "caller",
+                change("queued", RunOp::ForkAt { turn: 3 }),
+            )
+        })
+        .unwrap();
+    assert_eq!(refused["results"][0]["outcome"], "failed");
+    state.update(cx, |state, cx| {
+        for event in [
+            AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "first".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::UserMessage {
+                    text: "first".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            AgentEvent::TurnCompleted {
+                turn_id: "t1".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+            AgentEvent::ItemCompleted(agent::ThreadItem {
+                id: "second".into(),
+                parent_item_id: None,
+                content: agent::ItemContent::UserMessage {
+                    text: "second".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            AgentEvent::TurnCheckpoint {
+                turn_id: String::new(),
+                checkpoint_id: "t2".into(),
+            },
+        ] {
+            state.record_event("queued", &event, cx);
+        }
+        let queued = state.resident_mut("queued").unwrap();
+        queued.meta.resume_cursor =
+            Some(agent::ResumeCursor(serde_json::json!({"thread_id": "t"})));
+    });
+    let forked = state
+        .update(cx, |state, cx| {
+            call(
+                state,
+                cx,
+                "caller",
+                change("queued", RunOp::ForkAt { turn: 1 }),
+            )
+        })
+        .unwrap();
+    assert_eq!(forked["results"][0]["outcome"], "applied");
+    let fork = forked["results"][0]["new_thread_id"].as_str().unwrap();
+    state.read(|state| {
+        let fork = state.find_meta(fork).unwrap();
+        assert_eq!(
+            fork.fork_origin
+                .as_ref()
+                .map(|origin| origin.thread_id.as_str()),
+            Some("queued")
+        );
+        assert_eq!(
+            fork.pending_fork,
+            Some(agent::ForkPoint::Before {
+                checkpoint_id: "t2".into()
+            })
+        );
+    });
 }
 
 /// The model references only threads inside its grant's scope; a reference across a project

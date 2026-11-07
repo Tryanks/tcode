@@ -446,7 +446,7 @@ impl WorkspaceStore {
         self.dispatch(Command::RegenerateSessionTitle { session_id });
     }
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
-        self.create_and_show(Command::ForkThread { id }, true, cx);
+        self.create_and_show(Command::ForkThread { id, at: None }, true, cx);
     }
     pub fn merge_worktree(&mut self, session_id: String) {
         self.dispatch(Command::MergeWorktree { session_id });

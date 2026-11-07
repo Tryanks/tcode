@@ -16059,6 +16059,7 @@ pub(crate) mod tests {
             turn_retry: None,
             goal: None,
             rewind: None,
+            fork_at: None,
             queue_held: false,
             checkout_blocked: false,
             conversation_read_only: false,

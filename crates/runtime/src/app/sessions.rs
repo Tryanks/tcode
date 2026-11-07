@@ -400,7 +400,7 @@ impl AppState {
                     // `move_session_by` does: Claude Code cannot resume it there.
                     meta.moved_from.get_or_insert(old_cwd);
                     meta.resume_cursor = None;
-                    meta.pending_fork = false;
+                    meta.pending_fork = None;
                 }
                 if self
                     .resident(&meta.id)
@@ -425,7 +425,7 @@ impl AppState {
                 resident.meta.project_id = meta.project_id.clone();
                 resident.meta.moved_from = meta.moved_from.clone();
                 resident.meta.resume_cursor = meta.resume_cursor.clone();
-                resident.meta.pending_fork = meta.pending_fork;
+                resident.meta.pending_fork = meta.pending_fork.clone();
             }
             self.persist_meta(&meta, cx);
         }
@@ -593,7 +593,7 @@ impl AppState {
         meta.moved_from.get_or_insert(old_cwd);
         meta.project_id = Some(project.id.clone());
         meta.resume_cursor = None;
-        meta.pending_fork = false;
+        meta.pending_fork = None;
         meta.updated_at = now_secs();
         if !by_own_turn {
             self.detach_provider_to_idle(session_id, cx);
@@ -1561,79 +1561,6 @@ impl AppState {
         } else {
             ForkAvailability::Available
         }
-    }
-
-    /// Duplicate a stored transcript and arrange for its next provider start to
-    /// fork the source's native session. The fork stays idle until its first
-    /// user turn, exactly like a cold-opened stored thread.
-    pub fn fork_thread(&mut self, id: &str, cx: &mut HostCx) -> Option<String> {
-        let resident = self.resident(id);
-        let source = resident
-            .map(|session| &session.meta)
-            .or_else(|| self.sessions.iter().find(|meta| meta.id == id))?;
-        if let Some(error) = fork_refusal(Self::session_fork_availability(source, resident)) {
-            self.report_error(RuntimeError::External(error.into()), cx);
-            return None;
-        }
-        let source = source.clone();
-
-        let mut fork = SessionMeta::new(source.provider, source.cwd.clone(), source.model.clone());
-        fork.title = format!("{} (fork)", source.title);
-        fork.option_selections = source.option_selections.clone();
-        fork.project_id = source.project_id.clone();
-        fork.acp_agent_id = source.acp_agent_id.clone();
-        fork.profile_id = source.profile_id.clone();
-        fork.resume_cursor = source.resume_cursor.clone();
-        fork.session_transfer_from = source.session_transfer_from.clone();
-        // The fork carries the source's context, so it may read what the source could.
-        fork.references = source.references.clone();
-        fork.pending_fork = true;
-        // `worktree` deliberately stays absent: it is an ownership/cleanup
-        // marker. The cwd may be shared, but the fork must not own the source's
-        // generated worktree or offer to delete it.
-
-        let fork_id = fork.id.clone();
-        self.upsert_session_in_memory(fork.clone());
-        let (completion, completed) = smol::channel::bounded(1);
-        self.enqueue_store_write(
-            StoreWrite::Fork {
-                src: source.id,
-                meta: Box::new(fork.clone()),
-                completion,
-            },
-            cx,
-        );
-        self.queue_activity_load(&fork_id, cx);
-        let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let result = completed
-                .recv()
-                .await
-                .unwrap_or_else(|_| Err("session store writer stopped".into()));
-            host_cx.enqueue(move |state, cx| match result {
-                Ok(()) => {
-                    // The fork's harness session is a new one: the parent's
-                    // restore points do not address it.
-                    state.record_event(&fork.id, &AgentEvent::CheckpointsCleared, cx);
-                    state.select_session(&fork.id, cx);
-                    state.reply_to_subscription(
-                        None,
-                        tcode_protocol::Subscription {
-                            known_index: None,
-                            topic: Topic::SessionEvents {
-                                session_id: fork.id.clone(),
-                            },
-                            after: None,
-                        },
-                        cx,
-                    );
-                }
-                Err(error) => {
-                    state.report_error(RuntimeError::PersistSession { error }, cx);
-                }
-            });
-        });
-        Some(fork_id)
     }
 
     /// Permanently delete a thread and every thread under it (the tree

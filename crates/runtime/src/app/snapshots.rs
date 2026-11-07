@@ -1297,6 +1297,7 @@ impl AppState {
                 .flatten(),
             goal: session.timeline.goal.clone(),
             rewind: self.rewind_status(session),
+            fork_at: self.fork_status(session),
             queue_held: session.queue_held && !session.queue.is_empty(),
             checkout_blocked: Self::checkout_blocked(session),
             conversation_read_only: Self::conversation_read_only(meta),

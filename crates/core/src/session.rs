@@ -573,6 +573,10 @@ pub struct Rewound {
     /// Present until a message is sent after the rewind, while the harness
     /// can undo it.
     pub undo_token: Option<String>,
+    /// The branch the rewind left, which outlives the undo: the harness keeps
+    /// it whatever is sent after ([`agent::ForkPoint::Branch`]). A fork of the
+    /// thread does not carry it, each branch being one thread's to go on in.
+    pub branch: Option<String>,
     /// The turns' metadata the cut removed, restored with the entries by an undo.
     removed_meta: Vec<TurnMeta>,
     /// A steer cut's turn and the steer restore points it had, which an
@@ -1156,6 +1160,13 @@ impl Timeline {
                     turn.steer_checkpoints.clear();
                 }
                 self.close_undo();
+                for entry in &mut self.entries {
+                    if matches!(&entry.content, EntryContent::Rewound(rewound) if rewound.branch.is_some())
+                        && let EntryContent::Rewound(rewound) = &mut Arc::make_mut(entry).content
+                    {
+                        rewound.branch = None;
+                    }
+                }
             }
             AgentEvent::RewindAvailability { unavailable } => {
                 self.rewind_unavailable = *unavailable;
@@ -1178,6 +1189,9 @@ impl Timeline {
                     files: files.clone(),
                     incomplete: incomplete.clone(),
                     undo_token: None,
+                    branch: undo_token
+                        .clone()
+                        .filter(|_| *later_history == agent::LaterHistory::Branch),
                     removed_meta: Vec::new(),
                     cut_steers: None,
                 };

@@ -29,7 +29,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Start (or resume) a session with an ACP agent.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    if opts.fork {
+    if opts.fork.is_some() {
         return Err(AgentError::Protocol(
             "session fork is not supported for this provider".into(),
         ));

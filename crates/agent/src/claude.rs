@@ -23,8 +23,8 @@
 //! writes stream-json lines to stdin. Multiple turns run over one process.
 
 use crate::{
-    LaterHistory, RewindFailure, RewindFailureReason, RewindFile, RewindFiles, RewindIncomplete,
-    RewindPreview, RewindPreviewResult,
+    ForkPoint, LaterHistory, RewindFailure, RewindFailureReason, RewindFile, RewindFiles,
+    RewindIncomplete, RewindPreview, RewindPreviewResult,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
@@ -54,6 +54,8 @@ const NATIVE_REWIND_MIN_VERSION: (u32, u32, u32) = (2, 1, 214);
 /// An older CLI that ignored the flag would restore files when the panel
 /// merely opens, so it is not asked.
 const REWIND_PREVIEW_MIN_VERSION: (u32, u32, u32) = (2, 1, 318);
+/// The release whose print mode has `--resume-session-at`.
+const FORK_AT_MIN_VERSION: (u32, u32, u32) = (2, 1, 223);
 
 /// First Claude Code release with `--append-system-prompt-file` (a hidden
 /// option in the published 2.0.33 `cli.js`; 2.0.32 lacks it).
@@ -300,6 +302,26 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let version = claude_version(opts.binary_path.as_deref(), &opts.launch_env).await;
     let native_rewind = version.is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
     let rewind_preview = version.is_some_and(|version| version >= REWIND_PREVIEW_MIN_VERSION);
+    let fork_anchor = match &opts.fork {
+        Some(ForkPoint::Before { checkpoint_id }) => {
+            if version.is_some_and(|version| version < FORK_AT_MIN_VERSION) {
+                return Err(AgentError::Provider(
+                    "forking from a message needs Claude Code 2.1.223 or later".into(),
+                ));
+            }
+            Some(fork_anchor(
+                &opts.resume,
+                config_dir(&opts.launch_env).as_deref(),
+                checkpoint_id,
+            )?)
+        }
+        Some(ForkPoint::Branch { .. }) => {
+            return Err(AgentError::Provider(
+                "Claude Code keeps no branches to go on in".into(),
+            ));
+        }
+        Some(ForkPoint::Tail) | None => None,
+    };
     // Absolute path: a bare name would be resolved against the session cwd we
     // set below, which breaks PATH lookup (see `resolve_binary`).
     let binary = crate::resolve_binary(opts.binary_path.as_deref(), "claude")?;
@@ -351,7 +373,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     if let Some(settings) = &launch.settings_json {
         cmd.arg("--settings").arg(settings);
     }
-    for arg in resume_args(&opts.resume, opts.fork) {
+    for arg in resume_args(&opts.resume, opts.fork.is_some(), fork_anchor.as_deref()) {
         cmd.arg(arg);
     }
     // Register tcode's enabled HTTP MCP servers. Tokens ride in Authorization
@@ -758,7 +780,51 @@ struct SessionConfig {
 const GOAL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
 const GOAL_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
-fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
+/// The entry the prompt `checkpoint_id` answered: where a fork before it ends,
+/// which `--resume-session-at` takes. Stream-json does not carry a message's
+/// parent, only the session's transcript does. `--resume-drops-turn`, which
+/// guards the same flag, is left out: it refuses any range holding a later
+/// prompt, so it allows a fork before the last turn alone.
+fn fork_anchor(
+    resume: &Option<ResumeCursor>,
+    claude_dir: Option<&Path>,
+    checkpoint_id: &str,
+) -> Result<String, AgentError> {
+    let session_id = resume
+        .as_ref()
+        .and_then(|cursor| cursor.str_field(&["session_id"]))
+        .ok_or_else(|| AgentError::Protocol("Claude Code fork without a session".into()))?;
+    let transcript = claude_dir
+        .and_then(|dir| crate::claude_goal::find_session_transcript(dir, session_id))
+        .ok_or_else(|| {
+            AgentError::Provider(format!("Claude Code has no transcript of {session_id}"))
+        })?;
+    let file = std::fs::File::open(&transcript)
+        .map_err(|err| AgentError::Provider(format!("{}: {err}", transcript.display())))?;
+    let entry = std::io::BufRead::lines(std::io::BufReader::new(file))
+        .map_while(Result::ok)
+        .filter(|line| line.contains(checkpoint_id))
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .find(|entry| entry.get("uuid").and_then(Value::as_str) == Some(checkpoint_id))
+        .ok_or_else(|| {
+            AgentError::Provider(format!(
+                "message {checkpoint_id} is not in Claude Code's transcript of {session_id}"
+            ))
+        })?;
+    entry
+        .get("parentUuid")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            AgentError::Provider("Claude Code cannot fork before a session's first message".into())
+        })
+}
+
+fn resume_args(
+    resume: &Option<ResumeCursor>,
+    fork: bool,
+    fork_anchor: Option<&str>,
+) -> Vec<String> {
     let Some(session_id) = resume
         .as_ref()
         .and_then(|cursor| cursor.str_field(&["session_id"]))
@@ -769,6 +835,9 @@ fn resume_args(resume: &Option<ResumeCursor>, fork: bool) -> Vec<String> {
     let mut args = vec!["--resume".into(), session_id];
     if fork {
         args.push("--fork-session".into());
+    }
+    if let Some(anchor) = fork_anchor {
+        args.extend(["--resume-session-at".into(), anchor.to_owned()]);
     }
     args
 }
@@ -4538,7 +4607,7 @@ mod tests {
                 cwd: directory.clone(),
                 model: None,
                 resume: None,
-                fork: false,
+                fork: None,
                 binary_path: Some(binary),
                 option_selections: Vec::new(),
                 mcp_servers: Vec::new(),
@@ -4600,7 +4669,7 @@ mod tests {
                     cwd: directory.clone(),
                     model: None,
                     resume: resume.clone(),
-                    fork: false,
+                    fork: None,
                     binary_path: Some(binary.clone()),
                     option_selections: Vec::new(),
                     mcp_servers: vec![crate::McpRegistration {
@@ -4647,7 +4716,7 @@ mod tests {
                 cwd: directory.clone(),
                 model: None,
                 resume: None,
-                fork: false,
+                fork: None,
                 binary_path: Some(recording_claude_at(&older, "2.0.32")),
                 option_selections: Vec::new(),
                 mcp_servers: Vec::new(),
@@ -4685,7 +4754,7 @@ mod tests {
                 cwd: directory.clone(),
                 model: None,
                 resume: None,
-                fork: false,
+                fork: None,
                 binary_path: Some(binary),
                 option_selections: vec![OptionSelection {
                     id: "permissionMode".into(),
@@ -4727,11 +4796,64 @@ mod tests {
     fn fork_flag_requires_both_request_and_resume_cursor() {
         let resume = Some(ResumeCursor(json!({"session_id": "session-source"})));
         assert_eq!(
-            resume_args(&resume, true),
+            resume_args(&resume, true, None),
             ["--resume", "session-source", "--fork-session"]
         );
-        assert_eq!(resume_args(&resume, false), ["--resume", "session-source"]);
-        assert!(resume_args(&None, true).is_empty());
+        assert_eq!(
+            resume_args(&resume, false, None),
+            ["--resume", "session-source"]
+        );
+        assert!(resume_args(&None, true, None).is_empty());
+    }
+
+    /// A fork from a message ends at the entry the message answered, which
+    /// only the transcript names (entries as 2.1.318 writes them), and leaves
+    /// out `--resume-drops-turn`, which refuses a range of several turns.
+    #[test]
+    fn a_fork_from_a_message_ends_where_its_transcript_says_it_was_sent() {
+        let dir = std::env::temp_dir().join(format!("agent-claude-fork-{}", uuid::Uuid::new_v4()));
+        let project = dir.join("projects/-work");
+        std::fs::create_dir_all(&project).unwrap();
+        let entry = |kind: &str, uuid: &str, parent: Option<&str>| {
+            json!({"type": kind, "uuid": uuid, "parentUuid": parent, "sessionId": "source",
+                "message": {"role": kind, "content": [{"type": "text", "text": "text"}]}})
+            .to_string()
+        };
+        std::fs::write(
+            project.join("source.jsonl"),
+            [
+                entry("user", "prompt-1", None),
+                entry("assistant", "reply-1", Some("prompt-1")),
+                entry("user", "prompt-2", Some("reply-1")),
+                entry("assistant", "reply-2", Some("prompt-2")),
+                entry("user", "prompt-3", Some("reply-2")),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let resume = Some(ResumeCursor(json!({"session_id": "source"})));
+
+        let anchor = fork_anchor(&resume, Some(&dir), "prompt-2").unwrap();
+        assert_eq!(
+            resume_args(&resume, true, Some(&anchor)),
+            [
+                "--resume",
+                "source",
+                "--fork-session",
+                "--resume-session-at",
+                "reply-1"
+            ]
+        );
+        for refused in ["prompt-1", "not-in-the-session"] {
+            assert!(
+                matches!(
+                    fork_anchor(&resume, Some(&dir), refused),
+                    Err(AgentError::Provider(_))
+                ),
+                "{refused}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -5074,7 +5196,7 @@ mod tests {
                 cwd: directory.clone(),
                 model: None,
                 resume: None,
-                fork: false,
+                fork: None,
                 binary_path: Some(binary),
                 option_selections: Vec::new(),
                 mcp_servers: Vec::new(),

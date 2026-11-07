@@ -9,7 +9,7 @@
 //! for Claude Code `CLAUDE_CONFIG_DIR`).
 //! Turn mode: `probe <provider> <prompt> [cwd] [acp-command args…] [flags]`.
 //! Flags are `--binary <path>`, `--model <id>`, `--option <id>=<value>`, `--effort <value>`,
-//! `--resume <cursor-json>`, `--fork`, `--leave-questions` (user-input requests
+//! `--resume <cursor-json>`, `--fork`, `--fork-at <checkpoint>`, `--leave-questions` (user-input requests
 //! stay unanswered), `--plan-feedback <words>` (the first plan decision is
 //! answered with these words instead of approved), `--mcp <name> <url> <token>` (an HTTP MCP server registered
 //! as tcode registers its own), `--linger <seconds>` (stay open until no turn has
@@ -22,10 +22,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use agent::{
-    AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, Attachment, ItemContent, LaunchEnv,
-    McpRegistration, OptionSelection, PluginContext, PluginOp, PluginScope, ProviderKind,
-    ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus, list_models,
-    list_plugins, run_plugin_op, start_session,
+    AcpAgent, AcpLaunch, AgentEvent, ApprovalDecision, Attachment, ForkPoint, ItemContent,
+    LaunchEnv, McpRegistration, OptionSelection, PluginContext, PluginOp, PluginScope,
+    ProviderKind, ResumeCursor, SessionCommand, SessionOptions, TurnOptions, TurnStatus,
+    list_models, list_plugins, run_plugin_op, start_session,
 };
 use base64::Engine as _;
 
@@ -230,7 +230,7 @@ fn main() {
     let mut effort = None;
     let mut option_selections = Vec::new();
     let mut resume = None;
-    let mut fork = false;
+    let mut fork = None;
     let mut leave_questions = false;
     let mut plan_feedback = None;
     let mut mcp_servers = Vec::new();
@@ -260,7 +260,12 @@ fn main() {
                     },
                 )));
             }
-            "--fork" => fork = true,
+            "--fork" => fork = Some(ForkPoint::Tail),
+            "--fork-at" => {
+                fork = Some(ForkPoint::Before {
+                    checkpoint_id: args.next().unwrap_or_else(|| usage()),
+                });
+            }
             "--goal" => set_mode(&mut probe_mode, ProbeMode::Goal),
             "--leave-questions" => leave_questions = true,
             "--plan-feedback" => plan_feedback = args.next(),
@@ -363,7 +368,7 @@ fn main() {
 
 struct Resumption {
     resume: Option<ResumeCursor>,
-    fork: bool,
+    fork: Option<ForkPoint>,
     leave_questions: bool,
     plan_feedback: Option<String>,
 }

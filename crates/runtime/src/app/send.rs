@@ -438,7 +438,7 @@ impl AppState {
         };
         active.shutdown_to_idle();
         active.meta.resume_cursor = None;
-        active.meta.pending_fork = false;
+        active.meta.pending_fork = None;
         let Some(transcript) = self.record_relay(target_id, pending, &text, cx) else {
             return;
         };

@@ -50,7 +50,7 @@ pub use migrate::{Migration, MigrationPhase, MigrationProgress};
 pub use moving::{ChunkWait, MovePlan, StepOutcome, StorageStep, StorageWork};
 pub use projection::ProjectionPublication;
 pub use search::{IndexedEntry, SearchMatch, SearchSource};
-pub use turn_index::TurnIndex;
+pub use turn_index::{CloneBound, TurnIndex};
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -307,6 +307,7 @@ enum Op {
     CloneEvents {
         src: String,
         dst: String,
+        bound: Option<CloneBound>,
     },
     UpsertMeta(Box<SessionMeta>),
     UpsertProject(Box<Project>),
@@ -375,6 +376,16 @@ impl Mutation {
         Self(Op::CloneEvents {
             src: src.to_owned(),
             dst: dst.to_owned(),
+            bound: None,
+        })
+    }
+
+    /// Give `dst` the rows of `src`'s log up to `bound`.
+    pub fn clone_events_to(src: &str, dst: &str, bound: CloneBound) -> Self {
+        Self(Op::CloneEvents {
+            src: src.to_owned(),
+            dst: dst.to_owned(),
+            bound: Some(bound),
         })
     }
 
@@ -1422,18 +1433,27 @@ fn apply_op(
             rows::needs_compaction(st, connection, thread.key)?;
             turn_index::forget(st, connection, &thread)?;
         }
-        Op::CloneEvents { src, dst } => {
+        Op::CloneEvents { src, dst, bound } => {
             let target = rows::ensure_thread(st, connection, dst)?;
             rows::clear(st, connection, &target)?;
             let target = rows::ensure_thread(st, connection, dst)?;
             let source = rows::thread(st, connection, src)?;
+            let end = match (&source, bound) {
+                (Some(source), Some(bound)) => {
+                    Some(turn_index::bound_row(st, connection, source, *bound)?)
+                }
+                _ => None,
+            };
             if let Some(source) = &source {
-                rows::copy(st, connection, source, &target)?;
+                rows::copy(st, connection, source, &target, end)?;
             }
             let target = rows::ensure_thread(st, connection, dst)?;
             activity::recompute(st, connection, &target)?;
             rows::needs_compaction(st, connection, target.key)?;
-            turn_index::copy(st, connection, source.as_ref(), &target)?;
+            match end {
+                Some(_) => turn_index::rebuild(st, connection, &target)?,
+                None => turn_index::copy(st, connection, source.as_ref(), &target)?,
+            }
         }
         Op::UpsertMeta(meta) => {
             let mut previous_parent = None;

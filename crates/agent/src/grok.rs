@@ -18,10 +18,10 @@ use crate::acp_session::{
 };
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalOptionKind, Attachment, Compaction,
-    ItemContent, LaterHistory, LaunchEnv, ModelSpec, ProviderKind, ResumeCursor, RewindConflict,
-    RewindConflictKind, RewindFailure, RewindFailureReason, RewindFile, RewindFiles, RewindMode,
-    RewindPreview, RewindPreviewResult, SessionCommand, SessionHandle, SessionOptions, TokenUsage,
-    TurnStatus, UserInputOption, UserInputQuestion,
+    ForkPoint, ItemContent, LaterHistory, LaunchEnv, ModelSpec, ProviderKind, ResumeCursor,
+    RewindConflict, RewindConflictKind, RewindFailure, RewindFailureReason, RewindFile,
+    RewindFiles, RewindMode, RewindPreview, RewindPreviewResult, SessionCommand, SessionHandle,
+    SessionOptions, TokenUsage, TurnStatus, UserInputOption, UserInputQuestion,
 };
 
 /// The directory Grok launched with `launch_env` keeps its configuration and
@@ -67,7 +67,7 @@ pub async fn list_models(
         cwd: std::env::temp_dir(),
         model: None,
         resume: None,
-        fork: false,
+        fork: None,
         binary_path,
         option_selections: Vec::new(),
         mcp_servers: Vec::new(),
@@ -731,10 +731,14 @@ impl Dialect for Grok {
         let resumed_session = resumed.is_some();
         let (session_id, modes, config_options) = match resumed {
             Some(source) => {
-                let session_id = if opts.fork {
-                    fork(connection, &source, opts).await?
-                } else {
-                    source
+                let session_id = match &opts.fork {
+                    Some(ForkPoint::Branch { .. }) => {
+                        return Err(AgentError::Provider(
+                            "Grok keeps no branches to go on in".into(),
+                        ));
+                    }
+                    Some(point) => fork(connection, &source, point, opts).await?,
+                    None => source,
                 };
                 let resumed = connection
                     .send_request(
@@ -1155,17 +1159,29 @@ fn text_of(content: &[acp::ToolCallContent]) -> String {
         .collect()
 }
 
-/// Fork `source` into a new Grok session in the same directory.
+/// Fork `source` into a new Grok session in the same directory, up to the
+/// prompt `point` names when it names one. Unlike `_x.ai/rewind/execute`, the
+/// fork's `targetPromptIndex` keeps the prompt it names: a fork before a prompt
+/// names the one before it.
 async fn fork(
     connection: &acp_session::Connection,
     source: &str,
+    point: &ForkPoint,
     opts: &SessionOptions,
 ) -> Result<String, AgentError> {
     let cwd = opts.cwd.to_string_lossy();
+    let mut params = json!({ "sourceSessionId": source, "sourceCwd": cwd, "newCwd": cwd });
+    if let ForkPoint::Before { checkpoint_id } = point {
+        let index = prompt_index(checkpoint_id)
+            .map_err(|failure| AgentError::Protocol(failure.detail.unwrap_or_default()))?;
+        params["targetPromptIndex"] = json!(index.checked_sub(1).ok_or_else(|| {
+            AgentError::Provider("Grok cannot fork before a session's first prompt".into())
+        })?);
+    }
     let forked = connection
         .send_request(UntypedMessage {
             method: FORK.into(),
-            params: json!({ "sourceSessionId": source, "sourceCwd": cwd, "newCwd": cwd }),
+            params,
         })
         .block_task()
         .await
@@ -1413,6 +1429,16 @@ mod tests {
             {
                 assert_eq!(live["params"], recorded["params"], "{live}");
             }
+            if recorded["method"] == FORK {
+                assert_eq!(
+                    live["params"]["sourceSessionId"],
+                    recorded["params"]["sourceSessionId"]
+                );
+                assert_eq!(
+                    live["params"]["targetPromptIndex"],
+                    recorded["params"]["targetPromptIndex"]
+                );
+            }
             if recorded["method"] == "initialize" {
                 let capabilities =
                     |message: &Value| message["params"]["clientCapabilities"].clone();
@@ -1518,7 +1544,7 @@ mod tests {
             cwd: dir,
             model: None,
             resume: None,
-            fork: false,
+            fork: None,
             option_selections: Vec::new(),
             mcp_servers: Vec::new(),
             launch_env: LaunchEnv {
@@ -1904,6 +1930,62 @@ mod tests {
             .map(Value::to_string)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// [`RESUMED_TURN`] with the session it resumes made by Grok's fork, in the
+    /// shape `xai-grok-shell/src/session/fork.rs` takes and answers.
+    fn fork_fixture() -> String {
+        let forked = RESUMED_TURN
+            .lines()
+            .find_map(|line| {
+                let record: Value = serde_json::from_str(line).unwrap();
+                (record["message"]["method"] == "session/resume")
+                    .then(|| record["message"]["params"]["sessionId"].clone())
+            })
+            .unwrap();
+        let mut lines = Vec::new();
+        for line in RESUMED_TURN.lines() {
+            let record: Value = serde_json::from_str(line).unwrap();
+            if record["message"]["method"] == "session/resume" {
+                lines.push(json!({"from": "client", "message": {"jsonrpc": "2.0", "id": "fork", "method": FORK,
+                    "params": {"sourceSessionId": "source-session", "targetPromptIndex": 2}}}).to_string());
+                lines.push(
+                    json!({"from": "agent", "message": {"jsonrpc": "2.0", "id": "fork",
+                    "result": {"newSessionId": forked}}})
+                    .to_string(),
+                );
+            }
+            lines.push(line.to_owned());
+        }
+        lines.join("\n")
+    }
+
+    /// Grok's fork keeps the prompt it names, so a fork before prompt 3 names
+    /// prompt 2, and the session goes on in the one it made.
+    #[test]
+    fn a_fork_before_a_prompt_names_the_prompt_before_it() {
+        if std::env::var_os(REPLAY_AGENT).is_some() {
+            return replay_agent(&fork_fixture());
+        }
+        let opts = SessionOptions {
+            resume: Some(ResumeCursor(json!({ "session_id": "source-session" }))),
+            fork: Some(ForkPoint::Before {
+                checkpoint_id: "3".into(),
+            }),
+            ..stand_in_options("a_fork_before_a_prompt_names_the_prompt_before_it")
+        };
+        let events = replay(opts, "Count, edit, ask and echo", |_| Next::Close);
+        let started = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::SessionStarted {
+                    provider_session_id,
+                    ..
+                } => Some(provider_session_id.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(started, "source-session");
     }
 
     /// A resumed session numbers its next prompt after the points it already

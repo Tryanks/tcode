@@ -2,7 +2,7 @@
 //! --stdio` per Tcode session, the server's `/api` routes, and its
 //! `/api/event` SSE stream.
 
-use crate::{LaterHistory, RewindFailure, RewindFailureReason, RewindFile, RewindFiles};
+use crate::{ForkPoint, LaterHistory, RewindFailure, RewindFailureReason, RewindFile, RewindFiles};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -239,12 +239,21 @@ fn open_session(http: &Http, opts: &SessionOptions) -> Result<SessionSetup, Agen
         .resume
         .as_ref()
         .and_then(|cursor| cursor.str_field(&["session_id"]));
-    let session = match resumed {
-        Some(session_id) if opts.fork => {
-            http.post(&format!("/api/session/{session_id}/fork"), &json!({}))?
+    let session = match (resumed, &opts.fork) {
+        (Some(_), Some(ForkPoint::Branch { .. })) => {
+            return Err(AgentError::Provider(
+                "OpenCode keeps no branches to go on in".into(),
+            ));
         }
-        Some(session_id) => http.get(&format!("/api/session/{session_id}"))?,
-        None => {
+        (Some(session_id), Some(point)) => {
+            let body = match point {
+                ForkPoint::Before { checkpoint_id } => json!({ "before": checkpoint_id }),
+                _ => json!({}),
+            };
+            http.post(&format!("/api/session/{session_id}/fork"), &body)?
+        }
+        (Some(session_id), None) => http.get(&format!("/api/session/{session_id}"))?,
+        (None, _) => {
             let mut body = json!({});
             if let Some(model) = &requested_model {
                 body["model"] = model.wire();
@@ -2962,7 +2971,7 @@ cat > /dev/null
             cwd: directory.clone(),
             model: Some("opencode/deepseek-v4.1-flash-free".into()),
             resume: None,
-            fork: false,
+            fork: None,
             binary_path: Some(binary),
             option_selections: vec![OptionSelection {
                 id: EFFORT.into(),
@@ -3603,6 +3612,38 @@ cat > /dev/null
             .map(|id| format!(r#","revert":{{"messageID":"{id}"}}"#))
             .unwrap_or_default();
         format!(r#"{{"data":{{"id":"ses_root"{revert}}}}}"#)
+    }
+
+    /// A fork from a message names it as `before`, and a whole fork names
+    /// nothing (`POST /api/session/{id}/fork`, 2.2.5). The session goes on in
+    /// the one the server made.
+    #[test]
+    fn a_fork_copies_what_came_before_the_message_it_names() {
+        smol::block_on(async {
+            const FORK: &str = "POST /api/session/ses_source/fork";
+            for (point, body) in [
+                (
+                    ForkPoint::Before {
+                        checkpoint_id: "msg_prompt".into(),
+                    },
+                    json!({"before": "msg_prompt"}),
+                ),
+                (ForkPoint::Tail, json!({})),
+            ] {
+                let mut fixture = fixture(Vec::new(), vec![(FORK, 200, SESSION.into())]);
+                fixture.options.resume = Some(ResumeCursor(json!({"session_id": "ses_source"})));
+                fixture.options.fork = Some(point);
+                let handle = open(fixture.options.clone()).await;
+                let fork = fixture
+                    .server
+                    .requests()
+                    .into_iter()
+                    .find(|request| request.key == FORK)
+                    .unwrap();
+                assert_eq!(fork.body, body);
+                send(&handle, SessionCommand::Shutdown).await;
+            }
+        });
     }
 
     /// A rewind stages OpenCode's revert and leaves it staged, as its /undo

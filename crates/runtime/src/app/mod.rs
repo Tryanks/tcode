@@ -254,6 +254,7 @@ mod history;
 mod original;
 mod storage_pass;
 use history::{Hydration, SessionLog};
+mod fork;
 mod lifecycle;
 mod options;
 mod orchestrate;

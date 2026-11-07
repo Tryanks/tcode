@@ -322,6 +322,7 @@ fn a_fork_offers_none_of_its_parents_restore_points() {
         1,
         Command::ForkThread {
             id: "rewound-thread".into(),
+            at: None,
         },
     );
     cx.run_until(|state| state.residents.live.keys().any(|id| id != "rewound-thread"));

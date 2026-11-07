@@ -296,6 +296,7 @@ impl AppState {
                 | Command::RewindTurn { session_id, .. }
                 | Command::PreviewRewind { session_id, .. }
                 | Command::UndoRewind { session_id, .. }
+                | Command::OpenRewoundBranch { session_id, .. }
                 | Command::AddReviewComment { session_id, .. }
                 | Command::RemoveReviewComment { session_id, .. }
                 | Command::SetTerminalHeight { session_id, .. }
@@ -312,7 +313,7 @@ impl AppState {
                 | Command::MarkSessionRead { session_id, .. }
                 | Command::MarkSessionUnread { session_id }
                 | Command::WriteRelaunchMarker { session_id, .. } => session(session_id),
-                Command::ForkThread { id } => session(id),
+                Command::ForkThread { id, .. } => session(id),
                 // A space may move its threads only between its own projects.
                 Command::MoveSession {
                     session_id,
