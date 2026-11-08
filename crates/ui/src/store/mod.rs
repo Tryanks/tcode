@@ -2774,6 +2774,12 @@ impl WorkspaceStore {
             .and_then(|activity| activity.agent)
     }
 
+    /// What a thread is doing and what keeps it going, as its host reports
+    /// them.
+    pub fn activity(&self, session_id: &str) -> Option<&tcode_protocol::SessionActivity> {
+        self.index_summary.activity.get(session_id)
+    }
+
     /// What a thread's running turn last started, as its host reports it.
     pub fn latest_activity(&self, session_id: &str) -> Option<tcode_core::session::LatestActivity> {
         self.index_summary

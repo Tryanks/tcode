@@ -23,6 +23,7 @@ const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
 /// How long a part drawn here takes to cross-fade to another of its states.
 const CHANGE: std::time::Duration = std::time::Duration::from_millis(200);
 
+mod background;
 pub(crate) mod components;
 mod empty;
 mod header;
@@ -240,6 +241,15 @@ pub struct ChatView {
     drawer_agent: Option<String>,
     /// The Agents sheet's content on phone.
     agents: Entity<crate::agents_panel::AgentsPanel>,
+    /// Whether the Agents sheet is open on phone.
+    agents_sheet_open: bool,
+    /// Whether the background list is open over the thread, where the rail
+    /// does not show it.
+    background_open: bool,
+    /// The piece of background work the timeline last pointed out, by its
+    /// call, while it stays marked.
+    background_highlight: Option<String>,
+    background_unmark: Option<gpui::Task<()>>,
     terminal_was_open: bool,
     /// The conversation's rows, in a view of their own: see
     /// [`TimelineView`]. The view never reads it as it renders but to tell
@@ -472,6 +482,10 @@ impl ChatView {
             composer,
             terminal_drawer,
             agents,
+            agents_sheet_open: false,
+            background_open: false,
+            background_highlight: None,
+            background_unmark: None,
             terminal_was_open,
             terminal_split: cx.new(|_| gpui_base::ResizableState::default()),
             terminal_glide: crate::motion::resize_glide::ResizeGlide::new(
@@ -632,6 +646,10 @@ impl ChatView {
         self.rail
             .update(cx, |rail, cx| rail.set_session(session_id.clone(), cx));
         self.session_id = session_id;
+        self.background_open = false;
+        self.background_highlight = None;
+        self.background_unmark = None;
+        self.agents_sheet_open = false;
         self.rail_stale = true;
         self.composer_drawn = false;
         // Not yet shown, for a host asking before the view next renders.
@@ -960,7 +978,8 @@ impl ChatView {
             self.rail.update(cx, |rail, _| rail.set_layout(rail_layout));
         }
         let mut side = self.render_side(window, cx);
-        let phone_strip = self.render_phone_strip(agents.as_ref(), window, cx);
+        let phone_strip =
+            self.render_phone_strip(agents.as_ref(), &self.rail_layout.cards.clone(), window, cx);
         let phone_strip_height = phone_strip.as_ref().map_or(px(0.), |(_, progress)| {
             px(crate::material::bar_height(
                 crate::material::Bar::Toolbar,

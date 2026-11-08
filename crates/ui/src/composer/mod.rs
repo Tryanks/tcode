@@ -3,6 +3,8 @@
 //! the pending-approval panel.
 
 mod components;
+
+pub(crate) use components::force_terminate::{UNANSWERED, confirm_force_terminate};
 pub(crate) mod model;
 
 pub(crate) use components::goal_strip::{

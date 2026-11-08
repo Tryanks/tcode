@@ -153,6 +153,9 @@ pub(crate) struct TimelineView {
     /// window's turn indices under it. Marked until the thread changes, the
     /// keyboard is put to use elsewhere, or a press lands inside it.
     pub(in crate::chat) highlighted_turn: Option<usize>,
+    /// The call the background list last pointed out, marked a while.
+    pub(in crate::chat) located: Option<String>,
+    located_unmark: Option<gpui::Task<()>>,
     /// Keyed `plan`, `user:<id>`, `assistant:<id>` or `error:<id>`.
     pub(in crate::chat) copied: CopiedMark,
     /// A system scrolling screenshot is driving the timeline: where it was
@@ -265,6 +268,8 @@ impl TimelineView {
             tool_texts: tools::DerivedTexts::default(),
             full_outputs: HashMap::new(),
             copy_when_loaded: None,
+            located: None,
+            located_unmark: None,
             hover: crate::motion::ListHover::new(crate::material::HOVER).in_scene(scene),
             list_scroll,
             sent_message: None,
@@ -982,6 +987,8 @@ impl TimelineView {
             self.tool_texts.clear();
             self.full_outputs.clear();
             self.highlighted_turn = None;
+            self.located = None;
+            self.located_unmark = None;
             self.session_key = session_key;
             self.painted_tail_start = None;
             self.markdown_visible_rows = tail_row_window(self.rows.len());
@@ -1168,6 +1175,62 @@ impl TimelineView {
         self.jump_to_row(row, true, cx);
         self.sync_markdown_residency(Some(row), cx);
         cx.notify();
+    }
+
+    /// Brings the call `item_id` into view and marks it a while: the row of
+    /// the background list that names it was pressed.
+    pub(in crate::chat) fn locate(&mut self, item_id: &str, cx: &mut Context<Self>) {
+        let turn = self
+            .workspace_store
+            .read(cx)
+            .with_timeline_for(
+                self.session_id.as_deref(),
+                |timeline| {
+                    timeline
+                        .entries
+                        .iter()
+                        .find(|entry| entry.id == item_id)
+                        .map(|entry| entry.turn)
+                },
+                cx,
+            )
+            .flatten();
+        let Some(turn) = turn else {
+            return;
+        };
+        // A finished turn's calls fold into its work log, which opens to
+        // show this one.
+        let segment = self.row_of_activity(turn, item_id, cx).and_then(|row| {
+            let start = self.rows.get(row)?.entry_range.start;
+            self.workspace_store
+                .read(cx)
+                .with_timeline_for(
+                    self.session_id.as_deref(),
+                    |timeline| timeline.entries.get(start).map(|entry| entry.id.clone()),
+                    cx,
+                )
+                .flatten()
+        });
+        if let Some(segment) = segment {
+            let key = crate::chat::model::work_log_key(&segment);
+            if !self.expanded.contains(&key) {
+                self.toggle_expanded(turn, &key, cx);
+            }
+        }
+        self.scroll_to_activity(turn, item_id, cx);
+        let item_id = item_id.to_owned();
+        self.located = Some(item_id.clone());
+        self.located_unmark = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            let _ = this.update(cx, |timeline, cx| {
+                if timeline.located.as_deref() == Some(item_id.as_str()) {
+                    timeline.located = None;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// Puts `row` at the top of the timeline, gliding there or at once, and
