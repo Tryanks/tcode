@@ -2700,7 +2700,40 @@ impl Mapper {
                 });
             }
         }
+        // An agent a subagent starts is reported here too, naming that
+        // subagent's task. Its call is in the subagent's transcript, which
+        // may reach us later or never, so the call is known from this event
+        // and is the subagent's from the start.
+        let spawner = msg
+            .get("parent_task_id")
+            .and_then(Value::as_str)
+            .and_then(|task_id| self.task_tools.get(task_id))
+            .filter(|_| msg.get("task_type").and_then(Value::as_str) == Some("local_agent"))
+            .cloned();
+        if let Some(spawner) = &spawner {
+            match self.tool_items.get_mut(&parent_id) {
+                Some(ToolItem::Subagent { parent_item_id, .. }) => {
+                    *parent_item_id = Some(spawner.clone());
+                }
+                Some(_) => {}
+                None => {
+                    if let Some(tool) =
+                        ToolItem::subagent(&spawned_subagent(msg), Some(spawner.clone()))
+                    {
+                        self.tool_items.insert(parent_id.clone(), tool);
+                    }
+                }
+            }
+        }
         let mut events = self.update_subagent(&parent_id, ItemStatus::InProgress, None);
+        // The launch acknowledgement that returns the call is only in the
+        // subagent's transcript, which both feeds replay; this comes once.
+        if spawner.is_some() && msg.get("is_backgrounded").and_then(Value::as_bool) == Some(true) {
+            events.push(AgentEvent::ItemBackgrounded {
+                item_id: parent_id,
+                parent_item_id: spawner,
+            });
+        }
         events.extend(self.link_background_tasks());
         events
     }
@@ -7637,6 +7670,118 @@ mod tests {
                 assert!(events.iter().any(|event| matches!(event,
                     AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall {status: ItemStatus::Completed, ..}, .. }) if id == "send"
                 )), "SendMessage must retain its own tool result");
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        });
+    }
+
+    /// A background subagent's own background Agent call is that subagent's.
+    /// Claude Code 2.1.319 reports the nested task on the lead's stream with
+    /// the launching subagent's task as `parent_task_id`, before the
+    /// subagent's transcript tail shows the call; the lead's Agents view
+    /// lists only Subagent items without a parent, so the nested one must
+    /// never be one, whether or not its metadata file is readable yet.
+    #[test]
+    fn a_subagents_background_agent_stays_with_that_subagent() {
+        smol::block_on(async {
+            let root =
+                std::env::temp_dir().join(format!("tcode-nested-bg-{}", uuid::Uuid::new_v4()));
+            let dir = root.join("projects/project/session/subagents");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("agent-a-child.meta.json"),
+                r#"{"agentType":"general-purpose","description":"Check the UI","toolUseId":"toolu_child","spawnDepth":1,"requestShape":"background","requestNonInteractive":true}"#
+            ).unwrap();
+            std::fs::write(dir.join("agent-a-nested.meta.json"),
+                r#"{"agentType":"general-purpose","description":"Visual check: headless screenshots","toolUseId":"toolu_nested","parentAgentId":"a-child","spawnDepth":2,"requestShape":"background","requestNonInteractive":true}"#
+            ).unwrap();
+            for metadata in [Some(root.as_path()), None] {
+                let mut mapper = Mapper::new();
+                let mut events = Vec::new();
+                for line in [
+                    r#"{"type":"assistant","session_id":"session","message":{"id":"msg-spawn","content":[{"type":"tool_use","id":"toolu_child","name":"Agent","input":{"description":"Check the UI","prompt":"Check the UI.","subagent_type":"general-purpose","run_in_background":true}}]}}"#,
+                    r#"{"type":"system","subtype":"task_started","session_id":"session","task_id":"a-child","tool_use_id":"toolu_child","description":"Check the UI","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"Check the UI."}"#,
+                    r#"{"type":"user","session_id":"session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_child","content":"Async agent launched successfully.\nagentId: a-child"}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"a-child"}}"#,
+                    r#"{"type":"system","subtype":"task_started","session_id":"session","task_id":"a-nested","tool_use_id":"toolu_nested","description":"Visual check: headless screenshots","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":2,"parent_task_id":"a-child","task_type":"local_agent","prompt":"Take headless screenshots."}"#,
+                    r#"{"type":"system","subtype":"background_tasks_changed","session_id":"session","tasks":[{"task_id":"a-child","task_type":"local_agent","subagent_type":"general-purpose","description":"Check the UI"},{"task_id":"a-nested","task_type":"local_agent","subagent_type":"general-purpose","description":"Visual check: headless screenshots","parent_task_id":"a-child"}]}"#,
+                ] {
+                    let msg = serde_json::from_str(line).unwrap();
+                    events.extend(mapper.on_wire_message(msg, metadata).await);
+                }
+                // The child's transcript shows the call and its launch only now.
+                let mut child = crate::subagent_tail::TranscriptMapper::new("toolu_child");
+                let mut transcript = Vec::new();
+                for line in [
+                    r#"{"type":"assistant","message":{"id":"msg-child","content":[{"type":"tool_use","id":"toolu_nested","name":"Agent","input":{"description":"Visual check: headless screenshots","prompt":"Take headless screenshots.","subagent_type":"general-purpose","run_in_background":true}}]}}"#,
+                    r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_nested","content":[{"type":"text","text":"Async agent launched successfully.\nagentId: a-nested"}]}]}}"#,
+                ] {
+                    transcript.extend(child.map_value(&serde_json::from_str(line).unwrap()));
+                }
+                events.extend(mapper.on_tail_notice(SubagentTailNotice {
+                    parent_id: "toolu_child".into(),
+                    events: transcript,
+                    model: None,
+                    stopped: false,
+                }));
+                events.extend(mapper.on_wire_message(serde_json::from_str(
+                    r#"{"type":"system","subtype":"task_notification","session_id":"session","task_id":"a-nested","tool_use_id":"toolu_nested","status":"completed","output_file":"","summary":"Screenshots taken"}"#,
+                ).unwrap(), metadata).await);
+                events.extend(mapper.on_tail_notice(SubagentTailNotice {
+                    parent_id: "toolu_nested".into(),
+                    events: Vec::new(),
+                    model: None,
+                    stopped: true,
+                }));
+
+                let snapshots: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        AgentEvent::ItemStarted(item)
+                        | AgentEvent::ItemUpdated(item)
+                        | AgentEvent::ItemCompleted(item)
+                            if matches!(item.content, ItemContent::Subagent { .. }) =>
+                        {
+                            Some(item)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let leads: Vec<_> = snapshots
+                    .iter()
+                    .filter(|item| item.parent_item_id.is_none())
+                    .map(|item| item.id.as_str())
+                    .collect();
+                assert!(
+                    leads.iter().all(|id| *id == "toolu_child"),
+                    "only the lead's own call is the lead's agent (metadata={metadata:?}): {snapshots:?}"
+                );
+                let nested: Vec<_> = snapshots
+                    .iter()
+                    .filter(|item| item.id == "toolu_nested")
+                    .collect();
+                assert!(
+                    matches!(
+                        nested.first(),
+                        Some(ThreadItem { parent_item_id: Some(parent), content: ItemContent::Subagent { description, status: ItemStatus::InProgress, .. }, .. })
+                            if parent == "toolu_child" && description == "Visual check: headless screenshots"
+                    ),
+                    "the nested agent is the subagent's from its task on (metadata={metadata:?}): {nested:?}"
+                );
+                assert!(
+                    matches!(
+                        nested.last(),
+                        Some(ThreadItem { content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }, .. })
+                            if summary == "Screenshots taken"
+                    ),
+                    "{nested:?}"
+                );
+                assert!(
+                    events.iter().any(|event| matches!(
+                        event,
+                        AgentEvent::ItemBackgrounded { item_id, parent_item_id: Some(parent) }
+                            if item_id == "toolu_nested" && parent == "toolu_child"
+                    )),
+                    "the launch returns the subagent's call: {events:?}"
+                );
             }
             std::fs::remove_dir_all(root).unwrap();
         });

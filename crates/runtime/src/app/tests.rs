@@ -900,6 +900,27 @@ fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_i
                         )
                 })
         );
+        // Launched in the background, it is the child's background work.
+        state.on_event(
+            "parent",
+            AgentEvent::ItemBackgrounded {
+                item_id: "toolu_grandchild".into(),
+                parent_item_id: Some("toolu_child".into()),
+            },
+            cx,
+        );
+        assert!(matches!(
+            state.session_status_snapshot(&child_id).unwrap().background_tasks.as_slice(),
+            [listed] if listed.task.item_id.as_deref() == Some("toolu_grandchild")
+                && listed.task.kind == agent::BackgroundKind::Agent
+        ));
+        assert!(
+            state
+                .session_status_snapshot("parent")
+                .unwrap()
+                .background_tasks
+                .is_empty()
+        );
 
         state.on_event(
             "parent",
