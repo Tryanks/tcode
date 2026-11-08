@@ -1113,6 +1113,16 @@ fn session_activity_names_what_keeps_a_thread_going_literal_json() {
     assert_eq!(decoded.task.item_id.as_deref(), Some("toolu-1"));
     assert!(!decoded.ended && !decoded.task.started_reported);
     assert_eq!(serde_json::to_value(&decoded).unwrap(), task);
+
+    let moved = json!({"type": "move_to_background",
+        "content": {"session_id": "s", "item_id": "toolu-1"}});
+    assert_eq!(
+        serde_json::from_value::<crate::Command>(moved.clone()).unwrap(),
+        crate::Command::MoveToBackground {
+            session_id: "s".into(),
+            item_id: "toolu-1".into(),
+        }
+    );
 }
 
 /// A peer built before the field sends entries without it, and every thread

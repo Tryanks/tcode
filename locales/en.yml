@@ -239,6 +239,7 @@ background:
   keeps_scheduled: "Scheduled message"
   keeps_notify: "Watching other threads: %{count}"
   in_list: "In the background list"
+  move: "Move to background"
 markdown:
   math_show_rendered: "Show rendered formula"
   math_show_source: "Show LaTeX source"

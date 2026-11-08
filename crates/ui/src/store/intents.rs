@@ -327,6 +327,13 @@ impl WorkspaceStore {
     pub fn force_terminate(&mut self, session_id: String) {
         self.dispatch(Command::ForceTerminate { session_id });
     }
+    /// Move a thread's running call into the background.
+    pub fn move_to_background(&mut self, session_id: String, item_id: String) {
+        self.dispatch(Command::MoveToBackground {
+            session_id,
+            item_id,
+        });
+    }
     /// Stop one piece of a thread's background work, or all of it with `None`.
     pub fn stop_background_task(&mut self, session_id: String, task_id: Option<String>) {
         self.dispatch(Command::StopBackgroundTask {

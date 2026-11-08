@@ -585,6 +585,12 @@ pub enum Command {
         session_id: String,
         task_id: Option<String>,
     },
+    /// Move the thread's running call `item_id` into the background; only
+    /// offered where the provider's `Caps::background` can.
+    MoveToBackground {
+        session_id: String,
+        item_id: String,
+    },
     /// Ask the provider to compact the session's context now; only offered
     /// where the provider has a native operation (`Caps::manual_compaction`).
     CompactContext {
@@ -797,6 +803,7 @@ impl Command {
             | Self::RetryTurn { session_id, .. }
             | Self::Interrupt { session_id, .. }
             | Self::StopBackgroundTask { session_id, .. }
+            | Self::MoveToBackground { session_id, .. }
             | Self::ForceTerminate { session_id }
             | Self::CompactContext { session_id, .. }
             | Self::SetGoal { session_id, .. }

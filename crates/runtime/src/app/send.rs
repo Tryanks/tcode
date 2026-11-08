@@ -946,6 +946,34 @@ impl AppState {
         Ok(())
     }
 
+    /// Move the thread's running call `item_id` into the background.
+    pub fn move_to_background(
+        &mut self,
+        target_id: &str,
+        item_id: String,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let active = self
+            .resident(target_id)
+            .ok_or_else(|| provider_command_error("The thread is not open."))?;
+        if !active
+            .meta
+            .provider
+            .caps()
+            .background
+            .is_some_and(|control| control.move_running)
+        {
+            return Err(provider_command_error(
+                "This provider cannot move a call into the background.",
+            ));
+        }
+        let Runtime::Live(commands) = &active.runtime else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        commands
+            .try_send(SessionCommand::MoveToBackground { item_id })
+            .map_err(provider_command_error)
+    }
+
     /// Stop one piece of the thread's background work, or all of it with `None`.
     pub fn stop_background_task(
         &mut self,
