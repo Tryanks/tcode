@@ -2243,13 +2243,13 @@ impl AppState {
         });
     }
 
-    /// A thread loaded with its last turn still open while nothing runs it
-    /// lost what ran it: a host restart took its process, or a native
-    /// subagent's parent left without a close. The turn ends as interrupted
-    /// when its last record was made, so it stops reporting work nothing can
-    /// finish and the next message opens a turn of its own instead of joining
-    /// it. A turn no provider started, as the one a rewind opens for what
-    /// comes next, stays open.
+    /// A thread whose last turn is still open while nothing runs it lost what
+    /// ran it: its process closed, before or across a host restart, or a
+    /// native subagent's parent left without a close. The turn ends as
+    /// interrupted when its last record was made, so it stops reporting work
+    /// nothing can finish and the next message opens a turn of its own
+    /// instead of joining it. A turn no provider started, as the one a rewind
+    /// opens for what comes next, stays open.
     pub(super) fn repair_orphaned_turn(&mut self, id: &str, cx: &mut HostCx) {
         let Some(session) = self.resident(id) else {
             return;

@@ -112,6 +112,7 @@ impl AppState {
                             parked.mark_dead();
                             !parked.queue.is_empty()
                         });
+                        self.repair_orphaned_turn(session_id, cx);
                         let is_child = self
                             .sessions
                             .iter()
@@ -142,6 +143,7 @@ impl AppState {
                 if let Some(active) = self.resident_mut(session_id) {
                     active.mark_dead();
                 }
+                self.repair_orphaned_turn(session_id, cx);
                 self.report_error(
                     RuntimeError::ProviderClosed {
                         harness: self.thread_harness_name(session_id),

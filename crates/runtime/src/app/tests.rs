@@ -14672,21 +14672,55 @@ fn storage_pass_over_a_real_data_dir() {
     drop(host);
 }
 
-/// A message sent after the host restarted, to a thread whose turn was
-/// running when it stopped, opens a turn of its own that runs from the
-/// provider taking it until the provider ends it, leaving the thread and
-/// coming back included; the turn the stopped process left ends as
-/// interrupted, when its work stopped, instead of taking the message in.
 #[test]
 fn a_message_after_a_restart_mid_turn_runs_a_turn_of_its_own() {
-    let test_store = TestStore::new("tcode-restart-mid-turn-test");
+    a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(true);
+}
+
+#[test]
+fn a_message_after_the_process_exits_mid_turn_runs_a_turn_of_its_own() {
+    a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(false);
+}
+
+/// A message sent to a thread whose turn was running when its process went
+/// away, with the host that restarted or on its own while the host ran,
+/// opens a turn of its own that runs from the provider taking it until the
+/// provider ends it, leaving the thread and coming back included; the turn
+/// the gone process left ends as interrupted instead of taking the message
+/// in, and after a restart it ends when its work stopped.
+fn a_message_after_its_process_went_mid_turn_runs_a_turn_of_its_own(restarted: bool) {
+    let test_store = TestStore::new("tcode-gone-mid-turn-test");
     let cwd = test_store.root().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, cwd, None);
     meta.id = "thread".into();
+    let task = AgentEvent::ItemCompleted(ThreadItem {
+        id: "local-user-task".into(),
+        parent_item_id: None,
+        content: ItemContent::UserMessage {
+            text: "Do the task".into(),
+            context_len: None,
+            attachments: Vec::new(),
+        },
+    });
+    let work = [
+        AgentEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+        },
+        AgentEvent::ItemStarted(ThreadItem {
+            id: "build".into(),
+            parent_item_id: None,
+            content: ItemContent::CommandExecution {
+                command: "make".into(),
+                output: String::new(),
+                exit_code: None,
+                status: ItemStatus::InProgress,
+            },
+        }),
+    ];
     // The host stopped an hour before the thread was opened again.
     let stopped = now_millis() - 3_600_000;
-    {
+    if restarted {
         let mut cx = TestAppContext::default();
         let state = cx.new_entity(TestClientState::new((*test_store).clone()));
         state.update(&mut cx, |state, cx| {
@@ -14695,34 +14729,13 @@ fn a_message_after_a_restart_mid_turn_runs_a_turn_of_its_own() {
             let mut process = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
             process.meta = meta.clone();
             state.residents.live.insert(meta.id.clone(), process);
-            for event in [
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id: "local-user-task".into(),
-                    parent_item_id: None,
-                    content: ItemContent::UserMessage {
-                        text: "Do the task".into(),
-                        context_len: None,
-                        attachments: Vec::new(),
-                    },
-                }),
-                AgentEvent::TurnStarted {
-                    turn_id: "turn-1".into(),
-                },
-                AgentEvent::ItemStarted(ThreadItem {
-                    id: "build".into(),
-                    parent_item_id: None,
-                    content: ItemContent::CommandExecution {
-                        command: "make".into(),
-                        output: String::new(),
-                        exit_code: None,
-                        status: ItemStatus::InProgress,
-                    },
-                }),
-            ] {
-                state.record_event_at("thread", stopped, &event, Vec::new(), cx);
+            for event in std::iter::once(&task).chain(&work) {
+                state.record_event_at("thread", stopped, event, Vec::new(), cx);
             }
         });
         cx.run_until_parked();
+    } else {
+        test_store.upsert_meta(&meta).unwrap();
     }
 
     let scripted = scripted_provider(ProviderKind::ClaudeCode);
@@ -14734,30 +14747,57 @@ fn a_message_after_a_restart_mid_turn_runs_a_turn_of_its_own() {
         state
     });
     state.update(&mut cx, |state, cx| state.select_session("thread", cx));
-    cx.run_until_parked();
-    state.dispatch_command(
-        &mut cx,
-        1,
-        Command::SendTurn {
-            session_id: "thread".into(),
-            text: "continue".into(),
-            attachment_paths: Vec::new(),
-        },
-    );
-    cx.run_until(|_| !commands.is_empty());
-    let Ok(SessionCommand::SendTurn { delivery_id, .. }) = commands.try_recv() else {
-        panic!("expected the message to reach the provider")
+    // The reader writes once the thread they reopened is on screen, and a
+    // provider's process takes far longer to start than the host takes to
+    // load the thread; the scripted one starts at once.
+    cx.run_until(|state| {
+        !restarted
+            || state
+                .resident("thread")
+                .is_some_and(|session| !session.timeline.turns.is_empty())
+    });
+    let send = |cx: &mut TestAppContext, id, text: &str| {
+        state.dispatch_command(
+            cx,
+            id,
+            Command::SendTurn {
+                session_id: "thread".into(),
+                text: text.into(),
+                attachment_paths: Vec::new(),
+            },
+        );
+        cx.run_until(|_| !commands.is_empty());
+        let Ok(SessionCommand::SendTurn { delivery_id, .. }) = commands.try_recv() else {
+            panic!("expected the message to reach the provider")
+        };
+        // What the Claude Code client emits once the message is written.
+        for event in [
+            AgentEvent::TurnAccepted { delivery_id },
+            AgentEvent::TurnStarted {
+                turn_id: "turn-1".into(),
+            },
+        ] {
+            scripted.events.try_send(event).unwrap();
+        }
+        cx.run_until_parked();
     };
-    // What the Claude Code client emits once the message is written.
-    for event in [
-        AgentEvent::TurnAccepted { delivery_id },
-        AgentEvent::TurnStarted {
-            turn_id: "turn-1".into(),
-        },
-    ] {
-        scripted.events.try_send(event).unwrap();
+    if !restarted {
+        send(&mut cx, 1, "Do the task");
+        for event in [
+            work[1].clone(),
+            AgentEvent::SessionClosed {
+                reason: Some("claude exited with exit status: 1".into()),
+            },
+        ] {
+            scripted.events.try_send(event).unwrap();
+        }
+        cx.run_until(|state| {
+            state
+                .resident("thread")
+                .is_some_and(|session| matches!(session.runtime, Runtime::Idle))
+        });
     }
-    cx.run_until_parked();
+    send(&mut cx, 2, "continue");
 
     // The turns a client folds from the log, and the one the host runs.
     let turns = |state: &TestEntity| {
@@ -14789,13 +14829,15 @@ fn a_message_after_a_restart_mid_turn_runs_a_turn_of_its_own() {
         Some(1),
     );
     assert_eq!(turns(&state), running);
-    let abandoned =
-        Timeline::fold_stored(&test_store.read_events("thread").unwrap()).turns[0].end_ts;
-    assert_eq!(
-        abandoned,
-        Some(stopped),
-        "the abandoned turn ends when its work stopped, not when it was reopened"
-    );
+    if restarted {
+        let abandoned =
+            Timeline::fold_stored(&test_store.read_events("thread").unwrap()).turns[0].end_ts;
+        assert_eq!(
+            abandoned,
+            Some(stopped),
+            "the abandoned turn ends when its work stopped, not when it was reopened"
+        );
+    }
     state.update(&mut cx, |state, cx| {
         state.park_active(cx);
         state.select_session("thread", cx);
