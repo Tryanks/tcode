@@ -1,8 +1,8 @@
-//! The thread's background work as one list: each piece its harness runs
-//! in the background with how long it has run, how it stands and a stop
-//! where the harness has one; then a line for each other thing that keeps
-//! the thread active, which leads to where that is managed. The rail shows
-//! it as a card; without the rail a pill opens it over the timeline, or in a
+//! The thread's background work: each piece its harness runs in the
+//! background with how long it has run, how it stands and a stop where the
+//! harness has one. On a wide window each piece is a row of the rail card
+//! that lists its kind (a command in Commands, a subagent in Agents); without
+//! the rail a pill opens them all as one list over the timeline, or in a
 //! sheet on a phone.
 
 use std::rc::Rc;
@@ -15,7 +15,6 @@ use gpui::{
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
-use tcode_core::pull_request::PullRequestKey;
 use tcode_protocol::BackgroundTaskStatus;
 
 use super::ChatView;
@@ -36,22 +35,13 @@ const ROWS: Duration = Duration::from_millis(200);
 /// highlight to come or go.
 const CHANGE: Duration = Duration::from_millis(200);
 
-/// A thread's background work and what else keeps it active, as its host
-/// reports them.
+/// A thread's background work, as its host reports it.
 #[derive(Clone, PartialEq)]
 pub(in crate::chat) struct Background {
     pub(in crate::chat) harness: String,
     /// What of it the harness stops.
     stop: BackgroundStop,
     pub(in crate::chat) rows: Vec<BackgroundTaskStatus>,
-    /// Its agents still running, which the Agents view manages.
-    agents: u32,
-    /// The pull requests a watch follows for it.
-    pull_requests: Vec<PullRequestKey>,
-    /// When its earliest scheduled message is due (unix seconds).
-    scheduled_at: Option<u64>,
-    /// Its `notify_when` watches on other threads.
-    notify: u32,
 }
 
 impl Background {
@@ -61,12 +51,6 @@ impl Background {
         if status.background_tasks.is_empty() {
             return None;
         }
-        let activity = store.activity(session_id);
-        let wakes = activity.map(|activity| activity.wakes.clone());
-        let watched = wakes
-            .as_ref()
-            .map(|wakes| wakes.pull_requests.clone())
-            .unwrap_or_default();
         Some(Self {
             harness: store.harness_name_for(Some(session_id), cx),
             stop: status
@@ -75,13 +59,6 @@ impl Background {
                 .background
                 .map_or(BackgroundStop::None, |control| control.stop),
             rows: status.background_tasks.clone(),
-            agents: activity.map_or(0, |activity| activity.background.agents),
-            pull_requests: tcode_core::pull_request::watched(store.pull_requests(session_id))
-                .filter(|link| watched.contains(&link.key.number))
-                .map(|link| link.key.clone())
-                .collect(),
-            scheduled_at: wakes.as_ref().and_then(|wakes| wakes.scheduled_at),
-            notify: wakes.as_ref().map_or(0, |wakes| wakes.notify),
         })
     }
 
@@ -111,13 +88,6 @@ impl Background {
             .iter()
             .filter(|row| row.listed && !row.ended && row.stopping_since.is_none())
             .collect()
-    }
-
-    fn keeps_active(&self) -> bool {
-        self.agents > 0
-            || !self.pull_requests.is_empty()
-            || self.scheduled_at.is_some()
-            || self.notify > 0
     }
 }
 
@@ -228,7 +198,7 @@ pub(in crate::chat) fn stop_all(
 
 /// The list: a row for each piece, folding in and out as the harness
 /// starts and ends them; then, where the harness stops none of it, that it
-/// does not; then what else keeps the thread active.
+/// does not.
 pub(in crate::chat) fn body(
     background: &Background,
     place: &Place,
@@ -267,9 +237,6 @@ pub(in crate::chat) fn body(
         .min_w_0()
         .child(rows)
         .children(no_stop)
-        .when(background.keeps_active(), |list| {
-            list.child(keeps_active(background, place, cx))
-        })
         .into_any_element()
 }
 
@@ -562,160 +529,6 @@ fn row(
     .into_any_element()
 }
 
-/// What else keeps the thread active, each a line that leads to where it is
-/// managed: its running agents, the pull requests a watch follows, its next
-/// scheduled message and its watches on other threads. Nothing of these is
-/// controlled here.
-fn keeps_active(background: &Background, place: &Place, cx: &mut App) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    let mut lines = Vec::new();
-    if background.agents > 0 {
-        lines.push(line(
-            place.clone(),
-            "agents",
-            IconName::Bot,
-            (
-                crate::tr!("background.keeps_agents", count = background.agents).into_owned(),
-                None,
-            ),
-            Some(Rc::new(
-                move |chat: &mut ChatView,
-                      window: &mut Window,
-                      cx: &mut gpui::Context<ChatView>| {
-                    chat.open_agents(window, cx)
-                },
-            )),
-            cx,
-        ));
-    }
-    for key in &background.pull_requests {
-        let open = key.clone();
-        lines.push(line(
-            place.clone(),
-            "watch",
-            IconName::Eye,
-            (
-                crate::tr!("background.keeps_watch", number = key.number).into_owned(),
-                None,
-            ),
-            Some(Rc::new(
-                move |chat: &mut ChatView,
-                      window: &mut Window,
-                      cx: &mut gpui::Context<ChatView>| {
-                    chat.open_watched_pull_request(open.clone(), window, cx)
-                },
-            )),
-            cx,
-        ));
-    }
-    if let Some(at) = background.scheduled_at {
-        let countdown = crate::widgets::clock::Clock::until(
-            SharedString::from(format!("{}-bg-scheduled", place.key)),
-            at,
-            |left| crate::time::format_countdown(left / 1000).into(),
-        );
-        lines.push(line(
-            place.clone(),
-            "scheduled",
-            IconName::Hourglass,
-            (
-                crate::tr!("background.keeps_scheduled").into_owned(),
-                Some(countdown.into_any_element()),
-            ),
-            None,
-            cx,
-        ));
-    }
-    if background.notify > 0 {
-        lines.push(line(
-            place.clone(),
-            "notify",
-            IconName::Bell,
-            (
-                crate::tr!("background.keeps_notify", count = background.notify).into_owned(),
-                None,
-            ),
-            Some(Rc::new(
-                |chat: &mut ChatView, window: &mut Window, cx: &mut gpui::Context<ChatView>| {
-                    chat.locate_notify_watch(window, cx)
-                },
-            )),
-            cx,
-        ));
-    }
-    v_flex()
-        .w_full()
-        .min_w_0()
-        .mt_1()
-        .pt_1()
-        .border_t_1()
-        .border_color(cx.theme().border)
-        .child(
-            div()
-                .px_1()
-                .py_0p5()
-                .text_secondary(place.touch, cx)
-                .text_color(muted)
-                .child(crate::tr!("background.keeps")),
-        )
-        .children(lines)
-        .into_any_element()
-}
-
-type Go = Rc<dyn Fn(&mut ChatView, &mut Window, &mut gpui::Context<ChatView>)>;
-
-fn line(
-    place: Place,
-    what: &'static str,
-    icon: IconName,
-    (label, extra): (String, Option<AnyElement>),
-    go: Option<Go>,
-    cx: &App,
-) -> AnyElement {
-    let muted = cx.theme().muted_foreground;
-    let radius = crate::material::radius_card(cx);
-    let row = h_flex()
-        .w_full()
-        .min_w_0()
-        .gap_2()
-        .px_1()
-        .py_0p5()
-        .items_center()
-        .when(place.touch, |row| row.min_h(px(44.)))
-        .text_secondary(place.touch, cx)
-        .text_color(muted)
-        .child(Icon::new(icon).small().flex_none())
-        .child(
-            h_flex()
-                .flex_1()
-                .min_w_0()
-                .gap_1()
-                .overflow_hidden()
-                .child(crate::widgets::fade_text(SharedString::from(label.clone())))
-                .children(extra),
-        );
-    let Some(go) = go else {
-        return row.into_any_element();
-    };
-    crate::material::accessible_clickable(
-        row.relative()
-            .rounded(radius)
-            .child(crate::material::row_hover(radius, cx))
-            .child(Icon::new(IconName::ChevronRight).small().flex_none()),
-        SharedString::from(format!("{}-bg-keeps-{what}", place.key)),
-        Role::Button,
-        label,
-        cx,
-    )
-    .debug_selector(move || format!("background-keeps-{what}"))
-    .cursor_pointer()
-    .on_click(move |_, window, cx| {
-        let go = go.clone();
-        place.go(window, cx, move |chat, window, cx| go(chat, window, cx));
-    })
-    .into_any_element()
-}
-
 /// How long a piece pointed out from the timeline stays marked.
 const POINTED_OUT: Duration = Duration::from_secs(4);
 
@@ -805,22 +618,6 @@ impl ChatView {
             .update(cx, |timeline, cx| timeline.locate(item_id, cx));
     }
 
-    /// The thread's agents, where they are managed: the Agents tab beside
-    /// the thread, or the sheet on a phone.
-    pub(in crate::chat) fn open_agents(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) {
-        let Some(session_id) = self.session_id.clone() else {
-            return;
-        };
-        if self.window_state.read(cx).compact {
-            self.agents_sheet_open = true;
-            cx.notify();
-        } else {
-            self.workspace_store.update(cx, |store, cx| {
-                store.open_tab_for(&session_id, tcode_core::ui::RightTab::Agents, cx)
-            });
-        }
-    }
-
     /// A subagent's own transcript, beside the thread or over it.
     pub(in crate::chat) fn open_subagent(
         &mut self,
@@ -839,65 +636,6 @@ impl ChatView {
         window.defer(cx, move |window, cx| {
             crate::agents_panel::open_agent(&store, mirror, host, None, window, cx)
         });
-    }
-
-    /// The watched pull request `key`, where its watch is managed.
-    pub(in crate::chat) fn open_watched_pull_request(
-        &mut self,
-        key: PullRequestKey,
-        window: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        let Some(session_id) = self.session_id.clone() else {
-            return;
-        };
-        if !self.window_state.read(cx).compact {
-            self.workspace_store.update(cx, |store, cx| {
-                store.open_tab_for(&session_id, tcode_core::ui::RightTab::PullRequests, cx)
-            });
-        }
-        crate::pull_requests::open_pull_request(
-            &self.workspace_store,
-            &self.window_state,
-            session_id,
-            key,
-            window,
-            cx,
-        );
-    }
-
-    /// The latest call through which the thread asked to be told of other
-    /// threads, in the timeline.
-    pub(in crate::chat) fn locate_notify_watch(
-        &mut self,
-        window: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        let call =
-            self.workspace_store
-                .read(cx)
-                .with_entries_for(
-                    self.session_id.as_deref(),
-                    |timeline| {
-                        timeline.entries.iter().rev().find_map(|entry| {
-                            let tcode_core::session::EntryContent::Item(
-                                agent::ItemContent::ToolCall { name, .. },
-                            ) = &entry.content
-                            else {
-                                return None;
-                            };
-                            let name = agent::ToolName::parse(name);
-                            (name.tool == "notify_when"
-                                && name.server == Some(agent::McpRegistration::SERVER_NAME_CONTROL))
-                            .then(|| entry.id.clone())
-                        })
-                    },
-                    cx,
-                )
-                .flatten();
-        if let Some(call) = call {
-            self.locate_item(&call, window, cx);
-        }
     }
 }
 
