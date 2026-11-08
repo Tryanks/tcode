@@ -955,7 +955,13 @@ impl AppState {
         let active = self
             .resident(target_id)
             .ok_or_else(|| provider_command_error("The thread is not open."))?;
-        if !active.meta.provider.caps().background_tasks {
+        if !active
+            .meta
+            .provider
+            .caps()
+            .background
+            .is_some_and(|control| control.stop.stops())
+        {
             return Err(provider_command_error(
                 "This provider cannot stop background work.",
             ));

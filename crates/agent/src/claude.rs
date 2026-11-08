@@ -1404,6 +1404,11 @@ async fn handle_command(
             }
             ControlFlow::Continue(())
         }
+        SessionCommand::MoveToBackground { item_id } => {
+            let request = mapper.move_to_background_request(item_id);
+            let _ = write_line(stdin, &request).await;
+            ControlFlow::Continue(())
+        }
         SessionCommand::ApplySettings {
             model,
             option_selections,
@@ -1989,6 +1994,9 @@ pub(crate) struct Mapper {
     /// Live permission-mode requests awaiting Claude's correlated response.
     /// A successful stdin write is not proof that the CLI applied the mode.
     pending_permission_modes: HashMap<String, String>,
+    /// `background_tasks` requests awaiting Claude's answer, by control
+    /// request_id: a refusal is the only word of one that did nothing.
+    pending_background_moves: HashSet<String>,
     /// [`SessionCommand::ReadAccountUsage`] askers by control request_id.
     pending_usage_reads: HashMap<String, smol::channel::Sender<Result<Value, String>>>,
     outgoing: Vec<Value>,
@@ -2062,6 +2070,7 @@ impl Mapper {
             applied_permission_mode,
             auto_unavailable: None,
             pending_permission_modes: HashMap::new(),
+            pending_background_moves: HashSet::new(),
             pending_usage_reads: HashMap::new(),
             outgoing: Vec::new(),
             request_usage: json!({}),
@@ -2239,6 +2248,34 @@ impl Mapper {
                 self.control_request(json!({ "subtype": "stop_task", "task_id": task_id }))
             })
             .collect()
+    }
+
+    /// Ctrl+B for the call `item_id`: Claude returns it to the model and
+    /// its command or agent goes on as a background task.
+    fn move_to_background_request(&mut self, item_id: String) -> Value {
+        let message =
+            self.control_request(json!({ "subtype": "background_tasks", "tool_use_id": item_id }));
+        if let Some(request_id) = message.get("request_id").and_then(Value::as_str) {
+            self.pending_background_moves.insert(request_id.to_owned());
+        }
+        message
+    }
+
+    /// The list again, once the call is known of a listed task that had
+    /// none: Claude lists a task before it says which call started it.
+    fn link_background_tasks(&mut self) -> Option<AgentEvent> {
+        let mut linked = false;
+        for task in &mut self.background_tasks {
+            if task.item_id.is_none()
+                && let Some(item_id) = self.task_tools.get(&task.id)
+            {
+                task.item_id = Some(item_id.clone());
+                linked = true;
+            }
+        }
+        linked.then(|| AgentEvent::BackgroundTaskList {
+            tasks: self.background_tasks.clone(),
+        })
     }
 
     /// The first request bringing the process to `target`, `None` when it runs
@@ -2663,7 +2700,9 @@ impl Mapper {
                 });
             }
         }
-        self.update_subagent(&parent_id, ItemStatus::InProgress, None)
+        let mut events = self.update_subagent(&parent_id, ItemStatus::InProgress, None);
+        events.extend(self.link_background_tasks());
+        events
     }
 
     fn on_background_tasks_changed(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -2683,7 +2722,14 @@ impl Mapper {
                         .and_then(Value::as_str)
                         .unwrap_or(id)
                         .to_owned(),
+                    kind: match task.get("task_type").and_then(Value::as_str) {
+                        Some("local_bash") => crate::BackgroundKind::Command,
+                        Some("local_agent" | "remote_agent") => crate::BackgroundKind::Agent,
+                        _ => crate::BackgroundKind::Other,
+                    },
+                    item_id: self.task_tools.get(id).cloned(),
                     started_at: known.map_or(now, |known| known.started_at),
+                    started_reported: false,
                 })
             })
             .collect::<Vec<_>>();
@@ -3383,6 +3429,7 @@ impl Mapper {
                 {
                     self.task_tools
                         .insert(agent_id.to_owned(), tool_use_id.clone());
+                    out.extend(self.link_background_tasks());
                 }
                 let ToolItem::Subagent { parent_item_id, .. } = &item else {
                     unreachable!("matched as a subagent");
@@ -3409,6 +3456,16 @@ impl Mapper {
             };
             let mut parent_item_id = None;
             let backgrounded = launched_in_background && matches!(item, ToolItem::Command { .. });
+            if let Some(task_id) = msg
+                .pointer("/tool_use_result/backgroundTaskId")
+                .and_then(Value::as_str)
+                .filter(|_| backgrounded)
+            {
+                self.task_tools
+                    .entry(task_id.to_owned())
+                    .or_insert_with(|| tool_use_id.clone());
+                out.extend(self.link_background_tasks());
+            }
             let content = match item {
                 ToolItem::Command { command, .. } if backgrounded => {
                     self.tool_items.insert(
@@ -3498,6 +3555,23 @@ impl Mapper {
         if let Some(reply) = self.pending_usage_reads.remove(request_id) {
             let _ = reply.try_send(usage_response(response).map_err(|error| error.to_string()));
             return Vec::new();
+        }
+        if self.pending_background_moves.remove(request_id) {
+            let moved = response.get("subtype").and_then(Value::as_str) == Some("success")
+                && response
+                    .pointer("/response/backgrounded")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+            if moved {
+                return Vec::new();
+            }
+            let error = response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("the call is no longer running in the foreground");
+            return vec![AgentEvent::Warning {
+                message: format!("claude: could not move the call to the background: {error}"),
+            }];
         }
         if self
             .pending_settings
@@ -6374,7 +6448,15 @@ mod tests {
             &mut m,
             r#"{"type":"system","subtype":"task_started","task_id":"bg-1","tool_use_id":"toolu-bg","description":"Launch background sleep command","task_type":"local_bash"}"#,
         );
-        assert!(task_started.is_empty());
+        // Claude lists the task before it names the call that started it;
+        // the list follows once it has.
+        assert!(matches!(
+            task_started.as_slice(),
+            [AgentEvent::BackgroundTaskList { tasks }]
+                if tasks.len() == 1
+                    && tasks[0].item_id.as_deref() == Some("toolu-bg")
+                    && tasks[0].kind == crate::BackgroundKind::Command
+        ));
         let running = feed(
             &mut m,
             r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu-bg","type":"tool_result","content":"Command running in background with ID: bg-1","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"backgroundTaskId":"bg-1"}}"#,
@@ -6660,6 +6742,7 @@ mod tests {
         ));
         assert_eq!(first[0].id, "a3138d90bec23d1c7");
         assert_eq!(first[0].name, "wait helper");
+        assert_eq!(first[0].kind, crate::BackgroundKind::Agent);
         let second = tasks(&feed(
             &mut m,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a3138d90bec23d1c7","run_id":"0mw6umb2h-0212cc6f","task_type":"local_agent","subagent_type":"general-purpose","description":"wait helper"},{"task_id":"bxg56veie","run_id":"0mw6umbct-82b1a926","task_type":"local_bash","description":"wait","parent_task_id":"a3138d90bec23d1c7"}]}"#,
@@ -6687,6 +6770,32 @@ mod tests {
         assert!(
             matches!(drained.as_slice(), [AgentEvent::BackgroundTaskList { tasks }] if tasks.is_empty())
         );
+    }
+
+    /// Moving a call to the background is Ctrl+B for that call: the
+    /// `background_tasks` control request naming it (Claude Code 2.1.319's
+    /// SDK schema). A refusal is the only word of one that did nothing.
+    #[test]
+    fn a_call_moves_to_the_background_and_a_refusal_says_so() {
+        let mut m = Mapper::new();
+        let request = m.move_to_background_request("toolu-bash".into());
+        assert_eq!(
+            request["request"],
+            json!({"subtype": "background_tasks", "tool_use_id": "toolu-bash"})
+        );
+        let id = request["request_id"].as_str().unwrap().to_owned();
+        let refused = m.on_message(json!({"type":"control_response","response":{
+            "subtype":"success","request_id": id,"response":{"backgrounded":false}}}));
+        assert!(
+            matches!(refused.as_slice(), [AgentEvent::Warning { .. }]),
+            "{refused:?}"
+        );
+
+        let request = m.move_to_background_request("toolu-agent".into());
+        let id = request["request_id"].as_str().unwrap().to_owned();
+        let moved = m.on_message(json!({"type":"control_response","response":{
+            "subtype":"success","request_id": id,"response":{"backgrounded":true}}}));
+        assert!(moved.is_empty(), "{moved:?}");
     }
 
     /// A task stopped through `stop_task` starts no follow-up turn: the CLI

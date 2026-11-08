@@ -1229,6 +1229,7 @@ impl SessionActor for Actor {
                 json!({}),
                 PendingRequest::AccountUsage(reply),
             ),
+            SessionCommand::MoveToBackground { .. } => Ok(()),
             SessionCommand::Shutdown => Ok(()),
         }
     }
@@ -1985,7 +1986,13 @@ impl Actor {
                         .and_then(Value::as_str)
                         .unwrap_or(id)
                         .to_owned(),
+                    kind: crate::BackgroundKind::Command,
+                    item_id: terminal
+                        .get("itemId")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                     started_at: known.map_or(now, |known| known.started_at),
+                    started_reported: false,
                 })
             })
             .collect();
@@ -1993,6 +2000,27 @@ impl Actor {
             .then(|| std::time::Instant::now() + BACKGROUND_TERMINAL_READ_INTERVAL);
         if tasks == self.background_terminals {
             return;
+        }
+        // Codex returns a command's call once it yields and says nothing of
+        // its terminal going on but this list: the call it names went on in
+        // the background.
+        let backgrounded: Vec<String> = tasks
+            .iter()
+            .filter_map(|task| task.item_id.clone())
+            .filter(|item_id| {
+                !self
+                    .background_terminals
+                    .iter()
+                    .any(|known| known.item_id.as_ref() == Some(item_id))
+            })
+            .collect();
+        for item_id in backgrounded {
+            self.events
+                .emit(AgentEvent::ItemBackgrounded {
+                    item_id,
+                    parent_item_id: None,
+                })
+                .await;
         }
         self.background_terminals = tasks.clone();
         let count = tasks.len();
@@ -6047,13 +6075,25 @@ mod tests {
                 actor.background_terminal_read.is_some(),
                 "it keeps watching"
             );
+            assert!(
+                matches!(
+                    events.try_recv(),
+                    Ok(AgentEvent::ItemBackgrounded { item_id, parent_item_id: None })
+                        if item_id == "call_1"
+                ),
+                "the call that started it went on in the background"
+            );
             let listed = events.try_recv().unwrap();
             let AgentEvent::BackgroundTaskList { tasks } = &listed else {
                 panic!("expected the list: {listed:?}");
             };
             assert_eq!(
-                (tasks[0].id.as_str(), tasks[0].name.as_str()),
-                ("98412", "sleep 40")
+                (
+                    tasks[0].id.as_str(),
+                    tasks[0].name.as_str(),
+                    tasks[0].item_id.as_deref()
+                ),
+                ("98412", "sleep 40", Some("call_1"))
             );
             assert!(matches!(
                 events.try_recv(),

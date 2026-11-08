@@ -667,6 +667,7 @@ impl SessionActor for OpenCodeActor {
             }
             SessionCommand::RetryTurn { .. }
             | SessionCommand::StopBackgroundTask { .. }
+            | SessionCommand::MoveToBackground { .. }
             | SessionCommand::SetGoal { .. }
             | SessionCommand::ClearGoal
             | SessionCommand::ReadAccountUsage { .. }
