@@ -100,6 +100,16 @@ fn create_new_project_creates_and_registers_a_host_directory() {
         patch: tcode_core::settings::SettingsPatch::NewProjectDir(Some("~/Work".into())),
     })
     .unwrap();
+    // A folder the host cannot place is refused, and the last one stays:
+    // neither a relative path nor another user's home is a folder here.
+    for dir in ["Elsewhere", "~someone/Work"] {
+        let error = link
+            .command_blocking(Command::PatchSettings {
+                patch: tcode_core::settings::SettingsPatch::NewProjectDir(Some(dir.into())),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_settings", "dir: {dir:?}");
+    }
     link.command_blocking(Command::CreateNewProject {
         name: "elsewhere".into(),
         parent: None,
