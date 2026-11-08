@@ -153,9 +153,21 @@ Platform prerequisites:
 
 - **macOS** — Xcode command-line tools.
 - **Windows** — MSVC toolchain.
-- **Linux** — a Vulkan driver plus the usual GPUI build deps (`libxkbcommon-dev`,
-  `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`)
-  and WebKitGTK for the embedded preview (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`).
+- **Linux** — a Vulkan driver plus the usual GPUI build deps and WebKitGTK 4.1
+  with GTK 3 for the embedded preview. The Debian list is the one CI installs:
+
+  ```sh
+  # Debian / Ubuntu
+  sudo apt install build-essential clang cmake pkg-config libssl-dev libzstd-dev \
+    libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
+    libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev \
+    libwebkit2gtk-4.1-dev libgtk-3-dev
+  # Arch Linux (headers ship with the libraries)
+  sudo pacman -S --needed base-devel clang cmake pkgconf openssl zstd alsa-lib \
+    fontconfig wayland libxkbcommon libxkbcommon-x11 libx11 libxcb mesa \
+    vulkan-icd-loader vulkan-headers webkit2gtk-4.1 gtk3
+  ```
+
   On a Wayland session the preview runs GTK on a nested compositor of its
   own (experimental); `WAYLAND_DISPLAY= cargo run` embeds it into an X11
   window through XWayland instead.
