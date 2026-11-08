@@ -744,7 +744,6 @@ struct Actor {
 struct CodexSubagent {
     agent_type: String,
     description: String,
-    child_item_id: String,
     model: Option<String>,
     effort: Option<String>,
 }
@@ -2821,26 +2820,10 @@ impl Actor {
                             agent_type: subagent.agent_type.clone(),
                             description: subagent.description.clone(),
                             status,
-                            summary: summary.clone(),
+                            summary,
                             model: subagent.model.clone(),
                             effort: subagent.effort.clone(),
                         };
-                        if method == "item/completed" {
-                            self.events
-                                .emit(AgentEvent::ItemCompleted(ThreadItem {
-                                    id: subagent.child_item_id.clone(),
-                                    parent_item_id: Some(item.id.clone()),
-                                    content: ItemContent::Subagent {
-                                        agent_type: subagent.agent_type.clone(),
-                                        description: "child thread".into(),
-                                        status,
-                                        summary,
-                                        model: subagent.model.clone(),
-                                        effort: subagent.effort.clone(),
-                                    },
-                                }))
-                                .await;
-                        }
                     }
                     self.items.insert(item.id.clone(), item.clone());
                     let event = match method {
@@ -3036,7 +3019,6 @@ impl Actor {
         };
         let model = override_str("model");
         let effort = override_str("reasoning_effort").or_else(|| override_str("reasoningEffort"));
-        let child_item_id = format!("{parent_id}:{thread_id}");
         let needs_metadata = !self.subagents.contains_key(&parent_id);
         let subagent = self
             .subagents
@@ -3044,7 +3026,6 @@ impl Actor {
             .or_insert_with(|| CodexSubagent {
                 agent_type,
                 description,
-                child_item_id,
                 model,
                 effort,
             })
@@ -3080,30 +3061,6 @@ impl Actor {
             AgentEvent::ItemCompleted(parent)
         };
         self.events.emit(parent_event).await;
-
-        let child = ThreadItem {
-            id: subagent.child_item_id,
-            parent_item_id: Some(parent_id.clone()),
-            content: ItemContent::Subagent {
-                agent_type: subagent.agent_type,
-                description: match kind {
-                    "interacted" => "interacted with parent".into(),
-                    "completed" => "child thread completed".into(),
-                    "interrupted" => "child thread interrupted".into(),
-                    _ => "child thread started".into(),
-                },
-                status,
-                summary: None,
-                model: subagent.model,
-                effort: subagent.effort,
-            },
-        };
-        let event = match kind {
-            "started" => AgentEvent::ItemStarted(child),
-            "completed" | "interrupted" => AgentEvent::ItemCompleted(child),
-            _ => AgentEvent::ItemUpdated(child),
-        };
-        self.events.emit(event).await;
         if needs_metadata
             && let Err(error) = self.request(
                 "thread/read",
@@ -3135,29 +3092,11 @@ impl Actor {
         };
         model.clone_from(&subagent.model);
         effort.clone_from(&subagent.effort);
-        let mut child = parent.clone();
-        child.id.clone_from(&subagent.child_item_id);
-        child.parent_item_id = Some(parent_id.to_owned());
-        if let ItemContent::Subagent {
-            description,
-            status,
-            ..
-        } = &mut child.content
-        {
-            *description = match status {
-                ItemStatus::InProgress => "child thread started",
-                ItemStatus::Completed => "child thread completed",
-                ItemStatus::Interrupted => "child thread interrupted",
-                _ => "child thread",
-            }
-            .into();
-        }
-        // A metadata reply can follow completion. Update both labels without
+        // A metadata reply can follow completion. Update the label without
         // reopening the child or replacing its terminal status and summary.
         self.events
             .emit(AgentEvent::ItemUpdated(parent.clone()))
             .await;
-        self.events.emit(AgentEvent::ItemUpdated(child)).await;
     }
 
     /// Deliver `request_user_input_async` answers into the running turn. The
@@ -6503,14 +6442,6 @@ mod tests {
                     content: ItemContent::Subagent { status: ItemStatus::InProgress, .. }
                 }) if id == "call_spawn"
             ));
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemStarted(ThreadItem {
-                    id,
-                    parent_item_id: Some(parent),
-                    content: ItemContent::Subagent { status: ItemStatus::InProgress, .. }
-                }) if id == "call_spawn:thread_child" && parent == "call_spawn"
-            ));
 
             actor
                 .handle_notification(
@@ -6527,14 +6458,10 @@ mod tests {
                 .await;
             assert!(matches!(
                 events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
-                    if parent == "call_spawn"
-            ));
-            assert!(matches!(
-                events.recv().await.unwrap(),
                 AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, .. }, .. })
                     if id == "call_spawn"
             ));
+            assert!(events.try_recv().is_err());
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
@@ -6566,19 +6493,15 @@ mod tests {
                         }}),
                     )
                     .await;
-                for _ in 0..2 {
-                    let event = events.try_recv().unwrap();
-                    let (AgentEvent::ItemStarted(item)
-                    | AgentEvent::ItemUpdated(item)
-                    | AgentEvent::ItemCompleted(item)) = event
-                    else {
-                        panic!("expected subagent snapshot");
-                    };
-                    assert!(
-                        matches!(item.content, ItemContent::Subagent { status, .. } if status == expected),
-                        "{kind} must preserve the child's actual work state: {item:?}"
-                    );
-                }
+                let event = events.try_recv().unwrap();
+                let (AgentEvent::ItemUpdated(item) | AgentEvent::ItemCompleted(item)) = event
+                else {
+                    panic!("expected subagent snapshot");
+                };
+                assert!(
+                    matches!(item.content, ItemContent::Subagent { status, .. } if status == expected),
+                    "{kind} must preserve the child's actual work state: {item:?}"
+                );
                 assert!(events.try_recv().is_err());
             }
             let _ = actor.child.kill();
@@ -6655,30 +6578,21 @@ mod tests {
                 actor
                     .handle_notification("item/started", &activity("started"))
                     .await;
-                for _ in 0..2 {
-                    let event = events.try_recv().unwrap();
-                    assert!(
-                        matches!(
-                            event,
-                            AgentEvent::ItemUpdated(ThreadItem {
-                                content: ItemContent::Subagent {
-                                    model: None,
-                                    effort: None,
-                                    ..
-                                },
+                let event = events.try_recv().unwrap();
+                assert!(
+                    matches!(
+                        event,
+                        AgentEvent::ItemUpdated(ThreadItem {
+                            content: ItemContent::Subagent {
+                                model: None,
+                                effort: None,
                                 ..
-                            }) | AgentEvent::ItemStarted(ThreadItem {
-                                content: ItemContent::Subagent {
-                                    model: None,
-                                    effort: None,
-                                    ..
-                                },
-                                ..
-                            })
-                        ),
-                        "unknown child metadata must not borrow the parent's model: {event:?}"
-                    );
-                }
+                            },
+                            ..
+                        })
+                    ),
+                    "unknown child metadata must not borrow the parent's model: {event:?}"
+                );
                 let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
                     panic!("expected thread metadata request");
                 };
@@ -6702,29 +6616,26 @@ mod tests {
                         .to_string(),
                     )
                     .await;
-                for (id, parent) in [("spawn", None), ("spawn:child", Some("spawn"))] {
-                    let AgentEvent::ItemUpdated(item) = events.try_recv().unwrap() else {
-                        panic!("expected label update");
-                    };
-                    assert_eq!(item.id, id);
-                    assert_eq!(item.parent_item_id.as_deref(), parent);
-                    assert!(matches!(item.content,
-                        ItemContent::Subagent { model: Some(model), effort: Some(effort), status, .. }
-                        if model == "gpt-5.6-sol" && effort == "high" && status == expected_status
-                    ));
-                }
+                let AgentEvent::ItemUpdated(item) = events.try_recv().unwrap() else {
+                    panic!("expected label update");
+                };
+                assert_eq!(item.id, "spawn");
+                assert_eq!(item.parent_item_id, None);
+                assert!(matches!(item.content,
+                    ItemContent::Subagent { model: Some(model), effort: Some(effort), status, .. }
+                    if model == "gpt-5.6-sol" && effort == "high" && status == expected_status
+                ));
                 assert!(events.try_recv().is_err());
                 if kind == "started" {
                     actor
                         .handle_notification("item/completed", &activity("completed"))
                         .await;
-                    for _ in 0..2 {
-                        assert!(
-                            matches!(events.try_recv().unwrap(), AgentEvent::ItemCompleted(ThreadItem {
-                            content: ItemContent::Subagent { model: Some(model), effort: Some(effort), status: ItemStatus::Completed, .. }, ..
-                        }) if model == "gpt-5.6-sol" && effort == "high")
-                        );
-                    }
+                    assert!(
+                        matches!(events.try_recv().unwrap(), AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::Subagent { model: Some(model), effort: Some(effort), status: ItemStatus::Completed, .. }, ..
+                    }) if model == "gpt-5.6-sol" && effort == "high")
+                    );
+                    assert!(events.try_recv().is_err());
                 }
                 let _ = actor.child.kill();
                 let _ = actor.child.wait();
@@ -6795,18 +6706,6 @@ mod tests {
                 }) if id == "call_spawn" && effort == "high"
             ));
 
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemStarted(ThreadItem {
-                    id,
-                    parent_item_id: Some(parent),
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::InProgress,
-                        ..
-                    }
-                }) if id == "call_spawn:thread_child" && parent == "call_spawn"
-            ));
-
             // Codex emits the instantaneous activity as item/started +
             // item/completed and may additionally fan out the legacy event.
             actor.handle_notification("item/completed", &started).await;
@@ -6846,17 +6745,6 @@ mod tests {
                     }
                 }) if id == "call_spawn"
             ));
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    parent_item_id: Some(parent),
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::Completed,
-                        ..
-                    },
-                    ..
-                }) if parent == "call_spawn"
-            ));
             actor
                 .handle_notification("item/completed", &completed)
                 .await;
@@ -6883,17 +6771,7 @@ mod tests {
                     ..
                 }) if id == "call_spawn"
             ));
-            assert!(matches!(
-                events.recv().await.unwrap(),
-                AgentEvent::ItemCompleted(ThreadItem {
-                    parent_item_id: Some(parent),
-                    content: ItemContent::Subagent {
-                        status: ItemStatus::Interrupted,
-                        ..
-                    },
-                    ..
-                }) if parent == "call_spawn"
-            ));
+            assert!(events.try_recv().is_err());
 
             let _ = actor.child.kill();
             let _ = actor.child.wait();
