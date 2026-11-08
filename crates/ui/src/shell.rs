@@ -5173,6 +5173,21 @@ impl AppShell {
         // Over a remote link the project shares its line with the link's state.
         let subtitle = if !store.scope().is_full() {
             Some(store.machine_label())
+        } else if self.links.len() > 1 {
+            // Over several hosts it names the thread's host instead, and the
+            // link's state only while the link is not up.
+            let state = store.connection_state();
+            let down = !matches!(
+                state,
+                tcode_client::ConnectionState::Connected { .. }
+                    | tcode_client::ConnectionState::Syncing { .. }
+            );
+            let parts: Vec<String> = project
+                .into_iter()
+                .chain([store.host_title().to_string()])
+                .chain(down.then(|| crate::remote::connection_label(&state)))
+                .collect();
+            Some(parts.join(" · "))
         } else {
             match (project, store.remote_host_name()) {
                 (Some(project), Some(_)) => Some(format!(
