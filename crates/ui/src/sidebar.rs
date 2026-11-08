@@ -7466,6 +7466,173 @@ mod tests {
         });
     }
 
+    /// The sidebar's share item puts the project in a space on the machine the
+    /// window shows, and takes it out again, and the project is marked shared
+    /// while it is in one. The machine answers over a scripted transport.
+    #[gpui::test]
+    fn the_share_item_toggles_the_project_in_a_space_on_its_machine(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ClientPayload, CommandResponse, EventEnvelope, HostMessage, HostingAction,
+            HostingState, IndexSnapshot, Query, QueryResponse, ServerEvent, SpaceAction, SpaceInfo,
+            Topic, decode_client_line, encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        cx.update(crate::theme::init);
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let event = |topic, event| {
+            encode_line(&HostMessage::Event(EventEnvelope {
+                request_id: None,
+                topic,
+                event,
+            }))
+            .unwrap()
+        };
+        let mut project = Project::from_root(PathBuf::from("/a"));
+        project.id = "a".into();
+        let mut thread = session("thread", None);
+        thread.project_id = Some(project.id.clone());
+        for line in [
+            event(
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                    sidebar_layout: SidebarLayout::Grouped,
+                    ..Default::default()
+                }),
+            ),
+            event(
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: vec![thread],
+                    projects: vec![project],
+                }),
+            ),
+        ] {
+            incoming.try_send(line).unwrap();
+        }
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|delay| executor.timer(delay))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Remote {
+                    host_id: "studio".into(),
+                    host_name: "Studio".into(),
+                },
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (sidebar, cx) =
+            cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
+        cx.simulate_resize(size(px(320.), px(900.)));
+
+        // The machine's spaces: one, holding the projects it was last given.
+        let mut shared: Vec<String> = Vec::new();
+        let mut asked: Vec<Vec<String>> = Vec::new();
+        let mut serve = |cx: &mut VisualTestContext| {
+            for _ in 0..4 {
+                cx.run_until_parked();
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                while let Ok(line) = outgoing.try_recv() {
+                    let message = decode_client_line(&line).unwrap();
+                    let state = |shared: &Vec<String>| HostingState {
+                        created_space_id: None,
+                        spaces: vec![SpaceInfo {
+                            id: "design".into(),
+                            name: "Design".into(),
+                            created_unix: 1,
+                            project_ids: shared.clone(),
+                            link: None,
+                            link_enabled: true,
+                            link_dead: false,
+                            members: vec![],
+                        }],
+                        enabled: true,
+                        expires_in_secs: 0,
+                        host_id: "studio".into(),
+                        host_name: "Studio".into(),
+                        invite: None,
+                        devices: vec![],
+                        traverse: vec![],
+                        group: None,
+                    };
+                    let reply = match message.payload {
+                        ClientPayload::Subscribe(subscription)
+                            if subscription.topic == Topic::Hosting =>
+                        {
+                            HostMessage::Event(EventEnvelope {
+                                request_id: Some(message.id),
+                                topic: Topic::Hosting,
+                                event: ServerEvent::HostingReplaced(Box::new(state(&shared))),
+                            })
+                        }
+                        ClientPayload::Query(Query::Hosting { action }) => {
+                            if let HostingAction::Spaces(SpaceAction::SetProjects {
+                                project_ids,
+                                ..
+                            }) = action
+                            {
+                                asked.push(project_ids.clone());
+                                shared = project_ids;
+                            }
+                            HostMessage::QueryResult {
+                                id: message.id,
+                                result: Ok(QueryResponse::Hosting(state(&shared))),
+                            }
+                        }
+                        ClientPayload::Subscribe(_) | ClientPayload::Command(_) => {
+                            HostMessage::Ack {
+                                id: message.id,
+                                result: Ok(CommandResponse::Unit),
+                            }
+                        }
+                        _ => continue,
+                    };
+                    incoming.try_send(encode_line(&reply).unwrap()).unwrap();
+                }
+            }
+            draw(cx);
+        };
+        serve(cx);
+        assert!(cx.debug_bounds("project-header-a").is_some());
+        assert!(cx.debug_bounds("project-shared-a").is_none());
+
+        let share = spaces::ToggleShare {
+            space_id: "design".into(),
+            project_id: "a".into(),
+        };
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.on_toggle_share(&share, window, cx)
+        });
+        serve(cx);
+        assert!(
+            cx.debug_bounds("project-shared-a").is_some(),
+            "a shared project is marked"
+        );
+
+        sidebar.update_in(cx, |sidebar, window, cx| {
+            sidebar.on_toggle_share(&share, window, cx)
+        });
+        serve(cx);
+        assert!(cx.debug_bounds("project-shared-a").is_none());
+        drop(serve);
+        assert_eq!(asked, [vec!["a".to_string()], vec![]]);
+    }
+
     #[gpui::test]
     fn grouped_layout_lays_out_only_the_visible_threads(cx: &mut TestAppContext) {
         use tcode_protocol::{
