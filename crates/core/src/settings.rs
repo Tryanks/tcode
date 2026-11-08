@@ -700,6 +700,31 @@ pub enum SettingsPatch {
     Traverse(TraverseSetting),
     RemoteHostName(Option<String>),
     LastProject(Option<String>),
+    NewProjectDir(Option<String>),
+    ProjectStart(ProjectStart),
+    ProjectStartCustom(Option<String>),
+}
+
+/// Where Create puts a new project when Settings names no folder.
+pub const DEFAULT_NEW_PROJECT_DIR: &str = "~/TcodeProjects";
+
+/// Where Add Project's folder list opens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStart {
+    /// The host's home.
+    #[default]
+    Home,
+    /// Where Create puts a new project.
+    NewProjectDir,
+    /// The folder `Settings.project_start_custom` names.
+    Custom,
+}
+
+impl ProjectStart {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// The Traverse instances this machine publishes to while hosting: relay
@@ -984,6 +1009,19 @@ pub struct Settings {
     /// background activity cannot move it. UI state; absent in legacy files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_project_id: Option<String>,
+    /// The host directory Create puts a new project in, one folder each, `~`
+    /// standing for the host's home. `None` is [`DEFAULT_NEW_PROJECT_DIR`];
+    /// absent in legacy files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_project_dir: Option<String>,
+    /// Where Add Project's folder list opens; absent in legacy files.
+    #[serde(default, skip_serializing_if = "ProjectStart::is_default")]
+    pub project_start: ProjectStart,
+    /// The folder [`ProjectStart::Custom`] opens on, kept while another choice
+    /// is made so choosing Custom again brings it back. `~` stands for the
+    /// host's home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_start_custom: Option<String>,
     /// ACP agents the user installed from the marketplace (or defined by hand),
     /// keyed by registry id. Each carries its resolved launch recipe, so a
     /// session can start without consulting the registry again.
@@ -1070,6 +1108,9 @@ impl Default for Settings {
             remote_host_name: None,
             last_visited: HashMap::new(),
             last_project_id: None,
+            new_project_dir: None,
+            project_start: ProjectStart::default(),
+            project_start_custom: None,
             acp_agents: BTreeMap::new(),
             unknown: serde_json::Map::new(),
         }
@@ -1077,6 +1118,23 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Where Create puts a new project, `~` standing for the host's home.
+    pub fn new_project_dir(&self) -> &str {
+        self.new_project_dir
+            .as_deref()
+            .unwrap_or(DEFAULT_NEW_PROJECT_DIR)
+    }
+
+    /// The folder Add Project's list opens on, `~` standing for the host's
+    /// home: a Custom choice with no folder named yet opens on the home.
+    pub fn project_start_dir(&self) -> &str {
+        match self.project_start {
+            ProjectStart::Home => "~",
+            ProjectStart::NewProjectDir => self.new_project_dir(),
+            ProjectStart::Custom => self.project_start_custom.as_deref().unwrap_or("~"),
+        }
+    }
+
     /// Apply one field-scoped mutation without replacing sibling fields. A
     /// value outside its field's range is refused and changes nothing.
     pub fn apply(&mut self, patch: SettingsPatch) -> Result<(), &'static str> {
@@ -1189,6 +1247,13 @@ impl Settings {
             SettingsPatch::Traverse(value) => self.traverse = TraverseSetting::new(value.sources),
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
             SettingsPatch::LastProject(value) => self.last_project_id = value,
+            SettingsPatch::NewProjectDir(value) => {
+                self.new_project_dir = value.filter(|dir| !dir.trim().is_empty());
+            }
+            SettingsPatch::ProjectStart(value) => self.project_start = value,
+            SettingsPatch::ProjectStartCustom(value) => {
+                self.project_start_custom = value.filter(|dir| !dir.trim().is_empty());
+            }
         }
         Ok(())
     }

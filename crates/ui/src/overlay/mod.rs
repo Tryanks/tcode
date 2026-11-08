@@ -641,6 +641,38 @@ mod tests {
             );
         }
 
+        /// Answer every directory listing asked so far with an empty folder.
+        fn answer_listings(&self, cx: &mut TestAppContext) {
+            let asked: Vec<_> = std::iter::from_fn(|| self.outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    let message = tcode_protocol::decode_client_line(&line).unwrap();
+                    match message.payload {
+                        tcode_protocol::ClientPayload::Query(
+                            tcode_protocol::Query::BrowseDirectories { path },
+                        ) => Some((message.id, path)),
+                        _ => None,
+                    }
+                })
+                .collect();
+            for (id, path) in asked {
+                let directory = std::path::PathBuf::from(path.trim_end_matches('/'));
+                self.send(
+                    tcode_protocol::HostMessage::QueryResult {
+                        id,
+                        result: Ok(tcode_protocol::QueryResponse::Directories(
+                            tcode_protocol::DirectoryListing {
+                                parent: directory.parent().map(std::path::Path::to_path_buf),
+                                directory,
+                                home: Some("/host/home".into()),
+                                entries: vec![],
+                            },
+                        )),
+                    },
+                    cx,
+                );
+            }
+        }
+
         fn commands(&self) -> Vec<(u64, tcode_protocol::Command)> {
             std::iter::from_fn(|| self.outgoing.try_recv().ok())
                 .filter_map(|line| {
@@ -681,9 +713,6 @@ mod tests {
         draw(cx);
         // Tab follows the rendered form's focus order, starting at the modal.
         cx.simulate_keystrokes("tab");
-        if kind == "import" {
-            cx.simulate_keystrokes("tab tab");
-        }
         cx.simulate_keystrokes(if cfg!(target_os = "macos") {
             "cmd-a"
         } else {
@@ -692,10 +721,15 @@ mod tests {
         cx.simulate_input(if invalid {
             "   "
         } else if kind == "create" {
+            // A bare name is a project in the new-project folder.
             "New project"
         } else {
             "/host/destination"
         });
+        if kind == "create" {
+            // The host lists the new-project folder: no such project there yet.
+            host.answer_listings(cx);
+        }
         host.commands();
         cx.simulate_keystrokes("enter");
         draw(cx);
@@ -718,6 +752,7 @@ mod tests {
             },
             "create" => Command::CreateNewProject {
                 name: "New project".into(),
+                parent: None,
             },
             "change" => Command::SetProjectRoot {
                 project_id: "project".into(),

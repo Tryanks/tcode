@@ -55,8 +55,8 @@ pub use event::{
 };
 pub use query::{
     ControlActivityFilter, ControlActivityPage, ControlActivityThread, DeviceAccess,
-    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction, GroupInfo,
-    GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
+    DirectoryListing, ExternalThread, GitDiffResult, GitDiffScope, GitFileText, GroupAction,
+    GroupInfo, GroupMachineInfo, HostedDevice, HostingAction, HostingState, IconImageEntry,
     MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, OUTPUT_PREVIEW_BYTES, PathEntry, PathInfo,
     PathKind, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, SESSION_WINDOW_BYTES,
     STORED_OUTPUT_BYTES, STORED_OUTPUT_COLS, STORED_OUTPUT_HISTORY, STORED_OUTPUT_ROWS,
@@ -364,6 +364,12 @@ pub use wire::{
 // SessionStatus carries background_tasks.
 // Command::ForceTerminate is new, and SessionStatus carries stopping_since.
 // ChildExpectation carries undelivered.
+// Query::BrowseDirectories (answered with QueryResponse::Directories, a
+// DirectoryListing) is new. Settings.new_project_dir (where CreateNewProject
+// puts a project), Settings.project_start (ProjectStart) and
+// Settings.project_start_custom are new, with SettingsPatch::NewProjectDir,
+// ProjectStart and ProjectStartCustom. CreateNewProject takes an optional
+// parent folder.
 //
 // Background work: SessionActivity drops waiting for background
 // (BackgroundActivity tasks and agents), unsettled and wakes (ThreadWakes

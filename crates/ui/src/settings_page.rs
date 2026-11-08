@@ -523,6 +523,14 @@ pub struct SettingsPage {
     usage_refresh_sent: bool,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: SettingsInput,
+    /// Editable "New project folder"; committed on change.
+    new_project_dir_input: SettingsInput,
+    /// Editable custom "Add Project start folder"; committed on change.
+    project_start_custom_input: SettingsInput,
+    /// The host's home, which the Projects rows write `~` paths under. Asked
+    /// of the host the first time those rows are drawn.
+    host_home: Option<SharedString>,
+    host_home_requested: bool,
     auto_settle_input: SettingsInput,
     project_rules_editor: Option<Entity<thread_behavior::ProjectRulesEditor>>,
     project_rules_subscription: Option<Subscription>,
@@ -723,6 +731,8 @@ impl SettingsPage {
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
         let home_url_input = cx.new(|cx| InputState::new(window, cx));
+        let new_project_dir_input = cx.new(|cx| InputState::new(window, cx));
+        let project_start_custom_input = cx.new(|cx| InputState::new(window, cx));
         let device_name = DevicePreferences::device_name(cx);
         let device_name_input =
             cx.new(|cx| InputState::new(window, cx).default_value(device_name.clone()));
@@ -781,6 +791,10 @@ impl SettingsPage {
             rail_opacity: 1.,
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
+            new_project_dir_input: SettingsInput::new(new_project_dir_input.clone()),
+            project_start_custom_input: SettingsInput::new(project_start_custom_input.clone()),
+            host_home: None,
+            host_home_requested: false,
             auto_settle_input: SettingsInput::new(auto_settle_input.clone()),
             project_rules_editor: None,
             project_rules_subscription: None,
@@ -814,6 +828,32 @@ impl SettingsPage {
                     }
                 }
             }));
+        page._subscriptions.push(
+            cx.subscribe(&new_project_dir_input, |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    if this.new_project_dir_input.is_user_edit(&value) {
+                        let dir = Some(value.trim().to_owned()).filter(|dir| !dir.is_empty());
+                        this.dispatch_settings(move |store| store.set_new_project_dir(dir), cx);
+                    }
+                }
+            }),
+        );
+        page._subscriptions.push(cx.subscribe(
+            &project_start_custom_input,
+            |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    if this.project_start_custom_input.is_user_edit(&value) {
+                        let dir = Some(value.trim().to_owned()).filter(|dir| !dir.is_empty());
+                        this.dispatch_settings(
+                            move |store| store.set_project_start_custom(dir),
+                            cx,
+                        );
+                    }
+                }
+            },
+        ));
         page._subscriptions
             .push(cx.subscribe(&device_name_input, |this, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -886,6 +926,33 @@ impl SettingsPage {
             let value = settings.browser.home_url.clone().unwrap_or_default();
             self.home_url_input.push(value, window, cx);
         }
+        if !self.new_project_dir_input.dirty {
+            let value = settings.new_project_dir.clone().unwrap_or_default();
+            self.new_project_dir_input.push(value, window, cx);
+        }
+        if !self.project_start_custom_input.dirty {
+            let value = settings.project_start_custom.clone().unwrap_or_default();
+            self.project_start_custom_input.push(value, window, cx);
+        }
+    }
+
+    /// Ask the host where its home is, once: listing `~` answers with it.
+    pub(super) fn fetch_host_home(&mut self, cx: &mut Context<Self>) {
+        if self.host_home_requested || !self.store.read(cx).can_manage_host() {
+            return;
+        }
+        self.host_home_requested = true;
+        let listing = self
+            .store
+            .update(cx, |store, cx| store.browse_directories("~".into(), cx));
+        cx.spawn(async move |this, cx| {
+            let home = listing.await.ok().and_then(|listing| listing.home);
+            let _ = this.update(cx, |page, cx| {
+                page.host_home = home.map(|home| home.to_string_lossy().into_owned().into());
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn commit_home_url(&self, cx: &mut Context<Self>) {
@@ -1528,6 +1595,9 @@ impl SettingsPage {
                             .clone()
                             .unwrap_or_default();
                         page.home_url_input.push(home_url, window, cx);
+                        page.new_project_dir_input.push(String::new(), window, cx);
+                        page.project_start_custom_input
+                            .push(String::new(), window, cx);
                         let device_name = DevicePreferences::device_name(cx);
                         page.device_name_input.push(device_name, window, cx);
                         let limit = remote_attachment_limit_value(cx);

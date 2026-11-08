@@ -859,8 +859,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             Ok(project_id) => response = CommandResponse::ProjectId(Some(project_id)),
             Err(error) => return CommandOutcome::Immediate(Err(error)),
         },
-        Command::CreateNewProject { name } => {
-            let task = app.create_new_project(name, cx);
+        Command::CreateNewProject { name, parent } => {
+            let task = app.create_new_project(name, parent, cx);
             return CommandOutcome::Pending(cx.spawn_background(async move {
                 task.await.map(|id| CommandResponse::ProjectId(Some(id)))
             }));
@@ -1269,6 +1269,15 @@ fn dispatch_query(
         Query::BrowseIconImages { directory } => {
             let task = cx.unblock(move || tcode_services::project_icons::browse(&directory));
             cx.spawn_background(async move { task.await.map_err(io_protocol_error) })
+        }
+        Query::BrowseDirectories { path } => {
+            let directories = app.user_directories().clone();
+            let task = cx.unblock(move || directories.browse_directories(&path));
+            cx.spawn_background(async move {
+                task.await
+                    .map(QueryResponse::Directories)
+                    .map_err(io_protocol_error)
+            })
         }
         Query::ReadIconImage { path } => {
             let task = cx.unblock(move || tcode_services::project_icons::thumbnail(&path));

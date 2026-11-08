@@ -615,10 +615,12 @@ impl AppState {
     pub fn create_new_project(
         &self,
         name: String,
+        parent: Option<String>,
         cx: &HostCx,
     ) -> HostTask<Result<String, ProtocolError>> {
         let directories = self.user_directories.clone();
-        let task = cx.unblock(move || directories.new_project_root(&name));
+        let parent = parent.unwrap_or_else(|| self.settings.new_project_dir().to_owned());
+        let task = cx.unblock(move || directories.new_project_root(&parent, &name));
         let host = cx.clone();
         cx.spawn_background(async move {
             let root = task.await.map_err(project_directory_error)?;

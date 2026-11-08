@@ -77,6 +77,12 @@ pub enum Query {
     BrowseIconImages {
         directory: PathBuf,
     },
+    /// The folders directly inside a host directory, for picking a project
+    /// root. `path` is in the host's own path rules; a leading `~` stands for
+    /// the host's home, and an empty path is the home itself.
+    BrowseDirectories {
+        path: String,
+    },
     ReadIconImage {
         path: PathBuf,
     },
@@ -245,6 +251,7 @@ pub enum QueryResponse {
         parent: Option<PathBuf>,
         entries: Vec<IconImageEntry>,
     },
+    Directories(DirectoryListing),
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),
     GitDiff(GitDiffResult),
@@ -315,6 +322,20 @@ pub struct GitDiffResult {
     pub error: Option<String>,
     pub branches: Vec<String>,
     pub default_base: Option<String>,
+}
+
+/// The folders inside one host directory. Clients return paths unchanged:
+/// their path separator and drive semantics may differ from the host's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryListing {
+    /// The directory listed, absolute, with `~` expanded.
+    pub directory: PathBuf,
+    /// `None` at a filesystem root.
+    pub parent: Option<PathBuf>,
+    /// The host's home, which `~` stands for.
+    pub home: Option<PathBuf>,
+    /// Each folder's name, hidden ones included, sorted case-insensitively.
+    pub entries: Vec<String>,
 }
 
 /// A picker entry on the host. Clients return `path` unchanged: their path

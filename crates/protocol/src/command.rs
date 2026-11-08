@@ -370,8 +370,13 @@ pub enum Command {
     CreateProject {
         root: PathBuf,
     },
+    /// Create the folder `name` for a new project inside `parent`, a host
+    /// path where `~` is the home; without one, inside Settings' new-project
+    /// folder.
     CreateNewProject {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
     },
     /// Point a project at `root`, carrying every thread's working directory
     /// under the old root along. With `move_files` the host moves the old

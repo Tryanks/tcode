@@ -140,6 +140,7 @@ pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) 
     theme::init_with_json(&options.theme_json, cx);
     crate::markdown::init(cx);
     crate::image_viewer::init(cx);
+    crate::add_project_dialog::init(cx);
     crate::shortcut::init(cx);
     // Global ⌘K / Ctrl-K opens/closes the command palette (handled by
     // AppShell). `secondary` is gpui's platform modifier: Command on a Mac,

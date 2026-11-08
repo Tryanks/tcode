@@ -2391,6 +2391,11 @@ impl WorkspaceStore {
         self.settings_replica.clone()
     }
 
+    /// The settings replica, borrowed, for a read that runs every frame.
+    pub(crate) fn settings_ref(&self) -> &Settings {
+        &self.settings_replica
+    }
+
     pub(crate) fn thread_list_revision(&self) -> u64 {
         self.thread_list_revision
     }
@@ -3016,6 +3021,27 @@ impl WorkspaceStore {
             async move |_| match host.query(Query::ScanExternalHistory).await {
                 Ok(QueryResponse::ExternalHistory(recent)) => Ok(recent),
                 Ok(other) => Err(format!("unexpected external-history response: {other:?}")),
+                Err(error) => Err(error.message),
+            },
+        )
+    }
+
+    /// The folders inside a *host* directory, for Add Project's picker. The
+    /// path is the host's to resolve (`~` included); its refusal is returned in
+    /// its own words.
+    pub fn browse_directories(
+        &self,
+        path: String,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::DirectoryListing, String>> {
+        if !self.can_manage_host() {
+            return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
+        }
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::BrowseDirectories { path }).await {
+                Ok(QueryResponse::Directories(listing)) => Ok(listing),
+                Ok(other) => Err(format!("unexpected directory response: {other:?}")),
                 Err(error) => Err(error.message),
             },
         )

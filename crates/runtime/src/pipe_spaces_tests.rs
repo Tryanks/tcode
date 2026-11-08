@@ -435,6 +435,7 @@ fn space_refuses_foreign_sessions_paths_terminals_and_host_subscriptions() {
     for command in [
         Command::CreateNewProject {
             name: "outside-space".into(),
+            parent: None,
         },
         Command::StartScratchDraft,
         // Authority over tcode_control is the host owner's: a space member may neither give
