@@ -830,7 +830,7 @@ impl RailView {
 mod tests {
     use agent::{Attachment, Goal, GoalStatus, ItemContent, ItemStatus, PlanStep, PlanStepStatus};
     use gpui::{AppContext as _, Bounds, TestAppContext, VisualTestContext, point, size};
-    use tcode_core::session::{EntryContent, Timeline};
+    use tcode_core::session::{EntryContent, Timeline, TimelineEntry};
 
     use super::*;
     use crate::chat::tests::*;
@@ -885,22 +885,41 @@ mod tests {
             ),
             1,
         ));
-        timeline.entries.extend((0..agents).map(|index| {
-            at_turn(
-                entry(
-                    &format!("agent-{index}"),
-                    EntryContent::Item(ItemContent::Subagent {
-                        agent_type: "general".into(),
-                        description: format!("Look through part {index} of the notes"),
-                        status: ItemStatus::Completed,
-                        summary: Some(format!("Part {index} has nothing new")),
-                        model: None,
-                        effort: None,
-                    }),
-                ),
-                1,
-            )
-        }));
+        timeline
+            .entries
+            .extend((0..agents).map(|index| at_turn(subagent(index, false), 1)));
+        timeline
+    }
+
+    /// The subagent `agent-{index}`, running or done with its result.
+    fn subagent(index: usize, running: bool) -> std::sync::Arc<TimelineEntry> {
+        entry(
+            &format!("agent-{index}"),
+            EntryContent::Item(ItemContent::Subagent {
+                agent_type: "general".into(),
+                description: format!("Look through part {index} of the notes"),
+                status: if running {
+                    ItemStatus::InProgress
+                } else {
+                    ItemStatus::Completed
+                },
+                summary: (!running).then(|| format!("Part {index} has nothing new")),
+                model: None,
+                effort: None,
+            }),
+        )
+    }
+
+    /// A thread whose latest turn runs `agents` subagents and ran
+    /// `commands` commands.
+    fn dispatched(agents: usize, commands: usize) -> Timeline {
+        let mut timeline = synthetic_markdown_timeline(2);
+        timeline
+            .entries
+            .extend((0..agents).map(|index| at_turn(subagent(index, true), 1)));
+        timeline
+            .entries
+            .extend((0..commands).map(|index| at_turn(command(&format!("cmd-{index}")), 1)));
         timeline
     }
 
@@ -1205,5 +1224,42 @@ mod tests {
             "the agents body scrolls inside its card"
         );
         whole(cx, "after the agents scroll");
+    }
+
+    /// Two cards with more than a short rail holds share it alike, however
+    /// much more one holds: fifteen agents are given as much of the rail
+    /// as a long turn's sixty commands and show more than a couple of
+    /// rows, rather than the commands card, which only counts what it
+    /// cannot show, taking the rail by how many it has.
+    #[gpui::test]
+    fn cards_that_overflow_a_short_rail_share_it_alike(cx: &mut TestAppContext) {
+        const AGENTS: usize = 15;
+        const COMMANDS: usize = 60;
+        let (_threads, cx) = short_rail(cx, || dispatched(AGENTS, COMMANDS));
+        inside(cx, &["agents", "commands"], AT_REST, "at rest");
+        let agents = bounds(cx, "rail-card-body-agents").expect("the agents card shows");
+        let commands = bounds(cx, "rail-card-body-commands").expect("the commands card shows");
+        let shown = |cx: &mut VisualTestContext, rows: usize, row: &str, body: Bounds<Pixels>| {
+            (0..rows)
+                .filter_map(|index| bounds(cx, &format!("{row}{index}")))
+                .filter(|row| row.top() >= body.top() && row.bottom() <= body.bottom())
+                .count()
+        };
+        let agents_shown = shown(cx, AGENTS, "rail-agent-agent-", agents);
+        let commands_shown = shown(cx, COMMANDS, "rail-command-cmd-", commands);
+        assert!(
+            agents_shown < AGENTS && commands_shown < COMMANDS,
+            "the rail is too short for either card ({agents_shown} agents in {agents:?}, \
+             {commands_shown} commands in {commands:?})"
+        );
+        assert!(
+            (agents.size.height - commands.size.height).abs() <= px(1.),
+            "the agents body {agents:?} ({agents_shown} agents) and the commands body \
+             {commands:?} ({commands_shown} commands) are not given alike"
+        );
+        assert!(
+            agents_shown > 2,
+            "the agents body {agents:?} shows only {agents_shown} agents"
+        );
     }
 }
