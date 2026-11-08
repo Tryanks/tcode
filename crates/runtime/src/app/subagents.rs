@@ -374,42 +374,6 @@ impl AppState {
             }
         }
     }
-
-    /// A mirror loaded with its last turn still open, while no live parent is
-    /// tracking it as running, was orphaned by a host restart or a parent that
-    /// left without a close: end the turn so it stops reporting work nothing
-    /// can finish.
-    pub(super) fn repair_orphaned_mirror_turn(&mut self, mirror_id: &str, cx: &mut HostCx) {
-        if self.native_subagent_turns.get(mirror_id) == Some(&true) {
-            return;
-        }
-        let Some(mirror) = self.resident(mirror_id) else {
-            return;
-        };
-        let Some(subagent_item_id) = mirror.meta.native_subagent.clone() else {
-            return;
-        };
-        let Some(turn) = mirror
-            .timeline
-            .turns
-            .last()
-            .filter(|turn| turn.status.is_none())
-        else {
-            return;
-        };
-        let turn_id = turn.provider_turn_id.clone().unwrap_or(subagent_item_id);
-        self.native_subagent_turns
-            .insert(mirror_id.to_string(), false);
-        self.record_event(
-            mirror_id,
-            &AgentEvent::TurnCompleted {
-                turn_id,
-                status: TurnStatus::Interrupted,
-                usage: None,
-            },
-            cx,
-        );
-    }
 }
 
 fn lifecycle_item(event: &AgentEvent) -> Option<&ThreadItem> {

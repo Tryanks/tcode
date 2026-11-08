@@ -2240,8 +2240,8 @@ mod tests {
             ),
             (
                 Some(3_000),
-                AgentEvent::TurnStarted {
-                    turn_id: "t2".into(),
+                AgentEvent::Warning {
+                    message: "Reconnecting.".into(),
                 },
             ),
         ]
