@@ -2286,7 +2286,8 @@ mod tests {
     /// agents: the rail's Agents card opens its transcript while it runs,
     /// and stops it there, and again once it has finished. One it starts in
     /// turn opens from the subagent's rail while it runs, before any of its
-    /// own transcript reaches the host.
+    /// own transcript reaches the host, and from the lead's background work,
+    /// where Claude Code lists it too.
     #[gpui::test]
     fn a_subagent_opens_from_wherever_its_thread_lists_it(cx: &mut TestAppContext) {
         use agent::{AgentEvent, ItemContent, ItemStatus, ThreadItem};
@@ -2521,6 +2522,52 @@ mod tests {
             }),
             "the nested subagent's row opens its own thread"
         );
+
+        // Claude Code lists the nested agent among the lead's own background
+        // work, where the lead has no call for it: its row there opens its
+        // thread, in the Commands card and in the pill's list alike.
+        events
+            .try_send(AgentEvent::BackgroundTaskList {
+                tasks: ["a73e1f3b", "a5c09d12"]
+                    .into_iter()
+                    .zip(["toolu_visual", "toolu_nested"])
+                    .map(|(id, item)| agent::BackgroundTask {
+                        id: id.into(),
+                        name: "Find the screenshot script".into(),
+                        kind: agent::BackgroundKind::Agent,
+                        item_id: Some(item.into()),
+                        started_at: 1,
+                        started_reported: false,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        driver.wait_until(cx, &store, "the lead lists the nested agent", |cx| {
+            store.read_with(cx, |store, cx| {
+                store
+                    .session_status_for(Some("lead"), cx)
+                    .is_some_and(|status| status.background_tasks.len() == 2)
+            })
+        });
+        assert_eq!(
+            opened_from(cx, &mut driver, &lead_view, "rail-command-toolu_nested"),
+            nested,
+            "the lead's Commands card opens the nested agent's thread"
+        );
+        store.update(cx, |store, cx| store.set_side_thread("lead", None, cx));
+        let lead_window = VisualTestContext::from_window(lead_view.1, cx).into_mut();
+        lead_window.simulate_resize(size(px(900.), px(1000.)));
+        draw_settled(lead_window);
+        let pill = lead_window
+            .debug_bounds("background-pill")
+            .expect("the pill stands for the rail");
+        lead_window.simulate_click(pill.center(), Modifiers::default());
+        assert_eq!(
+            opened_from(cx, &mut driver, &lead_view, "background-row-a5c09d12"),
+            nested,
+            "the pill's list opens the nested agent's thread"
+        );
+        VisualTestContext::from_window(lead_view.1, cx).simulate_resize(size(px(1800.), px(1000.)));
 
         events
             .try_send(AgentEvent::ItemCompleted(spawn(ItemStatus::Completed)))

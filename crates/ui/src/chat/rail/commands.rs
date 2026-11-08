@@ -419,6 +419,18 @@ fn row(
         line.command.clone()
     };
     let call = line.call.clone();
+    // An agent one of the thread's subagents started, which the harness
+    // lists with the thread's own background work, has no call here: its
+    // row opens its thread.
+    let transcript = line
+        .background
+        .as_ref()
+        .filter(|row| row.task.kind == BackgroundKind::Agent && standing == Some(Standing::Running))
+        .and_then(|row| row.task.item_id.as_deref())
+        .zip(background)
+        .and_then(|(item, (_, place))| {
+            crate::chat::background::transcript(place.store.read(cx), &place.session_id, item)
+        });
     let selector = key.clone();
     crate::material::accessible_clickable(
         h_flex(),
@@ -464,20 +476,37 @@ fn row(
             .children(trailing)
             .child(mark),
     )
-    .when_some(call, |row, (turn, entry_id)| {
-        let background = line.mark == Mark::Background;
-        row.cursor_pointer()
-            .on_click(cx.listener(move |rail, _, _, cx| {
-                rail.timeline.update(cx, |timeline, cx| {
-                    // One in the background may be an earlier turn's, folded
-                    // into its work log: that opens to show it.
-                    if background {
-                        timeline.locate(&entry_id, cx)
-                    } else {
-                        timeline.scroll_to_activity(turn, &entry_id, cx)
-                    }
-                });
-            }))
+    .map(|row| match (transcript, call) {
+        (Some(mirror), _) => {
+            row.cursor_pointer()
+                .on_click(cx.listener(move |rail, _, window, cx| {
+                    let host = rail.agent_host(cx);
+                    crate::agents_panel::open_agent(
+                        &rail.workspace_store,
+                        mirror.clone(),
+                        host,
+                        None,
+                        window,
+                        cx,
+                    );
+                }))
+        }
+        (None, Some((turn, entry_id))) => {
+            let background = line.mark == Mark::Background;
+            row.cursor_pointer()
+                .on_click(cx.listener(move |rail, _, _, cx| {
+                    rail.timeline.update(cx, |timeline, cx| {
+                        // One in the background may be an earlier turn's,
+                        // folded into its work log: that opens to show it.
+                        if background {
+                            timeline.locate(&entry_id, cx)
+                        } else {
+                            timeline.scroll_to_activity(turn, &entry_id, cx)
+                        }
+                    });
+                }))
+        }
+        (None, None) => row,
     })
     .into_any_element()
 }

@@ -481,17 +481,11 @@ fn row(
     // its row opens; any other row leads to its call in the timeline.
     let transcript = (standing == Standing::Running && task.kind == BackgroundKind::Agent)
         .then(|| {
-            let item = task.item_id.as_deref()?;
-            place
-                .store
-                .read(cx)
-                .sidebar_sessions()
-                .iter()
-                .find(|meta| {
-                    meta.parent_session_id.as_deref() == Some(place.session_id.as_str())
-                        && meta.native_subagent.as_deref() == Some(item)
-                })
-                .map(|meta| meta.id.clone())
+            transcript(
+                place.store.read(cx),
+                &place.session_id,
+                task.item_id.as_deref()?,
+            )
         })
         .flatten();
     let line = h_flex()
@@ -563,6 +557,36 @@ fn row(
         (None, None) => row,
     })
     .into_any_element()
+}
+
+/// The thread of the subagent the call `item` started, anywhere under
+/// `lead`: Claude Code lists an agent one of its subagents starts among the
+/// lead's own background work, while the call is that subagent's.
+pub(in crate::chat) fn transcript(
+    store: &WorkspaceStore,
+    lead: &str,
+    item: &str,
+) -> Option<String> {
+    let sessions = store.sidebar_sessions();
+    let under_lead = |meta: &tcode_core::project::SessionMeta| {
+        let mut parent = meta.parent_session_id.as_deref();
+        for _ in 0..sessions.len() {
+            match parent {
+                Some(id) if id == lead => return true,
+                Some(id) => {
+                    parent = store
+                        .thread_meta(id)
+                        .and_then(|meta| meta.parent_session_id.as_deref())
+                }
+                None => return false,
+            }
+        }
+        false
+    };
+    sessions
+        .iter()
+        .find(|meta| meta.native_subagent.as_deref() == Some(item) && under_lead(meta))
+        .map(|meta| meta.id.clone())
 }
 
 /// How long a piece pointed out from the timeline stays marked.
