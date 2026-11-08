@@ -1554,7 +1554,7 @@ remote:
     unreachable: "Machine unreachable"
     unreachable_cause: "Machine unreachable: %{reason}"
     timeout: "Connection timed out"
-    authentication_rejected: "Access rejected · Pair again"
+    authentication_rejected: "Access rejected"
     protocol_mismatch: "Protocol mismatch · Update the app"
     host_closed: "The machine closed the connection"
   state:

@@ -1554,7 +1554,7 @@ remote:
     unreachable: "ホストに接続できません"
     unreachable_cause: "ホストに接続できません：%{reason}"
     timeout: "接続がタイムアウトしました"
-    authentication_rejected: "アクセスが拒否されました · 再ペアリングしてください"
+    authentication_rejected: "アクセスが拒否されました"
     protocol_mismatch: "プロトコルが一致しません · アプリを更新してください"
     host_closed: "ホストが接続を閉じました"
   state:

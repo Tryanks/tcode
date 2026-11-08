@@ -3552,7 +3552,7 @@ impl SessionsSidebar {
             tcode_client::ConnectionState::Connected { .. }
                 | tcode_client::ConnectionState::Syncing { .. }
         ))
-        .then(|| crate::remote::connection_label(&state));
+        .then(|| crate::remote::connection_label_beside_pair_again(&state));
         let refused = failure == Some(tcode_client::ConnectionFailure::AuthenticationRejected);
         let id = host.name();
         let part = |part: &str| SharedString::from(format!("host-{part}-{id}"));
