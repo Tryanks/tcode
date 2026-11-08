@@ -18,6 +18,7 @@ use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::input::InputState;
 use crate::widgets::switch::Switch;
 
 /// How long a value drawn here takes to glide to a new one.
@@ -736,6 +737,23 @@ pub(crate) fn select_menu<T: Clone + 'static>(
                     })
                 }))
         })
+}
+
+/// Show `value` in a field that follows a saved setting, unless the field
+/// already shows it or is being typed in. Returns whether it was shown.
+pub(crate) fn follow_input(
+    state: &gpui::Entity<InputState>,
+    value: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let input = state.read(cx);
+    if input.value() == value || gpui::Focusable::focus_handle(input, cx).is_focused(window) {
+        return false;
+    }
+    let value = value.to_owned();
+    state.update(cx, |input, cx| input.set_value(value, window, cx));
+    true
 }
 
 #[cfg(test)]
