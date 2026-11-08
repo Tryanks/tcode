@@ -30,6 +30,8 @@ pub(super) enum StoreWrite {
         /// What the resident log's fold found the record supersedes, when
         /// the log is resident.
         streams: Option<Option<SupersededStream<u64>>>,
+        /// Threads whose metas change with what the record says happened.
+        metas: Vec<SessionMeta>,
     },
     UpsertMeta {
         meta: Box<SessionMeta>,
@@ -128,6 +130,7 @@ impl StoreWrite {
                 origin,
                 event,
                 streams,
+                metas,
             } => {
                 match Mutation::append_authored_event(
                     id,
@@ -137,10 +140,12 @@ impl StoreWrite {
                     *origin,
                     |bytes| history::append_projection(bytes, *ts, event, author.as_ref(), *origin),
                 ) {
-                    Ok(mutation) => vec![match streams {
+                    Ok(mutation) => std::iter::once(match streams {
                         Some(superseded) => mutation.superseding(superseded.clone()),
                         None => mutation,
-                    }],
+                    })
+                    .chain(metas.iter().cloned().map(Mutation::upsert_meta))
+                    .collect(),
                     Err(error) => return Some(Err(error.to_string())),
                 }
             }

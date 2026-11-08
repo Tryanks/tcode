@@ -7654,42 +7654,83 @@ fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
     ));
 }
 
-/// A report steered into the lead's running turn is delivered once the
-/// provider takes the steer, and a restart does not send it again.
+/// The record that the lead's provider took a child's report and the child no
+/// longer owing it are saved together: a host that stops right after saving
+/// that record, as a turn or as a steer, does not send the report again.
 #[test]
-fn a_steered_report_the_lead_took_is_not_sent_again_after_a_restart() {
-    let test_store = TestStore::new("tcode-steered-report-restart-test");
-    let mut child = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
-    child.id = "child".into();
-    child.parent_session_id = Some("lead".into());
-    child.expectation = Some(ChildExpectation::opened(1));
-    let mut lead = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
-    lead.meta.id = "lead".into();
-    test_store.upsert_meta(&lead.meta).unwrap();
-    test_store.upsert_meta(&child).unwrap();
+fn a_report_the_lead_took_is_saved_as_taken_with_the_record_of_it() {
+    for steered in [false, true] {
+        let test_store = TestStore::new("tcode-report-taken-with-record-test");
+        let mut child = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
+        child.id = "child".into();
+        child.parent_session_id = Some("lead".into());
+        child.expectation = Some(ChildExpectation::opened(1));
+        let (commands, actor) = smol::channel::unbounded();
+        let mut lead = live_session(ProviderKind::ClaudeCode, commands);
+        lead.meta.id = "lead".into();
+        lead.turn_in_flight = steered;
+        test_store.upsert_meta(&lead.meta).unwrap();
+        test_store.upsert_meta(&child).unwrap();
 
-    let mut cx = TestAppContext::default();
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    let (commands, actor) = smol::channel::unbounded();
-    lead.runtime = Runtime::Live(commands);
-    lead.turn_in_flight = true;
-    state.update(&mut cx, |state, cx| {
-        state.install_selected(lead);
-        state.fail_child_expectation("child", "the provider closed", cx);
-        let Ok(SessionCommand::Steer { request_id, .. }) = next_command(&actor) else {
-            panic!("a running turn takes the report as a steer");
-        };
-        state.on_event("lead", AgentEvent::SteerAccepted { request_id }, cx);
-    });
-    cx.run_until_parked();
-    drop((cx, state));
+        let mut cx = TestAppContext::default();
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        let taken = state.update(&mut cx, |state, cx| {
+            state.sessions.push(lead.meta.clone());
+            state.install_selected(lead);
+            state.fail_child_expectation("child", "the provider closed", cx);
+            match next_command(&actor) {
+                Ok(SessionCommand::Steer { request_id, .. }) if steered => {
+                    AgentEvent::SteerAccepted { request_id }
+                }
+                Ok(SessionCommand::SendTurn { delivery_id, .. }) if !steered => {
+                    AgentEvent::TurnAccepted { delivery_id }
+                }
+                other => panic!("the report goes to the lead: {other:?}"),
+            }
+        });
+        cx.run_until_parked();
 
-    let mut cx = TestAppContext::default();
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
-    state.update(&mut cx, |state, _| {
-        let expectation = state.find_meta("child").unwrap().expectation.unwrap();
-        assert_eq!(expectation.undelivered, None);
-    });
+        // The host stops once the record of the lead taking the report is
+        // saved, before anything written after it.
+        let (writes, held) = smol::channel::unbounded();
+        state.update(&mut cx, |state, cx| {
+            drop(std::mem::replace(&mut state.store_writes, writes));
+            state.store_writer.take().unwrap().join().unwrap();
+            state.on_event("lead", taken, cx);
+        });
+        let held: Vec<_> = std::iter::from_fn(|| held.try_recv().ok()).collect();
+        let record = held
+            .iter()
+            .position(|write| {
+                matches!(write, StoreWrite::AppendEvent { id, event, .. } if id == "lead"
+                && matches!(**event, AgentEvent::SteerAccepted { .. }
+                    | AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::UserMessage { .. },
+                        ..
+                    })))
+            })
+            .expect("the lead's log records it");
+        let (failures, _) = smol::channel::unbounded();
+        let writer = StoreWriter::new(
+            (*test_store).clone(),
+            SettingsStore::new(test_store.root().clone()),
+            failures,
+        );
+        let (saved, queue) = smol::channel::unbounded();
+        for write in held.into_iter().take(record + 1) {
+            saved.try_send(write).unwrap();
+        }
+        drop(saved);
+        writer.run(queue);
+        drop((cx, state));
+
+        let mut cx = TestAppContext::default();
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        state.update(&mut cx, |state, _| {
+            let expectation = state.find_meta("child").unwrap().expectation.unwrap();
+            assert_eq!(expectation.undelivered, None, "steered: {steered}");
+        });
+    }
 }
 
 /// A provider that refuses a steer because the turn just ended has not seen it:
@@ -11785,6 +11826,7 @@ fn store_writer_commits_a_waiting_delta_on_its_own_and_at_shutdown() {
             text: text.into(),
         }),
         streams: None,
+        metas: Vec::new(),
     };
     let texts = || -> Vec<String> {
         store

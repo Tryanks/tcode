@@ -590,11 +590,11 @@ impl AppState {
             &message.text,
             &message.attachments,
             message.delivery_key.as_deref(),
+            &message.reports,
             cx,
         );
         cx.author = author;
         cx.origin = origin;
-        self.reports_handed_over(&message.reports, cx);
         if let Some(meta) = self.meta_mut(session_id) {
             meta.updated_at = now_secs();
             let meta = meta.clone();
@@ -658,6 +658,7 @@ impl AppState {
         text: &str,
         attachments: &[Attachment],
         delivery_key: Option<&str>,
+        reports: &[ReportHandover],
         cx: &mut HostCx,
     ) {
         let user_event = AgentEvent::ItemCompleted(ThreadItem {
@@ -674,7 +675,7 @@ impl AppState {
                 attachments: attachment_paths(attachments),
             },
         });
-        self.record_event(session_id, &user_event, cx);
+        self.record_handover(session_id, &user_event, reports, cx);
     }
 
     /// Persist a pending steering bubble and return the exact id providers must
@@ -851,7 +852,7 @@ impl AppState {
             .resident_mut(target_id)
             .and_then(|active| active.take_queued(id))
         {
-            self.reports_handed_over(&message.reports, cx);
+            self.reports_dropped(&message.reports, cx);
         }
         self.reschedule_scheduled_wake(cx);
         self.evaluate_thread_settlement(target_id, cx);
