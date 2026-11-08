@@ -204,22 +204,28 @@ impl AppState {
     /// Create a project rooted at `root`, or return the existing id when one
     /// already covers it.
     ///
-    /// The root is validated here, against this host's filesystem and path
-    /// rules: a client cannot decide whether `C:\src` or `/srv/src` is absolute,
-    /// and only the host can see whether the directory exists.
+    /// The root is resolved and validated here, against this host's filesystem
+    /// and path rules: a client cannot decide whether `C:\src` or `/srv/src` is
+    /// absolute, what `~` stands for, or whether the directory exists.
     pub fn create_project(
         &mut self,
         root: PathBuf,
         cx: &mut HostCx,
     ) -> Result<String, ProtocolError> {
+        let root = self
+            .user_directories
+            .resolve_host_path(&root)
+            .map_err(|error| ProtocolError {
+                code: "invalid_project_root".into(),
+                message: match error.kind() {
+                    std::io::ErrorKind::InvalidInput => {
+                        format!("{} is not an absolute path on this host", root.display())
+                    }
+                    _ => error.to_string(),
+                },
+            })?;
         if let Some(existing) = self.projects.iter().find(|p| p.root == root) {
             return Ok(existing.id.clone());
-        }
-        if !root.is_absolute() {
-            return Err(ProtocolError {
-                code: "invalid_project_root".into(),
-                message: format!("{} is not an absolute path on this host", root.display()),
-            });
         }
         if !root.is_dir() {
             return Err(ProtocolError {

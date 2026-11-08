@@ -363,10 +363,11 @@ pub enum Command {
         project_id: String,
         png: Option<Vec<u8>>,
     },
-    /// Register a project rooted at `root`. The host validates the path against
-    /// its own filesystem — a client never decides whether a host path is
-    /// absolute or exists — and answers `invalid_project_root` when it is not an
-    /// absolute, existing directory there.
+    /// Register a project rooted at `root`. The host reads the path by its own
+    /// rules — a leading `~` is its home and `..` folds — and validates it
+    /// against its own filesystem; a client never decides whether a host path
+    /// is absolute or exists. It answers `invalid_project_root` when the path is
+    /// not an absolute, existing directory there.
     CreateProject {
         root: PathBuf,
     },
