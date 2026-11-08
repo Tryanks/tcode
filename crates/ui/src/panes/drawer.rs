@@ -328,6 +328,35 @@ impl ThreadPanel {
     pub(super) fn conversation_bounds(&self) -> Bounds<Pixels> {
         self.conversation.get()
     }
+
+    /// A drawer of the host of the chat that [replaced](Self::replace_chat)
+    /// the pane's own: a drawer shows one host's panels. The one it replaces
+    /// lets its page go as it is dropped.
+    pub(crate) fn set_drawer(&mut self, drawer: Drawer, cx: &mut Context<Self>) {
+        let drawer = cx.new(|_| drawer);
+        self.seat(drawer, cx);
+    }
+
+    /// `this` and `other` trade drawers, as they trade chats of different
+    /// hosts: each drawer goes with its host's thread, as it was.
+    pub(crate) fn exchange_drawers(this: &Entity<Self>, other: &Entity<Self>, cx: &mut App) {
+        let (ours, theirs) = (this.read(cx).drawer.clone(), other.read(cx).drawer.clone());
+        this.update(cx, |pane, cx| pane.seat(theirs, cx));
+        other.update(cx, |pane, cx| pane.seat(ours, cx));
+    }
+
+    fn seat(&mut self, drawer: Entity<Drawer>, cx: &mut Context<Self>) {
+        let pane = cx.weak_entity();
+        drawer.update(cx, |drawer, _| drawer.pane = pane);
+        self.preview = drawer.read(cx).preview();
+        self.split = Split::new(
+            drawer.downgrade(),
+            |drawer: &mut Drawer, width| drawer.set_pane_width(width),
+            cx,
+        );
+        self.drawer = drawer;
+        cx.notify();
+    }
 }
 
 impl Drawer {

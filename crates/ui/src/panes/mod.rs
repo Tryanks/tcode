@@ -34,6 +34,7 @@ pub(crate) use zoom::{PaneZoom, Zoom};
 use crate::chat::{ChatView, WindowEdges};
 use crate::icon::{Icon, IconName};
 use crate::shell::PaneCommand;
+use crate::store::{HostKey, ThreadKey, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::Button;
 
@@ -144,7 +145,7 @@ impl MoveThreadToPane {
 /// already showing it.
 #[derive(Action, Clone, Debug, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode, no_json)]
-pub(crate) struct OpenInNewPane(pub(crate) String);
+pub(crate) struct OpenInNewPane(pub(crate) ThreadKey);
 
 /// Lay the whole column out anew, as a layout swap (see [`LayoutSwap`]). The
 /// panes there fill the new slots in the layout's order, the current pane
@@ -233,9 +234,11 @@ pub(crate) struct ThreadPanel {
     /// Where the conversation was last painted: the pane less the drawer's
     /// room.
     conversation: Rc<Cell<Bounds<Pixels>>>,
-    /// The thread `chat` is bound to, held here too so the shell can read a
-    /// pane's binding while that pane's conversation is rendering.
+    /// The thread `chat` is bound to, and the store of its host, held here
+    /// too so the shell can read a pane's binding while that pane's
+    /// conversation is rendering.
     session_id: Option<String>,
+    store: Entity<WorkspaceStore>,
     /// The pane's own focus, tracked by its tab group. The composer's would
     /// make the group's click-to-focus bypass the composer's refusals (a
     /// software keyboard, a read-only thread) and add the composer to the tab
@@ -251,10 +254,10 @@ pub(crate) struct ThreadPanel {
     zoom: PaneZoom,
     /// Leaving the column: still drawn while its slot glides shut, inert.
     closing: bool,
-    /// The thread whose timeline the pane holds in the store for its chat,
-    /// so a thread that closes while the pane still draws it (gliding out,
-    /// or fading under the waiting hint) shows itself, not nothing.
-    lease: Option<String>,
+    /// The thread whose timeline the pane holds in its host's store for its
+    /// chat, so a thread that closes while the pane still draws it (gliding
+    /// out, or fading under the waiting hint) shows itself, not nothing.
+    lease: Option<(Entity<WorkspaceStore>, String)>,
     /// The pane's thread closed beside others: its chat stays bound to it
     /// while it fades out under the waiting hint.
     fading_out: bool,
@@ -307,6 +310,7 @@ impl ThreadPanel {
             }
         });
         let session_id = chat.read(cx).session_id().map(str::to_owned);
+        let store = chat.read(cx).workspace_store().clone();
         let frame = chat.read(cx).frame();
         // A pane taken down mid-fade, or with its glide never landing,
         // lets its lease go with it.
@@ -318,6 +322,7 @@ impl ThreadPanel {
         };
         let mut panel = Self {
             session_id: None,
+            store,
             chat,
             frame,
             preview,
@@ -352,22 +357,22 @@ impl ThreadPanel {
         panel
     }
 
-    /// Hold `session_id`'s timeline in the store, letting go of the one held
-    /// before.
+    /// Hold `session_id`'s timeline in the store of the chat's host, letting
+    /// go of the one held before, on whichever host that was.
     fn hold(&mut self, session_id: Option<&str>, cx: &mut App) {
-        if self.lease.as_deref() == session_id {
+        let lease = session_id.map(|session_id| {
+            let store = self.chat.read(cx).workspace_store().clone();
+            (store, session_id.to_owned())
+        });
+        if self.lease == lease {
             return;
         }
-        let store = self.chat.read(cx).workspace_store().clone();
-        let released = std::mem::replace(&mut self.lease, session_id.map(str::to_owned));
-        store.update(cx, |store, cx| {
-            if let Some(session_id) = session_id {
-                store.lease_timeline(session_id);
-            }
-            if let Some(released) = released {
-                store.release_timeline(&released, cx);
-            }
-        });
+        if let Some((store, session_id)) = &lease {
+            store.update(cx, |store, _| store.lease_timeline(session_id));
+        }
+        if let Some((store, released)) = std::mem::replace(&mut self.lease, lease) {
+            store.update(cx, |store, cx| store.release_timeline(&released, cx));
+        }
     }
 
     pub(crate) fn chat(&self) -> Entity<ChatView> {
@@ -382,6 +387,21 @@ impl ThreadPanel {
     /// The thread the pane shows.
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// The store of the host whose thread the pane shows, or waits for.
+    pub(crate) fn store(&self) -> &Entity<WorkspaceStore> {
+        &self.store
+    }
+
+    /// The host whose thread the pane shows, or waits for.
+    pub(crate) fn host(&self, cx: &App) -> HostKey {
+        self.store.read(cx).host_key()
+    }
+
+    /// The thread the pane shows, by its host.
+    pub(crate) fn thread(&self, cx: &App) -> Option<ThreadKey> {
+        Some(self.store.read(cx).thread_key(self.session_id.as_deref()?))
     }
 
     /// Show `chat`, as bound, in place of the pane's own, which it returns.
@@ -402,6 +422,7 @@ impl ThreadPanel {
         cx: &mut Context<Self>,
     ) -> Entity<ChatView> {
         let session_id = chat.read(cx).session_id().map(str::to_owned);
+        self.store = chat.read(cx).workspace_store().clone();
         self.frame = chat.read(cx).frame();
         self.fading_out = false;
         self.await_chat(false, cx);

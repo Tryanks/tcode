@@ -144,9 +144,13 @@ impl PreviewPanel {
                 return None;
             }
             Some(
-                crate::motion::native_fade::NativeFade::new("preview-pages", move |cx| {
-                    lifecycle.read(cx).native_pages()
-                })
+                crate::motion::native_fade::NativeFade::new(
+                    gpui::ElementId::NamedInteger(
+                        "preview-pages".into(),
+                        lifecycle.entity_id().as_u64(),
+                    ),
+                    move |cx| lifecycle.read(cx).native_pages(),
+                )
                 .into_any_element(),
             )
         }
