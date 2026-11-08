@@ -1421,7 +1421,7 @@ impl SessionsSidebar {
             .cloned();
         let host_name = self
             .sectioned()
-            .then(|| host_title(store.read(cx)).to_string());
+            .then(|| store.read(cx).host_title().to_string());
         let project = match (project, host_name) {
             (Some(project), Some(host)) => Some(format!("{project} · {host}")),
             (project, host) => project.or(host),

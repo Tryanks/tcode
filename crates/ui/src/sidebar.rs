@@ -225,19 +225,33 @@ fn fold_key(fold: Fold, id: &str) -> String {
     }
 }
 
-/// The name a host's section and rows carry.
-fn host_title(store: &WorkspaceStore) -> SharedString {
-    match store.host_key() {
-        HostKey::Local => crate::tr!("hosts.this_computer").into_owned().into(),
-        HostKey::Remote(_) => store.machine_label().into(),
-    }
-}
-
 /// Whether a list over several hosts shows `store`'s heading alone: the host
 /// is out of reach, refused this device or speaks another protocol, and its
 /// threads are not shown from what the client last held.
 fn host_down(store: &WorkspaceStore) -> bool {
     crate::remote::connection_failure(store.connection_state()).is_some()
+}
+
+/// A host whose threads the list shows, as a menu offers it.
+struct HostProjects {
+    host: HostKey,
+    title: SharedString,
+    /// Whether it holds its projects, not only a space.
+    full: bool,
+    projects: Vec<(ProjectKey, tcode_core::project::Project)>,
+}
+
+/// `menu` goes on to a host's items, under its name over several hosts.
+fn host_section(
+    menu: crate::widgets::menu::PopupMenu,
+    sectioned: bool,
+    title: &SharedString,
+) -> crate::widgets::menu::PopupMenu {
+    if sectioned {
+        menu.separator().label(title.clone())
+    } else {
+        menu
+    }
 }
 
 /// How element ids, debug selectors and row keys name `id` of `host` in a
@@ -256,9 +270,9 @@ fn named<'a>(hosts: usize, host: &HostKey, id: &'a str) -> Cow<'a, str> {
 /// A project as the sidebar names it: a project id is unique only on its
 /// host.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Deserialize)]
-struct ProjectKey {
-    host: HostKey,
-    project_id: String,
+pub(crate) struct ProjectKey {
+    pub(crate) host: HostKey,
+    pub(crate) project_id: String,
 }
 
 /// What a list narrowed to `scope` shows of `host`: nothing when `scope` is
@@ -665,12 +679,14 @@ pub(super) fn confirm_remove_project(
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
 struct FilterProject(Option<ProjectKey>);
+/// A new thread in a project, on the project's host.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
-struct StartDraftForProject(ProjectKey);
+pub(crate) struct StartDraftForProject(pub(crate) ProjectKey);
+/// A quick thread on a host.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
-struct QuickChat(HostKey);
+pub(crate) struct QuickChat(pub(crate) HostKey);
 /// Prompt for a directory and make it a project of this host.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
@@ -1803,12 +1819,6 @@ impl SessionsSidebar {
         cx.notify();
     }
 
-    fn on_quick_chat(&mut self, action: &QuickChat, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(store) = self.store_of(&action.0) {
-            store.update(cx, |store, cx| store.start_scratch_draft(cx));
-        }
-    }
-
     fn on_add_project(&mut self, action: &AddProject, window: &mut Window, cx: &mut Context<Self>) {
         self.add_project(&action.0, window, cx);
     }
@@ -1849,28 +1859,6 @@ impl SessionsSidebar {
         if DevicePreferences::host_collapsed(host, cx) {
             self.toggle_host(host, cx);
         }
-    }
-
-    fn on_start_draft_for_project(
-        &mut self,
-        action: &StartDraftForProject,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(store) = self.store_of(&action.0.host) else {
-            return;
-        };
-        let Some(project) = store
-            .read(cx)
-            .projects()
-            .into_iter()
-            .find(|project| project.id == action.0.project_id)
-        else {
-            return;
-        };
-        store.update(cx, |store, cx| {
-            store.start_draft(project.id, project.root, cx);
-        });
     }
 
     fn on_link_pull_request(
@@ -2997,7 +2985,7 @@ impl SessionsSidebar {
             (crate::tr!("hosts.title").into_owned().into(), None)
         } else {
             (
-                host_title(store),
+                store.host_title(),
                 match store.host_key() {
                     HostKey::Remote(_) => {
                         Some(crate::remote::connection_label(&connection_state).into())
@@ -3140,7 +3128,7 @@ impl SessionsSidebar {
                     })
                     .child(self.render_layout_toggle(SidebarLayout::Grouped, cx))
                     .when(one_host && lead.read(cx).scope().is_full(), |row| {
-                        let quick_chat = QuickChat(host.clone());
+                        let quick_chat = lead.clone();
                         row.child(
                             Button::new("quick-chat-grouped")
                                 .ghost()
@@ -3148,9 +3136,9 @@ impl SessionsSidebar {
                                 .compact()
                                 .icon(IconName::Plus)
                                 .tooltip(crate::tr!("sidebar.quick_chat"))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.on_quick_chat(&quick_chat, window, cx)
-                                })),
+                                .on_click(move |_, _, cx| {
+                                    quick_chat.update(cx, |store, cx| store.start_scratch_draft(cx))
+                                }),
                         )
                         .child(self.add_project_button(cx).on_click(cx.listener(
                             move |this, _, window, cx| this.add_project(&host, window, cx),
@@ -3159,20 +3147,10 @@ impl SessionsSidebar {
             )
     }
 
-    /// The threads view's header. Its filter and new thread list every
-    /// host's projects, under each host's name when there are several, as
-    /// its new project lists the hosts that hold their projects.
-    fn render_flat_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Each host whose threads the list shows.
+    fn host_projects(&self, cx: &App) -> Rc<Vec<HostProjects>> {
         let sectioned = self.sectioned();
-        // Each host whose threads the list shows: its name, whether it holds
-        // its projects, and its projects.
-        type HostProjects = (
-            HostKey,
-            SharedString,
-            bool,
-            Vec<(ProjectKey, tcode_core::project::Project)>,
-        );
-        let hosts: Rc<Vec<HostProjects>> = Rc::new(
+        Rc::new(
             self.hosts
                 .iter()
                 .filter_map(|host| {
@@ -3191,22 +3169,53 @@ impl SessionsSidebar {
                             (key, project)
                         })
                         .collect();
-                    Some((
-                        host.key.clone(),
-                        host_title(store),
-                        store.scope().is_full(),
+                    Some(HostProjects {
+                        host: host.key.clone(),
+                        title: store.host_title(),
+                        full: store.scope().is_full(),
                         projects,
-                    ))
+                    })
                 })
                 .collect(),
-        );
-        let host_section = move |menu: crate::widgets::menu::PopupMenu, title: &SharedString| {
-            if sectioned {
-                menu.separator().label(title.clone())
-            } else {
-                menu
-            }
-        };
+        )
+    }
+
+    /// `trigger` opens the choice of where a new thread starts: each host's
+    /// quick thread and projects, under its name over several hosts.
+    pub(crate) fn new_thread_chooser(
+        &self,
+        trigger: Button,
+        touch: bool,
+        cx: &App,
+    ) -> impl IntoElement + use<> {
+        let hosts = self.host_projects(cx);
+        let sectioned = self.sectioned();
+        trigger
+            .dropdown_menu(move |menu, _, _| {
+                hosts.iter().fold(menu, |menu, host| {
+                    let menu = host_section(menu, sectioned, &host.title).when(host.full, |menu| {
+                        menu.menu(
+                            crate::tr!("sidebar.quick_chat"),
+                            Box::new(QuickChat(host.host.clone())),
+                        )
+                    });
+                    host.projects.iter().fold(menu, |menu, (key, project)| {
+                        menu.menu(
+                            project.name.clone(),
+                            Box::new(StartDraftForProject(key.clone())),
+                        )
+                    })
+                })
+            })
+            .touch(touch)
+    }
+
+    /// The threads view's header. Its filter and new thread list every
+    /// host's projects, under each host's name when there are several, as
+    /// its new project lists the hosts that hold their projects.
+    fn render_flat_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sectioned = self.sectioned();
+        let hosts = self.host_projects(cx);
         let active_filter = self.project_filter.clone();
         let filter_icon_color = gpui_base::motion::transition(
             "sidebar-filter-icon",
@@ -3233,9 +3242,9 @@ impl SessionsSidebar {
                     filter_for_menu.is_none(),
                     Box::new(FilterProject(None)),
                 );
-                for (_, title, _, projects) in filter_hosts.iter() {
-                    menu = host_section(menu, title);
-                    for (key, project) in projects {
+                for host in filter_hosts.iter() {
+                    menu = host_section(menu, sectioned, &host.title);
+                    for (key, project) in &host.projects {
                         menu = menu.menu_with_check(
                             project.name.clone(),
                             filter_for_menu.as_ref() == Some(key),
@@ -3246,20 +3255,31 @@ impl SessionsSidebar {
                 menu
             });
 
-        let mut projects = hosts.iter().flat_map(|(_, _, _, projects)| projects);
+        let mut projects = hosts.iter().flat_map(|host| &host.projects);
         let draft_project = match &active_filter {
             Some(filter) => projects.find(|(key, _)| key == filter),
-            None => projects.next().filter(|_| projects.next().is_none()),
+            // Over several hosts every other host's quick thread is a choice
+            // too.
+            None if !sectioned => projects.next().filter(|_| projects.next().is_none()),
+            None => None,
         }
         .cloned();
+        let new_thread = Button::new("new-flat-thread")
+            .ghost()
+            .xsmall()
+            .compact()
+            .icon(IconName::Plus);
         let new_thread = if let Some((key, project)) = draft_project {
+            let tooltip = hosts
+                .iter()
+                .find(|host| host.host == key.host)
+                .filter(|_| sectioned)
+                .map_or(crate::tr!("sidebar.create_thread"), |host| {
+                    crate::tr!("sidebar.create_thread_on", host = host.title.clone())
+                });
             let cwd = project.root;
-            Button::new("new-flat-thread")
-                .ghost()
-                .xsmall()
-                .compact()
-                .icon(IconName::Plus)
-                .tooltip(crate::tr!("sidebar.create_thread"))
+            new_thread
+                .tooltip(tooltip)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(store) = this.store_of(&key.host) {
                         store.update(cx, |store, cx| {
@@ -3269,38 +3289,18 @@ impl SessionsSidebar {
                 }))
                 .into_any_element()
         } else {
-            let draft_hosts = hosts.clone();
-            Button::new("new-flat-thread")
-                .ghost()
-                .xsmall()
-                .compact()
-                .icon(IconName::Plus)
-                .tooltip(crate::tr!("sidebar.create_thread"))
-                .dropdown_menu(move |menu, _window, _cx| {
-                    let mut menu = menu;
-                    for (host, title, full, projects) in draft_hosts.iter() {
-                        menu = host_section(menu, title).when(*full, |menu| {
-                            menu.menu(
-                                crate::tr!("sidebar.quick_chat"),
-                                Box::new(QuickChat(host.clone())),
-                            )
-                        });
-                        for (key, project) in projects {
-                            menu = menu.menu(
-                                project.name.clone(),
-                                Box::new(StartDraftForProject(key.clone())),
-                            );
-                        }
-                    }
-                    menu
-                })
-                .into_any_element()
+            self.new_thread_chooser(
+                new_thread.tooltip(crate::tr!("sidebar.create_thread")),
+                false,
+                cx,
+            )
+            .into_any_element()
         };
 
         let full: Vec<(HostKey, SharedString)> = hosts
             .iter()
-            .filter(|(_, _, full, _)| *full)
-            .map(|(host, title, _, _)| (host.clone(), title.clone()))
+            .filter(|host| host.full)
+            .map(|host| (host.host.clone(), host.title.clone()))
             .collect();
         let add_project = match full.as_slice() {
             [] => None,
@@ -3544,7 +3544,7 @@ impl SessionsSidebar {
         let state = store.connection_state();
         let failure = crate::remote::connection_failure(state.clone());
         let up = failure.is_none();
-        let title = host_title(store);
+        let title = store.host_title();
         let menu = HostMenu {
             host: host.clone(),
             projects: (up && store.scope().is_full()).then(|| {
@@ -5271,7 +5271,7 @@ impl SessionsSidebar {
                     } else {
                         project_view_timestamp(meta)
                     };
-                    let host_name = (recent && sectioned).then(|| host_title(store.read(cx)));
+                    let host_name = (recent && sectioned).then(|| store.read(cx).host_title());
                     rows.push(CompactListRow::Thread(Rc::new(CompactThreadRow {
                         title: meta.title.clone().into(),
                         row_id: format!("compact-thread-row-{}", listed.name).into(),
@@ -5841,8 +5841,6 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_arrange))
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
-            .on_action(cx.listener(Self::on_start_draft_for_project))
-            .on_action(cx.listener(Self::on_quick_chat))
             .on_action(cx.listener(Self::on_add_project))
             .on_action(cx.listener(Self::on_sort_projects))
             .on_action(cx.listener(Self::on_manage_hosts))
@@ -6769,7 +6767,7 @@ impl SessionsSidebar {
         let host_name = self
             .store_of(&listed.host)
             .filter(|_| self.sectioned())
-            .map(|store| host_title(store.read(cx)));
+            .map(|store| store.read(cx).host_title());
         let thread =
             self.render_flat_thread(listed, &of.flags, project_name, host_name, window, cx);
         let row = div().w_full().px_2().pb(px(2.)).child(drag_ghost::slot(
@@ -6893,8 +6891,6 @@ impl Render for SessionsSidebar {
         .on_action(cx.listener(Self::on_change_project_root))
         .on_action(cx.listener(Self::on_project_reveal))
         .on_action(cx.listener(Self::on_filter_project))
-        .on_action(cx.listener(Self::on_start_draft_for_project))
-        .on_action(cx.listener(Self::on_quick_chat))
         .on_action(cx.listener(Self::on_add_project))
         .on_action(cx.listener(Self::on_sort_projects))
         .on_action(cx.listener(Self::on_manage_hosts))

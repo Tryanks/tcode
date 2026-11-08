@@ -611,6 +611,14 @@ impl WorkspaceStore {
         }
     }
 
+    /// The name the host goes by wherever the window shows several.
+    pub(crate) fn host_title(&self) -> gpui::SharedString {
+        match self.host_key() {
+            HostKey::Local => crate::tr!("hosts.this_computer").into_owned().into(),
+            HostKey::Remote(_) => self.machine_label().into(),
+        }
+    }
+
     pub fn machine_label(&self) -> String {
         let machine = self.remote_host_name().unwrap_or_default();
         match &self.scope {

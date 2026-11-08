@@ -81,7 +81,15 @@ impl ChatView {
                 .font_medium()
                 .text_color(cx.theme().muted_foreground)
                 .child(crate::material::tracked_uppercase(
-                    crate::tr!("chat.start_hub_title").as_ref(),
+                    if crate::shell::several_hosts(cx) {
+                        crate::tr!(
+                            "chat.start_hub_title_on",
+                            host = self.workspace_store.read(cx).host_title()
+                        )
+                    } else {
+                        crate::tr!("chat.start_hub_title")
+                    }
+                    .as_ref(),
                 )),
         );
         let fills = self.motion.scope("start-hub-fill");
