@@ -11403,6 +11403,7 @@ dependencies = [
  "computer-use-mcp",
  "control-mcp",
  "filetime",
+ "libc",
  "log",
  "mcp-host",
  "preview-mcp",

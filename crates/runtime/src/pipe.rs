@@ -130,6 +130,32 @@ impl SpawnedHost {
             .clone()
     }
 
+    /// Stop the host for an application that is quitting: its loop ends once
+    /// its inbox closes, stopping every harness this process started. A quit
+    /// that stops waiting first drops this future — gpui gives its quit
+    /// handlers a fixed budget, then exits — and the drop stops every harness
+    /// still running at once, on the quitting thread, since the host may not
+    /// run again before the process is gone.
+    pub fn stop(&self) -> impl std::future::Future<Output = ()> + use<> {
+        struct Unfinished;
+        impl Drop for Unfinished {
+            fn drop(&mut self) {
+                agent::stop_every_tree();
+            }
+        }
+        // Made outside the future, so a future dropped before its first
+        // poll stops them too.
+        let unfinished = Unfinished;
+        let to_host = self.to_host.clone();
+        let stopped = self.stopped.clone();
+        async move {
+            let unfinished = unfinished;
+            to_host.close();
+            let _ = stopped.recv().await;
+            std::mem::forget(unfinished);
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn shutdown_blocking(&self) -> Result<(), ProtocolError> {
         self.link().shutdown_blocking()?;
@@ -1454,6 +1480,107 @@ fn io_protocol_error(error: std::io::Error) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A quit stops waiting for the host after a fixed budget (gpui gives
+    /// its quit handlers 200 ms, then the process exits). With the host busy
+    /// past it and a harness that ignores everything but SIGKILL, the harness
+    /// is still gone by the time the quit gives up.
+    #[cfg(unix)]
+    #[test]
+    fn a_quit_that_stops_waiting_for_the_host_still_ends_every_harness() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root =
+            std::env::temp_dir().join(format!("tcode-abandoned-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pi = root.join("pi");
+        let pid_file = root.join("pi.pid");
+        std::fs::write(
+            &pi,
+            format!(
+                "#!/bin/sh\ntrap '' HUP INT TERM\necho $$ > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nexec sleep 120\n",
+                pid = pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = spawn_host(
+            SessionStore::open_at(root.join("store")).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+
+        // A model catalog query the harness never answers.
+        let catalog = std::thread::spawn(move || {
+            smol::block_on(agent::pi::list_models(Some(pi), Default::default()))
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let harness: libc::pid_t = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|pid| pid.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the harness never ran"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        let (entered, busy) = async_channel::bounded(1);
+        let (release, released) = async_channel::bounded::<()>(1);
+        let working = std::thread::spawn({
+            let host = host.clone();
+            move || {
+                smol::block_on(host.update_state_for_test(move |_, _| {
+                    entered.send_blocking(()).unwrap();
+                    let _ = released.recv_blocking();
+                }))
+            }
+        });
+        busy.recv_blocking().unwrap();
+
+        let stopped = smol::block_on(smol::future::or(
+            async {
+                host.stop().await;
+                true
+            },
+            async {
+                smol::Timer::after(std::time::Duration::from_millis(200)).await;
+                false
+            },
+        ));
+        assert!(!stopped, "the host was still busy");
+        let exited = |pid: libc::pid_t| {
+            // SAFETY: `info` is a valid, writable siginfo; WNOWAIT leaves the
+            // exit status for the thread that owns the child.
+            unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                ) != 0
+                    || info.si_pid() == pid
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !exited(harness) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the harness {harness} outlived the quit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        release.send_blocking(()).unwrap();
+        working.join().unwrap().unwrap();
+        assert!(catalog.join().unwrap().is_err());
+        host.stopped.recv_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     pub(super) fn next_event(
         events: &async_channel::Receiver<EventEnvelope>,
