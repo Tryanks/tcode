@@ -4062,11 +4062,13 @@ impl SessionsSidebar {
         emphasize_unread: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui::Div {
         let title = if let Some(input) = &state.renaming {
             self.rename_input(input, cx).into_any_element()
         } else {
             sidebar_label(meta.title.clone())
+                // As wide as the title, so the row knows what it cuts.
+                .flex_auto()
                 .text_body(false, cx)
                 .text_color(if meta.is_settled() {
                     cx.theme().muted_foreground
@@ -4079,7 +4081,7 @@ impl SessionsSidebar {
                 .into_any_element()
         };
         h_flex()
-            .flex_1()
+            .flex_auto()
             .min_w_0()
             .gap(px(6.))
             .child(title)
@@ -4092,7 +4094,6 @@ impl SessionsSidebar {
                 ),
                 |row, spinner| row.child(spinner),
             )
-            .into_any_element()
     }
 
     /// The spinner beside a title while it generates, faded in and out.
@@ -4256,56 +4257,75 @@ impl SessionsSidebar {
         }
     }
 
-    /// The row's status as a dot and its label; a change of status
-    /// cross-fades, and a status that ends fades out in its place.
-    fn thread_status_badge(
-        state: &ThreadRowState,
-        working: bool,
+    /// The dot leading a thread row's title: unread over the status's colour,
+    /// breathing while only background work keeps the thread going; none
+    /// while the row is renamed. A change cross-fades.
+    fn status_dot(
+        name: &str,
+        show_unread: bool,
+        renaming: bool,
+        status: Option<(gpui::Hsla, bool)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let status = Self::thread_status_label(state, working, cx);
-        let keeps = keeps_going(state);
-        let badge = faded_status(
-            format!("thread-status-{}", state.name),
-            status.map(|(color, label, breathes)| (color, SharedString::from(label), breathes)),
+        let dot = (!renaming)
+            .then(|| show_unread.then(|| (cx.theme().primary, false)).or(status))
+            .flatten();
+        faded_status(
+            format!("status-dot-{name}"),
+            dot,
             window,
             cx,
-            |(color, label, breathes), _, cx| {
-                h_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(if *breathes {
-                        crate::widgets::BreathingDot::new(*color).into_any_element()
-                    } else {
-                        div()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(*color)
-                            .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_secondary(false, cx)
-                            .text_color(*color)
-                            .child(label.clone()),
-                    )
+            |(color, breathes), _, _| {
+                if *breathes {
+                    crate::widgets::BreathingDot::new(*color).into_any_element()
+                } else {
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(*color)
+                        .into_any_element()
+                }
+            },
+        )
+    }
+
+    /// The word naming a thread row's status, its tooltip what keeps the
+    /// thread going or why it failed. A change cross-fades, and a status
+    /// that ends fades out in its place.
+    fn status_word(
+        state: &ThreadRowState,
+        status: Option<(gpui::Hsla, std::borrow::Cow<'static, str>, bool)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        let name = &state.name;
+        let word = faded_status(
+            format!("status-word-{name}"),
+            status.map(|(color, label, _)| (SharedString::from(label), color)),
+            window,
+            cx,
+            |(label, color), _, cx| {
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_secondary(false, cx)
+                    .text_color(*color)
+                    .child(crate::widgets::fade_text(label.clone()))
                     .into_any_element()
             },
         )?;
+        let keeps = keeps_going(state);
         Some(
-            h_flex()
-                .id(SharedString::from(format!("thread-status-{}", state.name)))
-                .when_some(keeps, |badge, keeps| {
-                    badge.with_tooltip(move |_, _| Tooltip::new(keeps.clone()))
+            div()
+                .id(SharedString::from(format!("thread-status-{name}")))
+                .when_some(keeps, |word, keeps| {
+                    word.with_tooltip(move |_, _| Tooltip::new(keeps.clone()))
                 })
-                .flex_none()
-                .child(badge)
-                .when(state.failed && !state.waiting(), |badge| {
-                    badge.with_tooltip(|_, _| Tooltip::new(crate::tr!("sidebar.failed_tooltip")))
+                .when(state.failed && !state.waiting(), |word| {
+                    word.with_tooltip(|_, _| Tooltip::new(crate::tr!("sidebar.failed_tooltip")))
                 })
-                .into_any_element(),
+                .child(word),
         )
     }
 
@@ -4537,6 +4557,7 @@ impl SessionsSidebar {
         let name = state.name.clone();
         let is_worktree = state.is_worktree;
         let show_unread = state.show_unread;
+        let status = Self::thread_status_label(&state, working, cx);
 
         let row = self
             .thread_clickable_row(
@@ -4557,68 +4578,80 @@ impl SessionsSidebar {
                 crate::material::selectable_row_height(false),
                 crate::material::selectable_row_inset(false).into(),
             ))
-            .when_some(
-                Self::thread_status_badge(&state, working, window, cx),
-                |row, badge| row.child(badge),
-            );
+            .children(Self::status_dot(
+                &name,
+                show_unread,
+                state.renaming.is_some(),
+                status
+                    .as_ref()
+                    .map(|(color, _, breathes)| (*color, *breathes)),
+                window,
+                cx,
+            ));
 
-        // Row body: rename input, or the (unread dot + worktree glyph + title).
+        // Row body: rename input, or the worktree glyph, the title and the
+        // status word beside it, which gives up its width before the title.
         let row = if state.renaming.is_some() {
             row.child(self.thread_title_or_input(meta, &state, false, window, cx))
         } else {
-            let unread = crate::motion::shown(
-                SharedString::from(format!("unread-{name}")),
-                show_unread.then_some(()),
-                SHOW,
+            row.when(is_worktree, |row| {
+                row.child(
+                    Icon::empty()
+                        .path("icons/git-branch.svg")
+                        .text_color(cx.theme().muted_foreground),
+                )
+            })
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        self.thread_title_or_input(meta, &state, false, window, cx)
+                            .flex_initial(),
+                    )
+                    .children(Self::status_word(&state, status, window, cx).map(|word| {
+                        word.flex_shrink(1000.)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .pl(ROW_GAP)
+                    })),
+            )
+            .children(Self::follow_up_glyph(meta, &name, window, cx))
+            .children(self.pin_glyph(meta, &state, window, cx))
+            .children(Self::pr_badge(
+                &store,
+                listed,
+                state.renaming.is_none(),
+                ROW_GAP,
+                "pr-badge-row",
                 window,
                 cx,
-            )
-            .map(|shown| shown.fade(div().size(px(6.)).rounded_full().bg(cx.theme().primary)));
-            row.children(unread)
-                .when(is_worktree, |row| {
-                    row.child(
-                        Icon::empty()
-                            .path("icons/git-branch.svg")
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                })
-                .child(self.thread_title_or_input(meta, &state, false, window, cx))
-                .children(Self::follow_up_glyph(meta, &name, window, cx))
-                .children(self.pin_glyph(meta, &state, window, cx))
-                .children(Self::pr_badge(
-                    &store,
-                    listed,
-                    state.renaming.is_none(),
-                    ROW_GAP,
-                    "pr-badge-row",
+            ))
+            .children(self.pane_glyph(&state, window, cx))
+            // The time narrows away while the thread works, giving the
+            // title its width gradually, and widens back after.
+            .when_some(
+                crate::motion::shown(
+                    SharedString::from(format!("thread-time-{name}")),
+                    (!working).then_some(()),
+                    SHOW,
                     window,
                     cx,
-                ))
-                .children(self.pane_glyph(&state, window, cx))
-                // The time narrows away while the thread works, giving the
-                // title its width gradually, and widens back after.
-                .when_some(
-                    crate::motion::shown(
-                        SharedString::from(format!("thread-time-{name}")),
-                        (!working).then_some(()),
-                        SHOW,
+                ),
+                |row, shown| {
+                    let blocked = store.read(cx).pending_approval_for(&meta.id)
+                        || store.read(cx).pending_user_input_for(&meta.id);
+                    let slot = self.render_flat_thread_right_slot(
+                        meta,
+                        &state,
+                        project_view_timestamp(meta),
+                        !blocked,
                         window,
                         cx,
-                    ),
-                    |row, shown| {
-                        let blocked = store.read(cx).pending_approval_for(&meta.id)
-                            || store.read(cx).pending_user_input_for(&meta.id);
-                        let slot = self.render_flat_thread_right_slot(
-                            meta,
-                            &state,
-                            project_view_timestamp(meta),
-                            !blocked,
-                            window,
-                            cx,
-                        );
-                        row.child(shown.fold_across_gap(ROW_GAP, slot))
-                    },
-                )
+                    );
+                    row.child(shown.fold_across_gap(ROW_GAP, slot))
+                },
+            )
         };
 
         self.thread_context_menu(row, meta, &state, working, false, cx)
@@ -4738,7 +4771,6 @@ impl SessionsSidebar {
         let show_unread = state.show_unread;
         let renaming = state.renaming.is_some();
         let status = Self::thread_status_label(&state, working, cx);
-        let keeps = keeps_going(&state);
 
         let row = self
             .thread_clickable_row(
@@ -4772,27 +4804,15 @@ impl SessionsSidebar {
 
         let row = {
             let title_or_input = self.thread_title_or_input(meta, &state, true, window, cx);
-            // Unread wins over the status colour; renaming hides the dot so the
-            // input keeps the row's leading width (same as render_thread).
-            let dot = (!renaming)
-                .then(|| {
-                    show_unread
-                        .then(|| cx.theme().primary)
-                        .or(status.as_ref().map(|(color, _, _)| *color))
-                })
-                .flatten();
-            let dot = faded_status(
-                format!("flat-dot-{name}"),
-                dot,
+            let dot = Self::status_dot(
+                &name,
+                show_unread,
+                renaming,
+                status
+                    .as_ref()
+                    .map(|(color, _, breathes)| (*color, *breathes)),
                 window,
                 cx,
-                |color, _, _| {
-                    div()
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(*color)
-                        .into_any_element()
-                },
             );
             let line_one = h_flex()
                 .w_full()
@@ -4819,36 +4839,14 @@ impl SessionsSidebar {
 
             let has_project = project_name.is_some();
             let has_status = status.is_some();
-            let status_line = faded_status(
-                format!("flat-status-{name}"),
-                status.map(|(color, label, _)| (SharedString::from(label), color)),
-                window,
-                cx,
-                |(label, color), _, _| {
-                    div()
-                        .whitespace_nowrap()
-                        .text_color(*color)
-                        .child(label.clone())
-                        .into_any_element()
-                },
-            );
+            let status_word = Self::status_word(&state, status, window, cx);
             let line_two = h_flex()
                 .w_full()
                 .min_w_0()
                 .items_center()
                 .gap_1()
                 .text_secondary(false, cx)
-                .when_some(status_line, |line, status| {
-                    line.child(
-                        div()
-                            .id(SharedString::from(format!("thread-status-{name}")))
-                            .flex_none()
-                            .when_some(keeps, |status, keeps| {
-                                status.with_tooltip(move |_, _| Tooltip::new(keeps.clone()))
-                            })
-                            .child(status),
-                    )
-                })
+                .children(status_word.map(|word| word.flex_none()))
                 .when(has_status && has_project, |line| {
                     line.child(div().flex_none().child("·"))
                 })
