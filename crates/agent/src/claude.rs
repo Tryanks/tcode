@@ -340,7 +340,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     let applied_permission_mode =
         effective_permission_mode(launch_permission_mode, &opts.extra_args);
 
-    let mut cmd = crate::process::async_command(&binary);
+    let mut cmd = crate::process::async_harness_command(&binary);
     cmd.arg("--print")
         .arg("--input-format")
         .arg("stream-json")
@@ -428,9 +428,10 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     }
 
     crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AgentError::Spawn(format!("spawning `{binary}`: {e}")))?;
+    let mut child = crate::process::ProcessTree::new(
+        cmd.spawn()
+            .map_err(|e| AgentError::Spawn(format!("spawning `{binary}`: {e}")))?,
+    );
 
     let stdin = child
         .stdin
@@ -572,7 +573,7 @@ pub async fn read_usage(
 ) -> Result<Value, AgentError> {
     let binary = crate::resolve_binary(binary_path.as_deref(), "claude")?;
     let binary_display = binary.to_string_lossy().into_owned();
-    let mut cmd = crate::process::async_command(&binary);
+    let mut cmd = crate::process::async_harness_command(&binary);
     cmd.arg("--print")
         .arg("--input-format")
         .arg("stream-json")
@@ -589,9 +590,10 @@ pub async fn read_usage(
         cmd.env(key, value);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| AgentError::Spawn(format!("spawning `{binary_display}`: {err}")))?;
+    let mut child = crate::process::ProcessTree::new(
+        cmd.spawn()
+            .map_err(|err| AgentError::Spawn(format!("spawning `{binary_display}`: {err}")))?,
+    );
     let mut stdin = child
         .stdin
         .take()
@@ -896,7 +898,7 @@ fn resume_args(
 
 #[allow(clippy::too_many_arguments)]
 async fn actor_loop(
-    mut child: smol::process::Child,
+    mut child: crate::process::ProcessTree<smol::process::Child>,
     mut stdin: smol::process::ChildStdin,
     cmd_rx: smol::channel::Receiver<SessionCommand>,
     line_rx: smol::channel::Receiver<String>,
@@ -1276,7 +1278,7 @@ async fn handle_command(
     goal: Option<&mut GoalTranscript>,
     stdin: &mut smol::process::ChildStdin,
     event_tx: &smol::channel::Sender<AgentEvent>,
-    child: &mut smol::process::Child,
+    child: &mut crate::process::ProcessTree<smol::process::Child>,
 ) -> ControlFlow<&'static str> {
     match command {
         SessionCommand::SendTurn {

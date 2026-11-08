@@ -990,7 +990,7 @@ composer:
   stop_unanswered: "%{harness} 没有响应停止"
   force_terminate: "强制终止"
   force_terminate_title: "强制终止 %{harness}？"
-  force_terminate_description: "这会结束 %{harness} 进程。当前回合就地停止，尚未完成的工作会丢失。它启动的后台命令可能会自行继续运行，结果不会再回到这个对话。已有的对话会保留，下一条消息会重新启动 %{harness}。"
+  force_terminate_description: "这会结束 %{harness} 进程。当前回合就地停止，尚未完成的工作会丢失。它启动的后台命令也会一并停止。已有的对话会保留，下一条消息会重新启动 %{harness}。"
   force_terminate_cancel: "继续等待"
   background_tasks: "后台任务"
   background_stop: "停止此任务"

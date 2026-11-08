@@ -14,7 +14,7 @@ use smol::channel::{Receiver, Sender};
 #[cfg(test)]
 use crate::TurnStatus;
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::process::{ChildOutput, send_json as write_json, spawn_line_reader};
+use crate::process::{ChildOutput, ProcessTree, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, DeltaKind, FileChange, FileChangeKind, ForkPoint, ItemContent,
@@ -54,7 +54,7 @@ fn list_models_blocking(
     launch_env: &LaunchEnv,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     let binary = crate::resolve_binary(binary_path, "pi")?;
-    let mut cmd = crate::process::command(&binary);
+    let mut cmd = crate::process::harness_command(&binary);
     cmd.arg("--mode")
         .arg("rpc")
         .arg("--no-session")
@@ -64,9 +64,10 @@ fn list_models_blocking(
     for (key, value) in launch_env.pairs(ProviderKind::Pi) {
         cmd.env(key, value);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())))?;
+    let mut child = ProcessTree::new(
+        cmd.spawn()
+            .map_err(|err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())))?,
+    );
     let mut stdin = BufWriter::new(
         child
             .stdin
@@ -221,7 +222,7 @@ async fn run_actor(
             return;
         }
     };
-    let mut cmd = crate::process::command(&binary);
+    let mut cmd = crate::process::harness_command(&binary);
     cmd.args(&opts.extra_args).arg("--mode").arg("rpc");
     // Which entry to fork before, or `None` for the leaf.
     let fork_at = match &opts.fork {
@@ -265,7 +266,7 @@ async fn run_actor(
         return;
     }
     let mut child = match cmd.spawn() {
-        Ok(child) => child,
+        Ok(child) => ProcessTree::new(child),
         Err(err) => {
             let _ = ready
                 .send(Err(AgentError::Spawn(format!(
@@ -352,7 +353,7 @@ async fn run_actor(
 }
 
 struct PiActor {
-    child: Child,
+    child: ProcessTree<Child>,
     stdin: BufWriter<ChildStdin>,
     lines: Receiver<ChildOutput>,
     events: Sender<AgentEvent>,
