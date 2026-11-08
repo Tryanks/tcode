@@ -117,6 +117,51 @@ fn create_new_project_creates_and_registers_a_host_directory() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A root a client sends is read by the host's rules: `~` is the host's home
+/// and `..` folds, so every way of writing one folder names one project.
+#[test]
+fn create_project_reads_the_root_as_a_host_path() {
+    let (host, root) = fixture(true, false);
+    let link = host.link();
+    let events = super::p4b_tests::observed_events(&link);
+    link.subscribe(Subscription {
+        known_index: None,
+        topic: Topic::Index,
+        after: None,
+    })
+    .unwrap();
+    let folder = root.join("home/src/app");
+    std::fs::create_dir_all(&folder).unwrap();
+    let create = |root: std::path::PathBuf| match link
+        .command_blocking(Command::CreateProject { root })
+        .unwrap()
+    {
+        CommandResponse::ProjectId(Some(id)) => id,
+        other => panic!("expected project id, got {other:?}"),
+    };
+
+    let id = create("~/src/app/".into());
+    let event = super::tests::next_event(
+        &events,
+        |event| matches!(&event.event, ServerEvent::IndexUpsertProject(project) if project.id == id),
+    );
+    let ServerEvent::IndexUpsertProject(project) = event.event else {
+        unreachable!()
+    };
+    assert_eq!(project.root, folder);
+    assert_eq!(create(root.join("home/src/other/../app/")), id);
+    assert_eq!(create(folder.clone()), id);
+
+    let error = link
+        .command_blocking(Command::CreateProject {
+            root: "~someone/src".into(),
+        })
+        .unwrap_err();
+    assert_eq!(error.code, "invalid_project_root");
+    host.shutdown_blocking().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn scratch_draft_uses_todays_host_documents_directory_and_reuses_the_draft() {
     for (documents, legacy) in [(true, false), (false, false), (true, true), (false, true)] {

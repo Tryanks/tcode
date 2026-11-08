@@ -1182,13 +1182,14 @@ impl AppState {
         cx: &mut HostCx,
     ) -> Result<serde_json::Value, String> {
         let root = PathBuf::from(params.root);
-        let existed = self.projects.iter().any(|project| project.root == root);
         let command = Command::CreateProject { root: root.clone() };
         self.validate_command_target(&command)
             .map_err(|error| error.message)?;
+        let known = self.projects.len();
         let id = self
             .create_project(root, cx)
             .map_err(|error| error.message)?;
+        let existed = self.projects.len() == known;
         let project = self
             .projects
             .iter()

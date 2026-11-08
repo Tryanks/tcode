@@ -102,11 +102,14 @@ impl Default for UserDirectories {
 
 impl UserDirectories {
     /// The folders directly inside `path` on this machine, for picking a
-    /// project root. A leading `~` is the home and an empty path the home
-    /// itself; anything else must be absolute. `..` and `.` are folded away
-    /// without following links, so the path keeps the shape the user typed.
+    /// project root: a host path as [`Self::resolve_host_path`] reads it, an
+    /// empty one being the home itself.
     pub fn browse_directories(&self, path: &str) -> io::Result<tcode_protocol::DirectoryListing> {
-        let directory = self.resolve_host_path(path)?;
+        let path = match path.trim() {
+            "" => "~",
+            path => path,
+        };
+        let directory = self.resolve_host_path(Path::new(path))?;
         let read = std::fs::read_dir(&directory).map_err(|error| {
             io::Error::new(error.kind(), format!("{}: {error}", directory.display()))
         })?;
@@ -131,32 +134,27 @@ impl UserDirectories {
         })
     }
 
-    /// `path` as this machine names it: a leading `~` is the home and an empty
-    /// path the home itself; anything else must be absolute.
-    fn resolve_host_path(&self, path: &str) -> io::Result<PathBuf> {
-        let path = path.trim();
-        let home = || {
-            self.home.clone().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "Host home directory is unavailable.",
-                )
-            })
-        };
-        let under_home = path
-            .strip_prefix("~/")
-            .or_else(|| cfg!(windows).then(|| path.strip_prefix("~\\")).flatten());
-        let expanded = if path.is_empty() || path == "~" {
-            home()?
-        } else if let Some(rest) = under_home {
-            home()?.join(rest)
-        } else {
-            PathBuf::from(path)
+    /// `path` as this machine names it: a leading `~` component is the home;
+    /// anything else must be absolute. `..` and `.` are folded away without
+    /// following links, so the path keeps the shape the user typed.
+    pub fn resolve_host_path(&self, path: &Path) -> io::Result<PathBuf> {
+        let expanded = match path.strip_prefix("~") {
+            Ok(rest) => self
+                .home
+                .as_ref()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "Host home directory is unavailable.",
+                    )
+                })?
+                .join(rest),
+            Err(_) => path.to_path_buf(),
         };
         if !expanded.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("{path} is not an absolute path."),
+                format!("{} is not an absolute path.", path.display()),
             ));
         }
         let mut normal = PathBuf::new();
@@ -188,7 +186,7 @@ impl UserDirectories {
                 "Project name must be a non-empty single directory name without / or \\.",
             ));
         }
-        let root = self.resolve_host_path(parent)?.join(name);
+        let root = self.resolve_host_path(Path::new(parent.trim()))?.join(name);
         create_directory(&root)?;
         Ok(root)
     }
