@@ -3289,28 +3289,34 @@ This begins after the hard break."#;
                     })
                     .unwrap();
             }
+            let shown = |window: &mut VisualTestContext| -> Vec<RewindMode> {
+                [
+                    RewindMode::FilesAndConversation,
+                    RewindMode::Conversation,
+                    RewindMode::Files,
+                ]
+                .into_iter()
+                .filter(|mode| {
+                    window
+                        .debug_bounds(format!("rewind-option-{mode:?}").leak())
+                        .is_some()
+                })
+                .collect()
+            };
+            // The spinner is the selected scope's preview alone; the scopes
+            // offered settle once the other scope's answer lands as well.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while window.debug_bounds("rewind-preview-checking").is_some() {
+            while window.debug_bounds("rewind-preview-checking").is_some()
+                || shown(window) != offered
+            {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "the previews are answered"
+                    "the previews are answered: {:?}, not {offered:?}, for {files:?}",
+                    shown(window)
                 );
                 driver.wait_until(window, &store, "the host's answers", |_| true);
                 draw_settled(window);
             }
-            let shown: Vec<RewindMode> = [
-                RewindMode::FilesAndConversation,
-                RewindMode::Conversation,
-                RewindMode::Files,
-            ]
-            .into_iter()
-            .filter(|mode| {
-                window
-                    .debug_bounds(format!("rewind-option-{mode:?}").leak())
-                    .is_some()
-            })
-            .collect();
-            assert_eq!(shown, offered, "{files:?}");
             assert_eq!(
                 window.debug_bounds("rewind-preview-files").is_some(),
                 !files.is_empty(),
