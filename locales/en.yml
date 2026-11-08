@@ -213,6 +213,8 @@ rail:
   commands_failed: "%{count} failed"
   commands_more: "%{count} more"
   commands_backgrounded: "%{count} moved to the background"
+  commands_turn: "%{count} this turn"
+  commands_backgrounded_note: "Commands moved to the background are in the Background card, not repeated here."
 background:
   title: "Background"
   pill: "Background %{count}"
