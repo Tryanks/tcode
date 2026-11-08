@@ -851,7 +851,7 @@ fn main() {
                 let window_state = shell.read(cx).window_state();
                 window_state.update(cx, |state, cx| {
                     state.pending_settings_section = Some(section);
-                    state.open_settings(cx);
+                    state.open_settings_on(tcode_ui::store::HostKey::Local, cx);
                 });
             }
 

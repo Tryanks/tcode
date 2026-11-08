@@ -535,6 +535,28 @@ pub(crate) fn several_hosts(cx: &App) -> bool {
     current_shell(cx).is_some_and(|shell| shell.read(cx).links.len() > 1)
 }
 
+/// Show `host`'s settings in place of the ones shown, on the same section.
+pub(crate) fn choose_settings_host(host: HostKey, cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    let shell = shell.read(cx);
+    let (Some(from), Some(to)) = (
+        shell
+            .settings_link(cx)
+            .map(|link| link.settings_page.clone()),
+        shell.link_of(&host).map(|link| link.settings_page.clone()),
+    ) else {
+        return;
+    };
+    let window_state = shell.window_state.clone();
+    SettingsPage::carry_section(&from, &to, cx);
+    window_state.update(cx, |state, cx| {
+        state.settings_host = Some(host);
+        cx.notify();
+    });
+}
+
 /// Whether a pane of this window shows `thread`, the compact page included.
 pub(crate) fn pane_shows(thread: &ThreadKey, cx: &App) -> bool {
     current_shell(cx).is_some_and(|shell| shell.read(cx).pane_showing(thread, cx).is_some())
@@ -888,6 +910,7 @@ impl AppShell {
                 if this.mounted != this.window_state.read(cx).history() {
                     this.blur_navigation(window, cx);
                 }
+                this.open_requested_settings_section(cx);
                 this.sync_nav(NavMotion::Animated, cx);
                 this.schedule_navigation_save(cx);
                 cx.notify();
@@ -1036,6 +1059,16 @@ impl AppShell {
     /// a whole acts on.
     fn current_link(&self, cx: &App) -> Option<&Link> {
         self.link_of(&self.column.as_ref()?.current_pane.read(cx).host(cx))
+    }
+
+    /// The link whose settings the Settings route shows.
+    fn settings_link(&self, cx: &App) -> Option<&Link> {
+        self.window_state
+            .read(cx)
+            .settings_host
+            .as_ref()
+            .and_then(|host| self.link_of(host))
+            .or_else(|| self.current_link(cx))
     }
 }
 
@@ -1577,6 +1610,10 @@ impl AppShell {
             .update(cx, |sidebar, cx| sidebar.set_hosts(stores.clone(), cx));
         self.palette
             .update(cx, |palette, cx| palette.set_stores(stores.clone(), cx));
+        for link in &self.links {
+            link.settings_page
+                .update(cx, |page, cx| page.set_hosts(stores.clone(), cx));
+        }
         self.hosts
             .update(cx, |hosts, cx| hosts.set_stores(stores, cx));
     }
@@ -4788,6 +4825,31 @@ impl AppShell {
             .into_any_element()
     }
 
+    /// Give the section a link elsewhere asked Settings to open to the page
+    /// of the host Settings shows.
+    fn open_requested_settings_section(&mut self, cx: &mut Context<Self>) {
+        if self
+            .window_state
+            .read(cx)
+            .pending_settings_section
+            .is_none()
+        {
+            return;
+        }
+        let Some(page) = self
+            .settings_link(cx)
+            .map(|link| link.settings_page.clone())
+        else {
+            return;
+        };
+        if let Some(section) = self
+            .window_state
+            .update(cx, |state, _| state.pending_settings_section.take())
+        {
+            page.update(cx, |page, cx| page.open_section(&section, cx));
+        }
+    }
+
     /// Settings, as two pages of the same stack: the section list, then one
     /// section's detail. Both wear the same nav bar as every other page.
     fn render_settings_page(
@@ -4797,7 +4859,10 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let back = self.back_control(cx);
-        let Some(settings) = self.current_link(cx).map(|link| link.settings_page.clone()) else {
+        let Some(settings) = self
+            .settings_link(cx)
+            .map(|link| link.settings_page.clone())
+        else {
             return div().into_any_element();
         };
         let detail = destination != Destination::Settings;
@@ -6060,7 +6125,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let link = self
-            .current_link(cx)
+            .settings_link(cx)
             .expect("a workspace route has a column");
         SettingsPage::fade_rail(&link.settings_page, rail, cx);
         // Settings is a window of its own: opening it switches the whole
@@ -7818,6 +7883,93 @@ pub(crate) mod tests {
                     .any(|toast| toast.starts_with("host-a: Updating")),
             "A's update finished and B's goes on: {said:?}"
         );
+    }
+
+    /// Over two hosts Settings opens on the current thread's host and
+    /// names a selector for the other: a host's setting changed there goes
+    /// to the host chosen alone, on the section the page was on, on a wide
+    /// window and on a phone's list. This device's rows are the same on
+    /// either host's page.
+    #[gpui::test]
+    fn settings_set_the_host_chosen_and_this_devices_rows_whichever_it_is(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, client, cx) =
+            mount_workspace(cx, two_hosts(), Default::default(), 1200.);
+        cx.update(|_, cx| crate::shortcut::init(cx));
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        for (key, store) in [(&key_a, &a), (&key_b, &b)] {
+            hosts[key].come_up(store, Vec::new(), None, cx);
+            send_events(&hosts[key].host, vec![panes_index(&[])]);
+        }
+        serve_thread(&hosts[&key_b].host, "thread-1");
+        b.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
+        });
+        settle_panes(cx);
+        assert_eq!(pane_hosts(&shell, cx), std::slice::from_ref(&key_b));
+        heard(&hosts[&key_a], &a, cx);
+        heard(&hosts[&key_b], &b, cx);
+        let patches = |host: &WorkspaceHost| {
+            sent(&host.host)
+                .into_iter()
+                .filter(|payload| {
+                    matches!(
+                        payload,
+                        ClientPayload::Command(Command::PatchSettings { .. })
+                    )
+                })
+                .count()
+        };
+
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_settings(cx));
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("settings-machine-caption").is_none());
+        click("settings-nav-threads", cx);
+        click("delete-confirm", cx);
+        assert_eq!((patches(&hosts[&key_a]), patches(&hosts[&key_b])), (0, 1));
+
+        click("settings-host-selector", cx);
+        for host in ["settings-host-host-a", "settings-host-host-b"] {
+            assert!(cx.debug_bounds(host).is_some(), "{host}");
+        }
+        click("settings-host-host-a", cx);
+        crate::test_frames::draw_settled(cx);
+        click("delete-confirm", cx);
+        assert_eq!((patches(&hosts[&key_a]), patches(&hosts[&key_b])), (1, 0));
+
+        // The device's name, typed on A's page and then on B's, is one name.
+        let device_name = || client.preferences.borrow().device_name.clone();
+        click("settings-nav-general", cx);
+        click("device-name-field", cx);
+        cx.simulate_input(" desk");
+        assert_eq!(device_name().as_deref(), Some("tablet desk"));
+        click("settings-host-selector", cx);
+        click("settings-host-host-b", cx);
+        crate::test_frames::draw_settled(cx);
+        click("device-name-field", cx);
+        cx.simulate_input("!");
+        assert_eq!(device_name().as_deref(), Some("tablet desk!"));
+        assert_eq!((patches(&hosts[&key_a]), patches(&hosts[&key_b])), (0, 0));
+
+        // A phone's list of sections chooses the same way.
+        resize(cx, 393.);
+        crate::test_frames::draw_settled(cx);
+        click("settings-host-selector", cx);
+        click("settings-host-host-a", cx);
+        click("settings-nav-threads", cx);
+        crate::test_frames::draw_settled(cx);
+        click("delete-confirm", cx);
+        assert_eq!((patches(&hosts[&key_a]), patches(&hosts[&key_b])), (1, 0));
     }
 
     /// `store` takes in what `host` sent it, and what it sent `host` so far
@@ -17842,6 +17994,9 @@ pub(crate) mod tests {
         window_state.update(cx, |state, cx| state.open_settings(cx));
         // The page is tapped once it has slid in.
         crate::test_frames::draw_settled(cx);
+        // One host: the machine's group is captioned, and chooses nothing.
+        assert!(cx.debug_bounds("settings-machine-caption").is_some());
+        assert!(cx.debug_bounds("settings-host-selector").is_none());
         let general = cx
             .debug_bounds("settings-nav-general")
             .expect("General settings row");

@@ -107,7 +107,7 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx)
             }),
         );
-        let threads = vec![
+        let mut threads = vec![
             self.title_generation_row(cx),
             self.toggle_row(
                 "delete-confirm",
@@ -137,6 +137,9 @@ impl SettingsPage {
                 WorkspaceStore::set_resume_on_limit_reset,
             ),
         ];
+        if self.settings_hosts(cx).len() > 1 {
+            threads.push(self.provider_marks_row(cx));
+        }
         let settling = self.settling_rows(&settings, window, cx);
         let panels = self.panel_rows(&settings, cx);
         let compact = self.window_state.read(cx).compact;

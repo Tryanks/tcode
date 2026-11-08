@@ -666,14 +666,18 @@ struct SortProjects(HostKey);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
 struct ManageHosts;
+/// Open Settings on this host.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct HostSettings(HostKey);
 /// Take this host out of the window's workspace.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
 struct LeaveHost(HostKey);
 
 /// What a host's heading offers: a thread in one of its projects or a quick
-/// thread, a new project, its projects' order, leaving the workspace, and the
-/// Machines page.
+/// thread, a new project, its settings, its projects' order, leaving the
+/// workspace, and the Machines page.
 #[derive(Clone)]
 struct HostMenu {
     host: HostKey,
@@ -698,10 +702,16 @@ impl HostMenu {
                     Box::new(StartDraftForProject(project.clone())),
                 );
             }
-            menu = menu.separator().menu(
-                crate::tr!("sidebar.add_project"),
-                Box::new(AddProject(host.clone())),
-            );
+            menu = menu
+                .separator()
+                .menu(
+                    crate::tr!("sidebar.add_project"),
+                    Box::new(AddProject(host.clone())),
+                )
+                .menu(
+                    crate::tr!("settings.title"),
+                    Box::new(HostSettings(host.clone())),
+                );
         }
         if let Some(sort) = &self.sort {
             menu = menu.menu(
@@ -1808,6 +1818,12 @@ impl SessionsSidebar {
                 cx,
             );
         }
+    }
+
+    fn on_host_settings(&mut self, action: &HostSettings, _: &mut Window, cx: &mut Context<Self>) {
+        let host = action.0.clone();
+        self.window_state
+            .update(cx, |state, cx| state.open_settings_on(host, cx));
     }
 
     fn on_manage_hosts(&mut self, _: &ManageHosts, _: &mut Window, cx: &mut Context<Self>) {
@@ -5791,6 +5807,7 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_add_project))
             .on_action(cx.listener(Self::on_sort_projects))
             .on_action(cx.listener(Self::on_manage_hosts))
+            .on_action(cx.listener(Self::on_host_settings))
             .on_action(cx.listener(Self::on_leave_host))
             .child(self.render_compact_search(cx))
             .child(
@@ -6830,6 +6847,7 @@ impl Render for SessionsSidebar {
         .on_action(cx.listener(Self::on_add_project))
         .on_action(cx.listener(Self::on_sort_projects))
         .on_action(cx.listener(Self::on_manage_hosts))
+        .on_action(cx.listener(Self::on_host_settings))
         .on_action(cx.listener(Self::on_leave_host))
         .on_action(cx.listener(Self::on_toggle_share))
         .on_action(cx.listener(Self::on_new_space_and_share))
