@@ -63,7 +63,7 @@ use crate::runtime_event::{
     present_runtime_toast,
 };
 use crate::settings_page::SettingsPage;
-use crate::sidebar::SessionsSidebar;
+use crate::sidebar::{QuickChat, SessionsSidebar, StartDraftForProject};
 use crate::store::{HostKey, ShowThread, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
@@ -524,6 +524,11 @@ pub(crate) fn shown_in_pane(thread: &ThreadKey, cx: &App) -> bool {
 /// The thread of the current pane, for what acts on the whole window.
 pub(crate) fn current_thread(cx: &App) -> Option<ThreadKey> {
     current_shell(cx)?.read(cx).page_thread(cx)
+}
+
+/// Whether the window is over several hosts, so what acts on one names it.
+pub(crate) fn several_hosts(cx: &App) -> bool {
+    current_shell(cx).is_some_and(|shell| shell.read(cx).links.len() > 1)
 }
 
 /// Whether a pane of this window shows `thread`, the compact page included.
@@ -1891,16 +1896,22 @@ impl AppShell {
     }
 
     /// `pane` is the current pane. Coming from another pane, the user has
-    /// moved on: a draft still in flight for that one lands nowhere.
+    /// moved on.
     fn set_current_pane(&mut self, pane: &Entity<ThreadPanel>, cx: &mut Context<Self>) {
         let Some(column) = self.column.as_mut() else {
             return;
         };
         if column.current_pane != *pane {
             column.current_pane = pane.clone();
-            if let Some(store) = self.store() {
-                store.update(cx, |store, _| store.selection_moved_on());
-            }
+            self.moved_on(cx);
+        }
+    }
+
+    /// The user moved on, wherever in the window: a thread still in flight
+    /// on any host, a draft asked for there included, lands nowhere.
+    fn moved_on(&self, cx: &mut Context<Self>) {
+        for link in &self.links {
+            link.store.update(cx, |store, _| store.selection_moved_on());
         }
     }
 
@@ -2050,6 +2061,9 @@ impl AppShell {
                 return;
             }
             self.move_column(host, window, cx);
+        }
+        if shown.asked {
+            self.moved_on(cx);
         }
         let session_id = shown.session_id.as_str();
         if self.compact(cx) {
@@ -2305,14 +2319,13 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let store = from.read(cx).chat().read(cx).workspace_store().clone();
         let Some((_, beside)) = self.add_pane(from, placement, window, cx) else {
             return;
         };
-        if let Some(store) = self.store() {
-            store.update(cx, |store, cx| {
-                store.start_draft_beside(beside.as_deref(), cx);
-            });
-        }
+        store.update(cx, |store, cx| {
+            store.start_draft_beside(beside.as_deref(), cx);
+        });
     }
 
     /// Show `session_id` in a pane of its own, on the first of `placements`
@@ -4793,17 +4806,33 @@ impl AppShell {
         let sidebar = self.sidebar.clone();
         // The root's leading control leads to Machines.
         let back = back.or_else(|| Some(self.machines_action(cx)));
-        let actions = vec![
-            nav_icon_button(
+        let new_thread_label = compact_label("new_thread");
+        // Over several hosts the user picks the host with the project: none
+        // is the window's to guess.
+        let new_thread = if self.links.len() > 1 {
+            let trigger = crate::material::toolbar_icon_button(
                 "compact-new-thread",
-                compact_label("new_thread"),
                 IconName::Plus,
+                new_thread_label,
+                true,
             )
-            .debug_selector(|| "compact-new-thread".into())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.start_thread(cx);
-            }))
-            .into_any_element(),
+            .debug_selector(|| "compact-new-thread".into());
+            // The press must reach the chooser, and not arm the ancestor
+            // window drag region.
+            div()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(self.sidebar.read(cx).new_thread_chooser(trigger, true, cx))
+                .into_any_element()
+        } else {
+            nav_icon_button("compact-new-thread", new_thread_label, IconName::Plus)
+                .debug_selector(|| "compact-new-thread".into())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.start_thread(cx);
+                }))
+                .into_any_element()
+        };
+        let actions = vec![
+            new_thread,
             nav_icon_button(
                 "compact-settings",
                 compact_label("settings"),
@@ -4885,8 +4914,34 @@ impl AppShell {
             .into_any_element()
     }
 
-    /// New thread: one project starts a draft directly, several go through the
-    /// palette, which already owns "new thread in <project>" and can search.
+    /// A new thread in a project starts on the project's host.
+    fn on_start_draft_for_project(
+        &mut self,
+        action: &StartDraftForProject,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.link_of(&action.0.host).map(|link| link.store.clone()) else {
+            return;
+        };
+        let Some(project) = store.read(cx).project(&action.0.project_id).cloned() else {
+            return;
+        };
+        store.update(cx, |store, cx| {
+            store.start_draft(project.id, project.root, cx)
+        });
+    }
+
+    fn on_quick_chat(&mut self, action: &QuickChat, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(link) = self.link_of(&action.0) {
+            link.store
+                .update(cx, |store, cx| store.start_scratch_draft(cx));
+        }
+    }
+
+    /// New thread over one host: one project starts a draft directly, several
+    /// go through the palette, which already owns "new thread in <project>"
+    /// and can search.
     /// On a phone the palette opens without the keyboard: the projects are
     /// there to tap, and the search pill still raises it on demand.
     fn start_thread(&mut self, cx: &mut Context<Self>) {
@@ -5581,6 +5636,8 @@ impl AppShell {
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .on_action(cx.listener(Self::on_open_thread_anchor))
+            .on_action(cx.listener(Self::on_start_draft_for_project))
+            .on_action(cx.listener(Self::on_quick_chat))
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
             .child(stack)
@@ -5925,6 +5982,8 @@ impl AppShell {
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .on_action(cx.listener(Self::on_open_thread_anchor))
+            .on_action(cx.listener(Self::on_start_draft_for_project))
+            .on_action(cx.listener(Self::on_quick_chat))
             .child(
                 div()
                     .id("workspace")
@@ -6004,6 +6063,8 @@ impl AppShell {
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .on_action(cx.listener(Self::on_open_thread_anchor))
+            .on_action(cx.listener(Self::on_start_draft_for_project))
+            .on_action(cx.listener(Self::on_quick_chat))
             .child(
                 h_flex()
                     .id("workspace")
@@ -6209,6 +6270,8 @@ impl AppShell {
             .key_context("TcodeShell")
             .on_action(cx.listener(Self::on_thread_undo))
             .on_action(cx.listener(Self::on_open_thread_anchor))
+            .on_action(cx.listener(Self::on_start_draft_for_project))
+            .on_action(cx.listener(Self::on_quick_chat))
             .child(
                 div()
                     .id("workspace")
@@ -7074,6 +7137,192 @@ pub(crate) mod tests {
         a.update(cx, |store, cx| store.put_back_thread("thread-1".into(), cx));
         draw(cx);
         assert_eq!(store_of(&shell, cx), b, "unasked, A's thread stays off");
+    }
+
+    /// `store` takes in what `host` sent it, and what it sent `host` so far
+    /// is set aside.
+    fn heard(host: &WorkspaceHost, store: &Entity<WorkspaceStore>, cx: &mut VisualTestContext) {
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        draw(cx);
+        let _ = sent(&host.host);
+    }
+
+    /// The new threads `host` is asked for: each project's draft, by
+    /// project, and a quick thread as `None`.
+    fn drafts_asked(host: &WorkspaceHost) -> Vec<Option<String>> {
+        sent(&host.host)
+            .into_iter()
+            .filter_map(|payload| match payload {
+                ClientPayload::Command(Command::StartDraft { project_id, .. }) => {
+                    Some(Some(project_id))
+                }
+                ClientPayload::Command(Command::StartScratchDraft) => Some(None),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The host names `draft` as the draft of `project` the client asked for.
+    fn ack_project_draft(host: &MountedShell, project: &str, draft: &str) {
+        let request = std::iter::from_fn(|| host.outgoing.try_recv().ok())
+            .map(|line| decode_client_line(&line).expect("client line"))
+            .find(|message| {
+                matches!(
+                    &message.payload,
+                    ClientPayload::Command(Command::StartDraft { project_id, .. })
+                        if project_id == project
+                )
+            })
+            .expect("the project's draft was asked for");
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Ack {
+                    id: request.id,
+                    result: Ok(tcode_protocol::CommandResponse::SessionId(Some(
+                        draft.into(),
+                    ))),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    /// Over several hosts, with no thread current, "+" asks neither host
+    /// anything: it offers each host's projects under the host's name, and
+    /// the project picked is drafted on its own host, where the column goes.
+    #[gpui::test]
+    fn a_new_thread_with_none_current_starts_on_the_host_picked(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 393.);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        let project =
+            |id: &str| crate::store::tests::project_at(id, std::path::Path::new(PANES_CWD));
+        hosts[&key_a].come_up(&a, Vec::new(), None, cx);
+        hosts[&key_b].come_up(&b, vec![project("on-b")], None, cx);
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(store_of(&shell, cx), a);
+        assert_eq!(shell.read_with(cx, |shell, cx| shell.page_thread(cx)), None);
+        heard(&hosts[&key_a], &a, cx);
+        heard(&hosts[&key_b], &b, cx);
+
+        let plus = cx.debug_bounds("compact-new-thread").expect("Threads' +");
+        cx.simulate_click(plus.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("tcode-popup-menu").is_some(), "a chooser");
+        assert!(!shell.read_with(cx, |shell, cx| shell.window_state.read(cx).palette_open));
+        assert_eq!(sent(&hosts[&key_a].host), Vec::new(), "A is asked nothing");
+        assert_eq!(sent(&hosts[&key_b].host), Vec::new(), "B is asked nothing");
+
+        // A's name and quick thread, then B's name, quick thread and project.
+        let on_b = cx.debug_bounds("menu-item-5").expect("B's project");
+        cx.simulate_click(on_b.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(drafts_asked(&hosts[&key_a]), Vec::<Option<String>>::new());
+        ack_project_draft(&hosts[&key_b].host, "on-b", "draft");
+        b.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(store_of(&shell, cx), b, "the column goes to B");
+        assert_eq!(pane_threads(&shell, cx), [Some("draft".into())]);
+    }
+
+    /// The one key that starts a thread, a split, drafts beside the current
+    /// thread on that thread's host and in its project; the other host
+    /// hears nothing.
+    #[gpui::test]
+    fn a_split_drafts_on_the_current_threads_host(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        cx.update(|_, cx| crate::shortcut::init(cx));
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        let project =
+            |id: &str| crate::store::tests::project_at(id, std::path::Path::new(PANES_CWD));
+        hosts[&key_a].come_up(&a, Vec::new(), None, cx);
+        hosts[&key_b].come_up(&b, Vec::new(), None, cx);
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            PANES_CWD.into(),
+            None,
+        );
+        meta.id = "thread-1".into();
+        meta.title = "thread-1".into();
+        meta.project_id = Some("on-b".into());
+        send_events(
+            &hosts[&key_b].host,
+            vec![(
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    summary: Default::default(),
+                    sessions: vec![meta],
+                    projects: vec![project("on-b")],
+                }),
+            )],
+        );
+        serve_thread(&hosts[&key_b].host, "thread-1");
+        b.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+        heard(&hosts[&key_b], &b, cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
+            Some(ThreadKey {
+                host: key_b.clone(),
+                session_id: "thread-1".into(),
+            })
+        );
+        heard(&hosts[&key_a], &a, cx);
+        heard(&hosts[&key_b], &b, cx);
+
+        cx.simulate_keystrokes("secondary-d");
+        draw(cx);
+        assert_eq!(drafts_asked(&hosts[&key_b]), [Some("on-b".to_owned())]);
+        assert_eq!(drafts_asked(&hosts[&key_a]), Vec::<Option<String>>::new());
+    }
+
+    /// A draft asked for on a host the column has since left, for a thread
+    /// asked for on another, lands nowhere when it is answered: the user
+    /// moved on, and the column stays where they went.
+    #[gpui::test]
+    fn a_draft_answered_after_the_column_left_its_host_stays_off(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        hosts[&key_a].come_up(&a, Vec::new(), None, cx);
+        hosts[&key_b].come_up(&b, Vec::new(), None, cx);
+        send_events(&hosts[&key_b].host, vec![panes_index(&[])]);
+        serve_thread(&hosts[&key_b].host, "thread-1");
+        assert_eq!(store_of(&shell, cx), a);
+
+        a.update(cx, |store, cx| store.start_scratch_draft(cx));
+        b.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+        draw(cx);
+        assert_eq!(store_of(&shell, cx), b);
+
+        ack_draft(&hosts[&key_a].host, "late");
+        a.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(store_of(&shell, cx), b, "the column stays on B");
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert!(!a.read_with(cx, |store, _| store.is_thread_open("late")));
     }
 
     /// Re-pairing with a machine ends on `open_host` with that machine's id.

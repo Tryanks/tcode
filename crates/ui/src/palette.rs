@@ -371,16 +371,29 @@ impl CommandPalette {
                 ));
             }
         };
+        let host = crate::shell::several_hosts(cx).then(|| store.host_title());
         if store.scope().is_full() {
             push_action(
-                crate::tr!("sidebar.quick_chat").into_owned(),
+                match &host {
+                    Some(host) => crate::tr!("palette.quick_chat_on", host = host.clone()),
+                    None => crate::tr!("sidebar.quick_chat"),
+                }
+                .into_owned(),
                 IconName::Plus,
                 Action::QuickChat,
             );
         }
         for project in store.projects() {
             push_action(
-                crate::tr!("palette.new_thread", project = project.name.clone()).into_owned(),
+                match &host {
+                    Some(host) => crate::tr!(
+                        "palette.new_thread_on",
+                        project = project.name.clone(),
+                        host = host.clone()
+                    ),
+                    None => crate::tr!("palette.new_thread", project = project.name.clone()),
+                }
+                .into_owned(),
                 IconName::Plus,
                 Action::NewThread {
                     cwd: project.root.clone(),
