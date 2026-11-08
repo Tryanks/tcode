@@ -437,6 +437,50 @@ fn row(
                 });
             })
         });
+    // A subagent running in the background keeps its own transcript, which
+    // the row leads to.
+    let transcript = (standing == Standing::Running && task.kind == BackgroundKind::Agent)
+        .then(|| {
+            let item = task.item_id.as_deref()?;
+            place
+                .store
+                .read(cx)
+                .sidebar_sessions()
+                .iter()
+                .find(|meta| {
+                    meta.parent_session_id.as_deref() == Some(place.session_id.as_str())
+                        && meta.native_subagent.as_deref() == Some(item)
+                })
+                .map(|meta| meta.id.clone())
+        })
+        .flatten()
+        .map(|mirror| {
+            let place = place.clone();
+            h_flex()
+                .id(SharedString::from(format!("{key}-transcript")))
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("background-transcript-{id}")
+                })
+                .w_full()
+                .min_w_0()
+                .pl(px(22.))
+                .gap_0p5()
+                .items_center()
+                .cursor_pointer()
+                .text_secondary(place.touch, cx)
+                .text_color(muted)
+                .hover(|line| line.text_color(cx.theme().foreground))
+                .child(crate::tr!("background.subagent_transcript"))
+                .child(Icon::new(IconName::ChevronRight).xsmall())
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let mirror = mirror.clone();
+                    place.go(window, cx, move |chat, window, cx| {
+                        chat.open_subagent(mirror, window, cx)
+                    });
+                })
+        });
     let detail = match standing {
         Standing::Running => None,
         Standing::Stopping => Some((
@@ -572,6 +616,7 @@ fn row(
     .child(crate::material::row_hover(radius, cx))
     .child(title)
     .children(detail)
+    .children(transcript)
     .children(force)
     .when_some(item, |row, item| {
         row.cursor_pointer().on_click(move |_, window, cx| {
@@ -841,6 +886,26 @@ impl ChatView {
                 store.open_tab_for(&session_id, tcode_core::ui::RightTab::Agents, cx)
             });
         }
+    }
+
+    /// A subagent's own transcript, beside the thread or over it.
+    pub(in crate::chat) fn open_subagent(
+        &mut self,
+        mirror: String,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let host = super::side::agent_host(
+            &cx.entity().downgrade(),
+            None,
+            self.session_id.is_some(),
+            &self.window_state,
+            cx,
+        );
+        let store = self.workspace_store.clone();
+        window.defer(cx, move |window, cx| {
+            crate::agents_panel::open_agent(&store, mirror, host, None, window, cx)
+        });
     }
 
     /// The watched pull request `key`, where its watch is managed.

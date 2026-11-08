@@ -240,6 +240,7 @@ background:
   keeps_watch: "#%{number} を監視中"
   keeps_scheduled: "予約メッセージ"
   keeps_notify: "他のスレッドを監視中：%{count}"
+  subagent_transcript: "サブエージェント · 記録を開く"
   in_list: "バックグラウンド一覧で表示"
   move: "バックグラウンドへ"
 markdown:

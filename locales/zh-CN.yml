@@ -240,6 +240,7 @@ background:
   keeps_watch: "关注 #%{number}"
   keeps_scheduled: "定时消息"
   keeps_notify: "关注其他线程的动静：%{count}"
+  subagent_transcript: "子代理 · 点开看它的记录"
   in_list: "在后台列表中"
   move: "转入后台"
 markdown:

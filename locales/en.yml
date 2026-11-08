@@ -240,6 +240,7 @@ background:
   keeps_watch: "Watching #%{number}"
   keeps_scheduled: "Scheduled message"
   keeps_notify: "Watching other threads: %{count}"
+  subagent_transcript: "Subagent · open its transcript"
   in_list: "In the background list"
   move: "Move to background"
 markdown:
