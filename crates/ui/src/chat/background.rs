@@ -530,11 +530,13 @@ fn row(
             place.session_id.clone(),
             background.harness.clone(),
         );
-        div().w_full().pl(px(22.)).pt_1().child(
+        h_flex().w_full().pl(px(22.)).pt_1().child(
             Button::new(SharedString::from(format!("{key}-force")))
                 .debug_selector(|| "background-force-terminate".into())
                 .danger()
                 .xsmall()
+                .text_secondary(place.touch, cx)
+                .text_color(cx.theme().danger)
                 .touch(place.touch)
                 .label(
                     crate::tr!("background.force_terminate", harness = harness.as_str())
