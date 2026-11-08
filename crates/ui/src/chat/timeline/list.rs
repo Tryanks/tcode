@@ -525,7 +525,7 @@ mod tests {
     fn open(cx: &mut TestAppContext) -> (TwoThreads, Entity<Panes>, &mut VisualTestContext) {
         let threads = seed_two_threads(cx, turns());
         let store = threads.store.clone();
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (panes, cx) = cx.add_window_view(|window, cx| Panes {
             chat: cx.new(|cx| {
                 ChatView::new(store, window_state, Some(threads.first.clone()), window, cx)

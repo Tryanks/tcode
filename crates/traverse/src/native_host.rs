@@ -246,6 +246,10 @@ impl ClientHost for NativeClientHost {
                 .get("right_panel_width")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|width| u32::try_from(width).ok()),
+            sidebar_collapsed: prefs
+                .get("sidebar_collapsed")
+                .and_then(serde_json::Value::as_bool),
+            sidebar_layout: value("sidebar_layout"),
         }
     }
 
@@ -258,6 +262,8 @@ impl ClientHost for NativeClientHost {
         prefs["remote_attachment_limit_mib"] =
             serde_json::json!(preferences.remote_attachment_limit_mib);
         prefs["right_panel_width"] = serde_json::json!(preferences.right_panel_width);
+        prefs["sidebar_collapsed"] = serde_json::json!(preferences.sidebar_collapsed);
+        prefs["sidebar_layout"] = serde_json::json!(preferences.sidebar_layout);
         self.write_prefs(&prefs);
     }
 
@@ -827,6 +833,8 @@ mod tests {
             navigation: Some(serde_json::json!({"history": ["hosts", "threads"]})),
             remote_attachment_limit_mib: Some(4),
             right_panel_width: Some(480),
+            sidebar_collapsed: Some(true),
+            sidebar_layout: Some("grouped".into()),
         });
 
         let saved: serde_json::Value =
@@ -843,6 +851,13 @@ mod tests {
         assert_eq!(host.load_preferences().remote_attachment_limit_mib, Some(4));
         assert_eq!(saved["right_panel_width"], 480);
         assert_eq!(host.load_preferences().right_panel_width, Some(480));
+        assert_eq!(saved["sidebar_collapsed"], true);
+        assert_eq!(saved["sidebar_layout"], "grouped");
+        assert_eq!(host.load_preferences().sidebar_collapsed, Some(true));
+        assert_eq!(
+            host.load_preferences().sidebar_layout.as_deref(),
+            Some("grouped")
+        );
 
         host.set_last_host_id(Some("next-host"));
         assert_eq!(host.last_host_id().as_deref(), Some("next-host"));

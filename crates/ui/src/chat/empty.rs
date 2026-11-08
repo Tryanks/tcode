@@ -242,12 +242,11 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (_, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store.clone(), window_state, None, window, cx)
         });

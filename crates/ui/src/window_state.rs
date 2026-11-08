@@ -1,7 +1,5 @@
-use gpui::{Context, Entity, EventEmitter, SharedString};
+use gpui::{Context, EventEmitter, SharedString};
 use serde::{Deserialize, Serialize};
-
-use crate::store::WorkspaceStore;
 
 /// One place the window can be. The window keeps a *history* of them, and every
 /// Back — the toolbar control, the Android gesture, the desktop Back row — pops
@@ -186,27 +184,27 @@ pub struct WindowState {
     /// the search pill wants the keyboard; the mobile "+" button lists
     /// projects to tap and must not raise it.
     pub palette_focuses_query: bool,
-    pub sidebar_collapsed: bool,
     pub quit_prompt_epoch: u64,
     pub quit_prompt_open: bool,
     pub pending_settings_section: Option<String>,
 }
 
-impl WindowState {
-    pub fn new(sidebar_collapsed: bool) -> Self {
+impl Default for WindowState {
+    fn default() -> Self {
         Self {
             compact: false,
             history: vec![Destination::Hosts],
             palette_open: false,
             palette_leaving: false,
             palette_focuses_query: true,
-            sidebar_collapsed,
             quit_prompt_epoch: 0,
             quit_prompt_open: false,
             pending_settings_section: None,
         }
     }
+}
 
+impl WindowState {
     pub fn with_compact(mut self, compact: bool) -> Self {
         self.compact = compact;
         self
@@ -361,18 +359,6 @@ impl WindowState {
             return;
         }
         *self.history.last_mut().expect("the history is never empty") = Destination::Thread;
-        cx.notify();
-    }
-
-    pub fn toggle_sidebar_collapsed(
-        &mut self,
-        store: &Entity<WorkspaceStore>,
-        cx: &mut Context<Self>,
-    ) {
-        self.sidebar_collapsed = !self.sidebar_collapsed;
-        store.update(cx, |store, cx| {
-            store.set_sidebar_collapsed(self.sidebar_collapsed, cx)
-        });
         cx.notify();
     }
 

@@ -132,11 +132,7 @@ pub fn init_client(cx: &mut App, host: &dyn ClientHost, options: &ShellOptions) 
         )));
     }
     crate::i18n::set_platform_system_locale(options.system_locale.as_deref());
-    let language = host.load_preferences().language;
-    crate::i18n::apply_locale(match language.as_deref() {
-        Some("system") | None => None,
-        override_locale => override_locale,
-    });
+    crate::i18n::apply_locale(crate::device::language(&host.load_preferences()));
     cx.text_system()
         .add_fonts(options.fonts.clone())
         .expect("failed to register bundled application fonts");
@@ -222,7 +218,7 @@ pub fn run_shell(
     ));
     let captured = mounted.clone();
     let window = open_client_window(cx, options.window, title, move |window, cx| {
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let shell = cx.new(|cx| {
             AppShell::new(
                 window_state,

@@ -102,7 +102,6 @@ impl Attachment {
         target: AttachmentTarget,
         local: Option<Transport>,
         client_host: Option<Rc<dyn ClientHost>>,
-        seed_blocking: bool,
         cx: &mut App,
     ) -> Option<Self> {
         let (transport, identity) = match &target {
@@ -141,23 +140,18 @@ impl Attachment {
                 return None;
             }
         }
-        let local = matches!(target, AttachmentTarget::Local);
-        // Local construction may seed synchronously; remote construction must
-        // register its subscriptions before a restored write can be replayed.
-        let runtime =
-            local.then(|| AttachmentRuntime::start_link(link.clone(), transport.state.clone(), cx));
+        // The store subscribes before the link pumps, so a restored write is
+        // never replayed ahead of its subscriptions.
         let store = cx.new(|cx| {
             WorkspaceStore::new_attached(
                 link.clone(),
                 identity,
                 client_host,
                 transport.current_host,
-                seed_blocking && local,
                 cx,
             )
         });
-        let runtime =
-            runtime.unwrap_or_else(|| AttachmentRuntime::start_link(link, transport.state, cx));
+        let runtime = AttachmentRuntime::start_link(link, transport.state, cx);
         Some(Self {
             target,
             store,
@@ -241,7 +235,6 @@ mod tests {
                 AttachmentTarget::Local,
                 Some(transport(to_host, from_host)),
                 None,
-                false,
                 cx,
             )
             .expect("local attachment")

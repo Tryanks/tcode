@@ -1676,7 +1676,7 @@ mod tests {
         cx.update(crate::theme::init);
         cx.update(|cx| cx.set_global(ClientAttachment::new(Rc::new(Browser), false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
+            let state = cx.new(|_| WindowState::default());
             HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
@@ -1765,7 +1765,7 @@ mod tests {
             ))
         });
         let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
+            let state = cx.new(|_| WindowState::default());
             HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let probe = window.root(cx).unwrap();
@@ -1870,7 +1870,7 @@ mod tests {
         }
         cx.update(crate::theme::init);
         cx.update(|cx| cx.set_global(ClientAttachment::new(Rc::new(Phone), false, |_, _, _| {})));
-        let state = cx.new(|_| WindowState::new(false));
+        let state = cx.new(|_| WindowState::default());
         let window = cx.open_window(gpui::size(px(1024.), px(852.)), |window, cx| {
             PairProbe(
                 cx.new(|cx| RemotePanel::new(state.clone(), window, cx)),
@@ -1985,7 +1985,7 @@ mod tests {
         cx.update(crate::theme::init);
         cx.update(|cx| cx.set_global(ClientAttachment::new(phone.clone(), false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
-            let state = cx.new(|_| WindowState::new(true));
+            let state = cx.new(|_| WindowState::default());
             HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let panel = window.update(cx, |probe, _, _| probe.0.clone()).unwrap();
@@ -2092,7 +2092,7 @@ mod tests {
                 )
             }
         }
-        let state = cx.new(|_| WindowState::new(false));
+        let state = cx.new(|_| WindowState::default());
         let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
             HostsProbe(cx.new(|cx| RemotePanel::new(state.clone(), window, cx)))
         });
@@ -2191,7 +2191,7 @@ mod tests {
         let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
         cx.update(|cx| cx.set_global(ClientAttachment::new(client.clone(), false, |_, _, _| {})));
         let (probe, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
+            let state = cx.new(|_| WindowState::default());
             PairingProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let host = |name: &str| PairedHost {

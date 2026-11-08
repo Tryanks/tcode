@@ -14,6 +14,7 @@ mod composer_trigger;
 mod context_meter;
 mod control;
 mod conversation_ui;
+mod device;
 pub(crate) mod diff;
 mod edge_back;
 mod env_editor;

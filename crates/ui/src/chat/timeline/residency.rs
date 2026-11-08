@@ -728,7 +728,7 @@ mod tests {
         // The thread's only code block: its lines show only the stale text.
         let text = format!("{}\n```\nstale\n```\n", large_markdown("stale session"));
         let mut threads = seed_two_threads(cx, single_assistant_timeline("large", &text));
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let store = threads.store.clone();
         let window = cx.add_window(|window, cx| {
             ChatView::new(store, window_state, Some(threads.first.clone()), window, cx)

@@ -1717,7 +1717,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1741,7 +1740,7 @@ mod tests {
             ),
             "the recorded events are the log's only rows: {page:?}"
         );
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
@@ -2359,7 +2358,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -2372,7 +2370,7 @@ mod tests {
                 !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
@@ -2556,7 +2554,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -2567,7 +2564,7 @@ mod tests {
                     && !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         struct LoadedImageChat {
             chat: Entity<ChatView>,
             sources: Vec<gpui::ImageSource>,
@@ -2852,7 +2849,6 @@ mod tests {
                     crate::store::WorkspaceAttachment::Local,
                     None,
                     None,
-                    false,
                     cx,
                 )
             });
@@ -2874,7 +2870,7 @@ mod tests {
             store.update(cx, |store, cx| {
                 store.set_session_replica_for_test(session_id.clone(), timeline, cx)
             });
-            let window_state = cx.new(|_| WindowState::new(false));
+            let window_state = cx.new(|_| WindowState::default());
             let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(
                     store.clone(),

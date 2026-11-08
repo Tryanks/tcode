@@ -55,7 +55,7 @@ pub extern "C" fn tcode_ios_start() {
                             // A phone runs no host of its own.
                             local: None,
                             local_failure: None,
-                            seed_blocking: false,
+                            local_settings: None,
                             restore_navigation: true,
                             reopen: None,
                         },

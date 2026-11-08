@@ -5,7 +5,7 @@ use std::rc::Rc;
 use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
 use tcode_client::{
     ConnectionState, HostLink,
-    host::{ClientHost, ClientPreferences, LiveHost},
+    host::{ClientHost, LiveHost},
 };
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
@@ -15,10 +15,7 @@ use tcode_core::{
     provider_models::{ResolvedModel, picker_models, resolve_models},
     provider_status::ProviderSnapshot,
     session::{ReviewComment, StoredEvent, Timeline},
-    settings::{
-        BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings, SidebarLayout,
-        ThemeMode,
-    },
+    settings::{BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings},
     ui::{ConversationDestination, RightTab},
 };
 use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
@@ -220,9 +217,10 @@ pub struct WorkspaceStore {
     /// browser.
     #[cfg_attr(not(preview_backend), allow(dead_code))]
     current_host: Option<LiveHost>,
-    client_preferences: ClientPreferences,
     image_host: images::ImageHost,
     attachment_tasks: Vec<Task<()>>,
+    /// Renames this client on its preview channel when the device is renamed.
+    _device_name: GpuiSubscription,
     /// Replicated terminal grids, keyed by the host's terminal id.
     terminals: HashMap<u64, std::rc::Rc<ClientTerminal>>,
     /// The agents' preview requests for the threads this client renders.
@@ -402,22 +400,6 @@ fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
 
-fn effective_client_settings(host: &Settings, preferences: &ClientPreferences) -> Settings {
-    let mut settings = host.clone();
-    settings.theme_mode = match preferences.appearance.as_deref() {
-        Some("system") => ThemeMode::System,
-        Some("light") => ThemeMode::Light,
-        Some("dark") => ThemeMode::Dark,
-        _ => settings.theme_mode,
-    };
-    settings.language = match preferences.language.as_deref() {
-        Some("system") => None,
-        Some(language) => Some(language.to_owned()),
-        None => settings.language,
-    };
-    settings
-}
-
 impl WorkspaceStore {
     fn destination(status: &SessionStatus) -> ConversationDestination {
         if status.draft
@@ -429,40 +411,36 @@ impl WorkspaceStore {
         }
     }
 
-    /// Construct the complete projection for exactly one client link.
-    ///
-    /// `seed_blocking` waits for Scope and its allowed domain snapshots. Only the desktop composition root asks for it: it
-    /// applies the locale and theme from `settings()` the instant the store
-    /// exists. Every other client renders immediately and re-renders when the
-    /// snapshots land, which is the only option on a single-threaded executor.
+    /// Construct the complete projection for exactly one client link. It
+    /// renders at once and again as the host's snapshots land.
     pub fn new_attached(
         host: HostLink,
         attachment: WorkspaceAttachment,
         client_host: Option<Rc<dyn ClientHost>>,
         current_host: Option<LiveHost>,
-        seed_blocking: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let image_host = images::HostImages::open(host.clone(), cx);
-        let client_preferences = client_host
-            .as_ref()
-            .map(|host| host.load_preferences())
-            .unwrap_or_default();
+        let device = crate::device::DevicePreferences::entity(cx);
+        let device_name = cx.observe(&device, |store, _, cx| {
+            store.rename_preview_client(crate::device::DevicePreferences::device_name(cx))
+        });
         let remote = matches!(attachment, WorkspaceAttachment::Remote { .. });
-        let store = Self {
+        let mut store = Self {
             host: host.clone(),
             scope: WorkspaceScope::Full,
             scoped_providers: Vec::new(),
             attachment,
             client_host,
             current_host,
-            client_preferences,
             image_host,
             attachment_tasks: Vec::new(),
+            _device_name: device_name,
             terminals: HashMap::new(),
             remote_preview: async_channel::unbounded(),
-            // Named below, from the preferences.
-            preview: preview::PreviewReplica::new(String::new()),
+            preview: preview::PreviewReplica::new(crate::device::DevicePreferences::device_name(
+                cx,
+            )),
             import_statuses: HashMap::new(),
             connection_state: if remote {
                 host.connection_state()
@@ -501,43 +479,14 @@ impl WorkspaceStore {
             draft_fallback_pending: false,
             creation_request_generation: 0,
         };
-        let mut store = store;
-        store.preview = preview::PreviewReplica::new(store.client_device_name());
-
         let _ = host.subscribe(Subscription {
             known_index: None,
             topic: Topic::Scope,
             after: None,
         });
         #[cfg(not(test))]
-        let events = host.events();
-        #[cfg(not(any(test, target_family = "wasm")))]
-        if seed_blocking {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while !store.seed_ready() && std::time::Instant::now() < deadline {
-                match events.try_recv() {
-                    Ok(envelope) => match envelope.event {
-                        ServerEvent::Runtime(event) => cx.emit(event),
-                        event => {
-                            store.apply_domain_event(EventEnvelope { event, ..envelope }, cx);
-                        }
-                    },
-                    Err(async_channel::TryRecvError::Empty) => {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                    Err(async_channel::TryRecvError::Closed) => break,
-                }
-            }
-            if !store.seed_ready() {
-                log::error!("host scope snapshot seeding timed out");
-            }
-        }
-        #[cfg(any(test, target_family = "wasm"))]
-        let _ = seed_blocking;
-
-        #[cfg(not(test))]
         {
-            let event_messages = events;
+            let event_messages = host.events();
             store.attachment_tasks.push(cx.spawn(async move |this, cx| {
                 while let Ok(envelope) = event_messages.recv().await {
                     if this
@@ -650,15 +599,6 @@ impl WorkspaceStore {
                 space_id: space_id.clone(),
             },
         }
-    }
-
-    #[cfg(not(any(test, target_family = "wasm")))]
-    fn seed_ready(&self) -> bool {
-        self.baseline_topics.contains(&Topic::Scope)
-            && self.baseline_topics.contains(&self.index_topic())
-            && (!self.scope.is_full()
-                || (self.baseline_topics.contains(&Topic::Settings)
-                    && self.baseline_topics.contains(&Topic::Providers)))
     }
 
     pub fn machine_label(&self) -> String {
@@ -2376,31 +2316,6 @@ impl WorkspaceStore {
             .collect();
     }
 
-    /// Whether this device folded the stack map's note about GitHub stacks away.
-    pub fn stack_note_collapsed(&self) -> bool {
-        self.client_preferences
-            .navigation
-            .as_ref()
-            .and_then(|navigation| navigation["stack_note_collapsed"].as_bool())
-            .unwrap_or(false)
-    }
-
-    pub fn set_stack_note_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
-        self.client_preferences
-            .navigation
-            .get_or_insert_with(|| serde_json::json!({}))["stack_note_collapsed"] =
-            serde_json::json!(collapsed);
-        if let Some(host) = &self.client_host {
-            let mut preferences = host.load_preferences();
-            preferences
-                .navigation
-                .get_or_insert_with(|| serde_json::json!({}))["stack_note_collapsed"] =
-                serde_json::json!(collapsed);
-            host.save_preferences(&preferences);
-        }
-        cx.notify();
-    }
-
     pub fn set_open_pull_request(
         &mut self,
         session_id: &str,
@@ -2455,7 +2370,7 @@ impl WorkspaceStore {
     }
 
     pub fn settings(&self) -> Settings {
-        effective_client_settings(&self.settings_replica, &self.client_preferences)
+        self.settings_replica.clone()
     }
 
     pub(crate) fn thread_list_revision(&self) -> u64 {
@@ -2575,71 +2490,6 @@ impl WorkspaceStore {
         self.client_host.as_ref()?.open_in_editor(path)
     }
 
-    pub fn client_theme_override(&self) -> Option<ThemeMode> {
-        match self.client_preferences.appearance.as_deref() {
-            Some("system") => Some(ThemeMode::System),
-            Some("light") => Some(ThemeMode::Light),
-            Some("dark") => Some(ThemeMode::Dark),
-            _ => None,
-        }
-    }
-
-    pub fn set_client_theme(&mut self, mode: Option<ThemeMode>) {
-        self.client_preferences.appearance = mode.map(|mode| match mode {
-            ThemeMode::System => "system".to_owned(),
-            ThemeMode::Light => "light".to_owned(),
-            ThemeMode::Dark => "dark".to_owned(),
-        });
-        self.save_client_preferences();
-    }
-
-    pub fn client_language_override(&self) -> Option<&str> {
-        self.client_preferences.language.as_deref()
-    }
-
-    pub fn set_client_language(&mut self, language: Option<String>) {
-        self.client_preferences.language = language;
-        self.save_client_preferences();
-    }
-
-    pub fn client_device_name_override(&self) -> Option<&str> {
-        self.client_preferences.device_name.as_deref()
-    }
-
-    pub fn client_device_name(&self) -> String {
-        self.client_preferences
-            .device_name
-            .clone()
-            .filter(|name| !name.trim().is_empty())
-            .or_else(|| self.client_host.as_ref().map(|host| host.device_name()))
-            .unwrap_or_else(|| crate::tr!("app.name").into_owned())
-    }
-
-    pub fn set_client_device_name(&mut self, name: Option<String>) {
-        self.client_preferences.device_name = name.filter(|name| !name.trim().is_empty());
-        self.save_client_preferences();
-        self.rename_preview_client();
-    }
-
-    /// The device's own per-image ceiling for attachments sent across the
-    /// internet, in bytes.
-    pub fn client_remote_attachment_limit_bytes(&self) -> u64 {
-        self.client_preferences
-            .remote_attachment_limit_mib
-            .map_or(tcode_core::attachments::DEFAULT_REMOTE_BYTES, |mib| {
-                u64::from(mib) * 1024 * 1024
-            })
-    }
-
-    pub fn client_remote_attachment_limit_override(&self) -> Option<u32> {
-        self.client_preferences.remote_attachment_limit_mib
-    }
-
-    pub fn set_client_remote_attachment_limit_mib(&mut self, limit: Option<u32>) {
-        self.client_preferences.remote_attachment_limit_mib = limit.filter(|limit| *limit > 0);
-        self.save_client_preferences();
-    }
-
     /// How an attachment from this client would reach the machine right now.
     pub fn attachment_link(&self) -> crate::attachments::TransferLink {
         use crate::attachments::TransferLink;
@@ -2656,34 +2506,6 @@ impl WorkspaceStore {
                 })
             }
             _ => TransferLink::Unknown,
-        }
-    }
-
-    /// The width the user dragged a right panel to, in points.
-    pub(crate) fn right_panel_width(&self) -> Option<u32> {
-        self.client_preferences.right_panel_width
-    }
-
-    pub(crate) fn set_right_panel_width(&mut self, width: u32, cx: &mut Context<Self>) {
-        if self.client_preferences.right_panel_width != Some(width) {
-            self.client_preferences.right_panel_width = Some(width);
-            self.save_client_preferences();
-            cx.notify();
-        }
-    }
-
-    pub fn reset_client_preferences(&mut self) {
-        self.client_preferences = ClientPreferences::default();
-        self.save_client_preferences();
-    }
-
-    fn save_client_preferences(&self) {
-        if let Some(host) = &self.client_host {
-            let mut preferences = self.client_preferences.clone();
-            // Navigation is written by the shell while this store is alive.
-            // Appearance edits must not replace it with our startup snapshot.
-            preferences.navigation = host.load_preferences().navigation;
-            host.save_preferences(&preferences);
         }
     }
 
@@ -2722,10 +2544,6 @@ impl WorkspaceStore {
 
     pub fn project_sort(&self) -> ProjectSort {
         self.settings_replica.project_sort
-    }
-
-    pub fn sidebar_layout(&self) -> SidebarLayout {
-        self.settings_replica.sidebar_layout
     }
 
     pub fn flat_sessions(&self) -> Vec<SessionMeta> {
@@ -4469,7 +4287,7 @@ pub(crate) mod tests {
         git::{GitFileEntry, GitStatus},
         project::{Project, SessionMeta},
         session::{EntryContent, ReviewComment, ReviewSide},
-        settings::{Settings, ThemeMode},
+        settings::Settings,
     };
     use tcode_protocol::{
         Command, EventEnvelope, ServerEvent, SessionEventRecord, Subscription, Topic,
@@ -4479,8 +4297,7 @@ pub(crate) mod tests {
     use tcode_services::store::SessionStore;
 
     use super::{
-        ConversationDestination, WorkspaceAttachment, WorkspaceStore, effective_client_settings,
-        history::HeldHistory,
+        ConversationDestination, WorkspaceAttachment, WorkspaceStore, history::HeldHistory,
     };
 
     pub(crate) fn seed_full_scope(
@@ -4751,7 +4568,6 @@ pub(crate) mod tests {
                     },
                     None,
                     None,
-                    false,
                     cx,
                 )
             });
@@ -4853,7 +4669,7 @@ pub(crate) mod tests {
                 .await;
         });
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
         });
         seed_full_scope(&store, &incoming, deferred, cx);
         cx.run_until_parked();
@@ -4921,10 +4737,13 @@ pub(crate) mod tests {
                 }
             ]
         );
-        workspace.update(cx, |store, _| {
-            store.set_sidebar_layout(tcode_core::settings::SidebarLayout::Grouped)
+        cx.update(|cx| {
+            crate::device::DevicePreferences::set_sidebar_layout(
+                tcode_core::settings::SidebarLayout::Grouped,
+                cx,
+            )
         });
-        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let window_state = cx.new(|_| crate::window_state::WindowState::default());
         let (_sidebar, cx) = cx.add_window_view(|_, cx| {
             crate::sidebar::SessionsSidebar::new(workspace.clone(), window_state, cx)
         });
@@ -5141,7 +4960,6 @@ pub(crate) mod tests {
         host.requests.lock().unwrap().clear();
         workspace.update(cx, |store, cx| {
             store.toggle_project_collapsed("shared".into(), cx);
-            store.set_sidebar_collapsed(true, cx);
             store.cycle_project_sort(cx);
             store.toggle_favorite_model(agent::ProviderKind::Codex, None, "team-model".into(), cx);
             store.mark_session_unread("shared-thread".into(), cx);
@@ -5152,7 +4970,6 @@ pub(crate) mod tests {
             });
             assert!(!store.session_unread("shared-thread"));
             assert!(store.is_project_collapsed("shared"));
-            assert!(store.settings().sidebar_collapsed);
             assert_eq!(
                 store.project_sort(),
                 tcode_core::settings::ProjectSort::NameAsc
@@ -5216,7 +5033,6 @@ pub(crate) mod tests {
                 },
                 Some(client.clone()),
                 Some(current_host.clone()),
-                false,
                 cx,
             )
         });
@@ -5236,14 +5052,7 @@ pub(crate) mod tests {
         let (_replies, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         let requests = store.read_with(cx, |store, _| store.remote_preview_requests());
         store.update(cx, |store, cx| {
@@ -5284,14 +5093,7 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         // The next command the client sends, past the subscriptions that
@@ -5353,7 +5155,7 @@ pub(crate) mod tests {
                 .chat_loading_for(store.sole_thread().as_deref(), cx)),
             "a rejected write must be visible without a snapshot"
         );
-        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let window_state = cx.new(|_| crate::window_state::WindowState::default());
         let (_chat, visual) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             crate::chat::ChatView::new(
                 store.clone(),
@@ -5521,14 +5323,7 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         let mut pump = std::pin::pin!(link.pump());
@@ -5682,13 +5477,12 @@ pub(crate) mod tests {
                 },
                 None,
                 None,
-                false,
                 cx,
             )
         });
         seed_full_scope(&store, &_incoming, Vec::new(), cx);
         let window_state =
-            cx.new(|_| crate::window_state::WindowState::new(false).with_compact(true));
+            cx.new(|_| crate::window_state::WindowState::default().with_compact(true));
         let (_sidebar, cx) = cx.add_window_view(|_, cx| {
             crate::sidebar::SessionsSidebar::new(store.clone(), window_state, cx)
         });
@@ -5817,61 +5611,13 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn client_preferences_persist_and_override_host_settings_only_when_set() {
-        use tcode_client::host::{ClientHost as _, ClientPreferences};
-
-        let root = scratch_root("tcode-desktop-preferences");
-        let client = tcode_traverse::NativeClientHost::new(root.clone(), "fallback device");
-        let host = Settings {
-            theme_mode: ThemeMode::Dark,
-            language: Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.into()),
-            ..Settings::default()
-        };
-
-        assert_eq!(
-            effective_client_settings(&host, &client.load_preferences()),
-            host
-        );
-
-        client.save_preferences(&ClientPreferences {
-            appearance: Some("light".into()),
-            language: Some("system".into()),
-            device_name: Some("Desk client".into()),
-            right_panel_width: Some(480),
-            ..Default::default()
-        });
-        let reloaded = tcode_traverse::NativeClientHost::new(root.clone(), "different fallback");
-        let preferences = reloaded.load_preferences();
-        assert_eq!(preferences.right_panel_width, Some(480));
-        let effective = effective_client_settings(&host, &preferences);
-        assert_eq!(effective.theme_mode, ThemeMode::Light);
-        assert_eq!(effective.language, None);
-        assert_eq!(reloaded.device_name(), "Desk client");
-
-        reloaded.save_preferences(&ClientPreferences::default());
-        assert_eq!(
-            effective_client_settings(&host, &reloaded.load_preferences()),
-            host,
-            "clearing the client override must reveal the replicated host fallback"
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[gpui::test]
     fn rapid_selection_is_immediate_idempotent_and_retires_old_loads(cx: &mut TestAppContext) {
         let (to_host, outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
         let host = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(host.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         seed_full_scope(&workspace, &_incoming, Vec::new(), cx);
         workspace.update(cx, |store, cx| {
@@ -5938,7 +5684,6 @@ pub(crate) mod tests {
                         WorkspaceAttachment::Local,
                         None,
                         None,
-                        false,
                         cx,
                     )
                 });
@@ -6000,14 +5745,7 @@ pub(crate) mod tests {
         let (_incoming, from_host) = async_channel::unbounded();
         let host = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(host.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         seed_full_scope(&workspace, &_incoming, Vec::new(), cx);
         workspace.update(cx, |store, cx| {
@@ -6147,7 +5885,7 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
         let topic = Topic::SessionEvents {
@@ -6259,7 +5997,6 @@ pub(crate) mod tests {
                 },
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -6367,7 +6104,7 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
         let reads = || {
@@ -6449,7 +6186,7 @@ pub(crate) mod tests {
                 .await;
         });
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&workspace, &incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
@@ -6795,14 +6532,7 @@ pub(crate) mod tests {
             let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
             let link = tcode_client::HostLink::new(to_host, from_host);
             let workspace = cx.new(|cx| {
-                WorkspaceStore::new_attached(
-                    link,
-                    WorkspaceAttachment::Local,
-                    None,
-                    None,
-                    false,
-                    cx,
-                )
+                WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
             });
             crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
             let open_question = |cx: &TestAppContext| {
@@ -6884,7 +6614,7 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&workspace, &incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
@@ -6950,7 +6680,7 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&workspace, &_incoming, deferred, cx);
         workspace.update(cx, |store, cx| {
@@ -7094,7 +6824,6 @@ pub(crate) mod tests {
                     WorkspaceAttachment::Local,
                     None,
                     None,
-                    false,
                     cx,
                 )
             });
@@ -7298,7 +7027,6 @@ pub(crate) mod tests {
                 },
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -7351,7 +7079,10 @@ pub(crate) mod tests {
     /// the page across, the first letting its page go.
     #[cfg(preview_backend)]
     #[gpui::test]
-    fn show_here_moves_a_threads_preview_between_clients(cx: &mut TestAppContext) {
+    fn show_here_moves_a_threads_preview_between_clients(
+        desk_cx: &mut TestAppContext,
+        laptop_cx: &mut TestAppContext,
+    ) {
         use crate::store::{PreviewPlace, PreviewReleased};
         let root = scratch_root("preview-handover");
         let disk = SessionStore::open_at(root.clone()).unwrap();
@@ -7369,17 +7100,18 @@ pub(crate) mod tests {
                 connection.to_host,
                 connection.from_host,
             ));
-            let store = driver.workspace(cx);
-            store.update(cx, |store, cx| {
-                store.set_client_device_name(Some(name.into()));
-                store.show_alone("one".into(), cx);
+            cx.update(|cx| {
+                crate::device::DevicePreferences::set_device_name(Some(name.into()), cx)
             });
+            let store = driver.workspace(cx);
+            store.update(cx, |store, cx| store.show_alone("one".into(), cx));
             (driver, store)
         };
-        let (mut desk_driver, desk) = client("Desk", cx);
-        let (mut laptop_driver, laptop) = client("Laptop", cx);
+        // Two devices, each its own app with its own name.
+        let (mut desk_driver, desk) = client("Desk", desk_cx);
+        let (mut laptop_driver, laptop) = client("Laptop", laptop_cx);
         let released = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let _released = cx.update(|cx| {
+        let _released = desk_cx.update(|cx| {
             let released = released.clone();
             cx.subscribe(&desk, move |_, event: &PreviewReleased, _| {
                 released.borrow_mut().push(event.session_id.clone())
@@ -7389,14 +7121,15 @@ pub(crate) mod tests {
             store.read_with(cx, |store, cx| store.preview_place("one", cx))
         };
         let mut settle =
-            |cx: &mut TestAppContext,
+            |desk_cx: &mut TestAppContext,
+             laptop_cx: &mut TestAppContext,
              what: &str,
-             ready: &mut dyn FnMut(&mut TestAppContext) -> bool| {
+             ready: &mut dyn FnMut(&mut TestAppContext, &mut TestAppContext) -> bool| {
                 let deadline = host_deadline();
                 loop {
-                    desk_driver.step(cx, &desk);
-                    laptop_driver.step(cx, &laptop);
-                    if ready(cx) {
+                    desk_driver.step(desk_cx, &desk);
+                    laptop_driver.step(laptop_cx, &laptop);
+                    if ready(desk_cx, laptop_cx) {
                         return;
                     }
                     assert!(std::time::Instant::now() < deadline, "timed out: {what}");
@@ -7405,38 +7138,49 @@ pub(crate) mod tests {
             };
 
         // The desk shows the preview first, as its panel would.
-        settle(cx, "the desk renders", &mut |cx| {
-            desk.update(cx, |store, _| store.claim_preview("one"));
-            place(&desk, cx) == PreviewPlace::Here
+        settle(desk_cx, laptop_cx, "the desk renders", &mut |desk_cx, _| {
+            desk.update(desk_cx, |store, _| store.claim_preview("one"));
+            place(&desk, desk_cx) == PreviewPlace::Here
         });
         let url = "http://localhost:5173/".to_string();
-        desk.update(cx, |store, cx| {
+        desk.update(desk_cx, |store, cx| {
             store.set_preview_url("one", url.clone(), cx)
         });
-        settle(cx, "the laptop sees where the page is", &mut |cx| {
-            laptop.update(cx, |store, _| store.claim_preview("one"));
-            place(&laptop, cx) == PreviewPlace::Elsewhere("Desk".into())
-                && laptop.read_with(cx, |store, _| store.preview_url("one")) == Some(url.clone())
-        });
+        settle(
+            desk_cx,
+            laptop_cx,
+            "the laptop sees where the page is",
+            &mut |_, laptop_cx| {
+                laptop.update(laptop_cx, |store, _| store.claim_preview("one"));
+                place(&laptop, laptop_cx) == PreviewPlace::Elsewhere("Desk".into())
+                    && laptop.read_with(laptop_cx, |store, _| store.preview_url("one"))
+                        == Some(url.clone())
+            },
+        );
         assert!(released.borrow().is_empty());
 
-        laptop.update(cx, |store, cx| store.show_preview_here("one", cx));
-        assert_eq!(place(&laptop, cx), PreviewPlace::Here);
-        settle(cx, "the desk lets its page go", &mut |cx| {
-            place(&desk, cx) == PreviewPlace::Elsewhere("Laptop".into())
-                && !released.borrow().is_empty()
-        });
+        laptop.update(laptop_cx, |store, cx| store.show_preview_here("one", cx));
+        assert_eq!(place(&laptop, laptop_cx), PreviewPlace::Here);
+        settle(
+            desk_cx,
+            laptop_cx,
+            "the desk lets its page go",
+            &mut |desk_cx, _| {
+                place(&desk, desk_cx) == PreviewPlace::Elsewhere("Laptop".into())
+                    && !released.borrow().is_empty()
+            },
+        );
         assert_eq!(*released.borrow(), ["one"]);
-        assert_eq!(place(&laptop, cx), PreviewPlace::Here);
+        assert_eq!(place(&laptop, laptop_cx), PreviewPlace::Here);
         assert_eq!(
-            laptop.read_with(cx, |store, _| store.preview_url("one")),
+            laptop.read_with(laptop_cx, |store, _| store.preview_url("one")),
             Some(url),
             "the page reopens where it was"
         );
 
         let link = desk_driver.link.clone();
         desk_driver
-            .await_with_events(cx, &desk, link.command(Command::ShutdownAllAndFlush))
+            .await_with_events(desk_cx, &desk, link.command(Command::ShutdownAllAndFlush))
             .unwrap();
         desk_driver.link.close();
         laptop_driver.link.close();
@@ -8023,14 +7767,7 @@ pub(crate) mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&store, &replies, deferred, cx);
         let mut pump = std::pin::pin!(link.pump());
@@ -8121,7 +7858,6 @@ pub(crate) mod tests {
                     WorkspaceAttachment::Local,
                     None,
                     None,
-                    false,
                     cx,
                 )
             });
@@ -8234,7 +7970,6 @@ pub(crate) mod tests {
                 WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -8327,7 +8062,6 @@ pub(crate) mod tests {
                 WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -8395,7 +8129,6 @@ pub(crate) mod tests {
                 WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             );
             store.open_thread("one", cx);

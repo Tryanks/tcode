@@ -114,7 +114,6 @@ impl Remote {
                 },
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -159,7 +158,7 @@ fn open_panel<'a>(
     cx: &'a mut TestAppContext,
 ) -> &'a mut VisualTestContext {
     let window_state =
-        cx.new(|_| crate::window_state::WindowState::new(false).with_compact(compact));
+        cx.new(|_| crate::window_state::WindowState::default().with_compact(compact));
     let store = remote.store.clone();
     let (_, cx) = cx.add_window_view(|window, cx| {
         let panel = cx.new(|cx| {

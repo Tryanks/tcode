@@ -47,6 +47,7 @@ use tcode_protocol::{
 
 use crate::attachment::{Attachment, LocalTransport, same_target};
 use crate::chat::ChatView;
+use crate::device::DevicePreferences;
 use crate::icon::{Icon, IconName};
 use crate::palette::CommandPalette;
 use crate::panes::{
@@ -58,8 +59,8 @@ use crate::preview_panel::PreviewPanel;
 use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::remote::{AttachmentTarget, RemotePanel};
 use crate::runtime_event::{
-    RuntimeEventSeverity, RuntimeToastAction, RuntimeToastDisposition, apply_runtime_effect,
-    present_runtime_event, present_runtime_toast,
+    RuntimeEventSeverity, RuntimeToastAction, RuntimeToastDisposition, present_runtime_event,
+    present_runtime_toast,
 };
 use crate::settings_page::SettingsPage;
 use crate::sidebar::SessionsSidebar;
@@ -270,8 +271,6 @@ struct Link {
     sidebar: Entity<SessionsSidebar>,
     settings_page: Entity<SettingsPage>,
     palette: Entity<CommandPalette>,
-    /// Whether this host's settings have been adopted once.
-    adopted: bool,
     /// Whether this host's saved record has been stamped with the time this
     /// window reached it.
     stamped: bool,
@@ -613,10 +612,10 @@ pub struct ShellSetup {
     /// A browser link that could not be paired opens the normal form with the
     /// one-shot failure visible after its URL fragment has been cleared.
     pub initial_pairing_error: Option<String>,
-    /// Wait for the first snapshots while attaching. Only desktop bootstrap
-    /// asks for it, and only because it applies locale and theme from them
-    /// before the first frame; a single-threaded client cannot wait at all.
-    pub seed_blocking: bool,
+    /// The settings of the host in this process, read before the window
+    /// opens: a device preference still unset takes its value from them
+    /// rather than from whichever host the window reaches first.
+    pub local_settings: Option<tcode_core::settings::Settings>,
     /// Mobile bootstrap restores client-local navigation. Desktop defaults to
     /// a fresh path; the phone example can opt into the mobile policy.
     pub restore_navigation: bool,
@@ -625,12 +624,11 @@ pub struct ShellSetup {
     pub reopen: Option<ShellPlace>,
 }
 
-/// Where a window was: the host it was attached to, the thread and page it
-/// showed there, and whether its sidebar was collapsed.
+/// Where a window was: the host it was attached to and the thread and page
+/// it showed there.
 pub struct ShellPlace {
     target: Option<AttachmentTarget>,
     navigation: NavigationSnapshot,
-    sidebar_collapsed: bool,
 }
 
 struct NavigationPersistence {
@@ -785,23 +783,26 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        if let Some(client) = setup.client_host.clone() {
+            DevicePreferences::install(client, cx);
+        }
+        if let Some(settings) = &setup.local_settings
+            && DevicePreferences::adopt(settings, cx)
+        {
+            crate::settings::apply_locale(DevicePreferences::language(cx).as_deref());
+        }
+        if let Some(mode) = DevicePreferences::appearance(cx) {
+            crate::settings_page::apply_theme(mode, window, cx);
+        }
         let mut restored = match setup.reopen.take() {
             Some(place) => {
                 setup.initial = place.target;
-                window_state.update(cx, |state, _| {
-                    state.sidebar_collapsed = place.sidebar_collapsed;
-                });
                 Some(place.navigation)
             }
             None => setup
                 .restore_navigation
                 .then(|| {
-                    setup
-                        .client_host
-                        .as_ref()?
-                        .load_preferences()
-                        .navigation
-                        .and_then(NavigationSnapshot::from_preferences)
+                    DevicePreferences::navigation(cx).and_then(NavigationSnapshot::from_preferences)
                 })
                 .flatten()
                 .map(|mut snapshot| {
@@ -955,7 +956,6 @@ impl AppShell {
         ShellPlace {
             target: self.column_link().map(|link| link.target.clone()),
             navigation: self.navigation_snapshot(cx),
-            sidebar_collapsed: self.window_state.read(cx).sidebar_collapsed,
         }
     }
 
@@ -1025,9 +1025,6 @@ impl AppShell {
         if self.navigation.is_none() {
             return;
         }
-        let Some(host) = self.setup.client_host.clone() else {
-            return;
-        };
         let snapshot = self.navigation_snapshot(cx);
         let navigation = self.navigation.as_mut().expect("enabled above");
         if navigation.scheduled.as_ref() == Some(&snapshot) {
@@ -1038,17 +1035,9 @@ impl AppShell {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
-            let mut preferences = host.load_preferences();
-            let member_settings = preferences
-                .navigation
-                .as_ref()
-                .and_then(|navigation| navigation.get("member_settings"))
-                .cloned();
-            preferences.navigation = serde_json::to_value(snapshot).ok();
-            if let Some(member_settings) = member_settings {
-                preferences.navigation.as_mut().unwrap()["member_settings"] = member_settings;
+            if let Ok(snapshot) = serde_json::to_value(snapshot) {
+                cx.update(|cx| DevicePreferences::save_navigation(snapshot, cx));
             }
-            host.save_preferences(&preferences);
         }));
     }
 
@@ -1249,13 +1238,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<HostKey> {
-        let open = Attachment::open(
-            target,
-            local,
-            self.setup.client_host.clone(),
-            self.setup.seed_blocking,
-            cx,
-        )?;
+        let open = Attachment::open(target, local, self.setup.client_host.clone(), cx)?;
         if let Some(host) = &self.setup.client_host {
             host.set_last_host_id(match &open.target {
                 AttachmentTarget::Local => None,
@@ -1284,10 +1267,7 @@ impl AppShell {
                 &store,
                 window,
                 |this, store, change: &StoreChange, window, cx| match change.topic {
-                    TopicKind::Settings => {
-                        let host = store.read(cx).host_key();
-                        this.adopt_host_settings(&host, window, cx);
-                    }
+                    TopicKind::Settings => Self::adopt_device_preferences(store, window, cx),
                     TopicKind::Index => this.fill_empty_column(store, cx),
                     _ => {}
                 },
@@ -1356,7 +1336,6 @@ impl AppShell {
             palette: cx.new(|cx| {
                 CommandPalette::new(store.clone(), self.window_state.clone(), window, cx)
             }),
-            adopted: false,
             stamped: false,
             attention: Default::default(),
             #[cfg(preview_backend)]
@@ -1365,7 +1344,6 @@ impl AppShell {
             _tasks: Vec::new(),
             _subscriptions: subscriptions,
         });
-        self.adopt_host_settings(&host, window, cx);
         Some(host)
     }
 
@@ -1790,26 +1768,21 @@ impl AppShell {
         }
     }
 
-    /// Take `host`'s language, theme and sidebar state once its settings
-    /// exist. Client preferences already override them inside the store, so
-    /// this is the same value the settings page shows.
-    fn adopt_host_settings(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(link) = self.link_of_mut(host) else {
-            return;
-        };
-        let store = link.store.read(cx);
-        if (link.adopted && store.scope().is_full()) || !store.settings_hydrated() {
+    /// The first full-scope host whose settings arrive gives each device
+    /// preference still unset its value.
+    fn adopt_device_preferences(
+        store: &Entity<WorkspaceStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = store.read(cx);
+        if !store.scope().is_full() || !store.settings_hydrated() {
             return;
         }
-        link.adopted = true;
-        let settings = store.settings();
-        crate::settings::apply_locale(settings.language.as_deref());
-        crate::settings_page::apply_theme(settings.theme_mode, window, cx);
-        let collapsed = settings.sidebar_collapsed;
-        self.window_state.update(cx, |state, cx| {
-            state.sidebar_collapsed = collapsed;
-            cx.notify();
-        });
+        if DevicePreferences::adopt(&store.settings(), cx) {
+            crate::settings::apply_locale(DevicePreferences::language(cx).as_deref());
+            crate::settings_page::apply_theme(DevicePreferences::theme(cx), window, cx);
+        }
     }
 }
 
@@ -2661,7 +2634,7 @@ impl AppShell {
         let Some(column) = self.column.as_ref() else {
             return false;
         };
-        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let collapsed = DevicePreferences::sidebar_collapsed(cx);
         let sidebar = if collapsed {
             px(0.)
         } else {
@@ -3523,12 +3496,8 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let toast = match event {
-            RuntimeEvent::Effect(RuntimeEffect::ApplyLocale { .. }) => {
-                let language = store.read(cx).settings().language;
-                apply_runtime_effect(&RuntimeEffect::ApplyLocale { language });
-                cx.notify();
-                return;
-            }
+            // The language is this device's, whatever a host says.
+            RuntimeEvent::Effect(RuntimeEffect::ApplyLocale { .. }) => return,
             RuntimeEvent::Effect(RuntimeEffect::CopyToClipboard { text }) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
                 return;
@@ -5433,7 +5402,7 @@ impl AppShell {
         let Some(column) = &mut self.column else {
             unreachable!("checked above");
         };
-        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let collapsed = DevicePreferences::sidebar_collapsed(cx);
         // The overlay is workspace-only transient state. Clear it synchronously
         // on route/expanded transitions rather than waiting for pointer input.
         if !collapsed || route != Route::Chat {
@@ -5531,7 +5500,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let collapsed = DevicePreferences::sidebar_collapsed(cx);
         let column = self
             .column
             .as_ref()
@@ -5620,7 +5589,7 @@ impl AppShell {
     ) -> AnyElement {
         let palette_open = self.window_state.read(cx).palette_mounted() && self.departing.is_none();
         let fullscreen = window.is_fullscreen();
-        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let collapsed = DevicePreferences::sidebar_collapsed(cx);
         let Some(column) = &mut self.column else {
             unreachable!("a workspace route has a column");
         };
@@ -5813,10 +5782,10 @@ impl AppShell {
         transition: SidebarHoverTransition,
         cx: &mut Context<Self>,
     ) {
-        let (collapsed, route) = {
-            let state = self.window_state.read(cx);
-            (state.sidebar_collapsed, state.route())
-        };
+        let (collapsed, route) = (
+            DevicePreferences::sidebar_collapsed(cx),
+            self.window_state.read(cx).route(),
+        );
         let popover_open = gpui_base::GlobalState::is_in_deferred_context(cx);
         let Some(column) = &mut self.column else {
             return;
@@ -6095,7 +6064,7 @@ pub(crate) mod tests {
         });
         let setup_client = client.clone();
         let window = cx.open_window(size(px(width), px(852.)), move |window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
+            let state = cx.new(|_| WindowState::default());
             AppShell::new(
                 state,
                 ShellSetup {
@@ -6263,7 +6232,7 @@ pub(crate) mod tests {
             outbox: Some(std::sync::Arc::new(SavedOutbox)),
         });
         let (shell, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
+            let state = cx.new(|_| WindowState::default());
             AppShell::new(
                 state,
                 ShellSetup {
@@ -6603,8 +6572,8 @@ pub(crate) mod tests {
 
     /// A desktop window opened in place of one that closed — macOS keeps the
     /// app and its local host running when the window closes, and the Dock
-    /// opens it again — is where the closed one was: on the same host, on the
-    /// same thread, with the sidebar as it was left.
+    /// opens it again — is where the closed one was: on the same host and on
+    /// the same thread.
     #[gpui::test]
     fn a_reopened_window_is_where_the_closed_one_was(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -6638,7 +6607,7 @@ pub(crate) mod tests {
         };
         let open = |setup: ShellSetup, cx: &mut TestAppContext| {
             let window = cx.open_window(size(px(1200.), px(800.)), move |window, cx| {
-                let state = cx.new(|_| WindowState::new(false));
+                let state = cx.new(|_| WindowState::default());
                 AppShell::new(state, setup, window, cx)
             });
             let shell = window.root(cx).unwrap();
@@ -6659,9 +6628,6 @@ pub(crate) mod tests {
         store_of(&closed, &closed_cx).update(&mut closed_cx, |store, cx| {
             store.show_thread("thread-a".into(), cx)
         });
-        closed
-            .read_with(&closed_cx, |shell, _| shell.window_state())
-            .update(&mut closed_cx, |state, _| state.sidebar_collapsed = true);
         draw(&mut closed_cx);
         assert_eq!(
             closed.read_with(&closed_cx, |shell, cx| shell
@@ -6698,7 +6664,6 @@ pub(crate) mod tests {
                     .as_deref(),
                 Some("thread-a")
             );
-            assert!(shell.window_state.read(cx).sidebar_collapsed);
         });
     }
 
@@ -7018,10 +6983,9 @@ pub(crate) mod tests {
             navigation["history"],
             serde_json::json!(["hosts", "threads", "thread", "settings"])
         );
-        // The store cached preferences before this checkpoint. A theme edit
-        // must retain the shell's newer history and selection.
-        store.update(cx, |store, _| {
-            store.set_client_theme(Some(tcode_core::settings::ThemeMode::Light))
+        // A theme edit keeps the history and selection the checkpoint saved.
+        cx.update(|window, cx| {
+            DevicePreferences::set_theme(tcode_core::settings::ThemeMode::Light, window, cx)
         });
         assert_eq!(client.load_preferences().navigation, Some(navigation));
         assert_eq!(
@@ -7241,7 +7205,6 @@ pub(crate) mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             );
             store.show_thread("thread-a".into(), cx);
@@ -13461,10 +13424,7 @@ pub(crate) mod tests {
     fn a_pane_stacked_below_another_leaves_the_window_chrome_to_it(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_panes(cx);
-        let store = store_of(&shell, cx);
-        shell
-            .read_with(cx, |shell, _| shell.window_state())
-            .update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
         cx.simulate_keystrokes("secondary-shift-d");
         draw(cx);
         answer_draft(&shell, &host, "draft-1", cx);
@@ -13931,10 +13891,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// A shell on a real host over `disk`, showing nothing yet.
+    /// A shell of `client` on a real host over `disk`, showing nothing yet.
     fn mount_on_host(
         cx: &mut TestAppContext,
         disk: tcode_services::store::SessionStore,
+        client: Option<Rc<dyn ClientHost>>,
     ) -> (
         Entity<AppShell>,
         Entity<WorkspaceStore>,
@@ -13946,19 +13907,124 @@ pub(crate) mod tests {
             tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
                 .expect("spawn test host");
         let driver = crate::store::tests::LocalHostDriver::new(&host);
-        let (shell, _transport, cx) = mount(cx);
+        let (shell, _transport, cx) = mount_with(cx, Some(AttachmentTarget::Local), client.clone());
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| {
             *store = WorkspaceStore::new_attached(
                 driver.link.clone(),
                 crate::store::WorkspaceAttachment::Local,
+                client,
                 None,
-                None,
-                false,
                 cx,
             );
         });
         (shell, store, host, driver, cx)
+    }
+
+    /// A profile from before theme, language and the sidebar were this
+    /// device's: each takes the first host's value once, and the host
+    /// changing its own later moves none of them, its language included.
+    #[gpui::test]
+    fn an_older_profile_takes_its_device_preferences_from_the_host_once(cx: &mut TestAppContext) {
+        use crate::store::tests::scratch_root;
+        use tcode_core::settings::{Settings, SettingsPatch, SidebarLayout, ThemeMode};
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = scratch_root("device-preferences-migration");
+        let disk =
+            tcode_services::store::SessionStore::open_at(root.clone()).expect("open test store");
+        tcode_services::settings::SettingsStore::new(root.clone())
+            .save(&Settings {
+                theme_mode: ThemeMode::Dark,
+                language: Some(crate::LANGUAGE_JAPANESE.into()),
+                sidebar_collapsed: true,
+                sidebar_layout: SidebarLayout::Grouped,
+                ..Settings::default()
+            })
+            .expect("save host settings");
+        let device = root.join("device");
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::write(
+            device.join("mobile.json"),
+            br#"{"appearance": null, "language": null, "device_name": "Old phone"}"#,
+        )
+        .unwrap();
+        let saved = || tcode_traverse::NativeClientHost::new(device.clone(), "phone");
+        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk, Some(Rc::new(saved())));
+        driver.wait_until(cx, &store, "the host's settings", |cx| {
+            store.read_with(cx, |store, _| store.settings_hydrated())
+        });
+        draw(cx);
+        let device_preferences = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                (
+                    DevicePreferences::theme(cx),
+                    DevicePreferences::language(cx),
+                    DevicePreferences::sidebar_collapsed(cx),
+                    DevicePreferences::sidebar_layout(cx),
+                )
+            })
+        };
+        let adopted = (
+            ThemeMode::Dark,
+            Some(crate::LANGUAGE_JAPANESE.to_owned()),
+            true,
+            SidebarLayout::Grouped,
+        );
+        assert_eq!(device_preferences(cx), adopted);
+        let persisted = saved().load_preferences();
+        assert_eq!(
+            (
+                persisted.appearance.as_deref(),
+                persisted.language.as_deref(),
+                persisted.sidebar_collapsed,
+                persisted.sidebar_layout.as_deref(),
+                persisted.device_name.as_deref(),
+            ),
+            (
+                Some("dark"),
+                Some(crate::LANGUAGE_JAPANESE),
+                Some(true),
+                Some("grouped"),
+                Some("Old phone"),
+            )
+        );
+        assert!(cx.update(|_, cx| cx.theme().mode.is_dark()));
+        assert_eq!(&*rust_i18n::locale(), crate::LANGUAGE_JAPANESE);
+
+        let link = driver.link.clone();
+        for command in [
+            Command::PatchSettings {
+                patch: SettingsPatch::ThemeMode(ThemeMode::Light),
+            },
+            Command::PatchSettings {
+                patch: SettingsPatch::Language(Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.into())),
+            },
+            Command::PatchSettings {
+                patch: SettingsPatch::SidebarLayout(SidebarLayout::Flat),
+            },
+            Command::SetSidebarCollapsed { collapsed: false },
+        ] {
+            driver
+                .await_with_events(cx, &store, link.command(command))
+                .expect("the host takes the old patch");
+        }
+        driver.wait_until(cx, &store, "the host's new settings", |cx| {
+            store.read_with(cx, |store, _| {
+                let settings = store.settings();
+                settings.theme_mode == ThemeMode::Light
+                    && settings.language.as_deref() == Some(crate::LANGUAGE_SIMPLIFIED_CHINESE)
+                    && settings.sidebar_layout == SidebarLayout::Flat
+                    && !settings.sidebar_collapsed
+            })
+        });
+        draw(cx);
+        assert_eq!(device_preferences(cx), adopted);
+        assert_eq!(saved().load_preferences(), persisted);
+        assert!(cx.update(|_, cx| cx.theme().mode.is_dark()));
+        assert_eq!(&*rust_i18n::locale(), crate::LANGUAGE_JAPANESE);
+        driver.shutdown(cx, &store, &host);
+        drop(shell);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Deleting the project of the draft on screen takes the draft away; the
@@ -13976,7 +14042,7 @@ pub(crate) mod tests {
         }
         disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
             .expect("persist session");
-        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk);
+        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk, None);
         let shows_draft_of = |project: &'static str| {
             let store = store.clone();
             move |cx: &TestAppContext| {
@@ -14029,7 +14095,7 @@ pub(crate) mod tests {
         ] {
             disk.upsert_meta(&meta).expect("persist session");
         }
-        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk);
+        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk, None);
 
         // Let the launch draft settle on the first project before the user
         // goes into "p" themselves.
@@ -14129,9 +14195,9 @@ pub(crate) mod tests {
             // TestWindow rejects native window moves, so a leaked press fails here.
             cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
             cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
-            state.read_with(cx, |state, _| {
+            state.read_with(cx, |state, cx| {
                 if width >= 900. {
-                    assert!(state.sidebar_collapsed);
+                    assert!(crate::device::DevicePreferences::sidebar_collapsed(cx));
                 } else {
                     assert!(state.palette_open);
                 }
@@ -14163,6 +14229,14 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
         initial: Option<AttachmentTarget>,
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+        mount_with(cx, initial, None)
+    }
+
+    fn mount_with(
+        cx: &mut TestAppContext,
+        initial: Option<AttachmentTarget>,
+        client_host: Option<Rc<dyn ClientHost>>,
+    ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
         // As `run_shell` does before opening the window: the shell alone,
         // without the window root, initializes nothing of gpui-base itself.
         cx.update(crate::theme::init);
@@ -14179,7 +14253,7 @@ pub(crate) mod tests {
         let mounted = Rc::new(RefCell::new(None));
         let capture = mounted.clone();
         let (_, cx) = cx.add_window_view(move |window, cx| {
-            let window_state = cx.new(|_| WindowState::new(false));
+            let window_state = cx.new(|_| WindowState::default());
             let shell = cx.new(|cx| {
                 AppShell::new(
                     window_state,
@@ -14188,6 +14262,7 @@ pub(crate) mod tests {
                             Ok(transport.borrow_mut().take().expect("one attachment"))
                         })),
                         initial,
+                        client_host,
                         ..Default::default()
                     },
                     window,
@@ -14347,7 +14422,7 @@ pub(crate) mod tests {
         let mounted = Rc::new(RefCell::new(None));
         let capture = mounted.clone();
         let (_, cx) = cx.add_window_view(move |window, cx| {
-            let window_state = cx.new(|_| WindowState::new(false));
+            let window_state = cx.new(|_| WindowState::default());
             let shell = cx.new(|cx| {
                 AppShell::new(
                     window_state,
@@ -15178,7 +15253,6 @@ pub(crate) mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             );
             store.show_thread("first".into(), cx);
@@ -15239,7 +15313,6 @@ pub(crate) mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             );
             store.show_thread("first".into(), cx);
@@ -15335,7 +15408,6 @@ pub(crate) mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             );
             store.show_thread("first".into(), cx);
@@ -16129,7 +16201,6 @@ pub(crate) mod tests {
     fn the_hosts_routes_sidebar_collapses_gradually(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
-        let store = store_of(&shell, cx);
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         resize(cx, 1024.);
         state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
@@ -16144,7 +16215,7 @@ pub(crate) mod tests {
             left(cx)
         };
 
-        state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
         let collapsing = half_way(cx);
         assert!(
             collapsing > px(0.) && collapsing < expanded,
@@ -16153,7 +16224,7 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         assert_eq!(left(cx), px(0.));
 
-        state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
         let expanding = half_way(cx);
         assert!(expanding > px(0.) && expanding < expanded, "{expanding:?}");
         crate::test_frames::draw_settled(cx);
@@ -17184,7 +17255,6 @@ pub(crate) mod tests {
         // reduced.
         cx.update(|_, cx| cx.set_reduce_motion(true));
         let store = store_of(&shell, cx);
-        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         resize(cx, 1600.);
         store.update(cx, |store, cx| {
             store.toggle_tab_panel_for("thread-1", tcode_core::ui::RightTab::Diff, cx)
@@ -17199,7 +17269,7 @@ pub(crate) mod tests {
                 crate::test_frames::draw_settled(cx);
                 let sidebar = shell.read_with(cx, |shell, cx| {
                     let attachment = shell.column.as_ref().expect("attached");
-                    if shell.window_state.read(cx).sidebar_collapsed {
+                    if crate::device::DevicePreferences::sidebar_collapsed(cx) {
                         px(0.)
                     } else {
                         attachment.sidebar_width.get()
@@ -17299,7 +17369,7 @@ pub(crate) mod tests {
         });
         walk(cx, &[1600.]);
 
-        window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
         walk(cx, &[1600., 1250., 1100., 1000., 900., 860., 720., 1600.]);
 
         resize(cx, 720.);
@@ -17591,8 +17661,6 @@ pub(crate) mod tests {
     fn the_sidebar_glides_as_it_collapses_and_expands(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_thread_with(cx, Vec::new());
-        let store = store_of(&shell, cx);
-        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         resize(cx, 1600.);
         let width = |cx: &mut VisualTestContext| {
             cx.debug_bounds("chat-composer")
@@ -17636,11 +17704,11 @@ pub(crate) mod tests {
         };
 
         let before = at_rest(cx);
-        window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
         let collapsing = frames(cx);
         let collapsed = at_rest(cx);
         follows("the sidebar collapsing", before, &collapsing, collapsed);
-        window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
         let expanding = frames(cx);
         assert_eq!(at_rest(cx), before);
         follows("the sidebar expanding", collapsed, &expanding, before);
@@ -17652,11 +17720,9 @@ pub(crate) mod tests {
     fn the_collapsed_sidebar_slides_in_from_the_edge_and_back(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount_thread_with(cx, Vec::new());
-        let store = store_of(&shell, cx);
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
         resize(cx, 1600.);
         draw_until(&shell, cx, &host, "chat-composer", None);
-        state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
         crate::test_frames::draw_settled(cx);
         let left = |cx: &mut VisualTestContext| {
             cx.debug_bounds("sidebar-hover-overlay")

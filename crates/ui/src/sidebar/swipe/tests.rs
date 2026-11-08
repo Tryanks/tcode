@@ -81,7 +81,6 @@ fn phone<'a>(
             crate::store::WorkspaceAttachment::Local,
             None,
             None,
-            false,
             cx,
         )
     });
@@ -89,7 +88,7 @@ fn phone<'a>(
     driver.wait_until(cx, &store, "sidebar baseline", |cx| {
         store.read_with(cx, |store, _| store.baseline_ready())
     });
-    let navigation = cx.new(|_| WindowState::new(false).with_compact(true));
+    let navigation = cx.new(|_| WindowState::default().with_compact(true));
     let sidebar = cx.new(|cx| SessionsSidebar::new(store.clone(), navigation.clone(), cx));
     let (_, cx) =
         cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));

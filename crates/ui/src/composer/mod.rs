@@ -2297,8 +2297,7 @@ mod replica_tests {
                 pump.pump_with_timer(|delay| executor.timer(delay)).await;
             })
             .detach();
-        let store =
-            cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, false, cx));
+        let store = cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, cx));
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         store.update(cx, |store, cx| {
             store.show_alone(status.session_id.clone(), cx)
@@ -3116,7 +3115,6 @@ mod replica_tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });

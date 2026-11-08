@@ -421,9 +421,7 @@ impl Drawer {
         let right_tab = panel.right_tab;
         let expanded = panel.right_panel_expanded;
 
-        let chosen = store
-            .read(cx)
-            .right_panel_width()
+        let chosen = crate::device::DevicePreferences::right_panel_width(cx)
             .map_or(px(RIGHT_PANEL_WIDTH), |width| px(width as f32));
         let rest = rest_width(chosen, pane_width);
         let covering = rest == Rest::Cover;
@@ -620,7 +618,7 @@ impl Drawer {
                     && let Some(width) = state.read(cx).sizes().get(1)
                 {
                     let width = f32::from(*width).round() as u32;
-                    store.update(cx, |store, cx| store.set_right_panel_width(width, cx));
+                    crate::device::DevicePreferences::set_right_panel_width(width, cx);
                 }
             })
             .child(

@@ -370,7 +370,7 @@ mod tests {
         };
         let mut threads = seed_two_threads(cx, running(&["shared"]));
         cx.update(|cx| cx.set_reduce_motion(true));
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let store = threads.store.clone();
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(

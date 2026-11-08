@@ -126,8 +126,7 @@ impl WorkspaceStore {
     }
 
     /// Name this client anew on its preview channel; it keeps rendering.
-    pub(super) fn rename_preview_client(&mut self) {
-        let name = self.client_device_name();
+    pub(super) fn rename_preview_client(&mut self, name: String) {
         if !self.preview.offered || self.preview.client.name == name {
             self.preview.client.name = name;
             return;

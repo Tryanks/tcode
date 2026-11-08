@@ -979,12 +979,11 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (panel, cx) = cx.add_window_view(|window, cx| {
             PreviewPanel::new(store.clone(), window_state, window, cx)
         });

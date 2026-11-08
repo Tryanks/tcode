@@ -139,6 +139,11 @@ pub struct ClientPreferences {
     /// pane allows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right_panel_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_collapsed: Option<bool>,
+    /// `"flat"` or `"grouped"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_layout: Option<String>,
 }
 
 /// One file a platform picker handed back, already read into memory.

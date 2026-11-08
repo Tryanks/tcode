@@ -122,7 +122,6 @@ impl Workspace {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -220,7 +219,7 @@ fn painted(
 fn a_thread_come_back_to_is_at_its_latest_at_once(cx: &mut TestAppContext) {
     for (count, continued) in [(100, true), (2000, false)] {
         let mut workspace = Workspace::new(cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let store = workspace.store.clone();
         let window =
             cx.add_window(|window, cx| ChatView::new(store, window_state, None, window, cx));

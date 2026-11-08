@@ -1,9 +1,8 @@
 use agent::ProviderKind;
 use tcode_core::git::GitAction;
 use tcode_protocol::{
-    GitActionRequest, MergeWorktreeFailure, NoticeSeverity, PluginOperationTarget, RuntimeEffect,
-    RuntimeError, RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId,
-    RuntimeToast,
+    GitActionRequest, MergeWorktreeFailure, NoticeSeverity, PluginOperationTarget, RuntimeError,
+    RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast,
 };
 
 use crate::toast::ToastKind;
@@ -19,17 +18,6 @@ pub(super) enum RuntimeEventSeverity {
 pub(super) struct PresentedRuntimeEvent {
     pub severity: RuntimeEventSeverity,
     pub message: String,
-}
-
-pub(super) fn apply_runtime_effect(effect: &RuntimeEffect) {
-    match effect {
-        RuntimeEffect::ApplyLocale { language } => {
-            crate::settings::apply_locale(language.as_deref());
-        }
-        RuntimeEffect::CopyToClipboard { .. } => {
-            unreachable!("clipboard effects are applied by the app shell")
-        }
-    }
 }
 
 pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEvent {
@@ -590,23 +578,6 @@ mod tests {
             );
         }
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-    }
-
-    #[test]
-    fn locale_effect_is_applied_only_at_ui_boundary() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        apply_runtime_effect(&RuntimeEffect::ApplyLocale {
-            language: Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.to_string()),
-        });
-        let chinese = crate::tr!("chat.new_thread").into_owned();
-
-        apply_runtime_effect(&RuntimeEffect::ApplyLocale {
-            language: Some(crate::LANGUAGE_ENGLISH.to_string()),
-        });
-        let english = crate::tr!("chat.new_thread").into_owned();
-
-        assert_eq!(chinese, "新建线程");
-        assert_eq!(english, "New thread");
     }
 
     #[test]

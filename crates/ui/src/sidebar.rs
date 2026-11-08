@@ -949,7 +949,7 @@ impl SessionsSidebar {
         let lists = self.thread_lists(cx);
         let store = self.store.read(cx);
         let mut ids = Vec::new();
-        match store.sidebar_layout() {
+        match crate::device::DevicePreferences::sidebar_layout(cx) {
             SidebarLayout::Flat => {
                 let rows = self.thread_rows(&lists.flat, self.project_filter.as_deref(), "recent");
                 ids.extend(
@@ -1032,7 +1032,7 @@ impl SessionsSidebar {
     /// change that resets them does not animate.
     fn sample_folds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
-        let layout = self.store.read(cx).sidebar_layout();
+        let layout = crate::device::DevicePreferences::sidebar_layout(cx);
         let groups = self.thread_lists(cx).groups;
         let mut targets = Vec::new();
         match layout {
@@ -2431,15 +2431,13 @@ impl SessionsSidebar {
             self.compact(cx),
         )
         .aria_label(tooltip)
-        .on_click(cx.listener(move |this, _, _, cx| {
+        .on_click(move |_, _, cx| {
             let next = match layout {
                 SidebarLayout::Flat => SidebarLayout::Grouped,
                 SidebarLayout::Grouped => SidebarLayout::Flat,
             };
-            this.store.update(cx, |store, _cx| {
-                store.set_sidebar_layout(next);
-            });
-        }))
+            crate::device::DevicePreferences::set_sidebar_layout(next, cx);
+        })
     }
 
     fn render_projects_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4200,7 +4198,13 @@ impl SessionsSidebar {
                     .filter(|group| store.is_project_collapsed(&group.project.id))
                     .map(|group| group.project.id.clone())
                     .collect::<HashSet<_>>();
-                (groups, collapsed, sessions, flags, store.sidebar_layout())
+                (
+                    groups,
+                    collapsed,
+                    sessions,
+                    flags,
+                    crate::device::DevicePreferences::sidebar_layout(cx),
+                )
             };
 
             let mut rows = Vec::new();
@@ -4567,7 +4571,7 @@ impl SessionsSidebar {
         self.compact_rows_rendered.set(0);
         self.tidy_row_swipes(cx);
         let model = self.compact_model(Some(window), cx);
-        let layout = self.store.read(cx).sidebar_layout();
+        let layout = crate::device::DevicePreferences::sidebar_layout(cx);
         let body = self.loading_body(
             move |this, window, cx| {
                 // The empty page fades in where the last project's list was.
@@ -5576,7 +5580,7 @@ impl SessionsSidebar {
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scope = (
-            self.store.read(cx).sidebar_layout(),
+            crate::device::DevicePreferences::sidebar_layout(cx),
             self.project_filter.clone(),
         );
         if self.settled_scope.as_ref() != Some(&scope) {
@@ -5594,7 +5598,7 @@ impl Render for SessionsSidebar {
             return self.render_compact(window, cx);
         }
 
-        let layout = self.store.read(cx).sidebar_layout();
+        let layout = crate::device::DevicePreferences::sidebar_layout(cx);
         let ThreadLists {
             groups,
             flat: flat_sessions,
@@ -5873,13 +5877,12 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.show_alone("background".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.simulate_resize(size(px(393.), px(852.)));
@@ -5992,14 +5995,13 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         driver.wait_until(cx, &store, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let sidebar = cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         (sidebar, store, window_state, driver, host, root)
     }
@@ -6086,11 +6088,8 @@ mod tests {
             "Flat shows no project headers"
         );
         // What the header's layout toggle does.
-        let mut switch = |layout, cx: &mut VisualTestContext| {
-            store.update(cx, |store, _| store.set_sidebar_layout(layout));
-            driver.wait_until(cx, &store, "the layout", |cx| {
-                store.read_with(cx, |store, _| store.sidebar_layout() == layout)
-            });
+        let switch = |layout, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| crate::device::DevicePreferences::set_sidebar_layout(layout, cx));
             draw(cx);
         };
         switch(SidebarLayout::Grouped, cx);
@@ -6615,7 +6614,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -6623,7 +6621,7 @@ mod tests {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
 
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let sidebar = cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         let reveals = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view(|window, cx| {
@@ -6870,14 +6868,13 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         driver.wait_until(cx, &store, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (_, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
         let cx: &mut VisualTestContext = cx;
@@ -7004,7 +7001,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -7012,7 +7008,7 @@ mod tests {
         driver.wait_until(cx, &store, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        let navigation = cx.new(|_| WindowState::new(false).with_compact(true));
+        let navigation = cx.new(|_| WindowState::default().with_compact(true));
         let (_, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), navigation.clone(), cx));
         cx.simulate_resize(size(px(393.), px(852.)));
@@ -7098,8 +7094,12 @@ mod tests {
         projects: usize,
         quick_chat: bool,
     ) -> bool {
+        use tcode_client::host::ClientHost as _;
         cx.update(crate::theme::init);
         let root = crate::store::tests::scratch_root(&format!("sidebar-{projects}-project"));
+        let device = || tcode_traverse::NativeClientHost::new(root.join("device"), "phone");
+        let client: std::rc::Rc<dyn tcode_client::host::ClientHost> = std::rc::Rc::new(device());
+        cx.update(|cx| crate::device::DevicePreferences::install(client, cx));
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
@@ -7137,14 +7137,13 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         driver.wait_until(cx, &store, "sidebar baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
         let cx: &mut VisualTestContext = cx;
@@ -7158,7 +7157,7 @@ mod tests {
             "the seeded threads are listed"
         );
         assert_eq!(
-            store.read_with(cx, |store, _| store.sidebar_layout()),
+            cx.update(|_, cx| crate::device::DevicePreferences::sidebar_layout(cx)),
             SidebarLayout::Flat
         );
         assert!(cx.debug_bounds("compact-group-header").is_none());
@@ -7187,19 +7186,12 @@ mod tests {
         let toggle = cx.debug_bounds("compact-layout-toggle").unwrap();
         assert_eq!(toggle.size, size(px(44.), px(44.)));
         cx.simulate_click(toggle.center(), gpui::Modifiers::default());
-        let deadline = crate::store::tests::host_deadline();
-        loop {
-            driver.step(cx, &store);
-            draw(cx);
-            if store.read_with(cx, |store, _| store.sidebar_layout()) == SidebarLayout::Grouped {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "layout change reaches the replica"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        draw(cx);
+        assert_eq!(
+            device().load_preferences().sidebar_layout.as_deref(),
+            Some("grouped"),
+            "the actual header action persists this device's choice"
+        );
         // The list the new layout brings folds its rows in; the reader
         // presses a header once it is there.
         draw_settled(cx);
@@ -7252,14 +7244,6 @@ mod tests {
         }
 
         driver.shutdown(cx, &store, &host);
-        let persisted = tcode_services::settings::SettingsStore::new(root.clone())
-            .try_load()
-            .unwrap();
-        assert_eq!(
-            persisted.sidebar_layout,
-            SidebarLayout::Grouped,
-            "the actual header action persists the shared choice"
-        );
         let _ = std::fs::remove_dir_all(root);
         headers
     }
@@ -7313,7 +7297,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -7325,7 +7308,7 @@ mod tests {
         driver.wait_until(cx, &store, "every thread", |cx| {
             store.read_with(cx, |store, _| store.flat_sessions().len() == 60)
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
 
@@ -7461,13 +7444,12 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.show_alone("virtual-0".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
             sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state, cx)),
             offset: px(0.),
@@ -7549,6 +7531,9 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         cx.update(crate::theme::init);
+        cx.update(|cx| {
+            crate::device::DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx)
+        });
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let event = |topic, event| {
@@ -7566,10 +7551,7 @@ mod tests {
         for line in [
             event(
                 Topic::Settings,
-                ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
-                    sidebar_layout: SidebarLayout::Grouped,
-                    ..Default::default()
-                }),
+                ServerEvent::SettingsSnapshot(Default::default()),
             ),
             event(
                 Topic::Index,
@@ -7600,12 +7582,11 @@ mod tests {
                 },
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
         cx.simulate_resize(size(px(320.), px(900.)));
@@ -7747,12 +7728,12 @@ mod tests {
                 projects: vec![project.clone(), other.clone()],
             })
         };
+        cx.update(|cx| {
+            crate::device::DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx)
+        });
         send(
             Topic::Settings,
-            ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
-                sidebar_layout: SidebarLayout::Grouped,
-                ..Default::default()
-            }),
+            ServerEvent::SettingsSnapshot(Default::default()),
         );
         send(Topic::Index, snapshot(&sessions));
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
@@ -7770,13 +7751,12 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.show_alone("virtual-0".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (sidebar, cx) =
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
         cx.run_until_parked();
@@ -7937,7 +7917,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -7945,7 +7924,7 @@ mod tests {
         // A selection keeps the store from opening a draft against a host
         // this fake transport never answers.
         store.update(cx, |store, cx| store.show_alone("other".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (_, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.simulate_resize(size(px(393.), px(852.)));
@@ -8026,14 +8005,13 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::shell::tests::shell_behind(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.show_thread("settled-39".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.simulate_resize(size(px(393.), px(6000.)));
@@ -8196,7 +8174,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -8205,7 +8182,7 @@ mod tests {
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         // The open thread is settled, so the closed shelf shows its row.
         store.update(cx, |store, cx| store.show_thread("settled-20".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.run_until_parked();
@@ -8366,12 +8343,12 @@ mod tests {
         // counted them would take active rows' places.
         sessions.push(settled("many-settled-0", "many", 41, 41));
         sessions.push(settled("many-settled-1", "many", 40, 40));
+        cx.update(|cx| {
+            crate::device::DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx)
+        });
         send(
             Topic::Settings,
-            ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
-                sidebar_layout: SidebarLayout::Grouped,
-                ..Default::default()
-            }),
+            ServerEvent::SettingsSnapshot(Default::default()),
         );
         send(
             Topic::Index,
@@ -8396,14 +8373,13 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::shell::tests::shell_behind(&store, cx);
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.show_thread("mixed-a".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.run_until_parked();
@@ -8562,7 +8538,6 @@ mod tests {
             send(
                 Topic::Settings,
                 ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
-                    sidebar_layout: SidebarLayout::Grouped,
                     collapsed_projects: vec!["mixed".into()],
                     ..Default::default()
                 }),
@@ -8580,10 +8555,7 @@ mod tests {
             );
             send(
                 Topic::Settings,
-                ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
-                    sidebar_layout: SidebarLayout::Grouped,
-                    ..Default::default()
-                }),
+                ServerEvent::SettingsSnapshot(Default::default()),
             );
             cx.run_until_parked();
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
@@ -8642,13 +8614,10 @@ mod tests {
             meta.settled_at = Some(100 - index);
             meta
         }));
-        let settings = |layout| {
-            ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
-                sidebar_layout: layout,
-                ..Default::default()
-            })
-        };
-        send(Topic::Settings, settings(SidebarLayout::Flat));
+        send(
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(Default::default()),
+        );
         send(
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
@@ -8672,12 +8641,11 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (sidebar, cx) = cx
             .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
         cx.update(|_, cx| cx.set_reduce_motion(false));
@@ -8700,10 +8668,10 @@ mod tests {
             }
             panic!("the list keeps scrolling");
         };
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
-            send(Topic::Settings, settings(layout));
-            cx.run_until_parked();
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.update(|_, cx| crate::device::DevicePreferences::set_sidebar_layout(layout, cx));
             let key = match layout {
                 SidebarLayout::Flat => "recent",
                 SidebarLayout::Grouped => "p11",
@@ -8840,7 +8808,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -8872,7 +8839,7 @@ mod tests {
         driver.wait_until(cx, &store, "the threads", |cx| {
             store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut sidebar = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
@@ -9082,7 +9049,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -9130,7 +9096,7 @@ mod tests {
         driver.wait_until(cx, &store, "the threads", |cx| {
             store.read_with(cx, |store, _| !store.flat_sessions().is_empty())
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut sidebar = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));

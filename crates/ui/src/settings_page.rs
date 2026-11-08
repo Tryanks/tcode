@@ -22,6 +22,7 @@ use gpui::{
 use gpui_base::{InteractiveElementExt as _, v_flex};
 
 use crate::acp_panel::AcpPanel;
+use crate::device::DevicePreferences;
 use crate::harness_dialog::{HarnessDialog, HarnessId, ManagePlugins};
 use crate::plugins_settings::PluginsSettingsPanel;
 use crate::provider_model_picker::ProviderModelPicker;
@@ -426,8 +427,8 @@ impl Section {
 /// field against later snapshots so a host update cannot overwrite what the
 /// user is in the middle of typing.
 /// The remote attachment ceiling as the settings field shows it, in MiB.
-fn remote_attachment_limit_value(store: &WorkspaceStore) -> String {
-    (store.client_remote_attachment_limit_bytes() / (1024 * 1024)).to_string()
+fn remote_attachment_limit_value(cx: &App) -> String {
+    (DevicePreferences::remote_attachment_limit_bytes(cx) / (1024 * 1024)).to_string()
 }
 
 struct SettingsInput {
@@ -680,10 +681,10 @@ impl SettingsPage {
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
         let home_url_input = cx.new(|cx| InputState::new(window, cx));
-        let device_name = store.read(cx).client_device_name();
+        let device_name = DevicePreferences::device_name(cx);
         let device_name_input =
             cx.new(|cx| InputState::new(window, cx).default_value(device_name.clone()));
-        let remote_attachment_limit = remote_attachment_limit_value(store.read(cx));
+        let remote_attachment_limit = remote_attachment_limit_value(cx);
         let remote_attachment_limit_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .step(1.)
@@ -865,7 +866,7 @@ impl SettingsPage {
             .trim()
             .to_string();
         let name = (!value.is_empty()).then_some(value);
-        self.dispatch_settings(move |store| store.set_client_device_name(name), cx);
+        DevicePreferences::set_device_name(name, cx);
     }
 
     fn commit_remote_attachment_limit(&self, cx: &mut Context<Self>) {
@@ -880,10 +881,7 @@ impl SettingsPage {
         else {
             return;
         };
-        self.dispatch_settings(
-            move |store| store.set_client_remote_attachment_limit_mib(Some(limit)),
-            cx,
-        );
+        DevicePreferences::set_remote_attachment_limit_mib(Some(limit), cx);
     }
 
     /// Open a harness's settings: a dialog on a wide window, a page of the
@@ -1413,10 +1411,8 @@ impl SettingsPage {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, window, cx| {
-                    store.update(cx, |store, _cx| {
-                        store.reset_settings();
-                        store.reset_client_preferences();
-                    });
+                    store.update(cx, |store, _cx| store.reset_settings());
+                    DevicePreferences::restore_defaults(window, cx);
                     // Provider profiles and installed agents survive the reset,
                     // so their cards need no rebuild — only the panels and
                     // inputs holding a copy of a reset preference do.
@@ -1431,12 +1427,11 @@ impl SettingsPage {
                             .clone()
                             .unwrap_or_default();
                         page.home_url_input.push(home_url, window, cx);
-                        let device_name = page.store.read(cx).client_device_name();
+                        let device_name = DevicePreferences::device_name(cx);
                         page.device_name_input.push(device_name, window, cx);
-                        let limit = remote_attachment_limit_value(page.store.read(cx));
+                        let limit = remote_attachment_limit_value(cx);
                         page.remote_attachment_limit_input.push(limit, window, cx);
                     });
-                    apply_theme(ThemeMode::System, window, cx);
                     true
                 })
         });
@@ -1552,12 +1547,12 @@ impl SettingsPage {
     }
 
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let store = self.store.read(cx);
-        let settings = store.settings();
-        let language_overridden = store.client_language_override().is_some();
-        let theme_overridden = store.client_theme_override().is_some();
-        let device_name_overridden = store.client_device_name_override().is_some();
-        let attachment_limit_overridden = store.client_remote_attachment_limit_override().is_some();
+        let settings = self.store.read(cx).settings();
+        let language = DevicePreferences::language(cx);
+        let theme = DevicePreferences::theme(cx);
+        let device_name_overridden = DevicePreferences::device_name_overridden(cx);
+        let attachment_limit_overridden =
+            DevicePreferences::remote_attachment_limit_mib(cx).is_some();
         let provider_marks_reset = crate::settings_rows::reset_action(
             "reset-sidebar-provider-marks",
             settings.sidebar_provider_marks,
@@ -1566,8 +1561,8 @@ impl SettingsPage {
             }),
         );
         let appearance = vec![
-            self.language_row(settings.language.as_deref(), language_overridden, cx),
-            self.theme_row(settings.theme_mode, theme_overridden, cx),
+            self.language_row(language.as_deref(), cx),
+            self.theme_row(theme, cx),
             self.toggle_row(
                 "sidebar-provider-marks",
                 crate::tr!("settings.sidebar_provider_marks.title"),
@@ -1754,8 +1749,8 @@ impl SettingsPage {
             "reset-device-name",
             overridden,
             cx.listener(|this, _, window, cx| {
-                this.dispatch_settings(|store| store.set_client_device_name(None), cx);
-                let name = this.store.read(cx).client_device_name();
+                DevicePreferences::set_device_name(None, cx);
+                let name = DevicePreferences::device_name(cx);
                 this.device_name_input.push(name, window, cx);
             }),
         );
@@ -1785,11 +1780,8 @@ impl SettingsPage {
             "reset-remote-attachment-limit",
             overridden,
             cx.listener(|this, _, window, cx| {
-                this.dispatch_settings(
-                    |store| store.set_client_remote_attachment_limit_mib(None),
-                    cx,
-                );
-                let limit = remote_attachment_limit_value(this.store.read(cx));
+                DevicePreferences::set_remote_attachment_limit_mib(None, cx);
+                let limit = remote_attachment_limit_value(cx);
                 this.remote_attachment_limit_input.push(limit, window, cx);
             }),
         );
@@ -3003,16 +2995,7 @@ impl SettingsPage {
         .into_any_element()
     }
 
-    fn theme_row(&self, mode: ThemeMode, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
-        let reset = crate::settings_rows::reset_action(
-            "reset-theme",
-            overridden,
-            cx.listener(|this, _, window, cx| {
-                this.dispatch_settings(|store| store.set_client_theme(None), cx);
-                let fallback = this.store.read(cx).settings().theme_mode;
-                apply_theme(fallback, window, cx);
-            }),
-        );
+    fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
         let label = match mode {
             ThemeMode::System => crate::tr!("settings.theme.system"),
             ThemeMode::Light => crate::tr!("settings.theme.light"),
@@ -3046,38 +3029,15 @@ impl SettingsPage {
                 ),
                 option(ThemeMode::Dark, "theme-option-dark", "settings.theme.dark"),
             ],
-            reset,
+            None,
             self.flip_row("theme-dropdown", cx),
-            {
-                let page = cx.entity();
-                move |mode, window, cx| {
-                    page.update(cx, |page, cx| {
-                        page.dispatch_settings(|store| store.set_client_theme(Some(mode)), cx)
-                    });
-                    apply_theme(mode, window, cx);
-                }
-            },
+            DevicePreferences::set_theme,
             cx,
         )
     }
 
-    fn language_row(
-        &self,
-        language: Option<&str>,
-        overridden: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn language_row(&self, language: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let selected = language.map(str::to_owned);
-        let reset = crate::settings_rows::reset_action(
-            "reset-language",
-            overridden,
-            cx.listener(|this, _, window, cx| {
-                this.dispatch_settings(|store| store.set_client_language(None), cx);
-                let fallback = this.store.read(cx).settings().language;
-                crate::settings::apply_locale(fallback.as_deref());
-                window.refresh();
-            }),
-        );
         let label = match language {
             Some(LANGUAGE_ENGLISH) => crate::tr!("settings.language.english"),
             Some(LANGUAGE_SIMPLIFIED_CHINESE) => crate::tr!("settings.language.chinese"),
@@ -3108,20 +3068,9 @@ impl SettingsPage {
                 ),
                 option(Some(LANGUAGE_JAPANESE), "settings.language.japanese"),
             ],
-            reset,
+            None,
             self.flip_row("language-dropdown", cx),
-            {
-                let page = cx.entity();
-                move |language, window, cx| {
-                    page.update(cx, |page, cx| {
-                        let preference = Some(language.unwrap_or("system").to_owned());
-                        page.dispatch_settings(|store| store.set_client_language(preference), cx);
-                        let effective = page.store.read(cx).settings().language;
-                        crate::settings::apply_locale(effective.as_deref());
-                    });
-                    window.refresh();
-                }
-            },
+            DevicePreferences::set_language,
             cx,
         )
     }
@@ -3279,8 +3228,7 @@ mod tests {
                 .pump_with_timer(|delay| executor.timer(delay))
                 .await;
         });
-        let store =
-            cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, false, cx));
+        let store = cx.new(|cx| WorkspaceStore::new_attached(link, attachment, None, None, cx));
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         (store, outgoing, incoming, pump)
     }
@@ -3297,7 +3245,7 @@ mod tests {
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
         store.update(cx, |store, cx| store.show_alone("live".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
@@ -3429,7 +3377,7 @@ mod tests {
             host_name: "Studio".into(),
         };
         let (store, outgoing, incoming, _pump) = scripted_store(attachment, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
@@ -3520,7 +3468,7 @@ mod tests {
             host_name: "Studio".into(),
         };
         let (store, outgoing, incoming, _pump) = scripted_store(attachment, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
@@ -3668,16 +3616,9 @@ mod tests {
         )
         .unwrap();
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.link(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page_handle = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let page = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
@@ -3718,16 +3659,9 @@ mod tests {
         )
         .expect("spawn settings test host");
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.link(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
         });
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (probe, cx) = cx.add_window_view(|window, cx| {
             let page = cx.new(|cx| {
                 let mut page = SettingsPage::new(store.clone(), window_state.clone(), window, cx);
@@ -3860,7 +3794,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
@@ -4001,14 +3935,13 @@ mod tests {
                 WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         driver.wait_until(cx, &store, "workspace baseline", |cx| {
             store.read_with(cx, |store, _| store.baseline_ready())
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (page, vcx) = cx.add_window_view(|window, cx| {
             SettingsPage::new(store.clone(), window_state.clone(), window, cx)
         });
@@ -4076,16 +4009,9 @@ mod tests {
         // No blocking seed: this is the portable client's timeline, where the
         // first snapshot lands after the page already exists.
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                host.link(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, None, cx)
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (page, cx) = cx.add_window_view(|window, cx| {
             SettingsPage::new(store.clone(), window_state.clone(), window, cx)
         });
@@ -4186,10 +4112,10 @@ mod tests {
         let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let mut page = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));

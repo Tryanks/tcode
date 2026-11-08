@@ -1057,7 +1057,7 @@ mod tests {
         );
         // Under the window's root, which hosts the dialogs.
         let store = thread.store.clone();
-        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let window_state = cx.new(|_| crate::window_state::WindowState::default());
         let mut chat = None;
         let (_root, cx) = cx.add_window_view(|window, cx| {
             let view = cx

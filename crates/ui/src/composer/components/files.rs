@@ -240,7 +240,7 @@ impl Composer {
         }
         let store = self.workspace_store.read(cx);
         let link = store.attachment_link();
-        let limit = store.client_remote_attachment_limit_bytes();
+        let limit = crate::device::DevicePreferences::remote_attachment_limit_bytes(cx);
         match transfer_verdict(link, size, limit) {
             TransferVerdict::Send => self.start_new_upload(name, source, size, cx),
             TransferVerdict::Reject => window.push_notification(

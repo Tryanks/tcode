@@ -382,10 +382,6 @@ impl PullRequestView {
         )
     }
 
-    pub(super) fn store(&self) -> &Entity<WorkspaceStore> {
-        &self.store
-    }
-
     /// Opens another layer of the stack in the thread's page, as a row of its map does.
     pub(super) fn select_layer(&mut self, key: PullRequestKey, cx: &mut Context<Self>) {
         if let Some((session, _)) = self.current.clone() {
@@ -2701,12 +2697,11 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (view, cx) = cx
             .add_window_view(|_, cx| PullRequestView::new(store.clone(), window_state.clone(), cx));
         cx.simulate_resize(gpui::size(px(1200.), px(800.)));

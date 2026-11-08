@@ -2600,7 +2600,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -2613,7 +2612,7 @@ mod tests {
                 !store.chat_loading_for(store.sole_thread().as_deref(), cx)
             })
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (_, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
@@ -2803,7 +2802,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -2821,7 +2819,7 @@ mod tests {
             )
         });
 
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
@@ -3065,7 +3063,6 @@ This begins after the hard break."#;
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -3082,7 +3079,7 @@ This begins after the hard break."#;
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
 
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(

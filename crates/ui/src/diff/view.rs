@@ -2043,11 +2043,10 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let panel = cx.new(|cx| DiffPanel::new(store, window_state, None, cx));
         panel.update(cx, |panel, cx| {
             panel.request_rendered_files(
@@ -2147,11 +2146,10 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let panel = cx.new(|cx| DiffPanel::new(store, window_state, None, cx));
         panel.update(cx, |panel, cx| {
             panel.request_rendered_files(
