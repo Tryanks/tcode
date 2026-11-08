@@ -63,6 +63,7 @@ fn create_new_project_creates_and_registers_a_host_directory() {
     .unwrap();
     let command = Command::CreateNewProject {
         name: "  my-project  ".into(),
+        parent: None,
     };
     let CommandResponse::ProjectId(Some(id)) = link.command_blocking(command.clone()).unwrap()
     else {
@@ -85,11 +86,33 @@ fn create_new_project_creates_and_registers_a_host_directory() {
     );
     for name in ["nested/project", r"nested\project", "", " ", ".", ".."] {
         let error = link
-            .command_blocking(Command::CreateNewProject { name: name.into() })
+            .command_blocking(Command::CreateNewProject {
+                name: name.into(),
+                parent: None,
+            })
             .unwrap_err();
         assert_eq!(error.code, "invalid_project_root", "name: {name:?}");
     }
     assert!(!root.join("home/TcodeProjects/nested").exists());
+
+    // Settings name the folder new projects go in, `~` being the host's home.
+    link.command_blocking(Command::PatchSettings {
+        patch: tcode_core::settings::SettingsPatch::NewProjectDir(Some("~/Work".into())),
+    })
+    .unwrap();
+    link.command_blocking(Command::CreateNewProject {
+        name: "elsewhere".into(),
+        parent: None,
+    })
+    .unwrap();
+    assert!(root.join("home/Work/elsewhere").is_dir());
+    // A folder Add Project names takes the project instead, made as needed.
+    link.command_blocking(Command::CreateNewProject {
+        name: "chosen".into(),
+        parent: Some("~/Given/".into()),
+    })
+    .unwrap();
+    assert!(root.join("home/Given/chosen").is_dir());
     host.shutdown_blocking().unwrap();
     let _ = std::fs::remove_dir_all(root);
 }

@@ -2,7 +2,7 @@ use super::*;
 use tcode_core::{
     control::SettlementAutomation,
     project::Project,
-    settings::{ProjectSettlementSettings, Settings},
+    settings::{DEFAULT_NEW_PROJECT_DIR, ProjectSettlementSettings, ProjectStart, Settings},
 };
 
 /// How long a value drawn here takes to glide to a new one.
@@ -142,6 +142,11 @@ impl SettingsPage {
         }
         let settling = self.settling_rows(&settings, window, cx);
         let panels = self.panel_rows(&settings, cx);
+        let can_manage_host = self.store.read(cx).can_manage_host();
+        if can_manage_host {
+            self.fetch_host_home(cx);
+        }
+        let projects = self.project_rows(&settings, cx);
         let compact = self.window_state.read(cx).compact;
         v_flex()
             .gap(crate::material::section_gap(cx))
@@ -167,6 +172,149 @@ impl SettingsPage {
                 panels,
                 cx,
             ))
+            .when(can_manage_host, |page| {
+                page.child(crate::settings_rows::settings_group(
+                    crate::tr!("settings.projects_section"),
+                    projects,
+                    cx,
+                ))
+            })
+    }
+
+    /// Projects: where Create puts a new project, and where Add Project's
+    /// folder list starts — the home, that same folder, or a folder of the
+    /// user's, whose field folds open with the choice.
+    fn project_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let home = self.host_home.clone();
+        let on_host = move |path: &str| host_path(path, home.as_deref());
+        let compact = self.window_state.read(cx).compact;
+
+        let new_dir_reset = crate::settings_rows::reset_action(
+            "reset-new-project-dir",
+            settings.new_project_dir.is_some(),
+            cx.listener(|this, _, window, cx| {
+                this.dispatch_settings(|store| store.set_new_project_dir(None), cx);
+                this.new_project_dir_input.push(String::new(), window, cx);
+            }),
+        );
+        let row = self.flip_row("new-project-dir", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
+                crate::tr!("settings.new_project_dir.title"),
+                Some(crate::tr!("settings.new_project_dir.description").into()),
+                new_dir_reset,
+                compact,
+                cx,
+            ),
+            row.field(
+                Input::new(&self.new_project_dir_input.state)
+                    .placeholder(on_host(DEFAULT_NEW_PROJECT_DIR)),
+                cx,
+            ),
+            cx,
+        );
+        let new_dir_row = row.render(layout);
+
+        let start = settings.project_start;
+        let label = |value: ProjectStart| -> SharedString {
+            match value {
+                ProjectStart::Home => crate::tr!("settings.project_start_dir.home"),
+                ProjectStart::NewProjectDir => {
+                    crate::tr!("settings.project_start_dir.new_project_dir")
+                }
+                ProjectStart::Custom => crate::tr!("settings.project_start_dir.custom"),
+            }
+            .into_owned()
+            .into()
+        };
+        // Each choice says which folder it opens on.
+        let options = [
+            (ProjectStart::Home, "project-start-home", on_host("~")),
+            (
+                ProjectStart::NewProjectDir,
+                "project-start-new-project-dir",
+                on_host(settings.new_project_dir()),
+            ),
+            (
+                ProjectStart::Custom,
+                "project-start-custom",
+                crate::tr!("settings.project_start_dir.custom_description")
+                    .into_owned()
+                    .into(),
+            ),
+        ]
+        .into_iter()
+        .map(|(value, id, description)| SelectRowOption {
+            value,
+            id: id.into(),
+            label: label(value),
+            description: Some(description),
+            selected: value == start,
+        })
+        .collect();
+        let start_reset = crate::settings_rows::reset_action(
+            "reset-project-start",
+            !start.is_default(),
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_project_start(ProjectStart::Home), cx)
+            }),
+        );
+        let start_row = crate::settings_rows::select_row(
+            "project-start-dropdown",
+            "project-start-popover",
+            "project-start-menu",
+            320.,
+            crate::tr!("settings.project_start_dir.title")
+                .into_owned()
+                .into(),
+            Some(
+                crate::tr!("settings.project_start_dir.description")
+                    .into_owned()
+                    .into(),
+            ),
+            label(start),
+            options,
+            start_reset,
+            self.flip_row("project-start-dropdown", cx),
+            {
+                let page = cx.entity();
+                move |value, _, cx| {
+                    page.update(cx, |page, cx| {
+                        page.dispatch_settings(move |store| store.set_project_start(value), cx)
+                    })
+                }
+            },
+            cx,
+        );
+
+        // The custom folder applies only while Custom is chosen, and folds with it.
+        let custom_row = crate::widgets::Collapsible::new(
+            "project-start-custom-fold",
+            start == ProjectStart::Custom,
+        )
+        .motion(&self.motion)
+        .w_full()
+        .content({
+            let row = self.flip_row("project-start-custom", cx);
+            let layout = row.row(
+                crate::settings_rows::row_labels(
+                    crate::tr!("settings.project_start_dir.custom_title"),
+                    Some(crate::tr!("settings.project_start_dir.custom_field_description").into()),
+                    None,
+                    row.compact(),
+                    cx,
+                ),
+                row.field(
+                    Input::new(&self.project_start_custom_input.state).placeholder(on_host("~")),
+                    cx,
+                ),
+                cx,
+            );
+            row.render(layout)
+        })
+        .into_any_element();
+
+        vec![new_dir_row, start_row, custom_row]
     }
 
     fn panel_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -998,3 +1146,21 @@ fn rule_dropdown<T: Clone + 'static>(
         .into_any_element()
 }
 impl gpui::EventEmitter<gpui::DismissEvent> for ProjectRulesEditor {}
+
+/// `path` as the host writes it: a leading `~` under the host's home once that
+/// is known, in the home's own separator.
+fn host_path(path: &str, home: Option<&str>) -> SharedString {
+    let Some((home, rest)) = home.zip(path.strip_prefix('~')) else {
+        return path.to_owned().into();
+    };
+    if !(rest.is_empty() || rest.starts_with(['/', '\\'])) {
+        return path.to_owned().into();
+    }
+    let separator = if home.contains('\\') && !home.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let rest = rest.replace(['/', '\\'], &separator.to_string());
+    format!("{}{rest}", home.trim_end_matches(separator)).into()
+}

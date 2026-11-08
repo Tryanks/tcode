@@ -53,7 +53,10 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::RemoteHostingEnabled(_)
         | SettingsPatch::Traverse(_)
         | SettingsPatch::RemoteHostName(_)
-        | SettingsPatch::LastProject(_) => true,
+        | SettingsPatch::LastProject(_)
+        | SettingsPatch::NewProjectDir(_)
+        | SettingsPatch::ProjectStart(_)
+        | SettingsPatch::ProjectStartCustom(_) => true,
     }
 }
 

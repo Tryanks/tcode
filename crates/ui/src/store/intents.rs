@@ -269,6 +269,15 @@ impl WorkspaceStore {
     pub fn set_browser_home_url(&mut self, value: Option<String>) {
         self.patch_settings(SettingsPatch::BrowserHomeUrl(value));
     }
+    pub fn set_new_project_dir(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::NewProjectDir(value));
+    }
+    pub fn set_project_start(&mut self, value: tcode_core::settings::ProjectStart) {
+        self.patch_settings(SettingsPatch::ProjectStart(value));
+    }
+    pub fn set_project_start_custom(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::ProjectStartCustom(value));
+    }
     pub fn set_browser_allow_evaluate(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::BrowserAllowEvaluate(value));
     }
@@ -949,9 +958,10 @@ impl WorkspaceStore {
     pub fn create_new_project(
         &self,
         name: String,
+        parent: Option<String>,
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
-        self.command(Command::CreateNewProject { name }, cx)
+        self.command(Command::CreateNewProject { name, parent }, cx)
     }
     pub fn set_project_root(
         &self,
