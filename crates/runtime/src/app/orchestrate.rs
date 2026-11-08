@@ -205,7 +205,6 @@ impl AppState {
     }
 
     pub(super) fn revoke_computer_use_registration(&mut self, session_id: &str) {
-        self.withdraw_foreground_prompts(session_id);
         if let Some(registration) = self.mcp.computer_use_registrations.remove(session_id)
             && let Some(tokens) = &self.mcp.computer_use_tokens
         {

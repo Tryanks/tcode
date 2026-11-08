@@ -206,10 +206,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some((url, tokens)) = preview_registration {
                 state.attach_preview_mcp(url, tokens);
             }
-            let foreground_asks = services.computer_use.take().map(|server| {
+            if let Some(server) = services.computer_use.take() {
                 state.attach_computer_use_mcp(server.url, server.tokens);
-                server.foreground_asks
-            });
+            }
             if let Some(server) = services.control.take() {
                 state.attach_control_mcp(server);
             }
@@ -217,9 +216,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             state.pump_pull_request_requests(services.pull_requests.take(), &mut cx);
             state.start_pull_request_workers(&mut cx);
             state.pump_control_requests(&mut cx);
-            if let Some(asks) = foreground_asks {
-                state.pump_foreground_asks(asks, &mut cx);
-            }
             state.pump_preview_requests(preview_requests, &mut cx);
             state.resume_undelivered_reports(&mut cx);
             if services.background_startup_probes {
@@ -886,16 +882,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => {
             return CommandOutcome::Immediate(
                 app.respond_control_grant(&session_id, &request_id, approve, cx)
-                    .map(|()| CommandResponse::Unit),
-            );
-        }
-        Command::RespondForegroundPrompt {
-            session_id,
-            prompt_id,
-            answer,
-        } => {
-            return CommandOutcome::Immediate(
-                app.respond_foreground_prompt(&session_id, &prompt_id, answer, cx)
                     .map(|()| CommandResponse::Unit),
             );
         }

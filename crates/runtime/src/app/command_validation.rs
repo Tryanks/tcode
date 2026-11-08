@@ -286,7 +286,6 @@ impl AppState {
                 | Command::EditPullRequestReviewDraft { .. }
                 | Command::SetControlGrant { .. }
                 | Command::RespondControlGrant { .. }
-                | Command::RespondForegroundPrompt { .. }
                 | Command::AddThreadReference { .. }
                 | Command::RemoveThreadReference { .. }
                 | Command::SetFollowUp { .. }

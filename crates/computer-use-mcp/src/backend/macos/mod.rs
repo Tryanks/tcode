@@ -1,7 +1,6 @@
 mod ax;
 mod background;
 mod capture;
-mod focus;
 mod input;
 mod overlay;
 
@@ -26,7 +25,6 @@ use super::{
 use crate::outline::{UiNode, is_text_sparse};
 
 use self::background::{BackgroundActivation, BackgroundDispatcher};
-use self::focus::FocusGuard;
 
 pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> {
     let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
@@ -226,7 +224,6 @@ pub(crate) fn perform_action_with_feedback(
                     });
                     Ok(keyboard_result(
                         attempt,
-                        click_point,
                         &format!("{ax_error}; keyboard replacement events"),
                     ))
                 }
@@ -259,11 +256,7 @@ pub(crate) fn perform_action_with_feedback(
                 }
                 dispatcher.type_text(text)
             });
-            Ok(keyboard_result(
-                attempt,
-                click_point,
-                "Unicode keyboard events",
-            ))
+            Ok(keyboard_result(attempt, "Unicode keyboard events"))
         }
         ActionKind::Keypress => {
             let keys = request.keys.as_deref().ok_or_else(|| {
@@ -292,7 +285,7 @@ pub(crate) fn perform_action_with_feedback(
                 }
                 dispatcher.keypress(keys)
             });
-            Ok(keyboard_result(attempt, click_point, "keyboard events"))
+            Ok(keyboard_result(attempt, "keyboard events"))
         }
         ActionKind::Scroll => {
             let action_point =
@@ -373,47 +366,10 @@ fn background(
     action(&dispatcher)
 }
 
-/// The foreground step activates the target app and types through the HID
-/// stream, which reaches only the frontmost app, then the guard restores
-/// the app the user was in. It never posts a pointer event: a target that
-/// refuses AX focus is refused here, as it would need a click.
-pub(super) fn type_in_foreground(
-    root: &RootInfo,
-    request: &ActionRequest,
-) -> Result<(), BackendError> {
-    if request.target_path.is_some() && target(root, request)?.focus().is_err() {
-        return Err(BackendError::new(
-            BackendErrorCode::OperationFailed,
-            "the target refused AX focus, and typing in the foreground never clicks to focus it",
-        ));
-    }
-    let focus_guard = FocusGuard::acquire(root);
-    if !focus_guard.is_ready() {
-        return Err(BackendError::new(
-            BackendErrorCode::OperationFailed,
-            "could not activate and raise the target window",
-        ));
-    }
-    match request.kind {
-        ActionKind::TypeText => input::foreground_type_text(request.text.as_deref().unwrap_or("")),
-        ActionKind::Keypress => input::foreground_keypress(request.keys.as_deref().unwrap_or(&[])),
-        ActionKind::SetText => {
-            input::foreground_keypress(&["cmd+a".into()])?;
-            input::foreground_type_text(request.text.as_deref().unwrap_or(""))
-        }
-        _ => Err(BackendError::new(
-            BackendErrorCode::InvalidAction,
-            "only keyboard steps are typed in the foreground",
-        )),
-    }
-}
-
-/// A keyboard step's result. When the background delivery could not start
-/// and the target takes focus without a click, the step reports that it
-/// needs the app in front; whether that happens is the caller's to decide.
+/// A keyboard step's result: keys whose background delivery could not start
+/// did not reach the app, and the step says why.
 fn keyboard_result(
     background_attempt: Result<(), BackendError>,
-    click_point: Option<(f64, f64)>,
     action_name: &str,
 ) -> ActionResult {
     match background_attempt {
@@ -421,13 +377,12 @@ fn keyboard_result(
             format!("{action_name} were posted directly to the target pid"),
             Delivery::BackgroundPid,
         ),
-        Err(error) if click_point.is_some() => ActionResult::didnt(
+        Err(error) => ActionResult::didnt(
             format!(
-                "background key delivery could not start ({error}); the target refused AX focus, and keys are never typed in the foreground behind a click, so the user was not asked"
+                "{action_name} were not sent: background key delivery could not start: {error}"
             ),
             Delivery::None,
         ),
-        Err(error) => ActionResult::needs_foreground(error.to_string()),
     }
 }
 

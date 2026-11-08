@@ -419,7 +419,7 @@ fn menu_row_key(row: &MenuRow) -> u64 {
 /// skills in the menu.
 /// The product name the composer's Harness goes by: an ACP agent's own name,
 /// else the native Harness's.
-pub(super) fn harness_name(
+fn harness_name(
     composer: &crate::store::ComposerState,
     store: &crate::store::WorkspaceStore,
 ) -> String {

@@ -28,7 +28,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 ureq = { version = "2", default-features = false, features = ["tls"] }
-tokio = { version = "1", features = ["sync"] }
 chrono = "0.4"
 filetime = "0.2"
 tcode-services = { path = "../services", features = ["test-support"] }

@@ -11,8 +11,6 @@ static CONFIG: RwLock<ComputerUseSettings> = RwLock::new(ComputerUseSettings {
     allow_input: true,
     image_mode: ImageMode::Auto,
     show_agent_cursor: true,
-    foreground_default: tcode_core::settings::ForegroundChoice::Ask,
-    foreground_apps: std::collections::BTreeMap::new(),
 });
 
 pub fn set(config: ComputerUseSettings) {

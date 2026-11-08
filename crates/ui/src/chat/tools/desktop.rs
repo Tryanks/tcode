@@ -409,16 +409,9 @@ impl Desktop<'_> {
                     .as_ref()
                     .filter(|report| report.get("outcome").and_then(Value::as_str) == Some("didnt"))
                     .map(|_| Chip::Warning(crate::tr!("tools.outcome.didnt").into_owned()));
-                let in_front = report
-                    .as_ref()
-                    .filter(|report| {
-                        report.get("activation").and_then(Value::as_str) == Some("foreground")
-                    })
-                    .map(|_| Chip::Tag(crate::tr!("tools.foreground.in_front").into_owned()));
                 Header::new(IconName::Monitor, verb)
                     .argument(Argument::plain(argument))
                     .chip(steps)
-                    .chip(in_front)
                     .chip(didnt)
             }
             Tool::Wait(condition) => {
@@ -468,10 +461,7 @@ impl Desktop<'_> {
                 .iter()
                 .find(|step| step.get("index").and_then(Value::as_u64) == Some(number));
             let outcome = result.and_then(|step| step.get("outcome")?.as_str());
-            let raw_message = result.and_then(|step| step.get("message")?.as_str());
-            let message = result
-                .and_then(|step| foreground_line(step))
-                .or_else(|| raw_message.map(str::to_owned));
+            let message = result.and_then(|step| step.get("message")?.as_str());
             let skipped = result.is_none() && stopped_at.is_some_and(|stop| number > stop);
             let (label, color) = match (outcome, skipped) {
                 (Some("worked"), _) => (Some(crate::tr!("tools.outcome.worked")), theme.success),
@@ -549,7 +539,7 @@ impl Desktop<'_> {
                                 .pl(px(24.))
                                 .min_w_0()
                                 .text_color(theme.muted_foreground)
-                                .child(crate::widgets::fade_text(message)),
+                                .child(crate::widgets::fade_text(message.to_owned())),
                         )
                     },
                 )
@@ -721,30 +711,6 @@ impl ToolView for Desktop<'_> {
 
 /// A window `find_roots` lists: `@r1 window app="X" bundle_id="…" pid=1
 /// title="…" window_id=2 frame=(…)`.
-/// What was decided about bringing a step's app to the front, in the
-/// user's language; the server's own words stay in the copied output.
-fn foreground_line(step: &Value) -> Option<String> {
-    let app = step.get("app").and_then(Value::as_str).unwrap_or_default();
-    let decision = step.get("foreground")?.as_str()?;
-    // Allowed but the keys did not go through: the server's words say why.
-    if decision.starts_with("allowed")
-        && step.get("outcome").and_then(Value::as_str) == Some("didnt")
-    {
-        return None;
-    }
-    let key = match decision {
-        "allowed_once" => "tools.foreground.allowed_once",
-        "allowed_always" => "tools.foreground.allowed_always",
-        "allowed_by_setting" => "tools.foreground.allowed_by_setting",
-        "declined" => "tools.foreground.declined",
-        "declined_by_setting" => "tools.foreground.declined_by_setting",
-        "unanswered" => "tools.foreground.unanswered",
-        "not_asked" => "tools.foreground.not_asked",
-        _ => return None,
-    };
-    Some(crate::tr!(key, app = app).into_owned())
-}
-
 fn root_node(line: &str) -> Option<Node> {
     let (reference, rest) = line.split_once(' ')?;
     reference.strip_prefix("@r")?;
