@@ -2798,17 +2798,6 @@ impl WorkspaceStore {
             .and_then(|activity| activity.latest_activity.clone())
     }
 
-    pub fn waiting_for(&self, session_id: &str) -> bool {
-        self.index_summary
-            .activity
-            .get(session_id)
-            .is_some_and(|activity| {
-                !activity.background.is_idle()
-                    || activity.unsettled > 0
-                    || !activity.wakes.pull_requests.is_empty()
-            })
-    }
-
     pub fn session_unread(&self, session_id: &str) -> bool {
         if !self.scope.is_full() {
             return self.thread_meta(session_id).is_some_and(|meta| {
