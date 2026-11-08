@@ -211,6 +211,11 @@ impl Agents {
                     else {
                         continue;
                     };
+                    // One its harness runs in the background is listed with
+                    // the thread's background work, not here.
+                    if entry.background && *status == ItemStatus::InProgress {
+                        continue;
+                    }
                     let mirror = live.iter().find(|meta| {
                         meta.parent_session_id.as_deref() == Some(parent_id)
                             && meta.native_subagent.as_deref() == Some(entry.id.as_str())
