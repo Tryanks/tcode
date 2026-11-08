@@ -829,9 +829,11 @@ fn subagent_item(
 }
 
 /// A subagent's transcript can itself spawn a subagent. The nested spawn is
-/// content of the child mirror, and once the grandchild's own transcript
-/// arrives it gets a titled mirror under the child mirror — never a nameless
-/// one on the root — whose turn closes with the nested spawn's terminal status.
+/// content of the child mirror and, from the spawn on, has a titled mirror
+/// under the child mirror — never a nameless one on the root — so the child
+/// thread's row for it opens while it runs, before (or without) any of the
+/// grandchild's own transcript. Its turn closes with the nested spawn's
+/// terminal status.
 #[test]
 fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_it() {
     let cx = &mut TestAppContext::default();
@@ -871,13 +873,18 @@ fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_i
             .unwrap()
             .id
             .clone();
-        assert!(
-            state
-                .sessions
-                .iter()
-                .all(|meta| meta.native_subagent.as_deref() != Some("toolu_grandchild")),
-            "a spawn item alone is content of the child mirror, not a mirror"
+        let grandchild = state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild"))
+            .cloned()
+            .expect("the spawn alone opens the grandchild's mirror");
+        assert_eq!(
+            grandchild.parent_session_id.as_deref(),
+            Some(child_id.as_str())
         );
+        assert_eq!(grandchild.title, "Explore: Research Workers limits");
+        assert!(state.resident(&grandchild.id).unwrap().has_work());
         assert!(
             state
                 .resident(&child_id)
@@ -907,17 +914,24 @@ fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_i
             }),
             cx,
         );
-        let grandchild = state
-            .sessions
-            .iter()
-            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild"))
-            .cloned()
-            .expect("grandchild mirror");
-        assert_eq!(
-            grandchild.parent_session_id.as_deref(),
-            Some(child_id.as_str())
+        assert!(
+            state
+                .resident(&grandchild.id)
+                .unwrap()
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| entry.id == "toolu_grandchild:user-1"),
+            "the grandchild's transcript goes to the mirror its spawn opened"
         );
-        assert_eq!(grandchild.title, "Explore: Research Workers limits");
+        assert_eq!(
+            state
+                .sessions
+                .iter()
+                .filter(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild"))
+                .count(),
+            1
+        );
         assert!(state.resident(&grandchild.id).unwrap().has_work());
         assert!(state.resident(&child_id).unwrap().has_work());
         assert_eq!(
