@@ -3614,7 +3614,10 @@ mod replica_tests {
         status.background_tasks = vec![agent::BackgroundTask {
             id: "bl5ti808a".into(),
             name: "npm run dev".into(),
+            kind: agent::BackgroundKind::Command,
+            item_id: None,
             started_at: 1,
+            started_reported: false,
         }];
         replace(
             &incoming,

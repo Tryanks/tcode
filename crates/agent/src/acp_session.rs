@@ -1271,6 +1271,7 @@ async fn handle_command<D: Dialect>(
         SessionCommand::RetryTurn { .. }
         | SessionCommand::ApplySettings { .. }
         | SessionCommand::StopBackgroundTask { .. }
+        | SessionCommand::MoveToBackground { .. }
         | SessionCommand::SetGoal { .. }
         | SessionCommand::ClearGoal
         | SessionCommand::ReadAccountUsage { .. } => {}

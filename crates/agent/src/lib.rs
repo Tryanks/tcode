@@ -85,9 +85,52 @@ pub enum ProviderKind {
 pub struct BackgroundTask {
     pub id: String,
     pub name: String,
-    /// When the adapter first saw it running (unix ms); no harness reports
-    /// when it started.
+    #[serde(default)]
+    pub kind: BackgroundKind,
+    /// The call that started it, when the harness says which.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// When it started (unix ms): as the harness reports it when
+    /// `started_reported`, else when the adapter first saw it running.
     pub started_at: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub started_reported: bool,
+}
+
+/// What a piece of background work is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundKind {
+    Command,
+    Agent,
+    #[default]
+    Other,
+}
+
+/// What a harness lets a client do with the background work it lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackgroundControl {
+    pub stop: BackgroundStop,
+    /// The harness moves a running command or agent call into the
+    /// background on request ([`SessionCommand::MoveToBackground`]).
+    pub move_running: bool,
+}
+
+/// Which of its background work a harness stops on request
+/// ([`SessionCommand::StopBackgroundTask`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundStop {
+    None,
+    /// One piece at a time; a stop for all of it is one stop for each.
+    Each,
+    /// One piece at a time, or all of it in one request of its own.
+    EachAndAll,
+}
+
+impl BackgroundStop {
+    pub fn stops(self) -> bool {
+        self != Self::None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,9 +153,9 @@ pub struct Caps {
     pub per_turn_effort: bool,
     pub options_apply_live: bool,
     pub live_option_push: LiveOptionPush,
-    /// The harness lists its background work and stops it, one piece or all
-    /// ([`AgentEvent::BackgroundTaskList`], [`SessionCommand::StopBackgroundTask`]).
-    pub background_tasks: bool,
+    /// The harness lists its background work ([`AgentEvent::BackgroundTaskList`]),
+    /// and what it lets a client do with it.
+    pub background: Option<BackgroundControl>,
     /// The running process can be asked to take a new model and options
     /// ([`SessionCommand::ApplySettings`]) rather than restart for them.
     pub live_settings: bool,
@@ -320,8 +363,13 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
                 // `background_tasks_changed` and `stop_task`, shells and
-                // subagents alike (2.1.318).
-                background_tasks: true,
+                // subagents alike (2.1.318); `stop_task` takes one id. The
+                // `background_tasks` control request with a `tool_use_id` is
+                // Ctrl+B for that call (2.1.319).
+                background: Some(BackgroundControl {
+                    stop: BackgroundStop::Each,
+                    move_running: true,
+                }),
                 // `set_model` and `apply_flag_settings` (2.1.318).
                 live_settings: true,
                 mcp_servers: true,
@@ -372,8 +420,12 @@ impl ProviderKind {
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::None,
-                // `thread/backgroundTerminals/*`, experimental (0.167.0).
-                background_tasks: true,
+                // `thread/backgroundTerminals/*`: `terminate` and `clean`,
+                // experimental (0.167.0).
+                background: Some(BackgroundControl {
+                    stop: BackgroundStop::EachAndAll,
+                    move_running: false,
+                }),
                 live_settings: true,
                 mcp_servers: true,
                 // `codex features list` reports `computer_use stable` (0.159.3).
@@ -408,7 +460,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
-                background_tasks: false,
+                background: None,
                 live_settings: false,
                 // ACP support is negotiated per agent; capable agents receive
                 // every tcode HTTP MCP registration in session/new or load.
@@ -446,7 +498,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
-                background_tasks: false,
+                background: None,
                 live_settings: true,
                 mcp_servers: false,
                 native_computer_use: false,
@@ -492,7 +544,7 @@ impl ProviderKind {
                 per_turn_effort: true,
                 options_apply_live: false,
                 live_option_push: LiveOptionPush::Only(&["agent"]),
-                background_tasks: false,
+                background: None,
                 live_settings: true,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -524,7 +576,7 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
-                background_tasks: false,
+                background: None,
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -568,7 +620,11 @@ impl ProviderKind {
                 per_turn_effort: false,
                 options_apply_live: true,
                 live_option_push: LiveOptionPush::All,
-                background_tasks: false,
+                // `background_tasks` lists them; nothing stops one.
+                background: Some(BackgroundControl {
+                    stop: BackgroundStop::None,
+                    move_running: false,
+                }),
                 live_settings: false,
                 mcp_servers: true,
                 native_computer_use: false,
@@ -1986,10 +2042,16 @@ pub enum SessionCommand {
         value: serde_json::Value,
     },
     /// Stop one piece of background work, or all of it with `None`, on a
-    /// harness with [`Caps::background_tasks`]. Its next
+    /// harness whose [`Caps::background`] stops it. Its next
     /// [`AgentEvent::BackgroundTaskList`] shows the result.
     StopBackgroundTask {
         task_id: Option<String>,
+    },
+    /// Move the running call `item_id` into the background, on a harness
+    /// whose [`Caps::background`] can: the call returns to the model and its
+    /// work goes on ([`AgentEvent::ItemBackgrounded`]).
+    MoveToBackground {
+        item_id: String,
     },
     /// Bring the running process to these settings where it stands, on a
     /// harness whose [`Caps::live_settings`] says it can be asked. Answered by
@@ -2235,7 +2297,7 @@ pub enum AgentEvent {
     BackgroundTasksChanged {
         count: usize,
     },
-    /// The background work a harness with [`Caps::background_tasks`] is running
+    /// The background work a harness with [`Caps::background`] is running
     /// now, replacing the last list. Transient, like
     /// [`Self::BackgroundTasksChanged`], which goes on carrying the liveness a
     /// list that just emptied may not yet mean.

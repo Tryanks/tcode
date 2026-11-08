@@ -7301,7 +7301,10 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
     let task = agent::BackgroundTask {
         id: "bl5ti808a".into(),
         name: "sleep 300".into(),
+        kind: agent::BackgroundKind::Command,
+        item_id: Some("toolu-sleep".into()),
         started_at: 1,
+        started_reported: false,
     };
     state.update(cx, |state, cx| {
         let mut session = live_session(ProviderKind::ClaudeCode, commands.clone());

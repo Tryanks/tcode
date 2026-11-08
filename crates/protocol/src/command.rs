@@ -580,7 +580,7 @@ pub enum Command {
         session_id: String,
     },
     /// Stop one piece of the thread's background work, or all of it with no
-    /// `task_id`; only offered where the provider has `Caps::background_tasks`.
+    /// `task_id`; only offered where the provider's `Caps::background` stops it.
     StopBackgroundTask {
         session_id: String,
         task_id: Option<String>,

@@ -159,6 +159,8 @@ struct Activity {
     /// later output as running updates and reports its end as the task's.
     backgrounded: HashMap<String, String>,
     background_tasks: usize,
+    /// The running background tasks as last listed.
+    background_list: Vec<crate::BackgroundTask>,
     /// A drop to no background tasks, withheld while a sent turn is open:
     /// Grok follows that turn with one reporting the finished task, and the
     /// runtime must not take the process for idle in between.
@@ -180,6 +182,36 @@ struct Models {
     current: Option<String>,
     /// The latest model call's usage.
     last_call: Option<TokenUsage>,
+}
+
+/// One running task of Grok's `background_tasks` list, with the call that
+/// started it when Grok has said which (`backgrounded`, by task).
+fn background_task(
+    task: &Value,
+    backgrounded: &HashMap<String, String>,
+) -> Option<crate::BackgroundTask> {
+    let id = task.get("task_id").and_then(Value::as_str)?;
+    let started = task
+        .get("started_at")
+        .and_then(Value::as_str)
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .and_then(|at| u64::try_from(at.timestamp_millis()).ok());
+    Some(crate::BackgroundTask {
+        id: id.to_owned(),
+        name: ["command", "description"]
+            .into_iter()
+            .find_map(|key| task.get(key).and_then(Value::as_str))
+            .unwrap_or(id)
+            .to_owned(),
+        kind: match task.get("kind").and_then(Value::as_str) {
+            Some("bash" | "shell") => crate::BackgroundKind::Command,
+            Some("agent" | "subagent") => crate::BackgroundKind::Agent,
+            _ => crate::BackgroundKind::Other,
+        },
+        item_id: backgrounded.get(id).cloned(),
+        started_at: started.unwrap_or_else(crate::now_unix_millis),
+        started_reported: started.is_some(),
+    })
 }
 
 impl Grok {
@@ -583,21 +615,29 @@ impl Grok {
                 }]
             }
             Some("background_tasks") => {
-                let running = update
+                let mut activity = self.activity();
+                let listed: Vec<crate::BackgroundTask> = update
                     .get("tasks")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
                     .filter(|task| task.get("status").and_then(Value::as_str) == Some("running"))
-                    .count();
-                let mut activity = self.activity();
+                    .filter_map(|task| background_task(task, &activity.backgrounded))
+                    .collect();
+                let running = listed.len();
+                let list = (listed != activity.background_list).then(|| {
+                    activity.background_list = listed.clone();
+                    AgentEvent::BackgroundTaskList { tasks: listed }
+                });
                 let drained = running == 0 && activity.background_tasks > 0;
                 activity.background_tasks = running;
                 activity.drained = drained && activity.sent_turn_open(state);
                 if activity.drained {
-                    return Vec::new();
+                    return list.into_iter().collect();
                 }
-                vec![AgentEvent::BackgroundTasksChanged { count: running }]
+                list.into_iter()
+                    .chain([AgentEvent::BackgroundTasksChanged { count: running }])
+                    .collect()
             }
             Some("turn_completed") => self.turn_completed(state, update),
             Some("auto_compact_started") => vec![AgentEvent::ContextCompacted(Compaction {
@@ -1016,17 +1056,32 @@ impl Dialect for Grok {
             INTERJECTION => self.steer_accepted(&params),
             QUEUE_CHANGED => self.queue_changed(state, &params),
             TASK_BACKGROUNDED => {
-                if let (Some(call), Some(task)) = (
+                let (Some(call), Some(task)) = (
                     params
                         .pointer("/update/tool_call_id")
                         .and_then(Value::as_str),
                     params.pointer("/update/task_id").and_then(Value::as_str),
-                ) {
-                    self.activity()
-                        .backgrounded
-                        .insert(task.to_owned(), call.to_owned());
+                ) else {
+                    return Vec::new();
+                };
+                let mut activity = self.activity();
+                activity
+                    .backgrounded
+                    .insert(task.to_owned(), call.to_owned());
+                // A task listed before Grok said which call started it.
+                let listed = activity
+                    .background_list
+                    .iter_mut()
+                    .find(|listed| listed.id == task && listed.item_id.is_none());
+                match listed {
+                    Some(listed) => {
+                        listed.item_id = Some(call.to_owned());
+                        vec![AgentEvent::BackgroundTaskList {
+                            tasks: activity.background_list.clone(),
+                        }]
+                    }
+                    None => Vec::new(),
                 }
-                Vec::new()
             }
             TASK_COMPLETED => self.task_completed(state, &params),
             SESSION_NOTIFICATION => params
@@ -1871,6 +1926,31 @@ mod tests {
         assert!(matches!(completed_last(&events, "call_68_0"),
             ItemContent::CommandExecution { output, exit_code: Some(0), status: ItemStatus::Completed, .. }
                 if output == "bgdone\n"));
+
+        // Grok lists the task with the call that started it and when it
+        // started, and lists none once it has ended.
+        let lists: Vec<&Vec<crate::BackgroundTask>> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::BackgroundTaskList { tasks } => Some(tasks),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            lists
+                .first()
+                .is_some_and(|tasks| matches!(tasks.as_slice(), [task]
+                if task.item_id.as_deref() == Some("call_68_0")
+                    && task.name == "sleep 1; echo bgdone"
+                    && task.kind == crate::BackgroundKind::Command
+                    && task.started_reported
+                    && task.started_at == 1_791_014_090_693)),
+            "{lists:#?}"
+        );
+        assert!(
+            lists.last().is_some_and(|tasks| tasks.is_empty()),
+            "{lists:#?}"
+        );
     }
 
     /// [`RESUMED_TURN`] with the rewind exchanges in the shapes Grok's own
