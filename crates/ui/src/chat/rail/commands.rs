@@ -137,12 +137,18 @@ pub(super) fn present(rail: &RailView, _cx: &App) -> bool {
 /// many commands run, or how many ran, and how many of those failed.
 pub(super) fn summary(rail: &RailView, _cx: &App) -> Option<SharedString> {
     let commands = &rail.commands;
-    let mut parts = vec![match (commands.running, commands.total) {
-        (0, 0) => return None,
-        (0, 1) => crate::tr!("rail.commands_one").into_owned(),
-        (0, total) => crate::tr!("rail.commands", count = total).into_owned(),
-        (running, _) => crate::tr!("rail.commands_running", count = running).into_owned(),
-    }];
+    let mut parts = vec![
+        match (commands.running, commands.total, commands.backgrounded) {
+            (0, 0, _) => return None,
+            // With some gone to the background, the count is the turn's.
+            (0, total, backgrounded @ 1..) => {
+                crate::tr!("rail.commands_turn", count = total + backgrounded).into_owned()
+            }
+            (0, 1, _) => crate::tr!("rail.commands_one").into_owned(),
+            (0, total, _) => crate::tr!("rail.commands", count = total).into_owned(),
+            (running, ..) => crate::tr!("rail.commands_running", count = running).into_owned(),
+        },
+    ];
     if commands.failed > 0 {
         parts.push(crate::tr!("rail.commands_failed", count = commands.failed).into_owned());
     }
@@ -170,12 +176,23 @@ fn fitted(rail: &RailView) -> Rc<Cell<Fitted>> {
     rail.motion.keep("rail-commands-fitted")
 }
 
+/// How tall the note under the rows was laid out, which the rows leave room
+/// for.
+fn note_height(rail: &RailView) -> Rc<Cell<f32>> {
+    rail.motion.keep("rail-commands-note")
+}
+
 /// The card's rows never scroll: in a rail too short for them all it
 /// shows as many as fit and counts the rest.
 pub(super) fn fit(rail: &RailView, cx: &App) -> Fit {
+    let note = if rail.commands.backgrounded > 0 {
+        note_height(rail).get()
+    } else {
+        0.
+    };
     Fit {
         rows: listed(rail).len(),
-        edge: f32::from(cx.theme().tokens.spacing.sm),
+        edge: f32::from(cx.theme().tokens.spacing.sm) + note,
         fitted: fitted(rail),
     }
 }
@@ -183,8 +200,10 @@ pub(super) fn fit(rail: &RailView, cx: &App) -> Fit {
 /// What the card shows below its header, laid out at the rail's width: a
 /// row for each command that fits the card's height, running ones first,
 /// each with how it stands at its right, bringing its place in the timeline
-/// into view on a click; then how many more. Commands that leave the list,
-/// or no longer fit, fold away as they stood.
+/// into view on a click; then how many more; then, where some of the turn's
+/// commands went on in the background, that the Background card lists
+/// them. Commands that leave the list, or no longer fit, fold away as they
+/// stood.
 pub(super) fn body(
     rail: &RailView,
     window: &mut Window,
@@ -267,6 +286,26 @@ pub(super) fn body(
                 ),
         )
     });
+    let note = (rail.commands.backgrounded > 0).then(|| {
+        let height = note_height(rail);
+        div()
+            .w_full()
+            .on_children_prepainted(move |bounds, _, _| {
+                if let Some(note) = bounds.first() {
+                    height.set(f32::from(note.size.height));
+                }
+            })
+            .child(
+                div()
+                    .debug_selector(|| "rail-commands-note".into())
+                    .w_full()
+                    .px_1()
+                    .pt_1()
+                    .text_secondary(false, cx)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(crate::tr!("rail.commands_backgrounded_note")),
+            )
+    });
     Some(
         v_flex()
             .w_full()
@@ -275,6 +314,7 @@ pub(super) fn body(
             .pb(cx.theme().tokens.spacing.sm)
             .child(rows)
             .children(more)
+            .children(note)
             .into_any_element(),
     )
 }

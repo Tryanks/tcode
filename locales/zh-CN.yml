@@ -213,6 +213,8 @@ rail:
   commands_failed: "%{count} 条失败"
   commands_more: "另有 %{count} 条"
   commands_backgrounded: "%{count} 条转入后台"
+  commands_turn: "本回合 %{count} 条"
+  commands_backgrounded_note: "转入后台的命令在「后台」卡片里，不在这里重复。"
 background:
   title: "后台"
   pill: "后台 %{count}"

@@ -213,6 +213,8 @@ rail:
   commands_failed: "%{count} 件失敗"
   commands_more: "ほか %{count} 件"
   commands_backgrounded: "%{count} 件をバックグラウンドへ"
+  commands_turn: "このターン %{count} 件"
+  commands_backgrounded_note: "バックグラウンドへ移したコマンドは「バックグラウンド」カードにあり、ここには重ねて出しません。"
 background:
   title: "バックグラウンド"
   pill: "バックグラウンド %{count}"
