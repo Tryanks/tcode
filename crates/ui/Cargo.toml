@@ -29,7 +29,7 @@ desktop = [
 # GPUI's platform file dialogs (`prompt_for_paths` / `prompt_for_new_path`).
 # Guards only the Browse and Save-to-disk actions.
 native-dialogs = []
-# Embedded webview preview backend. Available on macOS, Windows, Linux (X11), Android and iOS; the panel,
+# Embedded webview preview backend. Available on macOS, Windows, Linux, Android and iOS; the panel,
 # its URL field, open-externally and copy-URL are always compiled.
 native-preview = [
     "dep:tcode-traverse",
@@ -51,6 +51,8 @@ native-preview = [
     "dep:webkit2gtk",
     "dep:cairo-rs",
     "dep:gdk",
+    "dep:gtk",
+    "dep:wayland-nest",
     "dep:windows-core",
     "dep:windows",
     "dep:gpui-windows-core",
@@ -162,6 +164,9 @@ webkit2gtk = { version = "=2.0.1", optional = true }
 cairo-rs = { version = "0.18", features = ["png"], optional = true }
 # The X error trap that keeps a released webview from exiting the process.
 gdk = { version = "0.18.2", optional = true }
+# The GTK windows that hold webviews on a Wayland session.
+gtk = { version = "0.18.2", optional = true }
+wayland-nest = { path = "../platform/wayland-nest", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tempfile = { version = "3", optional = true }

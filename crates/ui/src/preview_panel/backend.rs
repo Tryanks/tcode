@@ -615,6 +615,8 @@ impl PreviewPanel {
                 Availability::Ready(view) => {
                     #[cfg(target_os = "ios")]
                     let view = super::ios::element(view);
+                    #[cfg(target_os = "linux")]
+                    let view = super::wayland::element(view, cx);
                     #[cfg(not(target_os = "android"))]
                     let margin = page_margin(cx);
                     #[cfg(target_os = "android")]
