@@ -1,8 +1,5 @@
-use std::time::Duration;
-
 use core_graphics::event::{
-    CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
-    ScrollEventUnit,
+    CGEvent, CGEventFlags, CGEventType, CGMouseButton, EventField, ScrollEventUnit,
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
@@ -65,16 +62,6 @@ pub(super) fn drag_events(
     Ok(events)
 }
 
-// Only the opt-in foreground keyboard retry types through the HID stream, once
-// the target app is verified frontmost; it never posts pointer events.
-#[allow(clippy::disallowed_methods)]
-pub(super) fn foreground_keypress(keys: &[String]) -> Result<(), BackendError> {
-    for event in keypress_events(keys)? {
-        event.post(CGEventTapLocation::HID);
-    }
-    Ok(())
-}
-
 pub(super) fn keypress_events(keys: &[String]) -> Result<[CGEvent; 2], BackendError> {
     let chord = parse_key_chord(keys).map_err(invalid)?;
     let flags = modifier_flags(chord.modifiers);
@@ -85,16 +72,6 @@ pub(super) fn keypress_events(keys: &[String]) -> Result<[CGEvent; 2], BackendEr
         .map_err(|()| operation("CoreGraphics could not create a key-up event"))?;
     up.set_flags(flags);
     Ok([down, up])
-}
-
-#[allow(clippy::disallowed_methods)] // As foreground_keypress.
-pub(super) fn foreground_type_text(text: &str) -> Result<(), BackendError> {
-    for [down, up] in text_event_pairs(text)? {
-        down.post(CGEventTapLocation::HID);
-        up.post(CGEventTapLocation::HID);
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    Ok(())
 }
 
 pub(super) fn text_event_pairs(text: &str) -> Result<Vec<[CGEvent; 2]>, BackendError> {

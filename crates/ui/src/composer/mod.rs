@@ -2036,16 +2036,6 @@ impl Composer {
             panels.push(column_fold(&shown, panel));
         }
         if let Some(shown) = self.motion.shown(
-            self.motion_key("foreground"),
-            self.foreground_question(cx),
-            SHOW,
-            window,
-            cx,
-        ) {
-            let panel = self.render_foreground_panel(&shown.value, window, cx);
-            panels.push(column_fold(&shown, panel));
-        }
-        if let Some(shown) = self.motion.shown(
             self.motion_key("control-request"),
             self.control_request(cx),
             SHOW,

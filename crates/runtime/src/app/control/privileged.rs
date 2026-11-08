@@ -39,8 +39,6 @@ pub(super) fn settings_patch_never_exposed(patch: &SettingsPatch) -> bool {
         | SettingsPatch::ComputerUseImageMode(_)
         | SettingsPatch::ComputerUseAllowInput(_)
         | SettingsPatch::ComputerUseShowAgentCursor(_)
-        | SettingsPatch::ComputerUseForegroundDefault(_)
-        | SettingsPatch::ComputerUseForegroundApp { .. }
         | SettingsPatch::BrowserEnabled(_)
         | SettingsPatch::BrowserHomeUrl(_)
         | SettingsPatch::BrowserAllowEvaluate(_)

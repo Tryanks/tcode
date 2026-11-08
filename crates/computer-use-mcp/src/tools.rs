@@ -185,19 +185,14 @@ struct WaitForParams {
 pub struct ComputerUseTools {
     tool_router: ToolRouter<Self>,
     feedback: Arc<crate::feedback::FeedbackSession>,
-    foreground: Option<crate::foreground::ForegroundAsker>,
 }
 
 #[tool_router]
 impl ComputerUseTools {
-    fn new(
-        feedback: Arc<crate::feedback::FeedbackSession>,
-        foreground: Option<crate::foreground::ForegroundAsker>,
-    ) -> Self {
+    fn new(feedback: Arc<crate::feedback::FeedbackSession>) -> Self {
         Self {
             tool_router: Self::tool_router(),
             feedback,
-            foreground,
         }
     }
 
@@ -375,8 +370,8 @@ impl ComputerUseTools {
     #[tool(
         description = "Execute a transaction of desktop input actions against an observed state, optionally using expect to verify semantic success. \
                        Actions: press, click (button, click_count), set_text, type_text, keypress, scroll, drag, and move_mouse to hover. \
-                       Each step uses the element's accessibility action (AX on macOS, UI Automation on Windows) when one fits and otherwise delivers events to the target app's own process or windows, so it works on background windows, never moves the user's pointer, and sends keys to the target app rather than whichever app the user has focused; each step reports its delivery, and only focusing an element for typing (UI Automation focus on Windows) or the following can bring the target app to the front. \
-                       On macOS, when background key delivery for type_text, keypress or set_text's keyboard replacement cannot start, Tcode asks the user in this thread whether the target app may come to the front for that step, unless they have a remembered choice for it in Settings → Computer Use, and the call waits up to 45 seconds for the answer; the step's message and its foreground field say what was decided, and its delivery is foreground_hid when the keys went through with the app in front. Pointer actions never bring an app to the front. \
+                       Each step uses the element's accessibility action (AX on macOS, UI Automation on Windows) when one fits and otherwise delivers events to the target app's own process or windows, so it works on background windows, never moves the user's pointer, and sends keys to the target app rather than whichever app the user has focused; each step reports its delivery. \
+                       When keys for type_text, keypress or set_text's keyboard replacement cannot be delivered to the target app, the step fails, its message says why, and its delivery is none. \
                        Hover that an app tracks from the real pointer may not respond to move_mouse. \
                        Every @e ref must belong to the supplied state_id; an evicted or stale state or a ref from another state errors and requires a fresh observe_ui, while a successful call returns a successor state_id that must replace the old one. \
                        Results report worked/didnt/unknown per step, stop at the first failure with stopped_at, and use expect as a postcondition rather than treating event delivery as success. \
@@ -422,47 +417,14 @@ impl ComputerUseTools {
             if !feedback.is_current() {
                 return tool_error("computer-use action cancelled");
             }
-            let mut foreground = None;
             let result = match prepare_action(&previous.tree, action) {
-                Ok(request) => {
-                    let result = crate::backend::perform_action_with_feedback(
-                        &previous.root,
-                        &request,
-                        &feedback,
-                        !params.immediate,
-                    )
-                    .unwrap_or_else(|error| ActionResult::didnt(error.to_string(), Delivery::None));
-                    match result.foreground.clone() {
-                        Some(need) => {
-                            let settings = crate::config::get();
-                            let decided = crate::foreground::decide(
-                                &settings,
-                                self.foreground.as_ref(),
-                                &previous.root,
-                                crate::foreground::action_of(&request),
-                                crate::foreground::ANSWER_WAIT,
-                            );
-                            let (decision, remembered) = tokio::select! {
-                                _ = context.ct.cancelled() => {
-                                    return tool_error("computer-use action cancelled");
-                                }
-                                decided = decided => decided,
-                            };
-                            foreground = Some(decision);
-                            let typed = decision.allows().then(|| {
-                                crate::backend::type_in_foreground(&previous.root, &request)
-                            });
-                            crate::foreground::step_result(
-                                decision,
-                                remembered,
-                                &previous.root.app_name,
-                                &need.background_error,
-                                typed,
-                            )
-                        }
-                        None => result,
-                    }
-                }
+                Ok(request) => crate::backend::perform_action_with_feedback(
+                    &previous.root,
+                    &request,
+                    &feedback,
+                    !params.immediate,
+                )
+                .unwrap_or_else(|error| ActionResult::didnt(error.to_string(), Delivery::None)),
                 Err(error) => ActionResult::didnt(error, Delivery::None),
             };
             let didnt = result.outcome == ActionOutcome::Didnt;
@@ -472,22 +434,16 @@ impl ComputerUseTools {
                 &previous.tree,
             ));
             activation = match (activation, result.delivery) {
-                (_, Delivery::ForegroundHid) => "foreground",
                 ("none", Delivery::BackgroundPid | Delivery::WindowMessage) => "background",
                 (current, _) => current,
             };
-            let mut step = json!({
+            step_results.push(json!({
                 "index": index + 1,
                 "action": action_name(action.action),
                 "outcome": result.outcome,
                 "message": result.message,
                 "delivery": result.delivery,
-            });
-            if let Some(decision) = foreground {
-                step["foreground"] = json!(decision);
-                step["app"] = json!(previous.root.app_name);
-            }
-            step_results.push(step);
+            }));
             if didnt {
                 stopped_at = Some(index + 1);
                 break;
@@ -733,12 +689,9 @@ impl ServerHandler for ComputerUseTools {
 
 pub type Service = StreamableHttpService<ComputerUseTools, LocalSessionManager>;
 
-pub(crate) fn service(
-    feedback: Arc<crate::feedback::FeedbackSession>,
-    foreground: Option<crate::foreground::ForegroundAsker>,
-) -> Service {
+pub(crate) fn service(feedback: Arc<crate::feedback::FeedbackSession>) -> Service {
     StreamableHttpService::new(
-        move || Ok(ComputerUseTools::new(feedback.clone(), foreground.clone())),
+        move || Ok(ComputerUseTools::new(feedback.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )

@@ -262,48 +262,6 @@ pub(super) fn frontmost_application_pid() -> Option<u32> {
     }
 }
 
-pub(super) fn activate_application(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: all selectors and return types below are stable AppKit APIs. The
-    // autorelease pool bounds temporary Objective-C objects on this thread.
-    unsafe {
-        let pool_class = objc_getClass(c"NSAutoreleasePool".as_ptr());
-        let application_class = objc_getClass(c"NSRunningApplication".as_ptr());
-        if pool_class.is_null() || application_class.is_null() {
-            return false;
-        }
-        let pool = send_id(pool_class, c"new");
-        let application = send_id_i32(
-            application_class,
-            c"runningApplicationWithProcessIdentifier:",
-            pid,
-        );
-        let activated =
-            !application.is_null() && send_bool_usize(application, c"activateWithOptions:", 0);
-        send_void(pool, c"drain");
-        activated
-    }
-}
-
-pub(super) fn raise_window(root: &RootInfo) -> Result<(), String> {
-    let (_application, window) = locate_window(root).map_err(|error| error.to_string())?;
-    let action = CFString::new("AXRaise");
-    let code = unsafe { AXUIElementPerformAction(window.as_ax(), action.as_concrete_TypeRef()) };
-    ax_result("AXRaise", code).map_err(|error| error.to_string())?;
-
-    let attribute = CFString::new("AXMain");
-    let code = unsafe {
-        AXUIElementSetAttributeValue(
-            window.as_ax(),
-            attribute.as_concrete_TypeRef(),
-            CFBoolean::true_value().as_CFTypeRef(),
-        )
-    };
-    ax_result("setting AXMain", code).map_err(|error| error.to_string())
-}
-
 unsafe fn send_id(receiver: *mut c_void, selector: &std::ffi::CStr) -> *mut c_void {
     let send: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
         unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
@@ -320,12 +278,6 @@ unsafe fn send_i32(receiver: *mut c_void, selector: &std::ffi::CStr) -> i32 {
     let send: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 =
         unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
     unsafe { send(receiver, sel_registerName(selector.as_ptr())) }
-}
-
-unsafe fn send_bool_usize(receiver: *mut c_void, selector: &std::ffi::CStr, value: usize) -> bool {
-    let send: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> i8 =
-        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
-    unsafe { send(receiver, sel_registerName(selector.as_ptr()), value) != 0 }
 }
 
 unsafe fn send_void(receiver: *mut c_void, selector: &std::ffi::CStr) {

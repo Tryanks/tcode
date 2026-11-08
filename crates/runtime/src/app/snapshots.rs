@@ -5,7 +5,7 @@ use tcode_protocol::AgentStatus;
 pub(crate) struct DomainDiff {
     subscriptions: HashSet<Topic>,
     index: IndexSnapshot,
-    summary_revisions: [u64; 8],
+    summary_revisions: [u64; 7],
     /// Residents borrowed one at a time from this revision on have not been
     /// projected into the summaries yet.
     residents_seen: u64,
@@ -563,8 +563,7 @@ impl<'a> ActivityProjection<'a> {
                     && tcode_core::pull_request::watched(&meta.pull_requests)
                         .next()
                         .is_some()),
-            waiting_for_approval: !approvals.is_empty()
-                || self.state.open_foreground_prompt(&meta.id).is_some(),
+            waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
             failed: self
                 .state
@@ -623,7 +622,7 @@ impl AppState {
         Some(activity)
     }
 
-    fn index_summary_revisions(&self) -> [u64; 8] {
+    fn index_summary_revisions(&self) -> [u64; 7] {
         [
             self.sessions.revision(),
             self.residents.live.revision(),
@@ -631,7 +630,6 @@ impl AppState {
             self.thread_activity.revision(),
             self.title_generating.revision(),
             self.approvals.revision(),
-            self.foreground_prompts.revision(),
             self.archived_revision,
         ]
     }
@@ -1316,7 +1314,6 @@ impl AppState {
                 .then(|| session.timeline.running_turn())
                 .flatten(),
             pending_approvals: approvals.to_vec(),
-            foreground_prompt: self.open_foreground_prompt(&meta.id),
             pending_user_input: user_input.cloned(),
             steering_supported: session.can_steer(),
             provider_option_descriptors,

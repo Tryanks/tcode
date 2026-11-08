@@ -308,12 +308,9 @@ pub use wire::{
 // protocol adds the VerifyHostToken command, which saves a token only when
 // the host takes it, and its TokenCheck response (accepted with an optional
 // account, rejected, missing_scopes, unreachable, unconfirmed).
-// Computer use asks before typing with an app in front: Settings'
-// computer_use drops allow_foreground_fallback for foreground_default and
-// foreground_apps (a stored true reads as allow), the
-// ComputerUseForegroundDefault and ComputerUseForegroundApp patches replace
-// ComputerUseAllowForegroundFallback, SessionStatus carries
-// foreground_prompt, and the protocol adds RespondForegroundPrompt.
+// Computer use never brings an app to the front for typing: Settings'
+// computer_use drops allow_foreground_fallback (an older file still loads)
+// with the ComputerUseAllowForegroundFallback patch.
 // Plugin management has no switches: Settings drops plugins with the
 // PluginManagementEnabled and PluginManagementProvider patches, and the host
 // keeps two catalogs per profile, one listed from outside any project and one

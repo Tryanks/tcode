@@ -248,7 +248,6 @@ mod control;
 mod dev_servers;
 mod disk_usage;
 mod events;
-mod foreground;
 mod git;
 mod history;
 mod original;
@@ -449,8 +448,6 @@ pub struct AppState {
     /// Live provider approvals for every resident session. This is the sole
     /// host-side authority; persisted timeline approvals remain client state.
     approvals: Revisioned<HashMap<String, Vec<agent::ApprovalRequest>>>,
-    /// Computer use's questions whether an app may come to the front, per thread.
-    foreground_prompts: Revisioned<HashMap<String, Vec<foreground::HeldPrompt>>>,
     /// Background-computed git state of the active session's cwd, driving the
     /// adaptive header quick-action button (`None` until the first refresh /
     /// with no active session). See [`AppState::refresh_git_status`].
@@ -660,7 +657,6 @@ impl AppState {
             callback_approval_requests: HashSet::new(),
             callback_user_input_requests: HashSet::new(),
             approvals: Default::default(),
-            foreground_prompts: Default::default(),
             git_status: HashMap::new(),
             git_busy: HashSet::new(),
             next_operation_id: 1,
