@@ -439,6 +439,11 @@ impl CommandPalette {
         let several = crate::shell::several_hosts(cx);
         // What a row names when the window is over several hosts.
         let on_host = |store: &WorkspaceStore| several.then(|| store.host_title());
+        let hosts: Vec<&PaletteHost> = self
+            .hosts
+            .iter()
+            .filter(|host| !(several && crate::sidebar::host_down(host.store.read(cx))))
+            .collect();
 
         let mut actions: Vec<(i32, Item)> = Vec::new();
         let mut push_action = |label: String, icon: IconName, action: Action| {
@@ -456,7 +461,7 @@ impl CommandPalette {
                 ));
             }
         };
-        for host in &self.hosts {
+        for host in &hosts {
             let store = host.store.read(cx);
             let key = store.host_key();
             let named = on_host(store);
@@ -636,7 +641,7 @@ impl CommandPalette {
                 pane(Box::new(layout)),
             );
         }
-        for host in &self.hosts {
+        for host in &hosts {
             let store = host.store.read(cx);
             if store.scope().is_full() {
                 push_action(
@@ -698,7 +703,7 @@ impl CommandPalette {
         }
 
         // Threads (fuzzy over titles), each host's ranked on its own.
-        for host in &self.hosts {
+        for host in &hosts {
             let store = host.store.read(cx);
             let mut threads: Vec<(i32, Item)> = Vec::new();
             for group in store.grouped_sessions() {
@@ -738,7 +743,7 @@ impl CommandPalette {
         if query.trim().is_empty() {
             return groups;
         }
-        for host in &self.hosts {
+        for host in &hosts {
             let store = host.store.read(cx);
             let key = store.host_key();
             let Some(hits) = self.content_hits.get(&key).filter(|hits| !hits.is_empty()) else {

@@ -225,10 +225,11 @@ fn fold_key(fold: Fold, id: &str) -> String {
     }
 }
 
-/// Whether a list over several hosts shows `store`'s heading alone: the host
-/// is out of reach, refused this device or speaks another protocol, and its
-/// threads are not shown from what the client last held.
-fn host_down(store: &WorkspaceStore) -> bool {
+/// Whether a window over several hosts shows `store`'s heading alone and
+/// offers nothing of it elsewhere: the host is out of reach, refused this
+/// device or speaks another protocol, and its threads are not shown from what
+/// the client last held.
+pub(crate) fn host_down(store: &WorkspaceStore) -> bool {
     crate::remote::connection_failure(store.connection_state()).is_some()
 }
 
