@@ -5,6 +5,7 @@ pub mod assets;
 /// The window's link to a host: its transport tasks and workspace store.
 pub mod attachment;
 mod attachments;
+mod attention;
 mod change_project_root_dialog;
 pub mod chat;
 mod commit_dialog;
@@ -68,7 +69,6 @@ pub mod sidebar;
 pub mod sizing;
 mod source_control_settings;
 pub mod store;
-mod system_notifications;
 mod terminal_drawer;
 mod terminal_key_bar;
 #[cfg(test)]

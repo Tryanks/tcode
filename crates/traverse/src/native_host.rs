@@ -25,7 +25,6 @@ type MulticastLock = dyn Fn(bool) + Send + Sync;
 /// transport policy.
 pub struct NativeClientHost {
     speech: Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>>,
-    notifier: Option<std::rc::Rc<dyn tcode_client::host::SystemNotifier>>,
     words: Option<std::rc::Rc<dyn tcode_client::words::WordSegmenter>>,
     data_dir: PathBuf,
     default_device_name: String,
@@ -45,7 +44,6 @@ impl NativeClientHost {
     pub fn new(data_dir: PathBuf, device_name: impl Into<String>) -> Self {
         Self {
             speech: None,
-            notifier: None,
             words: None,
             data_dir,
             default_device_name: device_name.into(),
@@ -124,14 +122,6 @@ impl NativeClientHost {
         self
     }
 
-    pub fn with_system_notifier(
-        mut self,
-        notifier: impl tcode_client::host::SystemNotifier + 'static,
-    ) -> Self {
-        self.notifier = Some(std::rc::Rc::new(notifier));
-        self
-    }
-
     pub fn with_speech_recognizer(
         mut self,
         recognizer: impl tcode_client::speech::SpeechRecognizer + 'static,
@@ -207,10 +197,6 @@ impl NativeClientHost {
 }
 
 impl ClientHost for NativeClientHost {
-    fn system_notifier(&self) -> Option<std::rc::Rc<dyn tcode_client::host::SystemNotifier>> {
-        self.notifier.clone()
-    }
-
     fn speech_recognizer(&self) -> Option<std::rc::Rc<dyn tcode_client::speech::SpeechRecognizer>> {
         self.speech.clone()
     }
