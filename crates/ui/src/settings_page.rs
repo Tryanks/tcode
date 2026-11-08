@@ -420,17 +420,17 @@ impl Section {
     }
 }
 
+/// The remote attachment ceiling as the settings field shows it, in MiB.
+fn remote_attachment_limit_value(cx: &App) -> String {
+    (DevicePreferences::remote_attachment_limit_bytes(cx) / (1024 * 1024)).to_string()
+}
+
 /// An input seeded from replicated settings.
 ///
 /// `pushed` is the last value this page wrote into the field, so an echoed
 /// change event can be told apart from a real edit; `dirty` then freezes the
 /// field against later snapshots so a host update cannot overwrite what the
 /// user is in the middle of typing.
-/// The remote attachment ceiling as the settings field shows it, in MiB.
-fn remote_attachment_limit_value(cx: &App) -> String {
-    (DevicePreferences::remote_attachment_limit_bytes(cx) / (1024 * 1024)).to_string()
-}
-
 struct SettingsInput {
     state: Entity<InputState>,
     pushed: String,
@@ -528,8 +528,9 @@ pub struct SettingsPage {
     /// Editable custom "Add Project start folder"; committed on change.
     project_start_custom_input: SettingsInput,
     /// The host's home, which the Projects rows write `~` paths under. Asked
-    /// of the host the first time those rows are drawn.
+    /// of the host when those rows are drawn, until it answers.
     host_home: Option<SharedString>,
+    /// An ask for the host's home is on its way or has been answered.
     host_home_requested: bool,
     auto_settle_input: SettingsInput,
     project_rules_editor: Option<Entity<thread_behavior::ProjectRulesEditor>>,
@@ -936,7 +937,8 @@ impl SettingsPage {
         }
     }
 
-    /// Ask the host where its home is, once: listing `~` answers with it.
+    /// Ask the host where its home is, until it answers: listing `~` answers
+    /// with it. A failed ask is made again the next time the rows are drawn.
     pub(super) fn fetch_host_home(&mut self, cx: &mut Context<Self>) {
         if self.host_home_requested || !self.store.read(cx).can_manage_host() {
             return;
@@ -946,10 +948,15 @@ impl SettingsPage {
             .store
             .update(cx, |store, cx| store.browse_directories("~".into(), cx));
         cx.spawn(async move |this, cx| {
-            let home = listing.await.ok().and_then(|listing| listing.home);
-            let _ = this.update(cx, |page, cx| {
-                page.host_home = home.map(|home| home.to_string_lossy().into_owned().into());
-                cx.notify();
+            let listing = listing.await;
+            let _ = this.update(cx, |page, cx| match listing {
+                Ok(listing) => {
+                    page.host_home = listing
+                        .home
+                        .map(|home| home.to_string_lossy().into_owned().into());
+                    cx.notify();
+                }
+                Err(_) => page.host_home_requested = false,
             });
         })
         .detach();
@@ -4282,6 +4289,88 @@ mod tests {
 
         crate::store::tests::shutdown_test_host(cx, &store, &host);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The new project folder's placeholder is written under the host's
+    /// home, which the page asks the host for; a failed ask is asked again
+    /// when the page is next drawn, rather than leaving `~` for good.
+    #[gpui::test]
+    fn the_host_home_is_asked_again_after_a_failed_ask(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ClientPayload, DirectoryListing, HostMessage, Query, QueryResponse, decode_client_line,
+            encode_line,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let (store, outgoing, incoming, _pump) = scripted_store(WorkspaceAttachment::Local, cx);
+        let window_state = cx.new(|_| WindowState::default());
+        let mut page = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPage::new(store.clone(), window_state, window, cx));
+            page = Some(view.clone());
+            gpui_base::Root::new(view, window, cx)
+        });
+        let page = page.unwrap();
+        let asked_home = |outgoing: &async_channel::Receiver<String>| {
+            std::iter::from_fn(|| outgoing.try_recv().ok())
+                .filter_map(|line| {
+                    let message = decode_client_line(&line).unwrap();
+                    match message.payload {
+                        ClientPayload::Query(Query::BrowseDirectories { path }) if path == "~" => {
+                            Some(message.id)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let answer = |id, result| {
+            incoming
+                .try_send(encode_line(&HostMessage::QueryResult { id, result }).unwrap())
+                .unwrap();
+        };
+        let drawn = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw_settled(cx);
+            page.read_with(cx, |page, cx| {
+                page.new_project_dir_input
+                    .state
+                    .read(cx)
+                    .presentation()
+                    .placeholder()
+                    .to_string()
+            })
+        };
+
+        page.update(cx, |page, cx| page.select_section(Section::Threads, cx));
+        drawn(cx);
+        let [first] = asked_home(&outgoing)[..] else {
+            panic!("drawing the Projects rows asks for the host's home once");
+        };
+        answer(
+            first,
+            Err(tcode_protocol::ProtocolError {
+                code: "transport_closed".into(),
+                message: "The host went away.".into(),
+            }),
+        );
+        assert_eq!(drawn(cx), "~/TcodeProjects");
+
+        let [again] = asked_home(&outgoing)[..] else {
+            panic!("the next drawing asks again");
+        };
+        answer(
+            again,
+            Ok(QueryResponse::Directories(DirectoryListing {
+                directory: "/host/home".into(),
+                parent: Some("/host".into()),
+                home: Some("/host/home".into()),
+                entries: vec![],
+            })),
+        );
+        assert_eq!(drawn(cx), "/host/home/TcodeProjects");
+        assert!(asked_home(&outgoing).is_empty(), "an answer is kept");
     }
 
     #[gpui::test]

@@ -1298,6 +1298,20 @@ fn separator_of(path: &str) -> char {
     }
 }
 
+/// `path` as the host writes it: a leading `~` under the host's `home` once
+/// that is known, in the home's own separator.
+pub(crate) fn under_host_home(path: &str, home: Option<&str>) -> String {
+    let Some((home, rest)) = home.zip(path.strip_prefix('~')) else {
+        return path.to_owned();
+    };
+    if !(rest.is_empty() || rest.starts_with(['/', '\\'])) {
+        return path.to_owned();
+    }
+    let separator = separator_of(home);
+    let rest = rest.replace(['/', '\\'], &separator.to_string());
+    format!("{}{rest}", home.trim_end_matches(separator))
+}
+
 /// `path` ending in its separator, to go on typing a folder name after.
 fn with_separator(path: &str) -> String {
     let separator = separator_of(path);
