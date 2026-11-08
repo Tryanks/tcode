@@ -212,6 +212,7 @@ rail:
   commands_running: "%{count} 条正在运行"
   commands_failed: "%{count} 条失败"
   commands_more: "另有 %{count} 条"
+  commands_backgrounded: "%{count} 条转入后台"
 background:
   title: "后台"
   pill: "后台 %{count}"

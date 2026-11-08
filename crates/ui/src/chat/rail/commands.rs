@@ -1,4 +1,5 @@
-//! The commands the thread's agent ran in its latest turn.
+//! The commands the thread's agent ran in its latest turn, in the
+//! foreground: one that went on in the background is the Background card's.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -72,15 +73,17 @@ pub(in crate::chat) struct Commands {
     total: usize,
     running: usize,
     failed: usize,
+    /// The latest turn's commands that went on in the background.
+    backgrounded: usize,
 }
 
 impl Commands {
-    /// Lists again the commands of `timeline`'s latest turn. An earlier
-    /// turn's command left in progress is not listed: its turn has ended,
-    /// so nothing the timeline holds says it still runs.
+    /// Lists again the commands of `timeline`'s latest turn that ran in the
+    /// foreground, and counts those that went on in the background.
     pub(in crate::chat) fn sync(&mut self, timeline: &Timeline) {
         let mut running = Vec::new();
         let mut settled = Vec::new();
+        let mut backgrounded = 0;
         let Some(latest) = timeline.turns.len().checked_sub(1) else {
             *self = Self::default();
             return;
@@ -93,6 +96,10 @@ impl Commands {
             let Some(ran) = shell::ran(entry) else {
                 continue;
             };
+            if entry.background {
+                backgrounded += 1;
+                continue;
+            }
             let line = Line {
                 entry_id: entry.id.clone(),
                 turn: entry.turn,
@@ -107,6 +114,7 @@ impl Commands {
             }
         }
         self.total = running.len() + settled.len();
+        self.backgrounded = backgrounded;
         self.running = running.len();
         self.failed = settled
             .iter()
@@ -129,22 +137,21 @@ pub(super) fn present(rail: &RailView, _cx: &App) -> bool {
 /// many commands run, or how many ran, and how many of those failed.
 pub(super) fn summary(rail: &RailView, _cx: &App) -> Option<SharedString> {
     let commands = &rail.commands;
-    let lead = match (commands.running, commands.total) {
+    let mut parts = vec![match (commands.running, commands.total) {
         (0, 0) => return None,
         (0, 1) => crate::tr!("rail.commands_one").into_owned(),
         (0, total) => crate::tr!("rail.commands", count = total).into_owned(),
         (running, _) => crate::tr!("rail.commands_running", count = running).into_owned(),
-    };
-    Some(
-        match commands.failed {
-            0 => lead,
-            failed => format!(
-                "{lead} · {}",
-                crate::tr!("rail.commands_failed", count = failed)
-            ),
-        }
-        .into(),
-    )
+    }];
+    if commands.failed > 0 {
+        parts.push(crate::tr!("rail.commands_failed", count = commands.failed).into_owned());
+    }
+    if commands.backgrounded > 0 {
+        parts.push(
+            crate::tr!("rail.commands_backgrounded", count = commands.backgrounded).into_owned(),
+        );
+    }
+    Some(parts.join(" · ").into())
 }
 
 /// The commands the card lists: the thread's, or while the card leaves,
