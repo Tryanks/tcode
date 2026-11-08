@@ -4748,6 +4748,102 @@ pub(crate) mod tests {
         }
     }
 
+    /// Another account runs the CLI the default one does, so both pickers list
+    /// that CLI's catalog; a third-party endpoint answers to its card alone.
+    /// The host answers over a scripted transport.
+    #[gpui::test]
+    fn a_second_account_lists_the_cli_catalog_and_a_third_party_endpoint_only_its_card(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_core::settings::{EnvVar, ProviderProfile, ProviderSettings};
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let profile = |settings| ProviderProfile {
+            kind: agent::ProviderKind::ClaudeCode,
+            settings,
+        };
+        let mut settings = Settings::default();
+        settings.profiles.extend([
+            (
+                "second-account".to_owned(),
+                profile(ProviderSettings {
+                    home_path: Some("/profile-homes/second-account".into()),
+                    ..Default::default()
+                }),
+            ),
+            (
+                "kimi".to_owned(),
+                profile(ProviderSettings {
+                    env: vec![EnvVar {
+                        name: "ANTHROPIC_BASE_URL".into(),
+                        value: "https://api.kimi.test/anthropic".into(),
+                        sensitive: false,
+                    }],
+                    custom_models: vec!["kimi-model".into()],
+                    ..Default::default()
+                }),
+            ),
+        ]);
+        let providers = tcode_protocol::ProvidersStatus {
+            model_catalogs: [(
+                agent::ProviderKind::ClaudeCode,
+                vec![agent::ModelSpec {
+                    id: "cli-model".into(),
+                    display_name: "CLI model".into(),
+                    is_default: true,
+                    options: Vec::new(),
+                }],
+            )]
+            .into(),
+            ..Default::default()
+        };
+        for (topic, event) in [
+            (Topic::Settings, ServerEvent::SettingsSnapshot(settings)),
+            (Topic::Providers, ServerEvent::ProvidersReplaced(providers)),
+        ] {
+            incoming
+                .try_send(
+                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(
+                        EventEnvelope {
+                            request_id: None,
+                            topic,
+                            event,
+                        },
+                    ))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let deferred = std::iter::from_fn(|| from_host.try_recv().ok()).collect();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|delay| executor.timer(delay))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
+        });
+        seed_full_scope(&store, &incoming, deferred, cx);
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        let ids = |store: &WorkspaceStore, profile: &str| {
+            store
+                .picker_models_for_profile(profile)
+                .into_iter()
+                .map(|model| model.id)
+                .collect::<Vec<_>>()
+        };
+        store.read_with(cx, |store, _| {
+            assert_eq!(ids(store, "claude"), ["cli-model"]);
+            assert_eq!(ids(store, "second-account"), ["cli-model"]);
+            assert_eq!(ids(store, "kimi"), ["kimi-model"]);
+        });
+    }
+
     #[gpui::test]
     fn member_scope_seeds_only_the_space_index_and_reseeds_on_reconnect(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
