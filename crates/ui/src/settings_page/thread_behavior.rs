@@ -186,7 +186,9 @@ impl SettingsPage {
     /// user's, whose field folds open with the choice.
     fn project_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let home = self.host_home.clone();
-        let on_host = move |path: &str| host_path(path, home.as_deref());
+        let on_host = move |path: &str| -> SharedString {
+            crate::add_project_dialog::under_host_home(path, home.as_deref()).into()
+        };
         let compact = self.window_state.read(cx).compact;
 
         let new_dir_reset = crate::settings_rows::reset_action(
@@ -1146,21 +1148,3 @@ fn rule_dropdown<T: Clone + 'static>(
         .into_any_element()
 }
 impl gpui::EventEmitter<gpui::DismissEvent> for ProjectRulesEditor {}
-
-/// `path` as the host writes it: a leading `~` under the host's home once that
-/// is known, in the home's own separator.
-fn host_path(path: &str, home: Option<&str>) -> SharedString {
-    let Some((home, rest)) = home.zip(path.strip_prefix('~')) else {
-        return path.to_owned().into();
-    };
-    if !(rest.is_empty() || rest.starts_with(['/', '\\'])) {
-        return path.to_owned().into();
-    }
-    let separator = if home.contains('\\') && !home.contains('/') {
-        '\\'
-    } else {
-        '/'
-    };
-    let rest = rest.replace(['/', '\\'], &separator.to_string());
-    format!("{}{rest}", home.trim_end_matches(separator)).into()
-}
