@@ -245,7 +245,7 @@ impl AppState {
                                 resident.delivery_in_flight = None;
                                 resident.turn_in_flight = false;
                                 resident.background_task_count = 0;
-                                resident.background_tasks.clear();
+                                resident.background.clear();
                             }
                             state.settle_rewind_unanswered(
                                 &session_id,

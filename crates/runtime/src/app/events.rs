@@ -51,7 +51,7 @@ impl AppState {
             }
             AgentEvent::BackgroundTaskList { tasks } => {
                 if let Some(resident) = self.resident_mut(session_id) {
-                    resident.background_tasks.clone_from(tasks);
+                    resident.background.list(tasks);
                 }
                 return;
             }

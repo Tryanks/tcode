@@ -1,6 +1,6 @@
 use super::*;
 use tcode_core::settlement::{AgentDelivery, AgentExecution};
-use tcode_protocol::AgentStatus;
+use tcode_protocol::{AgentStatus, BackgroundActivity, BackgroundTaskStatus, ThreadWakes};
 
 pub(crate) struct DomainDiff {
     subscriptions: HashSet<Topic>,
@@ -488,6 +488,35 @@ impl<'a> ActivityProjection<'a> {
         holds
     }
 
+    /// How many of this thread's agents run, and how many dispatched ones
+    /// finished and await its settle. A subagent of its harness's that runs
+    /// in the background (its spawn among `background`) is counted there.
+    fn agents_of(&self, parent_id: &str, background: &[BackgroundTaskStatus]) -> (u32, u32) {
+        let (mut running, mut unsettled) = (0, 0);
+        for index in self.children.get(parent_id).into_iter().flatten() {
+            let child = &self.state.sessions[*index];
+            match self.agent_status(child).map(|status| status.delivery) {
+                Some(AgentDelivery::Running) => running += 1,
+                Some(AgentDelivery::AwaitingSettle) => unsettled += 1,
+                Some(_) => {}
+                None => {
+                    let in_background = child.native_subagent.as_deref().is_some_and(|spawn| {
+                        background
+                            .iter()
+                            .any(|task| task.task.item_id.as_deref() == Some(spawn))
+                    });
+                    let runs = self.state.resident(&child.id).is_some_and(|session| {
+                        session.is_unfinished() || session.timeline.turn_running
+                    }) || self.children_hold(&child.id);
+                    if runs && !in_background {
+                        running += 1;
+                    }
+                }
+            }
+        }
+        (running, unsettled)
+    }
+
     /// A dispatched orchestrate child's execution and delivery; `None` for
     /// every other thread.
     pub(super) fn agent_status(&self, meta: &SessionMeta) -> Option<AgentStatus> {
@@ -513,7 +542,7 @@ impl<'a> ActivityProjection<'a> {
         } else if resident.is_some_and(|session| session.background_task_count > 0)
             || self.children_hold(&meta.id)
         {
-            AgentExecution::Waiting
+            AgentExecution::Background
         } else if meta.cancelled_at.is_some() {
             AgentExecution::Cancelled
         } else if activity.is_some_and(|activity| activity.failed) {
@@ -552,17 +581,40 @@ impl<'a> ActivityProjection<'a> {
                         .iter()
                         .any(|message| message.origin == MessageOrigin::Human))
         });
+        let tasks = resident.map_or_else(Vec::new, |session| {
+            session.background.statuses(&session.timeline)
+        });
+        let (agents, unsettled) = self.agents_of(&meta.id, &tasks);
         SessionActivity {
             working,
             turn_running: resident.is_some_and(|session| {
                 session.turn_in_flight && session.timeline.turn_retry.is_none()
             }),
-            waiting: resident.is_some_and(|session| session.background_task_count > 0)
-                || self.children_hold(&meta.id)
-                || (!meta.pull_request_watches_paused
-                    && tcode_core::pull_request::watched(&meta.pull_requests)
-                        .next()
-                        .is_some()),
+            background: BackgroundActivity {
+                // A harness can hold its process for work it lists none of.
+                tasks: resident.map_or(0, |session| {
+                    tasks.len().max(session.background_task_count) as u32
+                }),
+                agents,
+            },
+            unsettled,
+            wakes: ThreadWakes {
+                pull_requests: if meta.pull_request_watches_paused {
+                    Vec::new()
+                } else {
+                    tcode_core::pull_request::watched(&meta.pull_requests)
+                        .map(|link| link.key.number)
+                        .collect()
+                },
+                scheduled_at: resident
+                    .into_iter()
+                    .flat_map(|session| &session.queue)
+                    .filter_map(|message| message.not_before)
+                    .filter_map(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs())
+                    .min(),
+                notify: meta.control_watches.len() as u32,
+            },
             waiting_for_approval: !approvals.is_empty(),
             waiting_for_input: input.is_some(),
             failed: self
@@ -1252,7 +1304,7 @@ impl AppState {
             requested_profile_id: meta.profile_id.clone(),
             acp_agent_id: meta.acp_agent_id.clone(),
             project_id: meta.project_id.clone(),
-            background_tasks: session.background_tasks.clone(),
+            background_tasks: session.background.statuses(&session.timeline),
             queued_messages: session
                 .queue
                 .iter()

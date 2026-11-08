@@ -2550,6 +2550,7 @@ agents:
   untitled: "サブエージェント"
   state_working: "作業中"
   state_waiting: "待機中"
+  state_background: "バックグラウンドで実行中"
   state_finished: "終了"
   state_failed: "失敗"
   state_cancelled: "キャンセル済み"

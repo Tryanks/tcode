@@ -1018,7 +1018,6 @@ fn session_activity_carries_the_latest_activity_literal_json() {
         json!({
             "working": true,
             "turn_running": true,
-            "waiting": false,
             "waiting_for_approval": false,
             "waiting_for_input": false,
             "failed": false,
@@ -1081,6 +1080,41 @@ fn session_activity_carries_the_latest_activity_literal_json() {
     }
 }
 
+/// What keeps a thread going, as this and later builds write it: what runs
+/// in its background, the agents awaiting its settle and what wakes it
+/// later; and a piece of its background work as the status lists it.
+#[test]
+fn session_activity_names_what_keeps_a_thread_going_literal_json() {
+    let literal = json!({
+        "working": false,
+        "turn_running": false,
+        "background": {"tasks": 2, "agents": 1},
+        "unsettled": 1,
+        "wakes": {"pull_requests": [812], "scheduled_at": 1_800_000_000, "notify": 1},
+        "waiting_for_approval": false,
+        "waiting_for_input": false,
+        "failed": false,
+        "unread": false,
+        "fork": "available",
+    });
+    let decoded: SessionActivity = serde_json::from_value(literal.clone()).unwrap();
+    assert_eq!((decoded.background.count(), decoded.unsettled), (3, 1));
+    assert_eq!(decoded.wakes.pull_requests, [812]);
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), literal);
+
+    let task = json!({
+        "task": {"id": "bg-1", "name": "npm run dev", "kind": "command",
+            "item_id": "toolu-1", "started_at": 1_000},
+        "listed": true,
+        "stopping_since": 2_000,
+    });
+    let decoded: crate::BackgroundTaskStatus = serde_json::from_value(task.clone()).unwrap();
+    assert_eq!(decoded.task.kind, agent::BackgroundKind::Command);
+    assert_eq!(decoded.task.item_id.as_deref(), Some("toolu-1"));
+    assert!(!decoded.ended && !decoded.task.started_reported);
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), task);
+}
+
 /// A peer built before the field sends entries without it, and every thread
 /// with nothing to report is written the same way.
 #[test]
@@ -1088,7 +1122,6 @@ fn session_activity_without_a_latest_activity_keeps_the_older_shape() {
     let older = json!({
         "working": false,
         "turn_running": false,
-        "waiting": false,
         "waiting_for_approval": false,
         "waiting_for_input": false,
         "failed": false,
@@ -1111,7 +1144,9 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                     SessionActivity {
                         working: false,
                         turn_running: false,
-                        waiting: false,
+                        background: Default::default(),
+                        unsettled: 0,
+                        wakes: Default::default(),
                         waiting_for_approval: false,
                         waiting_for_input: false,
                         failed: false,
@@ -1126,7 +1161,9 @@ fn version_six_index_visits_output_and_elision_literal_json() {
                     SessionActivity {
                         working: false,
                         turn_running: false,
-                        waiting: false,
+                        background: Default::default(),
+                        unsettled: 0,
+                        wakes: Default::default(),
                         waiting_for_approval: false,
                         waiting_for_input: false,
                         failed: false,
@@ -1152,10 +1189,10 @@ fn version_six_index_visits_output_and_elision_literal_json() {
     };
     assert_eq!(
         serde_json::to_value(&index).unwrap(),
-        json!({"activity": {"cold": {"working":false,"turn_running":false,"waiting":false,
+        json!({"activity": {"cold": {"working":false,"turn_running":false,
             "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":true,
             "fork":"available"},
-            "child": {"working":false,"turn_running":false,"waiting":false,
+            "child": {"working":false,"turn_running":false,
             "waiting_for_approval":false,"waiting_for_input":false,"failed":false,"unread":false,
             "fork":"available","agent":{"execution":"finished","delivery":"awaiting_settle","report":"reported",
             "run_started_at":1000,"run_completed_at":81000}}},
@@ -1207,7 +1244,7 @@ fn version_six_index_visits_output_and_elision_literal_json() {
         "queued_messages":[{"id":3,"delivery_key":"send-key","text":"Next","fire_at_unix_secs":null,"editable":false}],
         "review_comment_drafts":[], "terminals":[], "active_terminal_id":null, "terminal_splits":[],
         "terminal_contexts":[], "terminal_open":false, "terminal_height":240.0, "delivery_in_flight":3,
-        "activity":{"working":true,"turn_running":false,"waiting":false,"waiting_for_approval":false,
+        "activity":{"working":true,"turn_running":false,"waiting_for_approval":false,
             "waiting_for_input":false,"failed":false,"unread":false,"fork":"available"},
         "stopping":false,"checkout_blocked":false,"conversation_read_only":false,
         "terminal_limit_reached":false,"terminal_split_available":false,"usage":null,"context_window":200000,

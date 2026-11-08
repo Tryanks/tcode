@@ -714,9 +714,15 @@ pub enum ForkAvailability {
 pub struct SessionActivity {
     pub working: bool,
     pub turn_running: bool,
-    /// Background tasks run, or a child thread holds this thread: one still
-    /// runs, or a dispatched one finished and awaits its lead's settle.
-    pub waiting: bool,
+    /// What goes on running in the thread's background.
+    #[serde(default, skip_serializing_if = "BackgroundActivity::is_idle")]
+    pub background: BackgroundActivity,
+    /// Dispatched agents that finished and await this thread's settle.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unsettled: u32,
+    /// What wakes the thread later though nothing of it runs.
+    #[serde(default, skip_serializing_if = "ThreadWakes::is_empty")]
+    pub wakes: ThreadWakes,
     pub waiting_for_approval: bool,
     pub waiting_for_input: bool,
     /// The latest run ended in an error and nothing has run since.
@@ -731,6 +737,70 @@ pub struct SessionActivity {
     /// for a provider that has reported no item yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_activity: Option<LatestActivity>,
+}
+
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
+/// What goes on running in a thread's background, which keeps it from
+/// settling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundActivity {
+    /// Pieces of background work its harness runs (see
+    /// [`SessionStatus::background_tasks`]).
+    pub tasks: u32,
+    /// Its agents still running: the dispatched ones, and the harness's own
+    /// subagents that run in its turn rather than in its background.
+    pub agents: u32,
+}
+
+impl BackgroundActivity {
+    pub fn is_idle(&self) -> bool {
+        self.tasks == 0 && self.agents == 0
+    }
+
+    pub fn count(&self) -> u32 {
+        self.tasks + self.agents
+    }
+}
+
+/// What wakes a thread later though nothing of it runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadWakes {
+    /// Numbers of the pull requests a watch that is not paused follows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pull_requests: Vec<u64>,
+    /// When its earliest scheduled message is due (unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<u64>,
+    /// Its `notify_when` watches on other threads.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub notify: u32,
+}
+
+impl ThreadWakes {
+    pub fn is_empty(&self) -> bool {
+        self.pull_requests.is_empty() && self.scheduled_at.is_none() && self.notify == 0
+    }
+}
+
+/// One piece of a thread's background work as its host lists it: what the
+/// harness lists, and calls going on in the background that it does not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundTaskStatus {
+    pub task: agent::BackgroundTask,
+    /// The harness lists it, so a stop can reach it. One it does not is
+    /// known only by its call, and `task.id` is the call's.
+    pub listed: bool,
+    /// When a stop for it went out (unix ms), while the harness still lists
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping_since: Option<u64>,
+    /// The harness no longer lists it while its call has not ended: it has
+    /// ended, and the harness has yet to say so in the conversation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ended: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -770,9 +840,10 @@ pub struct SessionStatus {
     pub acp_agent_id: Option<String>,
     pub project_id: Option<String>,
     pub queued_messages: Vec<QueuedMessageStatus>,
-    /// The background work the thread's harness lists and can stop.
+    /// The thread's background work: what its harness lists, then calls
+    /// going on in the background that it does not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub background_tasks: Vec<agent::BackgroundTask>,
+    pub background_tasks: Vec<BackgroundTaskStatus>,
     /// Backend-owned drafts used by provider-bound send-path assembly.
     pub review_comment_drafts: Vec<ReviewComment>,
     pub terminals: Vec<TerminalStatus>,

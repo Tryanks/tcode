@@ -38,20 +38,20 @@ pub use command::{
     TerminalSelection, ThreadExportFormat,
 };
 pub use event::{
-    AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, ControlActivityEntry,
-    ControlStatus, DiskUsage, DiskUsagePart, DiskUsageState, EndpointDescription,
-    EndpointPresetDescription, EventEnvelope, ExternalImportState, ExternalImportStatus,
-    ForkAvailability, ForkStatus, GitActionRequest, GitStatusStatus, HarnessDescription,
-    HarnessPermission, IndexSnapshot, IndexSummary, InjectedChannel, InjectedInstructions,
-    InjectedServer, InjectedTools, MergeWorktreeFailure, NoticeSeverity, PendingRewind,
-    PluginCatalogState, PluginChallenge, PluginChallengeKind, PluginOperationTarget,
-    PluginStaleReason, ProviderDiskUsage, ProviderPluginCatalog, ProviderUpdateAvailable,
-    ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RewindBlocked,
-    RewindStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
-    RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice, ServerEvent, SessionActivity,
-    SessionEventRecord, SessionPlan, SessionStatus, StorageMigration, TcodeDiskUsage,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    ThreadReferenceStatus, Topic,
+    AccountDiskUsage, AcpMarketplaceItem, AgentStatus, ArchivedSessions, BackgroundActivity,
+    BackgroundTaskStatus, ControlActivityEntry, ControlStatus, DiskUsage, DiskUsagePart,
+    DiskUsageState, EndpointDescription, EndpointPresetDescription, EventEnvelope,
+    ExternalImportState, ExternalImportStatus, ForkAvailability, ForkStatus, GitActionRequest,
+    GitStatusStatus, HarnessDescription, HarnessPermission, IndexSnapshot, IndexSummary,
+    InjectedChannel, InjectedInstructions, InjectedServer, InjectedTools, MergeWorktreeFailure,
+    NoticeSeverity, PendingRewind, PluginCatalogState, PluginChallenge, PluginChallengeKind,
+    PluginOperationTarget, PluginStaleReason, ProviderDiskUsage, ProviderPluginCatalog,
+    ProviderUpdateAvailable, ProviderUpdateRun, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RewindBlocked, RewindStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
+    RuntimeNotification, RuntimeOperationId, RuntimeToast, Scope, ScopedProviderChoice,
+    ServerEvent, SessionActivity, SessionEventRecord, SessionPlan, SessionStatus, StorageMigration,
+    TcodeDiskUsage, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    ThreadReferenceStatus, ThreadWakes, Topic,
 };
 pub use query::{
     ControlActivityFilter, ControlActivityPage, ControlActivityThread, DeviceAccess,
@@ -364,6 +364,13 @@ pub use wire::{
 // SessionStatus carries background_tasks.
 // Command::ForceTerminate is new, and SessionStatus carries stopping_since.
 // ChildExpectation carries undelivered.
+//
+// Background work: SessionActivity drops waiting for background
+// (BackgroundActivity tasks and agents), unsettled and wakes (ThreadWakes
+// pull_requests, scheduled_at and notify). SessionStatus.background_tasks
+// lists BackgroundTaskStatus (task, listed, stopping_since, ended), whose
+// BackgroundTask adds kind, item_id and started_reported. AgentExecution
+// adds background.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

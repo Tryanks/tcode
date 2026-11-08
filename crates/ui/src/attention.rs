@@ -106,7 +106,9 @@ mod tests {
                         SessionActivity {
                             working: false,
                             turn_running: false,
-                            waiting: false,
+                            background: Default::default(),
+                            unsettled: 0,
+                            wakes: Default::default(),
                             waiting_for_approval: waiting,
                             waiting_for_input: false,
                             failed: false,

@@ -970,33 +970,42 @@ impl Timeline {
         }
     }
 
+    /// The calls whose work goes on in the background: backgrounded, and
+    /// not ended.
+    pub fn running_background_items(&self) -> impl Iterator<Item = (&TimelineEntry, &ItemContent)> {
+        self.entries.iter().filter_map(|entry| {
+            let EntryContent::Item(content) = &entry.content else {
+                return None;
+            };
+            let (ItemContent::CommandExecution { status, .. }
+            | ItemContent::FileChange { status, .. }
+            | ItemContent::ToolCall { status, .. }
+            | ItemContent::Subagent { status, .. }) = content
+            else {
+                return None;
+            };
+            (entry.background && *status == ItemStatus::InProgress).then_some((&**entry, content))
+        })
+    }
+
     /// The completions that end the background work still open here, for a
     /// log whose process cannot finish it.
     pub fn interrupted_background_items(&self) -> Vec<ThreadItem> {
-        self.entries
-            .iter()
-            .filter(|entry| entry.background)
-            .filter_map(|entry| {
-                let EntryContent::Item(content) = &entry.content else {
-                    return None;
-                };
+        self.running_background_items()
+            .map(|(entry, content)| {
                 let mut content = content.clone();
-                let (ItemContent::CommandExecution { status, .. }
+                if let ItemContent::CommandExecution { status, .. }
                 | ItemContent::FileChange { status, .. }
                 | ItemContent::ToolCall { status, .. }
-                | ItemContent::Subagent { status, .. }) = &mut content
-                else {
-                    return None;
-                };
-                if *status != ItemStatus::InProgress {
-                    return None;
+                | ItemContent::Subagent { status, .. } = &mut content
+                {
+                    *status = ItemStatus::Interrupted;
                 }
-                *status = ItemStatus::Interrupted;
-                Some(ThreadItem {
+                ThreadItem {
                     id: entry.id.clone(),
                     parent_item_id: None,
                     content,
-                })
+                }
             })
             .collect()
     }

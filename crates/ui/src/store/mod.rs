@@ -2786,7 +2786,11 @@ impl WorkspaceStore {
         self.index_summary
             .activity
             .get(session_id)
-            .is_some_and(|activity| activity.waiting)
+            .is_some_and(|activity| {
+                !activity.background.is_idle()
+                    || activity.unsettled > 0
+                    || !activity.wakes.pull_requests.is_empty()
+            })
     }
 
     pub fn session_unread(&self, session_id: &str) -> bool {

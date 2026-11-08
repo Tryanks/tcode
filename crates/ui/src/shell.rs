@@ -16373,7 +16373,9 @@ pub(crate) mod tests {
             activity: tcode_protocol::SessionActivity {
                 working: false,
                 turn_running: false,
-                waiting: false,
+                background: Default::default(),
+                unsettled: 0,
+                wakes: Default::default(),
                 waiting_for_approval: false,
                 waiting_for_input: false,
                 failed: false,
@@ -17211,7 +17213,9 @@ pub(crate) mod tests {
                             tcode_protocol::SessionActivity {
                                 working,
                                 turn_running: working,
-                                waiting: false,
+                                background: Default::default(),
+                                unsettled: 0,
+                                wakes: Default::default(),
                                 waiting_for_approval: false,
                                 waiting_for_input: false,
                                 failed: false,

@@ -2550,6 +2550,7 @@ agents:
   untitled: "Subagent"
   state_working: "Working"
   state_waiting: "Waiting"
+  state_background: "In the background"
   state_finished: "Finished"
   state_failed: "Failed"
   state_cancelled: "Cancelled"
