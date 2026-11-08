@@ -1041,7 +1041,7 @@ composer:
   steer_unsupported_tooltip: "%{agent} 不支持追加提示 — 该消息将在本轮结束后发送"
   steer_unsupported: "%{agent} 不支持追加提示 — 消息已加入队列"
   drop_queued: "从队列中移除"
-  edit_queued: "在输入框中编辑"
+  edit_queued: "取消并编辑"
   reorder_queued: "拖动以调整顺序"
   remove_context: "移除"
   remove_image: "移除图片"

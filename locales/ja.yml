@@ -1048,7 +1048,7 @@ composer:
   steer_unsupported_tooltip: "%{agent} は追加指示に対応していません。このメッセージはターンの終了後に送信されます"
   steer_unsupported: "%{agent} は追加指示に対応していません。メッセージをキューに追加しました"
   drop_queued: "キューから削除"
-  edit_queued: "入力欄で編集"
+  edit_queued: "キャンセルして編集"
   reorder_queued: "ドラッグして並べ替え"
   remove_context: "削除"
   remove_image: "画像を削除"
