@@ -56,6 +56,8 @@ pub(crate) struct TimelineView {
     /// see [`ChatView::motion`].
     pub(in crate::chat) motion: crate::motion::owned::Owned,
     pub(in crate::chat) list_state: ListState,
+    /// The list as the handle its bounce scrolls.
+    followed: crate::scroll::FollowedList,
     /// The timeline changed since the list last mirrored it. GPUI's list
     /// resolves wheel and pan packets against the row indices it painted, so
     /// rows are only spliced during a frame, never between two frames.
@@ -228,6 +230,7 @@ impl TimelineView {
             layout: TimelineLayout::default(),
             motion: crate::motion::owned::Owned::in_scene(scene),
             scene: scene.clone(),
+            followed: crate::scroll::FollowedList::new(&list_state),
             list_state,
             timeline_stale: false,
             timeline_revision: None,
@@ -578,11 +581,7 @@ impl TimelineView {
                             .flex_1()
                             .min_h_0(),
                         |content| {
-                            crate::scroll::page_viewport(
-                                "timeline-bounce",
-                                &self.list_state,
-                                content,
-                            )
+                            crate::scroll::page_viewport("timeline-bounce", &self.followed, content)
                         },
                     ),
             )
@@ -2209,9 +2208,11 @@ mod tests {
 
     /// A reader following the tail stays pinned to the bottom while the last
     /// message grows in place: each delta the host streams into it lands
-    /// with the message's end on the timeline's bottom edge.
+    /// with the message's end on the timeline's bottom edge. A scroll up,
+    /// however slow, leaves the reply streaming below the reader, until they
+    /// are back at the end.
     #[gpui::test]
-    fn a_following_reader_stays_pinned_while_the_last_message_grows(cx: &mut TestAppContext) {
+    fn a_streaming_reply_holds_the_reader_at_its_end_until_they_scroll_up(cx: &mut TestAppContext) {
         use gpui::{VisualTestContext, px, size};
 
         let (host, session_id, _) = seeded_chat_host(cx, Timeline::default(), false);
@@ -2351,8 +2352,7 @@ mod tests {
                     .unwrap_or(0)
             })
         };
-        let mut heights = Vec::new();
-        for delta in 0..12 {
+        let mut stream = |delta: usize, cx: &mut VisualTestContext| {
             let before = streamed(cx);
             record(vec![agent::AgentEvent::Delta {
                 item_id: "streaming".into(),
@@ -2366,6 +2366,10 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(1));
             }
             draw_settled(cx);
+        };
+        let mut heights = Vec::new();
+        for delta in 0..12 {
+            stream(delta, cx);
 
             assert!(list.is_following_tail(), "delta {delta} paused following");
             let last = cx
@@ -2383,6 +2387,47 @@ mod tests {
             heights.windows(2).all(|pair| pair[1] > pair[0]),
             "the message grew with every delta: {heights:?}"
         );
+
+        // A trackpad scrolled slowly sends packets of under a pixel, and the
+        // reply goes on streaming between them. The packets take the reader
+        // up from the end, by what they add up to and what streamed in below
+        // since, and the reader stays where they took them.
+        let scroll = |delta: f32, phase: gpui::TouchPhase, cx: &mut VisualTestContext| {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: list.viewport_bounds().center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            draw_settled(cx);
+        };
+        let above_end =
+            || list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y;
+        scroll(0., gpui::TouchPhase::Started, cx);
+        for delta in 12..18 {
+            stream(delta, cx);
+            scroll(0.5, gpui::TouchPhase::Moved, cx);
+        }
+        scroll(0., gpui::TouchPhase::Ended, cx);
+        let read = list.scroll_px_offset_for_scrollbar().y;
+        assert!(
+            !list.is_following_tail() && above_end() >= px(3.),
+            "six packets of half a pixel left the reader {:?} above the end",
+            above_end()
+        );
+        for delta in 18..24 {
+            stream(delta, cx);
+            assert!(!list.is_following_tail(), "delta {delta} resumed following");
+            assert_eq!(
+                list.scroll_px_offset_for_scrollbar().y,
+                read,
+                "delta {delta} moved the reader"
+            );
+        }
+        // Back at the end, the reader follows the reply again.
+        scroll(-100_000., gpui::TouchPhase::Moved, cx);
+        stream(24, cx);
+        assert!(list.is_following_tail());
         driver.shutdown(cx, &store, &host);
     }
 
