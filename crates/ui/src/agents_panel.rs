@@ -56,6 +56,9 @@ struct AgentSettle(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_agents, no_json)]
 struct AgentCancel(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_agents, no_json)]
+struct AgentStopBackground(String);
 
 #[derive(Clone)]
 struct AgentRow {
@@ -87,6 +90,10 @@ struct AgentRow {
     open: Option<String>,
     /// The dispatched agent that Stop, Settle and Cancel act on.
     agent: Option<String>,
+    /// The piece of its lead's background work a native subagent runs as,
+    /// while its harness lists it and stops it on its own, and no stop for
+    /// it is out.
+    stop_task: Option<String>,
     /// The provider that manages a native subagent.
     managed_by: Option<&'static str>,
     /// A native subagent's type, which its provider names it by.
@@ -194,6 +201,23 @@ impl Agents {
         let running_activity = |id: Option<&str>, execution: AgentExecution| {
             store.latest_activity(id?).filter(|_| execution.running())
         };
+        let status = store.session_status_for(Some(parent_id), cx);
+        let stops = status
+            .and_then(|status| status.provider.caps().background)
+            .is_some_and(|control| control.stop.stops());
+        let stop_task = |item: &str| {
+            status?
+                .background_tasks
+                .iter()
+                .find(|row| {
+                    stops
+                        && row.listed
+                        && !row.ended
+                        && row.stopping_since.is_none()
+                        && row.task.item_id.as_deref() == Some(item)
+                })
+                .map(|row| row.task.id.clone())
+        };
         let mut native = Vec::new();
         let mut settled_native = Vec::new();
         store.with_entries_for(
@@ -211,17 +235,13 @@ impl Agents {
                     else {
                         continue;
                     };
-                    // One its harness runs in the background is listed with
-                    // the thread's background work, not here.
-                    if entry.background && *status == ItemStatus::InProgress {
-                        continue;
-                    }
                     let mirror = live.iter().find(|meta| {
                         meta.parent_session_id.as_deref() == Some(parent_id)
                             && meta.native_subagent.as_deref() == Some(entry.id.as_str())
                     });
                     let provider = parent.map(|parent| parent.provider);
                     let execution = match status {
+                        ItemStatus::InProgress if entry.background => AgentExecution::Background,
                         ItemStatus::InProgress => AgentExecution::Working,
                         ItemStatus::Completed => AgentExecution::Finished,
                         ItemStatus::Interrupted => AgentExecution::Interrupted,
@@ -252,6 +272,7 @@ impl Agents {
                         preview: summary.as_deref().map(compact).filter(|s| !s.is_empty()),
                         open: mirror.map(|meta| meta.id.clone()),
                         agent: None,
+                        stop_task: execution.running().then(|| stop_task(&entry.id)).flatten(),
                         managed_by: provider.map(|provider| provider.display_name()),
                         agent_type: Some(agent_type.clone()),
                         // A native subagent's end is not reported, only its start.
@@ -316,6 +337,7 @@ impl Agents {
                 preview: None,
                 open: Some(meta.id.clone()),
                 agent: Some(meta.id.clone()),
+                stop_task: None,
                 managed_by: None,
                 agent_type: None,
                 started_at: status.and_then(|status| status.run_started_at),
@@ -886,6 +908,20 @@ impl AgentsPanel {
             .update(cx, |store, _| store.interrupt_session(action.0.clone()));
     }
 
+    fn on_stop_background(
+        &mut self,
+        action: &AgentStopBackground,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lead) = self.session_id.clone() else {
+            return;
+        };
+        self.store.update(cx, |store, _| {
+            store.stop_background_task(lead, Some(action.0.clone()))
+        });
+    }
+
     fn on_settle(&mut self, action: &AgentSettle, _: &mut Window, cx: &mut Context<Self>) {
         self.store
             .update(cx, |store, _| store.settle_session(action.0.clone()));
@@ -917,6 +953,13 @@ impl AgentsPanel {
     /// The actions a row offers, with their icons and the action each sends.
     fn row_actions(row: &AgentRow) -> Vec<(IconName, SharedString, Box<dyn Action>)> {
         let mut actions: Vec<(IconName, SharedString, Box<dyn Action>)> = Vec::new();
+        if let Some(task) = row.stop_task.clone() {
+            actions.push((
+                IconName::Square,
+                crate::tr!("background.stop_task").into_owned().into(),
+                Box::new(AgentStopBackground(task)),
+            ));
+        }
         let Some(agent) = row.agent.clone().filter(|_| !row.archived) else {
             return actions;
         };
@@ -1456,6 +1499,7 @@ impl Render for AgentsPanel {
             .min_w_0()
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_stop))
+            .on_action(cx.listener(Self::on_stop_background))
             .on_action(cx.listener(Self::on_settle))
             .on_action(cx.listener(Self::on_cancel));
         // The empty state and the list cross-fade as the first agent starts
@@ -2238,11 +2282,11 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
-    /// A subagent Claude Code runs in the background opens its transcript
-    /// wherever the lead lists it: from the thread's background list while
-    /// it runs, and from the rail's agents once it has finished. One it
-    /// starts in turn opens from the subagent's rail while it runs, before
-    /// any of its own transcript reaches the host.
+    /// A subagent Claude Code runs in the background stays among the lead's
+    /// agents: the rail's Agents card opens its transcript while it runs,
+    /// and stops it there, and again once it has finished. One it starts in
+    /// turn opens from the subagent's rail while it runs, before any of its
+    /// own transcript reaches the host.
     #[gpui::test]
     fn a_subagent_opens_from_wherever_its_thread_lists_it(cx: &mut TestAppContext) {
         use agent::{AgentEvent, ItemContent, ItemStatus, ThreadItem};
@@ -2361,14 +2405,23 @@ mod tests {
                     .map(|meta| meta.id.clone())
             })
         };
-        driver.wait_until(cx, &store, "the subagent in the background list", |cx| {
-            mirror(cx).is_some()
-                && store.read_with(cx, |store, cx| {
-                    store
-                        .session_status_for(Some("lead"), cx)
-                        .is_some_and(|status| !status.background_tasks.is_empty())
-                })
-        });
+        driver.wait_until(
+            cx,
+            &store,
+            "the lead's agents list the subagent as running in the background",
+            |cx| {
+                mirror(cx).is_some()
+                    && store.read_with(cx, |store, cx| {
+                        store
+                            .session_status_for(Some("lead"), cx)
+                            .is_some_and(|status| !status.background_tasks.is_empty())
+                            && Agents::of(store, "lead", cx).lines().iter().any(|line| {
+                                line.key == "toolu_visual"
+                                    && line.execution == Some(super::AgentExecution::Background)
+                            })
+                    })
+            },
+        );
         let mirror = mirror(cx).unwrap();
         let opened_from = |cx: &mut TestAppContext,
                            driver: &mut crate::store::tests::LocalHostDriver,
@@ -2390,10 +2443,26 @@ mod tests {
         let lead_view = (chat, window);
 
         assert_eq!(
-            opened_from(cx, &mut driver, &lead_view, "background-row-a73e1f3b"),
+            opened_from(cx, &mut driver, &lead_view, "rail-agent-toolu_visual"),
             Some(mirror.clone()),
-            "the background list opens the running subagent's transcript"
+            "the Agents card opens the running subagent's transcript"
         );
+        store.update(cx, |store, cx| store.set_side_thread("lead", None, cx));
+        let lead_window = VisualTestContext::from_window(lead_view.1, cx).into_mut();
+        draw_settled(lead_window);
+        let stop = lead_window
+            .debug_bounds("background-stop-a73e1f3b")
+            .expect("the subagent's row has its stop");
+        lead_window.simulate_click(stop.center(), Modifiers::default());
+        driver.wait_until(cx, &store, "the stop reaches Claude Code", |_| {
+            std::iter::from_fn(|| commands.try_recv().ok()).any(|command| {
+                matches!(
+                    command,
+                    agent::SessionCommand::StopBackgroundTask { task_id: Some(id) }
+                        if id == "a73e1f3b"
+                )
+            })
+        });
 
         // The subagent starts one of its own, whose transcript has not
         // reached the host: its row in the subagent's rail opens it all

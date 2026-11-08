@@ -79,6 +79,13 @@ impl Background {
         .into()
     }
 
+    /// The piece the call `item_id` started.
+    pub(in crate::chat) fn task_for(&self, item_id: &str) -> Option<&BackgroundTaskStatus> {
+        self.rows
+            .iter()
+            .find(|row| row.task.item_id.as_deref() == Some(item_id))
+    }
+
     /// The pieces a stop reaches now: listed, running, with no stop out.
     fn stoppable(&self) -> Vec<&BackgroundTaskStatus> {
         if !self.stop.stops() {
@@ -250,7 +257,7 @@ fn kind_icon(kind: BackgroundKind) -> IconName {
 
 /// How a piece stands, as its row says it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Standing {
+pub(in crate::chat) enum Standing {
     Running,
     Stopping,
     /// Stopping, and the stop has gone unanswered too long.
@@ -259,7 +266,7 @@ enum Standing {
 }
 
 impl Standing {
-    fn of(row: &BackgroundTaskStatus, now: u64) -> Self {
+    pub(in crate::chat) fn of(row: &BackgroundTaskStatus, now: u64) -> Self {
         let unanswered = crate::composer::UNANSWERED.as_millis() as u64;
         match row.stopping_since {
             _ if row.ended => Self::Ended,
@@ -299,10 +306,35 @@ fn wake_when_unanswered(
     });
 }
 
-fn row(
+/// The wash under the row `key` while `highlighted`, coming and going.
+pub(in crate::chat) fn wash(
+    key: &str,
+    highlighted: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<gpui::Hsla> {
+    let accent = cx.theme().accent;
+    crate::motion::shown(
+        SharedString::from(format!("{key}-wash")),
+        highlighted.then_some(()),
+        CHANGE,
+        window,
+        cx,
+    )
+    .map(|shown| accent.opacity(shown.progress()))
+}
+
+/// What ends the row of a piece, under `key`: how long it has run, while
+/// it does and `elapsed` asks for it; then how it stands: its stop where the
+/// harness stops it, a spinner and Stopping once a stop is out, Force quit
+/// in the stop's place once that stop has gone unanswered too long, and
+/// Ended.
+pub(in crate::chat) fn controls(
     background: &Background,
     row: &BackgroundTaskStatus,
     place: &Place,
+    key: &str,
+    elapsed: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -311,22 +343,7 @@ fn row(
     wake_when_unanswered(row, place, now, window, cx);
     let task = &row.task;
     let id = task.id.clone();
-    let key = format!("{}-bg-{}", place.key, id);
-    let theme = cx.theme();
-    let muted = theme.muted_foreground;
-    let name = crate::chat::model::one_line(&task.name);
-    let highlighted = place.highlight.is_some() && place.highlight == task.item_id;
-    let accent = theme.accent;
-    let wash = crate::motion::shown(
-        SharedString::from(format!("{key}-wash")),
-        highlighted.then_some(()),
-        CHANGE,
-        window,
-        cx,
-    )
-    .map(|shown| accent.opacity(shown.progress()));
-    let radius = crate::material::radius_card(cx);
-    let elapsed = (standing != Standing::Ended).then(|| {
+    let elapsed = (elapsed && standing != Standing::Ended).then(|| {
         let first_seen = !task.started_reported;
         let clock = crate::widgets::clock::Clock::since(
             SharedString::from(format!("{key}-elapsed")),
@@ -430,6 +447,36 @@ fn row(
                 );
             })
     });
+    h_flex()
+        .flex_none()
+        .gap_1()
+        .items_center()
+        .text_secondary(place.touch, cx)
+        .text_color(cx.theme().muted_foreground)
+        .children(elapsed)
+        .child(state)
+        .children(stop)
+        .children(force)
+        .into_any_element()
+}
+
+fn row(
+    background: &Background,
+    row: &BackgroundTaskStatus,
+    place: &Place,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let standing = Standing::of(row, crate::time::now_millis());
+    let task = &row.task;
+    let id = task.id.clone();
+    let key = format!("{}-bg-{}", place.key, id);
+    let muted = cx.theme().muted_foreground;
+    let name = crate::chat::model::one_line(&task.name);
+    let highlighted = place.highlight.is_some() && place.highlight == task.item_id;
+    let wash = wash(&key, highlighted, window, cx);
+    let radius = crate::material::radius_card(cx);
+    let controls = controls(background, row, place, &key, true, window, cx);
     // A subagent running in the background keeps its own transcript, which
     // its row opens; any other row leads to its call in the timeline.
     let transcript = (standing == Standing::Running && task.kind == BackgroundKind::Agent)
@@ -478,18 +525,7 @@ fn row(
                 })
                 .child(crate::widgets::fade_text(SharedString::from(name.clone()))),
         )
-        .child(
-            h_flex()
-                .flex_none()
-                .gap_1()
-                .items_center()
-                .text_secondary(place.touch, cx)
-                .text_color(muted)
-                .children(elapsed)
-                .child(state)
-                .children(stop)
-                .children(force),
-        );
+        .child(controls);
     let item = task.item_id.clone();
     let place = place.clone();
     let selector = id.clone();

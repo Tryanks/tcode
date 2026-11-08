@@ -11,10 +11,12 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_core::settlement::AgentExecution;
+use tcode_protocol::BackgroundTaskStatus;
 
 use super::RailView;
 use crate::agents_panel::{AgentLine, AgentState, Agents};
 use crate::chat::ChatView;
+use crate::chat::background::{Background, Place};
 use crate::material::CARD_INSET;
 use crate::scroll::{LeftRows, VirtualList, row_key};
 use crate::theme::ActiveTheme as _;
@@ -88,8 +90,26 @@ pub(super) fn body(
     let store = rail.workspace_store.clone();
     let host = rail.agent_host(cx);
     let origins = rail.origins.clone();
+    let background = rail.background(cx).zip(rail.background_place(cx));
+    let highlight = rail.background_highlight.clone();
+    let reveal = highlight
+        .as_ref()
+        .and_then(|item| lines.iter().position(|line| &line.key == item));
     let draw = move |line: &AgentLine, window: &mut Window, cx: &mut App| {
-        row(line, &store, host.clone(), &origins, window, cx)
+        let background = background.as_ref().and_then(|(background, place)| {
+            let task = background.task_for(&line.key)?;
+            Some((background, task, place))
+        });
+        let highlighted = highlight.as_deref() == Some(line.key.as_str());
+        row(
+            line,
+            &store,
+            host.clone(),
+            &origins,
+            (background, highlighted),
+            window,
+            cx,
+        )
     };
     let leaving = {
         let draw = draw.clone();
@@ -104,6 +124,7 @@ pub(super) fn body(
         })
         .keyed_live(keys, ROWS, leaving)
         .measure_all()
+        .reveal(reveal)
         .scrollbar()
         .size_full()
         .px(px(CARD_INSET))
@@ -112,11 +133,19 @@ pub(super) fn body(
     )
 }
 
+/// The piece of background work an agent runs as, with the list it is
+/// part of and where it is drawn, and whether the timeline pointed it out.
+type BackgroundOf<'a> = (
+    Option<(&'a Background, &'a BackgroundTaskStatus, &'a Place)>,
+    bool,
+);
+
 fn row(
     line: &AgentLine,
     store: &Entity<crate::store::WorkspaceStore>,
     host: Option<Entity<ChatView>>,
     origins: &crate::motion::expand::Origins,
+    (background, highlighted): BackgroundOf<'_>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -161,6 +190,19 @@ fn row(
                 .whitespace_nowrap()
                 .text_secondary(false, cx)
                 .child(elapsed)
+        }))
+        // One its harness runs in the background stops here, where the
+        // harness stops it.
+        .children(background.map(|(background, task, place)| {
+            crate::chat::background::controls(
+                background,
+                task,
+                place,
+                &format!("rail-agent-bg-{}", line.key),
+                false,
+                window,
+                cx,
+            )
         }));
     let facts: Vec<String> = [line.model.clone(), line.effort.clone()]
         .into_iter()
@@ -265,6 +307,10 @@ fn row(
     .px_1()
     .py_1()
     .rounded(radius)
+    .when_some(
+        crate::chat::background::wash(&format!("rail-agent-{}", line.key), highlighted, window, cx),
+        |row, wash| row.bg(wash),
+    )
     .child(crate::material::row_hover(radius, cx))
     .child(title_line)
     .children(about)
