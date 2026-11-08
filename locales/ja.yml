@@ -317,6 +317,8 @@ sidebar:
   layout_grouped: "プロジェクトごとにグループ化"
   filter_empty: "このプロジェクトにはまだスレッドがありません。"
   project: "プロジェクト %{name}"
+  host: "ホスト %{name}"
+  manage_hosts: "ホストを管理"
   thread: "スレッド %{title}"
   thread_in_pane: "スレッド %{title}、%{place}のペイン"
   sort: "並べ替え：%{mode}"

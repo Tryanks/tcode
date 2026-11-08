@@ -317,6 +317,8 @@ sidebar:
   layout_grouped: "Group by project"
   filter_empty: "No threads in this project yet."
   project: "Project %{name}"
+  host: "Machine %{name}"
+  manage_hosts: "Manage machines"
   thread: "Thread %{title}"
   thread_in_pane: "Thread %{title}, %{place} pane"
   sort: "Sort: %{mode}"

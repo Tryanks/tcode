@@ -123,6 +123,36 @@ pub fn partition_threads<'a>(
     sections
 }
 
+/// Several hosts' rows of one section as one list, each sequence already in
+/// its host's order: the head shown latest goes next, earlier sequences first
+/// on a tie. Hosts are never sorted against each other, so the order each
+/// host's user arranged by hand survives the merge.
+pub fn merge_by_shown_time<T>(
+    sequences: impl IntoIterator<Item = Vec<T>>,
+    meta: impl Fn(&T) -> &SessionMeta,
+) -> Vec<T> {
+    let mut heads: Vec<_> = sequences
+        .into_iter()
+        .map(|rows| rows.into_iter().peekable())
+        .collect();
+    let mut merged = Vec::new();
+    loop {
+        let mut next: Option<(usize, u64)> = None;
+        for (index, rows) in heads.iter_mut().enumerate() {
+            if let Some(row) = rows.peek() {
+                let shown = shown_timestamp(meta(row));
+                if next.is_none_or(|(_, latest)| shown > latest) {
+                    next = Some((index, shown));
+                }
+            }
+        }
+        let Some((index, _)) = next else {
+            return merged;
+        };
+        merged.extend(heads[index].next());
+    }
+}
+
 // Order keys are base-26 fractions in (0, 1) written with the digits a–z and
 // compared as plain strings, so a move writes one key to one thread and every
 // client converges on the same order. A trailing `a` would leave no key
@@ -314,6 +344,49 @@ mod tests {
             order(&mut sessions),
             ["new", "pinned", "old", "reopened", "arranged"]
         );
+    }
+
+    /// Two hosts' Active threads, each sorted as its host lists them, merge
+    /// by the time each row shows; the rows host A's user arranged keep
+    /// their order and their place after its unarranged ones, though one of
+    /// them was active most recently; on a tie the first host's row leads.
+    #[test]
+    fn several_hosts_merge_by_time_and_keep_each_hosts_arranged_order() {
+        let thread = |id: &str, updated: u64, key: Option<&str>| {
+            let mut meta = SessionMeta::new(agent::ProviderKind::Codex, "/sample".into(), None);
+            meta.id = id.into();
+            meta.created_at = 1;
+            meta.updated_at = updated;
+            meta.active_order = key.map(str::to_owned);
+            meta
+        };
+        let mut a = vec![
+            thread("a-arranged-late", 5, Some("m")),
+            thread("a-old", 10, None),
+            thread("a-arranged-first", 100, Some("b")),
+            thread("a-new", 50, None),
+            thread("a-arranged-last", 20, Some("t")),
+        ];
+        let mut b = vec![thread("b-tie", 20, None), thread("b-newer", 40, None)];
+        sort_threads(&mut a);
+        sort_threads(&mut b);
+        let merged = merge_by_shown_time([a.iter().collect(), b.iter().collect()], |meta| meta);
+        let ids: Vec<_> = merged.iter().map(|meta| meta.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "a-new",
+                "b-newer",
+                "b-tie",
+                "a-old",
+                "a-arranged-first",
+                "a-arranged-late",
+                "a-arranged-last"
+            ]
+        );
+        let (earlier, later) = ([thread("earlier", 20, None)], [thread("later", 20, None)]);
+        let merged = merge_by_shown_time([later.iter().collect(), earlier.iter().collect()], |m| m);
+        assert_eq!(merged[0].id, "later", "a tie goes to the host listed first");
     }
 
     #[test]

@@ -571,9 +571,40 @@ impl SessionsSidebar {
         lower: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(drag) = self.drag.as_ref().filter(|drag| drag.arranges) else {
+        let Some(dragged) = self
+            .drag
+            .as_ref()
+            .filter(|drag| drag.arranges)
+            .map(|drag| drag.thread.clone())
+        else {
             return;
         };
+        // A row of another host, which the list interleaves by time: the
+        // thread lands among its own host's rows, after those drawn above.
+        let among_own = match zone {
+            DropZone::Row { thread, section }
+                if thread.host != dragged.host && *section != ThreadSection::Settled =>
+            {
+                let lists = self.thread_lists(cx);
+                let rows = self.thread_rows(&lists, scope, &Shelf::Recent);
+                let rows = match section {
+                    ThreadSection::Pinned => rows.pinned,
+                    _ => rows.active,
+                };
+                Some(
+                    rows.iter()
+                        .take_while(|(host, meta)| {
+                            **host != thread.host || meta.id != thread.session_id
+                        })
+                        .filter(|(host, meta)| {
+                            **host == dragged.host && meta.id != dragged.session_id
+                        })
+                        .count(),
+                )
+            }
+            _ => None,
+        };
+        let drag = self.drag.as_ref().expect("checked above");
         let (mut gap, mut over) = (drag.gap, drag.over);
         if drag.scope.as_ref() != scope {
             over = None;
@@ -592,16 +623,17 @@ impl SessionsSidebar {
                     over = Some(gap.map_or(drag.from, |(section, _)| section));
                 }
                 DropZone::Row { thread, section } => {
-                    let index = (thread.host == drag.thread.host)
-                        .then(|| {
-                            drag.others
-                                .section(*section)
-                                .iter()
-                                .position(|other| *other == thread.session_id)
-                        })
-                        .flatten();
+                    let index = match among_own {
+                        Some(index) => Some(index),
+                        None => drag
+                            .others
+                            .section(*section)
+                            .iter()
+                            .position(|other| *other == thread.session_id)
+                            .map(|index| index + usize::from(lower)),
+                    };
                     if let Some(index) = index {
-                        gap = Some((*section, index + usize::from(lower)));
+                        gap = Some((*section, index));
                         over = Some(*section);
                     }
                 }
@@ -1104,25 +1136,28 @@ impl SessionsSidebar {
         self.clear_finished_drag(cx);
         let scope = self.arrange_scope.clone();
         let lists = self.thread_lists(cx);
-        let mut sections = no_sections();
-        for lists in lists.iter() {
-            let Some(project) = host_scope(scope.as_ref(), &lists.host) else {
-                continue;
-            };
-            let host = self.arranged(
-                &lists.host,
-                scope.as_ref(),
-                project_threads(&lists.flat, project),
-            );
-            let tag = |rows: Vec<&SessionMeta>| -> Vec<ListedThread> {
-                rows.into_iter()
-                    .map(|meta| self.listed((&lists.host, meta)))
-                    .collect()
-            };
-            sections.pinned.extend(tag(host.pinned));
-            sections.active.extend(tag(host.active));
-            sections.settled.extend(tag(host.settled));
-        }
+        let sections = merged(
+            lists
+                .iter()
+                .filter_map(|lists| {
+                    let project = host_scope(scope.as_ref(), &lists.host)?;
+                    let host = self.arranged(
+                        &lists.host,
+                        scope.as_ref(),
+                        project_threads(&lists.flat, project),
+                    );
+                    Some(tagged_sections(&lists.host, host))
+                })
+                .collect(),
+        );
+        let tag = |rows: Vec<Listed>| -> Vec<ListedThread> {
+            rows.into_iter().map(|row| self.listed(row)).collect()
+        };
+        let sections = ThreadSections {
+            pinned: tag(sections.pinned),
+            active: tag(sections.active),
+            settled: tag(sections.settled),
+        };
         // The empty-Pinned row stays in the list, folding in and out with
         // the last pinned thread.
         let mut rows: Vec<ArrangeRow> = vec![
@@ -1384,6 +1419,13 @@ impl SessionsSidebar {
                 })
             })
             .cloned();
+        let host_name = self
+            .sectioned()
+            .then(|| host_title(store.read(cx)).to_string());
+        let project = match (project, host_name) {
+            (Some(project), Some(host)) => Some(format!("{project} · {host}")),
+            (project, host) => project.or(host),
+        };
         let state = self.thread_row_state(
             store.read(cx),
             listed,
