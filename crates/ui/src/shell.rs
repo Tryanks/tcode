@@ -268,7 +268,6 @@ struct Link {
     /// The host's preview panel: it answers the preview tools and owns the
     /// pages each pane's drawer shows.
     preview: Entity<PreviewPanel>,
-    sidebar: Entity<SessionsSidebar>,
     settings_page: Entity<SettingsPage>,
     palette: Entity<CommandPalette>,
     /// Whether this host's saved record has been stamped with the time this
@@ -649,6 +648,9 @@ pub struct AppShell {
     links: Vec<Link>,
     /// The views of the host the window shows, which is one of `links`.
     column: Option<Column>,
+    /// The threads of every host in `links`, wide beside the chat and as
+    /// the compact threads page.
+    sidebar: Entity<SessionsSidebar>,
     /// Saved hosts, pairing by invitation and authentication repair: the hosts
     /// destination, and the same panel Settings → Remote shows.
     hosts: Entity<RemotePanel>,
@@ -704,6 +706,7 @@ struct Departed {
     key: u64,
     column: Option<Column>,
     links: Vec<Link>,
+    sidebar: Entity<SessionsSidebar>,
     route: Route,
     destination: Destination,
 }
@@ -865,10 +868,12 @@ impl AppShell {
             panel.set_pairing_error(setup.initial_pairing_error.clone());
             panel
         });
+        let sidebar = cx.new(|cx| SessionsSidebar::new(Vec::new(), window_state.clone(), cx));
         let mut shell = Self {
             window_state,
             links: Vec::new(),
             column: None,
+            sidebar,
             hosts,
             nav: cx.new(|_| NavStackState::new()),
             back_swipe: None,
@@ -1144,14 +1149,15 @@ impl AppShell {
         }
         let links = std::mem::take(&mut self.links);
         self.retire(links, cx);
-        self.sync_hosts_panel(cx);
+        self.sync_hosts(cx);
         self.window_state
             .update(cx, |state, cx| state.leave_workspace(cx));
         cx.notify();
     }
 
-    /// Close `links` and the column, if any, and, in the wide layout, keep
-    /// their views on screen, inert, for the next workspace to rise over.
+    /// Close `links`, the column, if any, and the sidebar over them, which
+    /// a new one replaces, and, in the wide layout, keep their views on
+    /// screen, inert, for the next workspace to rise over.
     /// The column's preview pages go at once: a native view draws over
     /// everything, the workspace rising over it included.
     fn retire(&mut self, mut links: Vec<Link>, cx: &mut Context<Self>) {
@@ -1165,11 +1171,17 @@ impl AppShell {
             }
             column
         });
+        let window_state = self.window_state.clone();
+        let sidebar = std::mem::replace(
+            &mut self.sidebar,
+            cx.new(|cx| SessionsSidebar::new(Vec::new(), window_state, cx)),
+        );
         if !self.compact(cx) {
             self.departed.push(Departed {
                 key: self.scene_key,
                 column,
                 links,
+                sidebar,
                 route: self.window_state.read(cx).route(),
                 destination: self.destination(cx),
             });
@@ -1177,9 +1189,12 @@ impl AppShell {
         self.scene_key += 1;
     }
 
-    /// Hosts follows the window onto the hosts it is linked to now.
-    fn sync_hosts_panel(&self, cx: &mut Context<Self>) {
-        let stores = self.links.iter().map(|link| link.store.clone()).collect();
+    /// Hosts and the sidebar follow the window onto the hosts it is linked
+    /// to now.
+    fn sync_hosts(&self, cx: &mut Context<Self>) {
+        let stores: Vec<_> = self.links.iter().map(|link| link.store.clone()).collect();
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_hosts(stores.clone(), cx));
         self.hosts
             .update(cx, |hosts, cx| hosts.set_stores(stores, cx));
     }
@@ -1208,7 +1223,7 @@ impl AppShell {
         let links = std::mem::take(&mut self.links);
         self.retire(links, cx);
         let host = self.open_link(target, local, window, cx);
-        self.sync_hosts_panel(cx);
+        self.sync_hosts(cx);
         let Some(host) = host else {
             log::error!("this client cannot reach the requested host");
             self.window_state
@@ -1329,8 +1344,6 @@ impl AppShell {
             store: store.clone(),
             open: Some(open),
             preview,
-            sidebar: cx
-                .new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx)),
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
             palette: cx.new(|cx| {
@@ -1378,9 +1391,9 @@ impl AppShell {
             window,
             |this, _, event: &DockEvent, window, cx| {
                 if let DockEvent::DragDrop { item, target } = event
-                    && let Some(session_id) = crate::sidebar::thread_carried(item)
+                    && let Some(thread) = crate::sidebar::thread_carried(item)
                 {
-                    this.drop_thread(session_id.to_owned(), *target, window, cx);
+                    this.drop_thread(thread.clone(), *target, window, cx);
                 }
                 // The threads list draws a map of the panes.
                 if matches!(event, DockEvent::LayoutChanged) {
@@ -1975,14 +1988,19 @@ impl AppShell {
     /// it in a new pane there, the pane itself shows it in place of its own.
     fn drop_thread(
         &mut self,
-        session_id: String,
+        thread: ThreadKey,
         target: gpui_base::dock::DropTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(column) = self.column.as_ref() else {
+        let Some(column) = self
+            .column
+            .as_ref()
+            .filter(|column| column.host == thread.host)
+        else {
             return;
         };
+        let session_id = thread.session_id;
         let Some(pane) = column.panes(cx).into_iter().find(|pane| {
             pane.read(cx)
                 .group()
@@ -2036,15 +2054,20 @@ impl AppShell {
         window: &Window,
         cx: &App,
     ) -> bool {
-        let (Some(column), Some(link)) = (self.column.as_ref(), self.column_link()) else {
+        let Some(column) = self.column.as_ref() else {
             return false;
         };
-        let Some(session_id) = link.sidebar.read(cx).dragged_session() else {
+        let Some(thread) = self
+            .sidebar
+            .read(cx)
+            .dragged_session()
+            .filter(|thread| thread.host == column.host)
+        else {
             return false;
         };
         // The panes beneath a zoomed one are covered, and it is in no tab
         // group to drop on.
-        if column.zoom.pane().is_some() || self.pane_showing(session_id, cx).is_some() {
+        if column.zoom.pane().is_some() || self.pane_showing(&thread.session_id, cx).is_some() {
             return false;
         }
         column
@@ -2957,20 +2980,18 @@ impl AppShell {
             }
             column.handed.insert(chat.entity_id(), now);
         }
-        let (Some(column), Some(link)) = (self.column.as_ref(), self.column_link()) else {
+        let Some(column) = self.column.as_ref() else {
             return;
         };
         let shown = self.shown_threads(tree.as_ref(), cx);
-        let hovered = link.sidebar.read(cx).hovered_thread();
+        let hovered = self.sidebar.read(cx).hovered_thread();
         for pane in column.panes(cx) {
             let hovered = shown.map.iter().any(|cell| {
-                cell.pane == pane.entity_id()
-                    && hovered.is_some()
-                    && cell.row.as_deref() == hovered.as_deref()
+                cell.pane == pane.entity_id() && hovered.is_some() && cell.row == hovered
             });
             ThreadPanel::set_row_hovered(&pane, hovered, cx);
         }
-        SessionsSidebar::set_shown(&link.sidebar, shown, cx);
+        SessionsSidebar::set_shown(&self.sidebar, shown, cx);
     }
 
     /// What the threads list marks: nothing on a phone, nor on a route
@@ -2994,7 +3015,7 @@ impl AppShell {
         let store = link.store.read(cx);
         let row = |pane: &Entity<ThreadPanel>| {
             let thread = pane.read(cx).session_id()?;
-            Some(store.roster_row(thread))
+            Some(store.thread_key(&store.roster_row(thread)))
         };
         let panes = match column.zoom.pane().filter(|_| column.zoom.is_zoomed()) {
             Some(zoomed) => vec![zoomed.clone()],
@@ -3309,13 +3330,9 @@ pub(crate) fn navigate_thread(action: &crate::shortcut::NavigateThread, cx: &mut
     };
     let current = current_thread(cx);
     shell.update(cx, |shell, cx| {
-        let Some(link) = shell.column_link() else {
-            return;
-        };
-        let current = current.and_then(|thread| link.store.read(cx).session_of(thread));
-        let sidebar = link.sidebar.clone();
+        let sidebar = shell.sidebar.clone();
         if sidebar.update(cx, |sidebar, cx| {
-            sidebar.navigate_thread(action, current.as_deref(), cx)
+            sidebar.navigate_thread(action, current.as_ref(), cx)
         }) {
             shell.window_state.update(cx, |state, cx| {
                 state.close_palette(cx);
@@ -3737,10 +3754,8 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(link) = self.column_link() {
-            link.sidebar
-                .update(cx, |sidebar, cx| sidebar.undo_lifecycle(window, cx));
-        }
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.undo_lifecycle(window, cx));
     }
 
     fn on_toggle_palette(
@@ -4356,9 +4371,10 @@ impl AppShell {
     }
 
     fn render_arrange_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(sidebar) = self.column_link().map(|link| link.sidebar.clone()) else {
+        if self.column_link().is_none() {
             return div().into_any_element();
-        };
+        }
+        let sidebar = self.sidebar.clone();
         use crate::widgets::button::{Button, ButtonVariants as _};
         let done = div()
             // A control press must not arm the ancestor window drag region.
@@ -4397,7 +4413,7 @@ impl AppShell {
             ),
             None => (crate::tr!("mobile.threads").into_owned().into(), None),
         };
-        let sidebar = link.sidebar.clone();
+        let sidebar = self.sidebar.clone();
         let actions = vec![
             nav_icon_button(
                 "compact-new-thread",
@@ -5355,6 +5371,7 @@ impl AppShell {
             }
             std::mem::swap(&mut self.column, &mut left.column);
             std::mem::swap(&mut self.links, &mut left.links);
+            std::mem::swap(&mut self.sidebar, &mut left.sidebar);
             self.departing = Some(Departing {
                 destination: left.destination,
                 hosts_withheld,
@@ -5363,6 +5380,7 @@ impl AppShell {
             self.departing = None;
             std::mem::swap(&mut self.column, &mut left.column);
             std::mem::swap(&mut self.links, &mut left.links);
+            std::mem::swap(&mut self.sidebar, &mut left.sidebar);
             self.departed.insert(ix, left);
         }
         frame.render(layers).into_any_element()
@@ -5505,13 +5523,12 @@ impl AppShell {
             .column
             .as_ref()
             .expect("a workspace route has a column");
-        let link = self.column_link().expect("a workspace route has a column");
         let sidebar_width = column.sidebar_width.get();
         let sidebar = match sidebar {
             Some(opacity) => div()
                 .size_full()
                 .opacity(opacity)
-                .child(self.layout_part("sidebar", link.sidebar.clone()))
+                .child(self.layout_part("sidebar", self.sidebar.clone()))
                 .into_any_element(),
             None => div().into_any_element(),
         };
@@ -5621,7 +5638,7 @@ impl AppShell {
             Some(opacity) => div()
                 .size_full()
                 .opacity(opacity)
-                .child(self.layout_part("sidebar", link.sidebar.clone()))
+                .child(self.layout_part("sidebar", self.sidebar.clone()))
                 .into_any_element(),
             None => div().into_any_element(),
         };

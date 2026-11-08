@@ -89,7 +89,7 @@ fn phone<'a>(
         store.read_with(cx, |store, _| store.baseline_ready())
     });
     let navigation = cx.new(|_| WindowState::default().with_compact(true));
-    let sidebar = cx.new(|cx| SessionsSidebar::new(store.clone(), navigation.clone(), cx));
+    let sidebar = cx.new(|cx| SessionsSidebar::new(vec![store.clone()], navigation.clone(), cx));
     let (_, cx) =
         cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
     cx.update(|_, cx| cx.set_reduce_motion(false));

@@ -35,7 +35,7 @@ use tcode_protocol::{HostingAction, HostingState, SpaceAction, SpaceInfo};
 use super::{Submit, report, submit_actions};
 use crate::icon::Icon;
 use crate::overlay::{DialogActions, Notification, OverlayExt as _};
-use crate::store::WorkspaceStore;
+use crate::store::{HostKey, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -67,10 +67,10 @@ pub(crate) struct ToggleShare {
     pub project_id: String,
 }
 
-/// Create a space holding this project, then show its link.
+/// Create a space holding a host's project, then show its link.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_spaces, no_json)]
-pub(crate) struct NewSpaceAndShare(pub String);
+pub(crate) struct NewSpaceAndShare(pub HostKey, pub String);
 
 /// Which machine a [`Spaces`] manages.
 enum SpacesHost {
@@ -644,6 +644,7 @@ fn quoted(key: &str, name: &str) -> String {
 #[derive(Clone)]
 pub(crate) struct ShareTarget {
     pub spaces: Entity<Spaces>,
+    pub host: HostKey,
     pub project_id: String,
     pub project_name: String,
 }
@@ -677,7 +678,10 @@ pub(crate) fn share_items(
     }
     menu.menu(
         crate::tr!("spaces.share.new").into_owned(),
-        Box::new(NewSpaceAndShare(target.project_id.clone())),
+        Box::new(NewSpaceAndShare(
+            target.host.clone(),
+            target.project_id.clone(),
+        )),
     )
 }
 
