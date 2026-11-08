@@ -162,6 +162,16 @@ impl From<String> for HostKey {
     }
 }
 
+impl HostKey {
+    /// How this client writes the host down: `"local"` or the host's id.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Local => "local",
+            Self::Remote(host_id) => host_id,
+        }
+    }
+}
+
 impl From<HostKey> for String {
     fn from(host: HostKey) -> Self {
         match host {

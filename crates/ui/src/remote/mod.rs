@@ -1,11 +1,12 @@
-//! Hosts: which host this window talks to, and which devices may talk to it.
+//! Hosts: the machines this window can show and which of them it does, and
+//! which devices may talk to this one.
 //!
 //! This is a product surface, not a settings page. It is where connections
 //! are made, in both directions: the invitation this machine shows other
 //! devices, the saved machines this window can open, pairing by a scanned or
 //! pasted invitation and authentication repair. It is reached from the
 //! sidebar's feature area at every width. It needs `tcode_client` and the
-//! attachment owner's switch action, and nothing else: it compiles on every
+//! window's host requests, and nothing else: it compiles on every
 //! client, including `--no-default-features`.
 //!
 //! **Hosting** — whether the endpoint runs, its name, Traverse, whether new
@@ -89,12 +90,33 @@ impl AttachmentTarget {
     }
 }
 
-pub type SwitchAttachment = Rc<dyn Fn(AttachmentTarget, &mut Window, &mut App)>;
+/// What the window is asked to do with a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRequest {
+    /// Show `target` in the workspace beside the hosts already there; a
+    /// host that is reached only alone replaces them.
+    Open(AttachmentTarget),
+    /// Take the host out of the workspace, keeping its saved record.
+    Leave(HostKey),
+    /// Move the host one place earlier, or later, among the workspace's.
+    Move { host: HostKey, earlier: bool },
+}
 
-/// Leave the host this row names, keeping the saved record.
+pub type RequestHost = Rc<dyn Fn(HostRequest, &mut Window, &mut App)>;
+
+/// Leave the workspace of the host this row names, keeping the saved record.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_hosts, no_json)]
-struct DisconnectHost;
+struct DisconnectHost(String);
+
+/// Move the host this row names one place earlier, or later, among the
+/// workspace's hosts.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_hosts, no_json)]
+struct MoveHost {
+    host_id: String,
+    earlier: bool,
+}
 
 /// Forget the saved record. A live attachment to it keeps running: the record
 /// is a credential, not the connection.
@@ -102,15 +124,14 @@ struct DisconnectHost;
 #[action(namespace = tcode_hosts, no_json)]
 struct ForgetHost(String);
 
-/// The client's own identity and the action that re-points this window at a
-/// different host.
+/// The client's own identity and the way to ask this window for a host.
 ///
 /// It is deliberately separate from hosting: a client that can never host still
-/// needs saved hosts, a device name and a way to switch attachment.
+/// needs saved hosts, a device name and a way to open one.
 pub struct ClientAttachment {
     host: Rc<dyn ClientHost>,
     local: bool,
-    switch: SwitchAttachment,
+    request: RequestHost,
 }
 
 impl Global for ClientAttachment {}
@@ -122,12 +143,12 @@ impl ClientAttachment {
     pub fn new(
         host: Rc<dyn ClientHost>,
         local: bool,
-        switch: impl Fn(AttachmentTarget, &mut Window, &mut App) + 'static,
+        request: impl Fn(HostRequest, &mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
             host,
             local,
-            switch: Rc::new(switch),
+            request: Rc::new(request),
         }
     }
 
@@ -140,8 +161,8 @@ impl ClientAttachment {
         self.host.clone()
     }
 
-    pub fn switcher(&self) -> SwitchAttachment {
-        self.switch.clone()
+    pub fn requester(&self) -> RequestHost {
+        self.request.clone()
     }
 
     pub fn hosts(&self) -> Vec<PairedHost> {
@@ -302,8 +323,8 @@ fn group_entry(
 }
 
 pub struct RemotePanel {
-    /// The stores of the hosts the window is linked to. Hosts is also the
-    /// root of a window linked to none.
+    /// The stores of the hosts the window is linked to, in the workspace's
+    /// order.
     stores: Vec<Entity<WorkspaceStore>>,
     /// Why the host in this process did not start the last time this window
     /// tried to attach to it.
@@ -497,8 +518,12 @@ impl RemotePanel {
             }
             let attachment = cx.global::<ClientAttachment>();
             attachment.save_host(host.clone());
-            let switch = attachment.switcher();
-            switch(AttachmentTarget::Remote(Box::new(host)), window, cx);
+            let request = attachment.requester();
+            request(
+                HostRequest::Open(AttachmentTarget::Remote(Box::new(host))),
+                window,
+                cx,
+            );
         }
         cx.notify();
     }
@@ -598,8 +623,12 @@ impl RemotePanel {
                                     .compact()
                                     .label(crate::tr!("hosts.local.retry"))
                                     .on_click(|_, window, cx| {
-                                        let switch = cx.global::<ClientAttachment>().switcher();
-                                        switch(AttachmentTarget::Local, window, cx);
+                                        let request = cx.global::<ClientAttachment>().requester();
+                                        request(
+                                            HostRequest::Open(AttachmentTarget::Local),
+                                            window,
+                                            cx,
+                                        );
                                     }),
                             )
                             .child(
@@ -634,8 +663,8 @@ impl RemotePanel {
                 .children(actions)
                 .when(!failed, |row| {
                     row.on_click(|_, window, cx| {
-                        let switch = cx.global::<ClientAttachment>().switcher();
-                        switch(AttachmentTarget::Local, window, cx);
+                        let request = cx.global::<ClientAttachment>().requester();
+                        request(HostRequest::Open(AttachmentTarget::Local), window, cx);
                     })
                 })
             })
@@ -742,21 +771,30 @@ impl RemotePanel {
         .children(repair)
         .when(!needs_pairing, |row| {
             row.on_click(move |_, window, cx| {
-                let switch = cx.global::<ClientAttachment>().switcher();
-                switch(
-                    AttachmentTarget::Remote(Box::new(connect_host.clone())),
+                let request = cx.global::<ClientAttachment>().requester();
+                request(
+                    HostRequest::Open(AttachmentTarget::Remote(Box::new(connect_host.clone()))),
                     window,
                     cx,
                 );
             })
         })
         // The row must keep its hover fill while the child menu is hovered.
-        .child(self.host_menu(host, current));
+        .child(self.host_menu(host, current, cx));
         row.into_any_element()
     }
 
-    fn host_menu(&self, host: &PairedHost, current: bool) -> AnyElement {
+    fn host_menu(&self, host: &PairedHost, current: bool, cx: &App) -> AnyElement {
         let host_id = host.host_id.clone();
+        // Where the host stands among the workspace's, which a space's
+        // host, reached alone, is not one of.
+        let key = HostKey::Remote(host.host_id.clone());
+        let place = self
+            .stores
+            .iter()
+            .position(|store| store.read(cx).host_key() == key)
+            .filter(|_| self.stores.len() > 1);
+        let last = self.stores.len().saturating_sub(1);
         let label = crate::tr!("hosts.actions", name = host.name.clone()).into_owned();
         div()
             .flex_none()
@@ -772,12 +810,31 @@ impl RemotePanel {
                     .icon(IconName::Ellipsis)
                     .aria_label(label)
                     .dropdown_menu(move |menu, _window, _cx| {
-                        let menu = menu.when(current, |menu| {
-                            menu.menu(
-                                crate::tr!("hosts.disconnect").into_owned(),
-                                Box::new(DisconnectHost),
-                            )
-                        });
+                        let menu = menu
+                            .when(place.is_some_and(|place| place > 0), |menu| {
+                                menu.menu(
+                                    crate::tr!("hosts.move_up").into_owned(),
+                                    Box::new(MoveHost {
+                                        host_id: host_id.clone(),
+                                        earlier: true,
+                                    }),
+                                )
+                            })
+                            .when(place.is_some_and(|place| place < last), |menu| {
+                                menu.menu(
+                                    crate::tr!("hosts.move_down").into_owned(),
+                                    Box::new(MoveHost {
+                                        host_id: host_id.clone(),
+                                        earlier: false,
+                                    }),
+                                )
+                            })
+                            .when(current, |menu| {
+                                menu.menu(
+                                    crate::tr!("hosts.disconnect").into_owned(),
+                                    Box::new(DisconnectHost(host_id.clone())),
+                                )
+                            });
                         menu.menu(
                             crate::tr!("hosts.forget").into_owned(),
                             Box::new(ForgetHost(host_id.clone())),
@@ -825,6 +882,15 @@ impl RemotePanel {
 
         // The empty row is one more key, which leaves as the first machine
         // arrives and comes back after the last one goes.
+        // The workspace's hosts first, in its order, then the others.
+        let mut hosts = hosts;
+        hosts.sort_by_key(|host| {
+            let key = HostKey::Remote(host.host_id.clone());
+            self.stores
+                .iter()
+                .position(|store| store.read(cx).host_key() == key)
+                .unwrap_or(self.stores.len())
+        });
         let saved: Vec<(SharedString, Option<(PairedHost, bool)>)> = if hosts.is_empty() {
             vec![("hosts-empty".into(), None)]
         } else {
@@ -1336,6 +1402,7 @@ impl RemotePanel {
                 .lock_scroll_axis()
                 .track_scroll(scroll)
                 .on_action(cx.listener(Self::on_disconnect))
+                .on_action(cx.listener(Self::on_move))
                 .on_action(cx.listener(Self::on_forget))
                 .child(crate::settings_rows::content_column(
                     body,
@@ -1372,19 +1439,30 @@ impl RemotePanel {
             .into_any_element()
     }
 
-    fn on_disconnect(&mut self, _: &DisconnectHost, window: &mut Window, cx: &mut Context<Self>) {
-        // Leaving a host is an explicit act; the saved record stays. A client
-        // with a host of its own falls back to it rather than to nothing, and
-        // to nothing when that host does not start.
-        crate::shell::detach_current(cx);
-        if cx
-            .try_global::<ClientAttachment>()
-            .is_some_and(ClientAttachment::can_attach_local)
-        {
-            let switch = cx.global::<ClientAttachment>().switcher();
-            switch(AttachmentTarget::Local, window, cx);
-        }
-        cx.notify();
+    fn on_disconnect(
+        &mut self,
+        action: &DisconnectHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = cx.global::<ClientAttachment>().requester();
+        request(
+            HostRequest::Leave(HostKey::Remote(action.0.clone())),
+            window,
+            cx,
+        );
+    }
+
+    fn on_move(&mut self, action: &MoveHost, window: &mut Window, cx: &mut Context<Self>) {
+        let request = cx.global::<ClientAttachment>().requester();
+        request(
+            HostRequest::Move {
+                host: HostKey::Remote(action.host_id.clone()),
+                earlier: action.earlier,
+            },
+            window,
+            cx,
+        );
     }
 
     fn on_forget(&mut self, action: &ForgetHost, window: &mut Window, cx: &mut Context<Self>) {

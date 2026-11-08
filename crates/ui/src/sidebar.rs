@@ -4,6 +4,7 @@ use std::{
     rc::Rc,
 };
 
+use crate::device::DevicePreferences;
 use crate::material::{Bar, COMPACT_PAGE_INSET, bar, bar_height, empty_row, selectable_row};
 use crate::motion::drag_ghost;
 use crate::motion::list_rows::Glide;
@@ -221,14 +222,6 @@ fn fold_key(fold: Fold, id: &str) -> String {
         Fold::Project => format!("project:{id}"),
         Fold::More => format!("more:{id}"),
         Fold::Shelf => format!("shelf:{id}"),
-    }
-}
-
-/// How element ids and disclosures name a host's section.
-fn host_id(host: &HostKey) -> &str {
-    match host {
-        HostKey::Local => "local",
-        HostKey::Remote(host_id) => host_id,
     }
 }
 
@@ -689,9 +682,14 @@ struct SortProjects(HostKey);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
 struct ManageHosts;
+/// Take this host out of the window's workspace.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct LeaveHost(HostKey);
 
 /// What a host's heading offers: a thread in one of its projects or a quick
-/// thread, a new project, its projects' order, and the Machines page.
+/// thread, a new project, its projects' order, leaving the workspace, and the
+/// Machines page.
 #[derive(Clone)]
 struct HostMenu {
     host: HostKey,
@@ -727,8 +725,14 @@ impl HostMenu {
                 Box::new(SortProjects(host.clone())),
             );
         }
-        menu.separator()
-            .menu(crate::tr!("sidebar.manage_hosts"), Box::new(ManageHosts))
+        // The host in this process is always in the workspace.
+        let menu = menu.separator().when(*host != HostKey::Local, |menu| {
+            menu.menu(
+                crate::tr!("hosts.disconnect"),
+                Box::new(LeaveHost(host.clone())),
+            )
+        });
+        menu.menu(crate::tr!("sidebar.manage_hosts"), Box::new(ManageHosts))
     }
 }
 
@@ -844,7 +848,7 @@ enum FlatListRow {
 impl FlatListRow {
     fn key(&self) -> (&'static str, &str) {
         match self {
-            Self::Host(host) => ("host", host_id(host)),
+            Self::Host(host) => ("host", host.name()),
             Self::Thread(row) => ("thread", &row.name),
             Self::Boundary(ThreadSection::Pinned, _) => ("pinned", ""),
             Self::Boundary(_, _) => ("active", ""),
@@ -918,7 +922,7 @@ impl GroupedListRow {
             named(lists.len(), &of.host, &of.groups[*group].project.id)
         };
         match self {
-            Self::Host { host, .. } => ("host", Cow::Borrowed(host_id(&lists[*host].host))),
+            Self::Host { host, .. } => ("host", Cow::Borrowed(lists[*host].host.name())),
             Self::Project { host, group, .. } => ("project", project(host, group)),
             Self::Thread(row) => ("thread", Cow::Borrowed(row.name.as_str())),
             Self::ToggleThreads { host, group, .. } => ("toggle", project(host, group)),
@@ -970,8 +974,6 @@ pub struct SessionsSidebar {
     /// The hosts it lists, in order.
     hosts: Vec<SidebarHost>,
     window_state: Entity<WindowState>,
-    /// The hosts whose section the user shut, in a list over several.
-    collapsed_hosts: HashSet<HostKey>,
     /// Projects whose thread list is expanded past the collapsed limit.
     expanded_groups: HashSet<ProjectKey>,
     expanded_settled: HashSet<Shelf>,
@@ -1233,8 +1235,8 @@ impl SessionsSidebar {
                 continue;
             };
             let store = store.read(cx);
-            let host_collapsed = self.collapsed_hosts.contains(&of.host);
-            let host_key = fold_key(Fold::Host, host_id(&of.host));
+            let host_collapsed = DevicePreferences::host_collapsed(&of.host, cx);
+            let host_key = fold_key(Fold::Host, of.host.name());
             if sectioned {
                 rows.push((
                     GroupedListRow::Host {
@@ -1352,7 +1354,7 @@ impl SessionsSidebar {
 
         let lists = self.thread_lists(cx);
         let mut threads = Vec::new();
-        match crate::device::DevicePreferences::sidebar_layout(cx) {
+        match DevicePreferences::sidebar_layout(cx) {
             SidebarLayout::Flat => {
                 let rows = self.thread_rows(&lists, self.project_filter.as_ref(), &Shelf::Recent);
                 threads.extend(
@@ -1446,7 +1448,7 @@ impl SessionsSidebar {
     /// change that resets them does not animate.
     fn sample_folds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
-        let layout = crate::device::DevicePreferences::sidebar_layout(cx);
+        let layout = DevicePreferences::sidebar_layout(cx);
         let lists = self.thread_lists(cx);
         let mut targets = Vec::new();
         match layout {
@@ -1464,8 +1466,8 @@ impl SessionsSidebar {
                     };
                     if sectioned {
                         targets.push((
-                            fold_key(Fold::Host, host_id(&lists.host)),
-                            !self.collapsed_hosts.contains(&lists.host),
+                            fold_key(Fold::Host, lists.host.name()),
+                            !DevicePreferences::host_collapsed(&lists.host, cx),
                         ));
                     }
                     for group in lists.groups.iter() {
@@ -1631,7 +1633,6 @@ impl SessionsSidebar {
         let mut sidebar = Self {
             hosts: Vec::new(),
             window_state,
-            collapsed_hosts: HashSet::new(),
             expanded_groups: HashSet::new(),
             expanded_settled: HashSet::new(),
             settled_limits: HashMap::new(),
@@ -1716,7 +1717,6 @@ impl SessionsSidebar {
             return;
         }
         let listed = |host: &HostKey| self.hosts.iter().any(|listed| listed.key == *host);
-        self.collapsed_hosts.retain(listed);
         self.expanded_groups.retain(|project| listed(&project.host));
         let shelf_listed = |shelf: &Shelf| match shelf {
             Shelf::Recent => true,
@@ -1819,17 +1819,36 @@ impl SessionsSidebar {
         }
     }
 
+    fn on_leave_host(&mut self, action: &LeaveHost, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(request) = cx
+            .try_global::<crate::remote::ClientAttachment>()
+            .map(crate::remote::ClientAttachment::requester)
+        {
+            request(
+                crate::remote::HostRequest::Leave(action.0.clone()),
+                window,
+                cx,
+            );
+        }
+    }
+
     fn on_manage_hosts(&mut self, _: &ManageHosts, _: &mut Window, cx: &mut Context<Self>) {
         self.window_state
             .update(cx, |state, cx| state.go(Destination::Hosts, cx));
     }
 
     fn toggle_host(&mut self, host: &HostKey, cx: &mut Context<Self>) {
-        if !self.collapsed_hosts.remove(host) {
-            self.collapsed_hosts.insert(host.clone());
-        }
+        let collapsed = DevicePreferences::host_collapsed(host, cx);
+        DevicePreferences::set_host_collapsed(host, !collapsed, cx);
         self.compact_model_dirty = true;
         cx.notify();
+    }
+
+    /// Open `host`'s section, which the window just brought in.
+    pub(crate) fn reveal_host(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        if DevicePreferences::host_collapsed(host, cx) {
+            self.toggle_host(host, cx);
+        }
     }
 
     fn on_start_draft_for_project(
@@ -2960,8 +2979,8 @@ impl SessionsSidebar {
 
     /// The control that leads to Machines: over one host, that host's
     /// machine and how its link is; over several, whose headings say that
-    /// of each, Machines itself. Compact has none; Machines is the root its
-    /// Back returns to.
+    /// of each, Machines itself. Compact has none: the threads page's nav
+    /// bar leads there.
     fn render_machine_control(
         &self,
         lead: &Entity<WorkspaceStore>,
@@ -3068,7 +3087,7 @@ impl SessionsSidebar {
                 SidebarLayout::Flat => SidebarLayout::Grouped,
                 SidebarLayout::Grouped => SidebarLayout::Flat,
             };
-            crate::device::DevicePreferences::set_sidebar_layout(next, cx);
+            DevicePreferences::set_sidebar_layout(next, cx);
         })
     }
 
@@ -3550,7 +3569,7 @@ impl SessionsSidebar {
         ))
         .then(|| crate::remote::connection_label(&state));
         let refused = failure == Some(tcode_client::ConnectionFailure::AuthenticationRejected);
-        let id = host_id(host);
+        let id = host.name();
         let part = |part: &str| SharedString::from(format!("host-{part}-{id}"));
         let dot = transition(
             (part("dot"), "connection"),
@@ -3634,7 +3653,7 @@ impl SessionsSidebar {
         let Some(parts) = self.host_heading_parts(host, false, window, cx) else {
             return div().into_any_element();
         };
-        let id = host_id(host).to_owned();
+        let id = host.name().to_owned();
         let group = format!("host-{id}");
         let toggle = host.clone();
         let heading = selectable_row(
@@ -5166,7 +5185,7 @@ impl SessionsSidebar {
         {
             let swiped_off = self.swiped_off(cx);
             let lists = self.thread_lists(cx);
-            let layout = crate::device::DevicePreferences::sidebar_layout(cx);
+            let layout = DevicePreferences::sidebar_layout(cx);
             let kept = |host: &HostKey, meta: &SessionMeta| {
                 !swiped_off
                     .iter()
@@ -5208,7 +5227,7 @@ impl SessionsSidebar {
             let host_row = |host: &HostKey, collapsed| {
                 CompactListRow::Host(CompactHostRow {
                     host: host.clone(),
-                    row_id: format!("compact-host-{}", host_id(host)).into(),
+                    row_id: format!("compact-host-{}", host.name()).into(),
                     collapsed,
                 })
             };
@@ -5340,8 +5359,8 @@ impl SessionsSidebar {
                 }
             } else {
                 for (host, _, groups) in &hosts {
-                    let host_collapsed = self.collapsed_hosts.contains(host);
-                    let host_key = fold_key(Fold::Host, host_id(host));
+                    let host_collapsed = DevicePreferences::host_collapsed(host, cx);
+                    let host_key = fold_key(Fold::Host, host.name());
                     if sectioned {
                         folds.resize(rows.len(), 1.);
                         rows.push(host_row(host, Some(host_collapsed)));
@@ -5657,7 +5676,7 @@ impl SessionsSidebar {
         let full_scope = self.full_scope(cx);
         self.tidy_row_swipes(cx);
         let model = self.compact_model(Some(window), cx);
-        let layout = crate::device::DevicePreferences::sidebar_layout(cx);
+        let layout = DevicePreferences::sidebar_layout(cx);
         let body = self.loading_body(
             move |this, window, cx| {
                 // The empty page fades in where the last project's list was.
@@ -5827,6 +5846,7 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_add_project))
             .on_action(cx.listener(Self::on_sort_projects))
             .on_action(cx.listener(Self::on_manage_hosts))
+            .on_action(cx.listener(Self::on_leave_host))
             .child(self.render_compact_search(cx))
             .child(
                 bar("compact-layout-bar", Bar::Section, true, cx)
@@ -5876,7 +5896,7 @@ impl SessionsSidebar {
         let Some(parts) = self.host_heading_parts(&row.host, true, window, cx) else {
             return div().into_any_element();
         };
-        let id = host_id(&row.host).to_owned();
+        let id = row.host.name().to_owned();
         let toggle = row.host.clone();
         let spacing = &cx.theme().tokens.spacing;
         let heading = crate::material::accessible_clickable(
@@ -6769,7 +6789,7 @@ impl SessionsSidebar {
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scope = (
-            crate::device::DevicePreferences::sidebar_layout(cx),
+            DevicePreferences::sidebar_layout(cx),
             self.project_filter.clone(),
         );
         if self.settled_scope.as_ref() != Some(&scope) {
@@ -6792,7 +6812,7 @@ impl Render for SessionsSidebar {
             return self.render_compact(window, cx);
         }
 
-        let layout = crate::device::DevicePreferences::sidebar_layout(cx);
+        let layout = DevicePreferences::sidebar_layout(cx);
         let thread_lists = self.thread_lists(cx);
         // Flat and Grouped are each their own list; switching cross-fades
         // them, the one left keeping its scroll while it fades. Until the
@@ -6878,6 +6898,7 @@ impl Render for SessionsSidebar {
         .on_action(cx.listener(Self::on_add_project))
         .on_action(cx.listener(Self::on_sort_projects))
         .on_action(cx.listener(Self::on_manage_hosts))
+        .on_action(cx.listener(Self::on_leave_host))
         .on_action(cx.listener(Self::on_toggle_share))
         .on_action(cx.listener(Self::on_new_space_and_share))
         .child(self.render_app_row(window, cx))
@@ -7292,7 +7313,7 @@ mod tests {
         &'a mut VisualTestContext,
     ) {
         cx.update(crate::theme::init);
-        cx.update(|cx| crate::device::DevicePreferences::set_sidebar_layout(layout, cx));
+        cx.update(|cx| DevicePreferences::set_sidebar_layout(layout, cx));
         let (a, b) = (
             TestHost::remote(cx, "host-a", a),
             TestHost::remote(cx, "host-b", b),
@@ -7390,7 +7411,7 @@ mod tests {
         );
         // What the header's layout toggle does.
         let switch = |layout, cx: &mut VisualTestContext| {
-            cx.update(|_, cx| crate::device::DevicePreferences::set_sidebar_layout(layout, cx));
+            cx.update(|_, cx| DevicePreferences::set_sidebar_layout(layout, cx));
             draw(cx);
         };
         switch(SidebarLayout::Grouped, cx);
@@ -8404,7 +8425,7 @@ mod tests {
         let root = crate::store::tests::scratch_root(&format!("sidebar-{projects}-project"));
         let device = || tcode_traverse::NativeClientHost::new(root.join("device"), "phone");
         let client: std::rc::Rc<dyn tcode_client::host::ClientHost> = std::rc::Rc::new(device());
-        cx.update(|cx| crate::device::DevicePreferences::install(client, cx));
+        cx.update(|cx| DevicePreferences::install(client, cx));
         let host = spawn_host(
             SessionStore::open_at(root.clone()).unwrap(),
             HostServices::default(),
@@ -8462,7 +8483,7 @@ mod tests {
             "the seeded threads are listed"
         );
         assert_eq!(
-            cx.update(|_, cx| crate::device::DevicePreferences::sidebar_layout(cx)),
+            cx.update(|_, cx| DevicePreferences::sidebar_layout(cx)),
             SidebarLayout::Flat
         );
         assert!(cx.debug_bounds("compact-group-header").is_none());
@@ -8837,9 +8858,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
         cx.update(crate::theme::init);
-        cx.update(|cx| {
-            crate::device::DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx)
-        });
+        cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let event = |topic, event| {
@@ -9034,9 +9053,7 @@ mod tests {
                 projects: vec![project.clone(), other.clone()],
             })
         };
-        cx.update(|cx| {
-            crate::device::DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx)
-        });
+        cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
         send(
             Topic::Settings,
             ServerEvent::SettingsSnapshot(Default::default()),
@@ -9655,9 +9672,7 @@ mod tests {
         // counted them would take active rows' places.
         sessions.push(settled("many-settled-0", "many", 41, 41));
         sessions.push(settled("many-settled-1", "many", 40, 40));
-        cx.update(|cx| {
-            crate::device::DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx)
-        });
+        cx.update(|cx| DevicePreferences::set_sidebar_layout(SidebarLayout::Grouped, cx));
         send(
             Topic::Settings,
             ServerEvent::SettingsSnapshot(Default::default()),
@@ -9986,7 +10001,7 @@ mod tests {
         cx.run_until_parked();
         store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
-            cx.update(|_, cx| crate::device::DevicePreferences::set_sidebar_layout(layout, cx));
+            cx.update(|_, cx| DevicePreferences::set_sidebar_layout(layout, cx));
             let key = match layout {
                 SidebarLayout::Flat => "recent",
                 SidebarLayout::Grouped => "p11",

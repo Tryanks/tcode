@@ -57,7 +57,7 @@ use crate::panes::{
 use crate::preview_panel::PreviewPanel;
 #[cfg(preview_backend)]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
-use crate::remote::{AttachmentTarget, RemotePanel};
+use crate::remote::{AttachmentTarget, HostRequest, RemotePanel};
 use crate::runtime_event::{
     RuntimeEventSeverity, RuntimeToastAction, RuntimeToastDisposition, present_runtime_event,
     present_runtime_toast,
@@ -273,6 +273,8 @@ struct Link {
     /// Whether this host's saved record has been stamped with the time this
     /// window reached it.
     stamped: bool,
+    /// Whether the link was up when the window last looked.
+    connected: bool,
     attention: crate::attention::ApprovalAttention,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -594,6 +596,15 @@ enum Slot {
     Waiting,
 }
 
+/// Whether the machine behind `store` refused this device for good, so its
+/// link stopped reconnecting.
+fn refused(store: &Entity<WorkspaceStore>, cx: &App) -> bool {
+    matches!(
+        store.read(cx).connection_state(),
+        tcode_client::ConnectionState::Offline { reason } if reason.is_terminal()
+    )
+}
+
 /// What bootstrap tells the shell that is not the window itself.
 #[derive(Default)]
 pub struct ShellSetup {
@@ -606,7 +617,9 @@ pub struct ShellSetup {
     /// frame, whatever the window attaches to, and the window attaches to that
     /// host only when asked again.
     pub local_failure: Option<String>,
-    /// Where to attach at launch; `None` opens on the hosts list.
+    /// The host the window shows first at launch, opened beside the
+    /// workspace's hosts though it is not one of them; a host reached only
+    /// alone opens alone. `None` shows the workspace's first host.
     pub initial: Option<AttachmentTarget>,
     /// A browser link that could not be paired opens the normal form with the
     /// one-shot failure visible after its URL fragment has been cleared.
@@ -648,6 +661,9 @@ pub struct AppShell {
     links: Vec<Link>,
     /// The views of the host the window shows, which is one of `links`.
     column: Option<Column>,
+    /// Whether `links` is one host reached only alone, a space's, in place
+    /// of this device's workspace.
+    alone: bool,
     /// The threads of every host in `links`, wide beside the chat and as
     /// the compact threads page.
     sidebar: Entity<SessionsSidebar>,
@@ -873,6 +889,7 @@ impl AppShell {
             window_state,
             links: Vec::new(),
             column: None,
+            alone: false,
             sidebar,
             hosts,
             nav: cx.new(|_| NavStackState::new()),
@@ -899,17 +916,20 @@ impl AppShell {
             _subscriptions: subscriptions,
             setup,
         };
-        if let Some(reason) = shell.setup.local_failure.take() {
-            shell
-                .hosts
-                .update(cx, |hosts, cx| hosts.set_local_failure(Some(reason), cx));
-            if shell.setup.initial == Some(AttachmentTarget::Local) {
-                shell.setup.initial = None;
+        let local_started = match shell.setup.local_failure.take() {
+            Some(reason) => {
+                shell
+                    .hosts
+                    .update(cx, |hosts, cx| hosts.set_local_failure(Some(reason), cx));
+                if shell.setup.initial == Some(AttachmentTarget::Local) {
+                    shell.setup.initial = None;
+                }
+                false
             }
-        }
-        if let Some(target) = shell.setup.initial.take() {
-            shell.attach(target, window, cx);
-        }
+            None => true,
+        };
+        let initial = shell.setup.initial.take();
+        shell.open_workspace(initial, local_started, window, cx);
         if let Some(snapshot) = restored {
             shell
                 .window_state
@@ -1075,7 +1095,7 @@ impl AppShell {
                 store.update(cx, |store, cx| store.close_thread(&pending.session_id, cx));
             }
             self.window_state
-                .update(cx, |state, cx| state.discard_restored_thread(cx));
+                .update(cx, |state, cx| state.drop_thread_pages(cx));
             return;
         }
         if shown.as_deref() != Some(&pending.session_id) {
@@ -1106,26 +1126,255 @@ impl AppShell {
         }
     }
 
-    /// Point this window at `target`, replacing its links and column beneath the
-    /// navigation root. The window, its stack and its overlays stay put.
-    pub fn switch_to(
+    /// The hosts this device's workspace holds, in order.
+    fn members(&self, cx: &App) -> Vec<AttachmentTarget> {
+        let local = self.setup.local.is_some();
+        let Some(client) = &self.setup.client_host else {
+            return local
+                .then_some(AttachmentTarget::Local)
+                .into_iter()
+                .collect();
+        };
+        let saved = client.load_hosts();
+        let preference = DevicePreferences::workspace(cx);
+        let last_host_id = client.last_host_id();
+        let local_machine_id = client.local_machine_id();
+        crate::workspace::members(&crate::workspace::Device {
+            saved: &saved,
+            preference: preference.as_ref(),
+            last_host_id: last_host_id.as_deref(),
+            local,
+            local_machine_id: local_machine_id.as_deref(),
+            fixed_machine: client.fixed_machine(),
+        })
+    }
+
+    /// Change how this device arranges its workspace, from the hosts in it
+    /// now.
+    fn arrange_workspace(
+        &self,
+        change: impl FnOnce(&mut tcode_client::host::WorkspacePreference),
+        cx: &mut App,
+    ) {
+        let members: Vec<HostKey> = self.members(cx).iter().map(AttachmentTarget::key).collect();
+        DevicePreferences::arrange_workspace(cx, |workspace| {
+            let mut arranged = crate::workspace::arranged(workspace.as_ref(), &members);
+            change(&mut arranged);
+            *workspace = Some(arranged);
+        });
+    }
+
+    /// Open every host of the workspace, and `initial`, which the column
+    /// shows first, though it is not one of them; a host reached only alone
+    /// is opened alone. The host in this process is left out unless
+    /// `with_local`.
+    fn open_workspace(
+        &mut self,
+        initial: Option<AttachmentTarget>,
+        with_local: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(target) = initial
+            .as_ref()
+            .filter(|target| !crate::workspace::joins_target(target))
+        {
+            self.alone = true;
+            self.attach(target.clone(), window, cx);
+            return;
+        }
+        self.alone = false;
+        // A device's first workspace is the one an earlier version showed
+        // it, kept from here on.
+        if self.setup.client_host.is_some() && DevicePreferences::workspace(cx).is_none() {
+            self.arrange_workspace(|_| {}, cx);
+        }
+        let mut targets = self.members(cx);
+        if !with_local {
+            targets.retain(|target| *target != AttachmentTarget::Local);
+        }
+        if let Some(initial) = &initial
+            && !targets.iter().any(|target| same_target(target, initial))
+        {
+            targets.push(initial.clone());
+        }
+        for target in targets {
+            if self.link_of(&target.key()).is_none() {
+                self.open_target(target, window, cx);
+            }
+        }
+        self.order_links(cx);
+        self.sync_hosts(cx);
+        let opened = |key: &HostKey| self.link_of(key).is_some();
+        let host = initial
+            .map(|initial| initial.key())
+            .filter(opened)
+            .or_else(|| Some(HostKey::Local).filter(opened))
+            .or_else(|| self.links.first().map(Link::key));
+        let Some(host) = host else {
+            self.window_state
+                .update(cx, |state, cx| state.leave_workspace(cx));
+            cx.notify();
+            return;
+        };
+        self.show_column(host.clone(), window, cx);
+        self.window_state
+            .update(cx, |state, cx| state.enter_workspace(cx));
+        self.show_pending_session(&host, cx);
+        cx.notify();
+    }
+
+    /// Open the workspace's hosts that joined it since the window opened
+    /// them, such as a group's new member.
+    fn open_new_members(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.alone {
+            return;
+        }
+        let new: Vec<_> = self
+            .members(cx)
+            .into_iter()
+            // The host in this process is opened at launch, or asked for
+            // again after it failed to start.
+            .filter(|target| *target != AttachmentTarget::Local)
+            .filter(|target| self.link_of(&target.key()).is_none())
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        for target in new {
+            self.open_target(target, window, cx);
+        }
+        match self.links.first().map(Link::key) {
+            Some(host) if self.column.is_none() => self.enter_first_host(host, window, cx),
+            _ => {
+                self.order_links(cx);
+                self.sync_hosts(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Show `target` among the workspace's hosts, adding it to them. A host
+    /// reached only alone replaces them, and a browser only ever has its
+    /// own. A link the machine refused is not reused: it stopped
+    /// reconnecting, and pairing again lands here with the same machine.
+    pub fn open_host(
         &mut self,
         target: AttachmentTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Already there: go to that host's workspace instead of tearing its
-        // link down and building the same one again. A link the machine
-        // refused is not reused: it stopped reconnecting, and re-pairing
-        // lands here with the same machine.
-        if self.column_link().is_some_and(|current| {
-            same_target(&current.target, &target)
-                && !matches!(
-                    current.store.read(cx).connection_state(),
-                    tcode_client::ConnectionState::Offline { reason } if reason.is_terminal()
-                )
-        }) {
-            self.go(Destination::Threads, cx);
+        let fixed = self
+            .setup
+            .client_host
+            .as_ref()
+            .is_some_and(|client| client.fixed_machine());
+        if fixed || !crate::workspace::joins_target(&target) {
+            self.replace_workspace(target, window, cx);
+            return;
+        }
+        let host = target.key();
+        if self.alone {
+            self.blur_navigation(window, cx);
+            self.arrange_workspace(|workspace| crate::workspace::join(workspace, &host), cx);
+            let links = std::mem::take(&mut self.links);
+            self.retire(links, cx);
+            self.open_workspace(Some(target), true, window, cx);
+            return;
+        }
+        if let Some(link) = self.link_of(&host) {
+            if !refused(&link.store, cx) {
+                self.arrange_workspace(|workspace| crate::workspace::join(workspace, &host), cx);
+                self.order_links(cx);
+                self.sync_hosts(cx);
+                self.show_host_section(&host, cx);
+                return;
+            }
+            self.close_link(&host, window, cx);
+        }
+        if self.open_target(target, window, cx).is_none() {
+            cx.notify();
+            return;
+        }
+        self.arrange_workspace(|workspace| crate::workspace::join(workspace, &host), cx);
+        if self.column.is_none() {
+            self.blur_navigation(window, cx);
+            self.enter_first_host(host.clone(), window, cx);
+        } else {
+            self.order_links(cx);
+            self.sync_hosts(cx);
+        }
+        self.show_host_section(&host, cx);
+        cx.notify();
+    }
+
+    /// The window had no host and has `host`: its workspace replaces what
+    /// the window showed, as a whole.
+    fn enter_first_host(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.retire(Vec::new(), cx);
+        self.order_links(cx);
+        self.sync_hosts(cx);
+        self.show_column(host.clone(), window, cx);
+        self.window_state
+            .update(cx, |state, cx| state.enter_workspace(cx));
+        self.show_pending_session(&host, cx);
+    }
+
+    /// The window has gone: close its link to every host. The hosts, this
+    /// machine's included, keep running.
+    pub fn close_links(&mut self, cx: &mut Context<Self>) {
+        let links = std::mem::take(&mut self.links);
+        self.retire(links, cx);
+        self.sync_hosts(cx);
+        cx.notify();
+    }
+
+    /// Take `host` out of the workspace: only its link closes, and it stays
+    /// out though a group it is in would bring it back. Leaving a host
+    /// reached alone opens the workspace again.
+    pub fn leave_host(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        // The host in this process is always in the workspace.
+        if *host == HostKey::Local || self.link_of(host).is_none() {
+            return;
+        }
+        if self.alone {
+            let links = std::mem::take(&mut self.links);
+            self.retire(links, cx);
+            self.sync_hosts(cx);
+            self.open_workspace(None, true, window, cx);
+            return;
+        }
+        self.arrange_workspace(|workspace| crate::workspace::leave(workspace, host), cx);
+        self.close_link(host, window, cx);
+    }
+
+    /// Move `host` one place earlier, or later, among the workspace's hosts.
+    pub fn move_host(&mut self, host: &HostKey, earlier: bool, cx: &mut Context<Self>) {
+        self.arrange_workspace(
+            |workspace| crate::workspace::shift(workspace, host, earlier),
+            cx,
+        );
+        self.order_links(cx);
+        self.sync_hosts(cx);
+        cx.notify();
+    }
+
+    /// Make `target` the workspace's only host, beneath the navigation root.
+    /// The window, its stack and its overlays stay put.
+    fn replace_workspace(
+        &mut self,
+        target: AttachmentTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Already there: go to that host's threads instead of tearing its
+        // link down and building the same one again.
+        if self.links.len() == 1
+            && self.column_link().is_some_and(|current| {
+                same_target(&current.target, &target) && !refused(&current.store, cx)
+            })
+        {
+            self.show_host_section(&target.key(), cx);
             return;
         }
         // Never drop a working link for one this client cannot open.
@@ -1137,22 +1386,62 @@ impl AppShell {
             log::error!("this client cannot reach {target:?}");
             return;
         }
+        self.alone = !crate::workspace::joins_target(&target);
         self.blur_navigation(window, cx);
         self.attach(target, window, cx);
     }
 
-    /// Leave the current host without opening another one. The host keeps
-    /// running; only this window's link to it closes.
-    pub fn detach(&mut self, cx: &mut Context<Self>) {
-        if self.links.is_empty() {
+    /// Close the link to `host` and nothing else: every other host keeps
+    /// its link, store and views. A column on `host` moves to the
+    /// workspace's first host left; the last link closing leaves the
+    /// window with none.
+    fn close_link(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self.links.iter().position(|link| link.key() == *host) else {
+            return;
+        };
+        if self.links.len() == 1 {
+            let links = std::mem::take(&mut self.links);
+            self.retire(links, cx);
+            self.sync_hosts(cx);
+            self.window_state
+                .update(cx, |state, cx| state.leave_workspace(cx));
+            cx.notify();
             return;
         }
-        let links = std::mem::take(&mut self.links);
-        self.retire(links, cx);
+        let mut link = self.links.remove(at);
+        link.close(cx);
+        if self
+            .column
+            .as_ref()
+            .is_some_and(|column| column.host == *host)
+            && let Some(next) = self.links.first().map(Link::key)
+        {
+            self.move_column(next.clone(), window, cx);
+            if let Some(store) = self.link_of(&next).map(|link| link.store.clone()) {
+                self.fill_empty_column(&store, cx);
+            }
+        }
         self.sync_hosts(cx);
-        self.window_state
-            .update(cx, |state, cx| state.leave_workspace(cx));
         cx.notify();
+    }
+
+    /// The links in the workspace's order; a host opened outside it last.
+    fn order_links(&mut self, cx: &App) {
+        let order: Vec<HostKey> = self.members(cx).iter().map(AttachmentTarget::key).collect();
+        self.links.sort_by_key(|link| {
+            order
+                .iter()
+                .position(|member| *member == link.key())
+                .unwrap_or(order.len())
+        });
+    }
+
+    /// Back to the threads, with `host`'s section open among them.
+    fn show_host_section(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        self.window_state
+            .update(cx, |state, cx| state.leave_hosts(cx));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.reveal_host(host, cx));
     }
 
     /// Close `links`, the column, if any, and the sidebar over them, which
@@ -1199,26 +1488,50 @@ impl AppShell {
             .update(cx, |hosts, cx| hosts.set_stores(stores, cx));
     }
 
+    /// The transport of the host in this process when `target` is that host.
+    /// `Err` where it did not start: Hosts says why.
+    fn start_local(
+        &mut self,
+        target: &AttachmentTarget,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<tcode_client::host::Transport>, ()> {
+        let (AttachmentTarget::Local, Some(start)) = (target, &self.setup.local) else {
+            return Ok(None);
+        };
+        match start(cx) {
+            Ok(transport) => {
+                self.hosts
+                    .update(cx, |hosts, cx| hosts.set_local_failure(None, cx));
+                Ok(Some(transport))
+            }
+            Err(reason) => {
+                log::error!("the local host is unavailable: {reason}");
+                self.hosts
+                    .update(cx, |hosts, cx| hosts.set_local_failure(Some(reason), cx));
+                cx.notify();
+                Err(())
+            }
+        }
+    }
+
+    /// Link this window to `target` beside the hosts it is linked to.
+    fn open_target(
+        &mut self,
+        target: AttachmentTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<HostKey> {
+        let local = self.start_local(&target, cx).ok()?;
+        self.open_link(target, local, window, cx)
+    }
+
+    /// Link this window to `target` alone, in place of every link it had.
     fn attach(&mut self, target: AttachmentTarget, window: &mut Window, cx: &mut Context<Self>) {
         // A local host that does not start is a failure to link like any
-        // other: Hosts shows why, and whatever this window was on stays.
-        let local = match (&target, &self.setup.local) {
-            (AttachmentTarget::Local, Some(start)) => match start(cx) {
-                Ok(transport) => Some(transport),
-                Err(reason) => {
-                    log::error!("the local host is unavailable: {reason}");
-                    self.hosts
-                        .update(cx, |hosts, cx| hosts.set_local_failure(Some(reason), cx));
-                    cx.notify();
-                    return;
-                }
-            },
-            _ => None,
+        // other: whatever this window was on stays.
+        let Ok(local) = self.start_local(&target, cx) else {
+            return;
         };
-        if local.is_some() {
-            self.hosts
-                .update(cx, |hosts, cx| hosts.set_local_failure(None, cx));
-        }
         self.pending_navigation_restore = None;
         let links = std::mem::take(&mut self.links);
         self.retire(links, cx);
@@ -1231,17 +1544,26 @@ impl AppShell {
             cx.notify();
             return;
         };
-        let store = self.link_of(&host).expect("just opened").store.clone();
-        let pending_session = store
+        self.show_column(host.clone(), window, cx);
+        self.window_state
+            .update(cx, |state, cx| state.enter_workspace(cx));
+        self.show_pending_session(&host, cx);
+        cx.notify();
+    }
+
+    /// A message still on its way to a thread of `host` shows that thread.
+    fn show_pending_session(&self, host: &HostKey, cx: &mut Context<Self>) {
+        let Some(store) = self.link_of(host).map(|link| link.store.clone()) else {
+            return;
+        };
+        let pending = store
             .read(cx)
             .pending_sessions()
             .first()
             .map(|(id, _)| id.clone());
-        self.show_column(host, window, cx);
-        if let Some(id) = pending_session {
+        if let Some(id) = pending {
             store.update(cx, |store, cx| store.show_thread(id, cx));
         }
-        cx.notify();
     }
 
     /// Link this window to `target`, over `local` when it is the host in
@@ -1254,12 +1576,6 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> Option<HostKey> {
         let open = Attachment::open(target, local, self.setup.client_host.clone(), cx)?;
-        if let Some(host) = &self.setup.client_host {
-            host.set_last_host_id(match &open.target {
-                AttachmentTarget::Local => None,
-                AttachmentTarget::Remote(host) => Some(host.host_id.as_str()),
-            });
-        }
         let host = open.target.key();
         let store = open.store.clone();
         let preview =
@@ -1350,6 +1666,7 @@ impl AppShell {
                 CommandPalette::new(store.clone(), self.window_state.clone(), window, cx)
             }),
             stamped: false,
+            connected: false,
             attention: Default::default(),
             #[cfg(preview_backend)]
             _tasks: vec![preview_pump],
@@ -1367,6 +1684,16 @@ impl AppShell {
             return;
         };
         let (store, preview) = (link.store.clone(), link.preview.clone());
+        if let Some(client) = &self.setup.client_host {
+            client.set_last_host_id(match &host {
+                HostKey::Local => None,
+                HostKey::Remote(host_id) => Some(host_id),
+            });
+        }
+        let sidebar_width = self.column.as_ref().map_or_else(
+            || Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
+            |column| column.sidebar_width.clone(),
+        );
         let thread_panel = self.new_pane(&store, &preview, None, window, cx);
         let shell = cx.entity().downgrade();
         let drop_landing = Rc::new(Cell::new(None));
@@ -1423,13 +1750,33 @@ impl AppShell {
                 "workspace-panels",
                 gpui::Axis::Horizontal,
             ),
-            sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
+            sidebar_width,
             sidebar_overlay_visible: false,
             _subscriptions: subscriptions,
         });
-        // The previous host's pages are not this host's: land on its threads.
+    }
+
+    /// The column shows `host`'s threads in place of the host it was on,
+    /// which keeps its link and stops showing any thread. The pages of the
+    /// threads it showed go; the rest of the window's place stays.
+    fn move_column(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(column) = &self.column {
+            for pane in column.all_panes(cx) {
+                pane.update(cx, |pane, cx| pane.release_preview(cx));
+            }
+            if let Some(store) = self.link_of(&column.host).map(|link| link.store.clone()) {
+                store.update(cx, |store, cx| {
+                    for thread in store.open_threads() {
+                        store.close_thread(&thread, cx);
+                    }
+                    store.set_conversation_on_screen(false, cx);
+                });
+            }
+        }
+        self.pending_navigation_restore = None;
+        self.show_column(host, window, cx);
         self.window_state
-            .update(cx, |state, cx| state.enter_workspace(cx));
+            .update(cx, |state, cx| state.drop_thread_pages(cx));
     }
 
     fn new_pane(
@@ -1668,14 +2015,24 @@ impl AppShell {
         {
             crate::attention::request(window);
         }
-        self.stamp_connected(&host, cx);
+        let connected = store.read(cx).connection_state().is_connected();
+        if let Some(link) = self.link_of_mut(&host)
+            && std::mem::replace(&mut link.connected, connected) != connected
+            && connected
+        {
+            // A machine that comes up may have told this device of its
+            // group's new members.
+            self.stamp_connected(&host, cx);
+            self.open_new_members(window, cx);
+        }
         self.reconcile_navigation_restore(cx);
         self.schedule_navigation_save(cx);
         cx.notify();
     }
 
     /// Put `shown`, a thread of `store`'s host, in its pane. The column
-    /// shows one host's threads.
+    /// shows one host's threads: one the user asked for on another host
+    /// takes the column there, and one nobody asked for stays off screen.
     fn show_thread(
         &mut self,
         store: &Entity<WorkspaceStore>,
@@ -1689,7 +2046,10 @@ impl AppShell {
             .as_ref()
             .is_none_or(|column| column.host != host)
         {
-            return;
+            if !shown.asked || self.link_of(&host).is_none() {
+                return;
+            }
+            self.move_column(host, window, cx);
         }
         let session_id = shown.session_id.as_str();
         if self.compact(cx) {
@@ -1768,10 +2128,9 @@ impl AppShell {
         let AttachmentTarget::Remote(host) = &link.target else {
             return;
         };
-        if link.stamped || !link.store.read(cx).connection_state().is_connected() {
+        if std::mem::replace(&mut link.stamped, true) {
             return;
         }
-        link.stamped = true;
         if let Some(client) = cx.try_global::<crate::remote::ClientAttachment>() {
             // The timestamp mutation must share the transport's persistence
             // transaction so it cannot restore a pre-migration address.
@@ -3416,26 +3775,20 @@ pub(crate) fn undo_thread_action(action: &crate::sidebar::ThreadUndo, cx: &mut A
     });
 }
 
-/// Point this window at another host.
-pub(crate) fn switch_current(target: AttachmentTarget, window: &mut Window, cx: &mut App) {
+/// Ask this window's shell for `request`.
+pub(crate) fn request_host(request: HostRequest, window: &mut Window, cx: &mut App) {
     let Some(shell) = current_shell(cx) else {
         return;
     };
-    // A child (notably the pairing confirmation) can call this from its
-    // entity listener. Attachment setup updates those children in turn.
+    // The Hosts page and the pairing form ask from their own listeners,
+    // and opening or leaving a host updates them in turn.
     window.defer(cx, move |window, cx| {
-        shell.update(cx, |shell, cx| shell.switch_to(target, window, cx));
+        shell.update(cx, |shell, cx| match request {
+            HostRequest::Open(target) => shell.open_host(target, window, cx),
+            HostRequest::Leave(host) => shell.leave_host(&host, window, cx),
+            HostRequest::Move { host, earlier } => shell.move_host(&host, earlier, cx),
+        });
     });
-}
-
-/// Leave the attached host without opening another one.
-pub(crate) fn detach_current(cx: &mut App) {
-    let Some(shell) = current_shell(cx) else {
-        return;
-    };
-    // The Hosts menu calls this from its panel's listener, and detaching
-    // updates that panel.
-    cx.defer(move |cx| shell.update(cx, |shell, cx| shell.detach(cx)));
 }
 
 /// Route a platform Back gesture into the shell that owns the window.
@@ -4268,6 +4621,17 @@ impl AppShell {
             .into_any_element()
     }
 
+    fn machines_action(&self, cx: &mut Context<Self>) -> AnyElement {
+        nav_icon_button(
+            "compact-machines",
+            crate::tr!("hosts.title").into_owned(),
+            IconName::Monitor,
+        )
+        .debug_selector(|| "compact-machines".into())
+        .on_click(cx.listener(|this, _, _, cx| this.go(Destination::Hosts, cx)))
+        .into_any_element()
+    }
+
     fn palette_action(&self, cx: &mut Context<Self>) -> AnyElement {
         nav_icon_button(
             "compact-open-palette",
@@ -4399,21 +4763,36 @@ impl AppShell {
     fn render_threads_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
         let Some(link) = self.column_link() else {
-            return div().into_any_element();
+            let body = self.no_hosts(cx);
+            return page_surface(window, cx)
+                .debug_selector(|| "compact-threads-page".into())
+                .child(nav_bar(
+                    back,
+                    crate::tr!("mobile.threads").into_owned().into(),
+                    None,
+                    vec![],
+                    window,
+                    cx,
+                ))
+                .child(body)
+                .into_any_element();
         };
         let store = link.store.read(cx);
         // A remote machine's list is headed by the machine, with the link's
-        // state where every other page puts its context. The local list is
-        // just Threads; the way to the machines is the Back control.
-        let (title, subtitle): (SharedString, Option<SharedString>) = match store.remote_host_name()
-        {
-            Some(_) => (
-                store.machine_label().into(),
-                Some(crate::remote::connection_label(&store.connection_state()).into()),
-            ),
-            None => (crate::tr!("mobile.threads").into_owned().into(), None),
-        };
+        // state where every other page puts its context. The local list, and
+        // a list over several machines, is just Threads, each machine's
+        // state in its own section.
+        let (title, subtitle): (SharedString, Option<SharedString>) =
+            match store.remote_host_name().filter(|_| self.links.len() == 1) {
+                Some(_) => (
+                    store.machine_label().into(),
+                    Some(crate::remote::connection_label(&store.connection_state()).into()),
+                ),
+                None => (crate::tr!("mobile.threads").into_owned().into(), None),
+            };
         let sidebar = self.sidebar.clone();
+        // The root's leading control leads to Machines.
+        let back = back.or_else(|| Some(self.machines_action(cx)));
         let actions = vec![
             nav_icon_button(
                 "compact-new-thread",
@@ -4451,6 +4830,57 @@ impl AppShell {
                     .flex_1()
                     .min_h_0()
                     .child(self.layout_part("sidebar", sidebar)),
+            )
+            .into_any_element()
+    }
+
+    /// What the threads are while the window has no host: the ways to one.
+    fn no_hosts(&self, cx: &mut Context<Self>) -> AnyElement {
+        use crate::widgets::button::{Button, ButtonVariants as _};
+        let pairs = self
+            .setup
+            .client_host
+            .as_ref()
+            .is_some_and(|client| !client.fixed_machine());
+        v_flex()
+            .debug_selector(|| "no-hosts".into())
+            .flex_1()
+            .min_h_0()
+            .items_center()
+            .justify_center()
+            .gap(cx.theme().tokens.spacing.md)
+            .px(px(crate::material::COMPACT_PAGE_INSET))
+            .child(div().text_title(cx).child(crate::tr!("mobile.no_hosts")))
+            .child(
+                div()
+                    .text_secondary(self.compact(cx), cx)
+                    .text_center()
+                    .child(crate::tr!("mobile.no_hosts_help")),
+            )
+            .child(
+                h_flex()
+                    .gap(cx.theme().tokens.spacing.sm)
+                    .when(pairs, |row| {
+                        row.child(
+                            Button::new("no-hosts-pair")
+                                .debug_selector(|| "no-hosts-pair".into())
+                                .primary()
+                                .label(crate::tr!("hosts.pair.page_title"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.go(Destination::Pair, cx);
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("no-hosts-machines")
+                            .debug_selector(|| "no-hosts-machines".into())
+                            .ghost()
+                            .outline()
+                            .label(crate::tr!("hosts.title"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.go(Destination::Hosts, cx);
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -5239,7 +5669,7 @@ impl AppShell {
         } else {
             crate::tr!("hosts.title").into_owned().into()
         };
-        // Machines is a root the sidebar switches to; Pair is pushed over it,
+        // The sidebar switches to Machines and back; Pair is pushed over it,
         // so only Pair has somewhere to go back to.
         let gap = cx.theme().tokens.spacing.xs;
         let back =
@@ -5395,17 +5825,16 @@ impl AppShell {
     ) -> AnyElement {
         let fullscreen = window.is_fullscreen();
         if self.column.is_none() {
-            // No host: the hosts page is the whole window, and the only page
-            // there is. A tablet in landscape lands here before it attaches
-            // and a desktop after it disconnects; neither has a sidebar to
-            // switch routes with, so the page wears the same nav bar as its
-            // compact self — the title, and on Pair the Back that returns to
-            // Machines. Whatever the history says, nothing else is shown
-            // until `attach` enters a workspace.
-            let page = if self.destination(cx) == Destination::Pair {
-                self.render_pair_page(window, cx)
-            } else {
-                self.render_hosts_page(window, cx)
+            // No host: the threads' empty root, or Machines and Pair over it,
+            // is the whole window. A tablet in landscape lands here before it
+            // has a host and a desktop after its last one goes; neither has a
+            // sidebar to switch routes with, so each page wears the same nav
+            // bar as its compact self. Whatever the history says, nothing
+            // else is shown until the window has a host.
+            let page = match self.destination(cx) {
+                Destination::Pair => self.render_pair_page(window, cx),
+                Destination::Hosts => self.render_hosts_page(window, cx),
+                _ => self.render_threads_page(window, cx),
             };
             return div()
                 .id("app-shell")
@@ -6073,6 +6502,13 @@ pub(crate) mod tests {
                     "session_id": "thread-a",
                     "panel": panel
                 })),
+                workspace: Some(tcode_client::host::WorkspacePreference {
+                    hosts: vec![tcode_client::host::WorkspaceHost {
+                        host_id: "last-host".into(),
+                        collapsed: false,
+                    }],
+                    left: Vec::new(),
+                }),
                 ..Default::default()
             }),
             machine_exists,
@@ -6113,7 +6549,534 @@ pub(crate) mod tests {
         )
     }
 
-    /// Re-pairing with a machine ends on `switch_to` with that machine's id.
+    /// A device that has added `saved` and offers a link to each machine
+    /// the test holds both ends of: a window over several hosts, none of
+    /// them in this process.
+    struct WorkspaceClient {
+        saved: RefCell<Vec<tcode_client::pairing::PairedHost>>,
+        /// The links to dial, by machine, in order.
+        transports: RefCell<HashMap<String, Vec<Transport>>>,
+        preferences: RefCell<tcode_client::host::ClientPreferences>,
+        last_host_id: RefCell<Option<String>>,
+        /// What the next pairing admits this device to.
+        pairs: RefCell<Option<tcode_client::pairing::PairedHost>>,
+    }
+
+    impl ClientHost for WorkspaceClient {
+        fn device_name(&self) -> String {
+            "tablet".into()
+        }
+
+        fn device_id(&self) -> String {
+            "tablet".into()
+        }
+
+        fn device_platform(&self) -> Option<String> {
+            None
+        }
+
+        fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
+            self.preferences.borrow().clone()
+        }
+
+        fn save_preferences(&self, preferences: &tcode_client::host::ClientPreferences) {
+            *self.preferences.borrow_mut() = preferences.clone();
+        }
+
+        fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
+            self.saved.borrow().clone()
+        }
+
+        fn save_hosts(&self, hosts: &[tcode_client::pairing::PairedHost]) {
+            *self.saved.borrow_mut() = hosts.to_vec();
+        }
+
+        fn last_host_id(&self) -> Option<String> {
+            self.last_host_id.borrow().clone()
+        }
+
+        fn set_last_host_id(&self, host_id: Option<&str>) {
+            *self.last_host_id.borrow_mut() = host_id.map(str::to_owned);
+        }
+
+        fn pair(
+            &self,
+            _: tcode_client::pairing::PairInvite,
+            _: Option<std::net::IpAddr>,
+        ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
+        {
+            let paired = self
+                .pairs
+                .borrow_mut()
+                .take()
+                .expect("an invitation expected");
+            Box::pin(async move { Ok(paired) })
+        }
+
+        fn connect(&self, host: &tcode_client::pairing::PairedHost) -> Transport {
+            let mut transports = self.transports.borrow_mut();
+            let offered = transports.entry(host.host_id.clone()).or_default();
+            assert!(
+                !offered.is_empty(),
+                "an unexpected connection to {}",
+                host.host_id
+            );
+            offered.remove(0)
+        }
+    }
+
+    /// The machine's end of one link of a [`WorkspaceClient`].
+    struct WorkspaceHost {
+        host: MountedShell,
+        wakes: async_channel::Receiver<tcode_client::recovery::Wake>,
+    }
+
+    impl WorkspaceHost {
+        /// Offer `client` a link to `host_id`, the next it dials there.
+        fn offer(client: &WorkspaceClient, host_id: &str, cx: &mut TestAppContext) -> Self {
+            let (to_host, requests) = tcode_client::outgoing::channel();
+            let (forward, outgoing) = async_channel::unbounded();
+            let (incoming, from_host) = async_channel::unbounded();
+            let (states, state) = async_channel::unbounded();
+            let wakes = requests.wake.clone();
+            // The machine reads every line the window sends it.
+            cx.executor()
+                .spawn(async move {
+                    while let Ok(line) = requests.recv().await {
+                        if tcode_client::outgoing::subscription_key(&line).is_none() {
+                            requests.sent(&line);
+                        }
+                        if forward.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            client
+                .transports
+                .borrow_mut()
+                .entry(host_id.into())
+                .or_default()
+                .push(Transport {
+                    originals: None,
+                    to_host,
+                    from_host,
+                    state,
+                    current_host: None,
+                });
+            Self {
+                host: MountedShell {
+                    outgoing,
+                    observed: RefCell::new(Vec::new()),
+                    incoming,
+                    states,
+                },
+                wakes,
+            }
+        }
+
+        /// The machine admits the window to all of it, holds `projects` and
+        /// no thread, and its link is up.
+        fn come_up(
+            &self,
+            store: &Entity<WorkspaceStore>,
+            projects: Vec<tcode_core::project::Project>,
+            last_project_id: Option<&str>,
+            cx: &mut VisualTestContext,
+        ) {
+            crate::store::tests::seed_full_scope(store, &self.host.incoming, Vec::new(), cx);
+            send_events(
+                &self.host,
+                vec![
+                    (
+                        Topic::Settings,
+                        ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                            last_project_id: last_project_id.map(str::to_owned),
+                            ..Default::default()
+                        }),
+                    ),
+                    (
+                        Topic::Index,
+                        ServerEvent::IndexSnapshot(IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: Vec::new(),
+                            projects,
+                        }),
+                    ),
+                ],
+            );
+            self.host
+                .states
+                .try_send(tcode_client::ConnectionState::Connected { path: None })
+                .unwrap();
+            draw(cx);
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+        }
+    }
+
+    fn saved_machine(host_id: &str, group: bool) -> tcode_client::pairing::PairedHost {
+        tcode_client::pairing::PairedHost {
+            host_id: host_id.into(),
+            name: host_id.into(),
+            traverse: Vec::new(),
+            relay: None,
+            addrs: vec!["127.0.0.1:47503".into()],
+            last_connected_unix: None,
+            group_id: group.then(|| "group".into()),
+            space_id: None,
+            space_name: None,
+        }
+    }
+
+    /// A tablet `width` wide that has added `saved` and arranged its
+    /// workspace as `workspace`, with a link offered to each machine saved.
+    fn mount_workspace(
+        cx: &mut TestAppContext,
+        saved: Vec<tcode_client::pairing::PairedHost>,
+        workspace: Option<tcode_client::host::WorkspacePreference>,
+        width: f32,
+    ) -> (
+        Entity<AppShell>,
+        HashMap<HostKey, WorkspaceHost>,
+        Rc<WorkspaceClient>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let client = Rc::new(WorkspaceClient {
+            saved: RefCell::new(saved.clone()),
+            transports: RefCell::default(),
+            preferences: RefCell::new(tcode_client::host::ClientPreferences {
+                workspace,
+                ..Default::default()
+            }),
+            last_host_id: RefCell::default(),
+            pairs: RefCell::default(),
+        });
+        let hosts: HashMap<HostKey, WorkspaceHost> = saved
+            .iter()
+            .map(|host| {
+                (
+                    HostKey::Remote(host.host_id.clone()),
+                    WorkspaceHost::offer(&client, &host.host_id, cx),
+                )
+            })
+            .collect();
+        let setup_client: Rc<dyn ClientHost> = client.clone();
+        cx.update(|cx| {
+            cx.set_global(crate::remote::ClientAttachment::new(
+                setup_client.clone(),
+                false,
+                request_host,
+            ))
+        });
+        let mounted = Rc::new(RefCell::new(None));
+        let capture = mounted.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            let window_state = cx.new(|_| WindowState::default());
+            let shell = cx.new(|cx| {
+                AppShell::new(
+                    window_state,
+                    ShellSetup {
+                        client_host: Some(setup_client),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            });
+            *capture.borrow_mut() = Some(shell.clone());
+            gpui_base::Root::new(shell, window, cx)
+        });
+        let shell: Entity<AppShell> = mounted.borrow_mut().take().unwrap();
+        cx.update(|window, cx| {
+            window.activate_window();
+            set_back_target(window.window_handle(), &shell, cx);
+        });
+        resize(cx, width);
+        (shell, hosts, client, cx)
+    }
+
+    /// The store of `host`, which the window is linked to.
+    fn store_on(
+        shell: &Entity<AppShell>,
+        host: &str,
+        cx: &VisualTestContext,
+    ) -> Entity<WorkspaceStore> {
+        let key = HostKey::Remote(host.into());
+        shell.read_with(cx, |shell, _| {
+            shell.link_of(&key).expect("linked").store.clone()
+        })
+    }
+
+    /// The hosts the window is linked to, in order.
+    fn linked(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<HostKey> {
+        shell.read_with(cx, |shell, _| shell.links.iter().map(Link::key).collect())
+    }
+
+    /// An invitation the pairing form takes; the device's `pair` decides
+    /// which machine it admits it to.
+    const INVITATION: &str = "tcode://pair?v=3&id=a5f3c6ea6ba6c5c5d0c4e2b7a5f3c6ea6ba6c5c5d0c4e2b7a5f3c6ea6ba6c5c5&secret=AAECAwQFBgcICQoLDA0ODw&traverse=off&port=47420";
+
+    /// Paste `INVITATION` on the pairing page as the user would, the
+    /// device answering with `admitted`.
+    fn pair_with(
+        shell: &Entity<AppShell>,
+        client: &WorkspaceClient,
+        admitted: tcode_client::pairing::PairedHost,
+        cx: &mut VisualTestContext,
+    ) {
+        *client.pairs.borrow_mut() = Some(admitted);
+        if shell.read_with(cx, |shell, cx| shell.destination(cx)) != Destination::Pair {
+            shell.update(cx, |shell, cx| shell.go(Destination::Pair, cx));
+        }
+        draw(cx);
+        cx.simulate_input(INVITATION);
+        draw(cx);
+        assert!(client.pairs.borrow().is_none(), "the invitation is sent");
+    }
+
+    fn two_hosts() -> Vec<tcode_client::pairing::PairedHost> {
+        vec![saved_machine("host-a", true), saved_machine("host-b", true)]
+    }
+
+    /// A machine refusing this device, and pairing with it again, change
+    /// nothing on another machine of the window: its store, pane, thread
+    /// and half-written message stay, and it is sent nothing. The refused
+    /// machine says so, and offers Pair again, in its own section.
+    #[gpui::test]
+    fn a_host_refused_and_paired_again_changes_nothing_on_another(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        cx.update(|_, cx| {
+            crate::shortcut::init(cx);
+            DevicePreferences::set_sidebar_layout(tcode_core::settings::SidebarLayout::Grouped, cx)
+        });
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        assert_eq!(linked(&shell, cx), [key_a.clone(), key_b.clone()]);
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        hosts[&key_a].come_up(&a, Vec::new(), None, cx);
+        hosts[&key_b].come_up(&b, Vec::new(), None, cx);
+        send_events(&hosts[&key_a].host, vec![panes_index(&[])]);
+        serve_thread(&hosts[&key_a].host, "thread-1");
+        a.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
+        });
+        crate::test_frames::draw_settled(cx);
+        let card = cx.debug_bounds("composer-card").expect("A's composer");
+        cx.simulate_click(card.center(), gpui::Modifiers::default());
+        cx.simulate_input("half a thought");
+        draw(cx);
+        let pane = shell.read_with(cx, |shell, _| {
+            shell
+                .column
+                .as_ref()
+                .expect("a column")
+                .current_pane
+                .clone()
+        });
+        let composer = pane.read_with(cx, |pane, cx| pane.chat().read(cx).composer());
+        let link_a = a.read_with(cx, |store, _| store.connection_state());
+        sent(&hosts[&key_a].host);
+        let unchanged = |cx: &mut VisualTestContext| {
+            assert_eq!(store_of(&shell, cx), a, "the column stays on A");
+            shell.read_with(cx, |shell, cx| {
+                let column = shell.column.as_ref().unwrap();
+                assert_eq!(column.current_pane, pane);
+                assert_eq!(column.panes(cx), std::slice::from_ref(&pane));
+            });
+            assert_eq!(
+                pane.read_with(cx, |pane, _| pane.session_id().map(str::to_owned)),
+                Some("thread-1".into())
+            );
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                "half a thought"
+            );
+            a.read_with(cx, |store, cx| {
+                assert!(store.is_thread_open("thread-1"));
+                assert!(!store.chat_loading_for(Some("thread-1"), cx));
+                assert_eq!(store.connection_state(), link_a);
+            });
+            assert_eq!(sent(&hosts[&key_a].host), Vec::new(), "A hears nothing");
+        };
+
+        hosts[&key_b]
+            .host
+            .states
+            .try_send(tcode_client::ConnectionState::Offline {
+                reason: tcode_client::ConnectionFailure::AuthenticationRejected,
+            })
+            .unwrap();
+        crate::test_frames::draw_settled(cx);
+        let again = cx
+            .debug_bounds("host-pair-again-host-b")
+            .expect("B offers Pair again in its section");
+        unchanged(cx);
+
+        let paired_again = WorkspaceHost::offer(&client, "host-b", cx);
+        cx.simulate_click(again.center(), gpui::Modifiers::default());
+        pair_with(&shell, &client, saved_machine("host-b", true), cx);
+        assert_eq!(linked(&shell, cx), [key_a.clone(), key_b.clone()]);
+        let b = store_on(&shell, "host-b", cx);
+        paired_again.come_up(&b, Vec::new(), None, cx);
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("host-pair-again-host-b").is_none());
+        assert!(b.read_with(cx, |store, _| store.connection_state().is_connected()));
+        unchanged(cx);
+    }
+
+    /// Leaving the app parks every host's link, and coming back reconnects
+    /// every one.
+    #[gpui::test]
+    fn park_and_reconnect_reach_every_host(cx: &mut TestAppContext) {
+        use tcode_client::recovery::Wake;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 393.);
+        for wake in [Wake::Park, Wake::Reconnect] {
+            shell.read_with(cx, |shell, _| shell.wake_connection(wake.clone()));
+            for host in ["host-a", "host-b"] {
+                assert_eq!(
+                    hosts[&HostKey::Remote(host.into())].wakes.try_recv(),
+                    Ok(wake.clone()),
+                    "{host}"
+                );
+            }
+        }
+    }
+
+    /// Only the column's host is asked for its last project's draft; once
+    /// that host leaves the workspace, the column goes to the host left,
+    /// which is asked for its own, and the host left stays out.
+    #[gpui::test]
+    fn only_the_columns_host_offers_its_draft_until_it_leaves(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        let project =
+            |id: &str| crate::store::tests::project_at(id, std::path::Path::new(PANES_CWD));
+        let drafted = |host: &WorkspaceHost| -> Vec<String> {
+            sent(&host.host)
+                .into_iter()
+                .filter_map(|payload| match payload {
+                    ClientPayload::Command(Command::StartDraft { project_id, .. }) => {
+                        Some(project_id)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        hosts[&key_a].come_up(&a, vec![project("on-a")], Some("on-a"), cx);
+        hosts[&key_b].come_up(&b, vec![project("on-b")], Some("on-b"), cx);
+        assert_eq!(drafted(&hosts[&key_a]), ["on-a"]);
+        assert_eq!(drafted(&hosts[&key_b]), Vec::<String>::new());
+
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.leave_host(&key_a, window, cx)));
+        draw(cx);
+        assert_eq!(linked(&shell, cx), std::slice::from_ref(&key_b));
+        assert_eq!(store_of(&shell, cx), b);
+        assert_eq!(drafted(&hosts[&key_b]), ["on-b"]);
+        let workspace = client.load_preferences().workspace.expect("arranged");
+        assert_eq!(workspace.left, ["host-a"]);
+        assert!(workspace.hosts.iter().all(|host| host.host_id != "host-a"));
+    }
+
+    /// Pairing with a machine adds it beside the window's hosts, leaving
+    /// their links as they are; pairing into a space replaces them, as a
+    /// space is reached alone.
+    #[gpui::test]
+    fn pairing_adds_a_machine_beside_the_others_and_a_space_replaces_them(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, client, cx) =
+            mount_workspace(cx, vec![saved_machine("host-a", true)], None, 1200.);
+        let key_a = HostKey::Remote("host-a".into());
+        let a = store_on(&shell, "host-a", cx);
+        hosts[&key_a].come_up(&a, Vec::new(), None, cx);
+
+        let _c = WorkspaceHost::offer(&client, "host-c", cx);
+        pair_with(&shell, &client, saved_machine("host-c", false), cx);
+        assert_eq!(
+            linked(&shell, cx),
+            [key_a.clone(), HostKey::Remote("host-c".into())]
+        );
+        assert_eq!(store_on(&shell, "host-a", cx), a, "A's link is kept");
+        assert!(a.read_with(cx, |store, _| store.connection_state().is_connected()));
+        assert_eq!(store_of(&shell, cx), a, "the column stays");
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.window_state.read(cx).route()),
+            Route::Chat
+        );
+
+        let _d = WorkspaceHost::offer(&client, "host-d", cx);
+        pair_with(
+            &shell,
+            &client,
+            tcode_client::pairing::PairedHost {
+                space_id: Some("space".into()),
+                space_name: Some("Shared".into()),
+                ..saved_machine("host-d", false)
+            },
+            cx,
+        );
+        assert_eq!(linked(&shell, cx), [HostKey::Remote("host-d".into())]);
+    }
+
+    /// A thread the user asks for on a host the column is not on takes the
+    /// column there: panes show one host at a time. One nobody asked for
+    /// stays off screen.
+    #[gpui::test]
+    fn a_thread_asked_for_on_another_host_takes_the_column_there(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        for (key, store) in [(&key_a, &a), (&key_b, &b)] {
+            hosts[key].come_up(store, Vec::new(), None, cx);
+            send_events(&hosts[key].host, vec![panes_index(&[])]);
+            serve_thread(&hosts[key].host, "thread-1");
+        }
+        a.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+        draw(cx);
+        assert_eq!(store_of(&shell, cx), a);
+
+        b.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+        draw(cx);
+        assert_eq!(store_of(&shell, cx), b, "the column is on B");
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
+        assert!(b.read_with(cx, |store, _| store.is_thread_open("thread-1")));
+        assert!(
+            !a.read_with(cx, |store, _| store.is_thread_open("thread-1")),
+            "A's thread is no longer shown"
+        );
+        assert_eq!(linked(&shell, cx), [key_a, key_b], "both links stay");
+
+        a.update(cx, |store, cx| store.put_back_thread("thread-1".into(), cx));
+        draw(cx);
+        assert_eq!(store_of(&shell, cx), b, "unasked, A's thread stays off");
+    }
+
+    /// Re-pairing with a machine ends on `open_host` with that machine's id.
     /// The link it refused has stopped reconnecting, so it is rebuilt rather
     /// than kept saying the pairing was rejected; a pairing into one of its
     /// spaces is likewise a new link, not the full one it replaces.
@@ -6146,7 +7109,7 @@ pub(crate) mod tests {
         client.transports.borrow_mut().push(fresh_transport());
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(
+                shell.open_host(
                     AttachmentTarget::Remote(Box::new(saved.clone())),
                     window,
                     cx,
@@ -6166,7 +7129,7 @@ pub(crate) mod tests {
         // The working link to the same machine is kept...
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(
+                shell.open_host(
                     AttachmentTarget::Remote(Box::new(saved.clone())),
                     window,
                     cx,
@@ -6184,7 +7147,7 @@ pub(crate) mod tests {
         };
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(AttachmentTarget::Remote(Box::new(member)), window, cx)
+                shell.open_host(AttachmentTarget::Remote(Box::new(member)), window, cx)
             });
         });
         cx.run_until_parked();
@@ -6657,7 +7620,7 @@ pub(crate) mod tests {
         closed_cx.update(|window, _| window.remove_window());
         closed_cx.run_until_parked();
         let place = closed.read_with(cx, |shell, cx| shell.current_place(cx));
-        closed.update(cx, |shell, cx| shell.detach(cx));
+        closed.update(cx, |shell, cx| shell.close_links(cx));
 
         let (reopened, mut reopened_cx) = open(
             ShellSetup {
@@ -6698,11 +7661,7 @@ pub(crate) mod tests {
             shell.read_with(cx, |shell, cx| {
                 assert_eq!(
                     shell.window_state.read(cx).history(),
-                    [
-                        Destination::Hosts,
-                        Destination::Threads,
-                        Destination::Thread
-                    ]
+                    [Destination::Threads, Destination::Thread]
                 );
                 assert_eq!(
                     shell
@@ -6820,15 +7779,11 @@ pub(crate) mod tests {
         for (saved, expected) in [
             (
                 vec!["hosts", "threads", "thread", "settings", "settings_section"],
-                vec![
-                    Destination::Hosts,
-                    Destination::Threads,
-                    Destination::Thread,
-                ],
+                vec![Destination::Threads, Destination::Thread],
             ),
             (
                 vec!["hosts", "threads", "hosts", "pair"],
-                vec![Destination::Hosts, Destination::Threads, Destination::Hosts],
+                vec![Destination::Threads, Destination::Hosts],
             ),
         ] {
             let (shell, _, _, cx) = mount_restored(cx, &saved, true);
@@ -6863,7 +7818,7 @@ pub(crate) mod tests {
             shell.read_with(cx, |shell, cx| {
                 assert_eq!(
                     shell.window_state.read(cx).history(),
-                    [Destination::Hosts, Destination::Threads]
+                    [Destination::Threads]
                 );
                 assert_eq!(shell.page_thread(cx).map(|thread| thread.session_id), None);
             });
@@ -6872,7 +7827,7 @@ pub(crate) mod tests {
             let preferences = client.load_preferences();
             assert_eq!(
                 preferences.navigation.unwrap()["history"],
-                serde_json::json!(["hosts", "threads"])
+                serde_json::json!(["threads"])
             );
         }
     }
@@ -6980,7 +7935,7 @@ pub(crate) mod tests {
         assert_eq!(same_page["session_id"], "thread-b");
         assert_eq!(
             same_page["history"],
-            serde_json::json!(["hosts", "threads", "thread"])
+            serde_json::json!(["threads", "thread"])
         );
 
         store.update(cx, |store, cx| {
@@ -6998,7 +7953,7 @@ pub(crate) mod tests {
         assert_eq!(navigation["session_id"], "thread-c");
         assert_eq!(
             navigation["history"],
-            serde_json::json!(["hosts", "threads", "thread", "settings"])
+            serde_json::json!(["threads", "thread", "settings"])
         );
         // A theme edit keeps the history and selection the checkpoint saved.
         cx.update(|window, cx| {
@@ -7012,37 +7967,40 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn cold_start_with_a_missing_machine_restores_hosts(cx: &mut TestAppContext) {
+    fn cold_start_with_a_missing_machine_restores_the_empty_threads(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], false);
         shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [Destination::Threads]
+            );
             assert!(shell.store().is_none());
         });
+        assert!(cx.debug_bounds("no-hosts").is_some());
         assert!(sent(&host).is_empty());
     }
 
-    /// A tablet in landscape with nothing to attach to is the hosts page and
-    /// nothing else: the wide layout has no local host and no sidebar to
-    /// switch routes with, so the page is the whole window until the window
-    /// attaches somewhere, Pair returns to it, and disconnecting comes back
-    /// to it.
+    /// A tablet in landscape with no host is the threads' empty root and the
+    /// pages it leads to, nothing else: the wide layout has no local host and
+    /// no sidebar to switch routes with, so each page is the whole window
+    /// until the window has a host, Back returns to the root, and leaving
+    /// the last host comes back to it.
     #[gpui::test]
-    fn a_wide_mobile_window_stays_on_hosts_until_it_attaches(cx: &mut TestAppContext) {
+    fn a_wide_mobile_window_without_a_host_shows_the_empty_threads_until_one_opens(
+        cx: &mut TestAppContext,
+    ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, _host, client, cx) =
             mount_restored_at_width(cx, &["hosts"], false, 1024., "plan");
-        let assert_locked_on_hosts = |cx: &mut VisualTestContext| {
+        let assert_on_empty_root = |cx: &mut VisualTestContext| {
             crate::test_frames::draw_settled(cx);
             assert!(
-                cx.debug_bounds("hosts-page").is_some(),
-                "the hosts page is the window"
+                cx.debug_bounds("no-hosts").is_some(),
+                "the empty threads are the window"
             );
-            assert!(
-                cx.debug_bounds("hosts-route").is_none(),
-                "no workspace column"
-            );
+            assert!(cx.debug_bounds("chat-route").is_none(), "no workspace");
             assert!(
                 cx.debug_bounds("sidebar-feature-hosts").is_none(),
                 "no sidebar"
@@ -7055,35 +8013,44 @@ pub(crate) mod tests {
         shell.read_with(cx, |shell, cx| {
             assert!(!shell.compact(cx), "1024px on a mobile build is wide");
             assert!(shell.store().is_none());
-            assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [Destination::Threads]
+            );
         });
-        assert_locked_on_hosts(cx);
-        let state = shell.read_with(cx, |shell, _| shell.window_state());
-        // Nothing leads away: Back is the root, and a stale destination
-        // still shows the hosts page.
+        assert_on_empty_root(cx);
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| assert!(!shell.back(window, cx)));
         });
-        assert_locked_on_hosts(cx);
-        state.update(cx, |state, cx| state.go(Destination::Threads, cx));
-        draw(cx);
+        assert_on_empty_root(cx);
+        // Machines and Pair are pages over the root, and Back returns to it.
+        let machines = cx
+            .debug_bounds("no-hosts-machines")
+            .expect("the root leads to Machines");
+        cx.simulate_click(machines.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("hosts-page").is_some());
-        assert!(cx.debug_bounds("compact-threads-page").is_none());
-        state.update(cx, |state, cx| state.leave_workspace(cx));
-        // Pair is the one page over Hosts, and its Back returns to Hosts.
-        state.update(cx, |state, cx| state.go(Destination::Pair, cx));
-        draw(cx);
         let back = cx
             .debug_bounds("compact-back")
-            .expect("Pair returns to Machines");
+            .expect("Machines returns to the threads");
         cx.simulate_click(back.center(), gpui::Modifiers::default());
-        assert_locked_on_hosts(cx);
+        assert_on_empty_root(cx);
+        let pair = cx
+            .debug_bounds("no-hosts-pair")
+            .expect("the root leads to pairing");
+        cx.simulate_click(pair.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        let back = cx
+            .debug_bounds("compact-back")
+            .expect("Pair returns to the threads");
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        assert_on_empty_root(cx);
 
-        // Attaching leaves the page for the new host's workspace...
+        // Opening a host leaves the root for its workspace...
         let saved = client.saved.clone();
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(AttachmentTarget::Remote(Box::new(saved)), window, cx)
+                shell.open_host(AttachmentTarget::Remote(Box::new(saved)), window, cx)
             });
         });
         crate::test_frames::draw_settled(cx);
@@ -7091,19 +8058,26 @@ pub(crate) mod tests {
             assert!(shell.store().is_some());
             assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
         });
-        assert!(cx.debug_bounds("hosts-page").is_none());
+        assert!(cx.debug_bounds("no-hosts").is_none());
         assert!(
             cx.debug_bounds("sidebar-feature-hosts").is_some(),
             "the wide workspace"
         );
 
-        // ...and disconnecting returns to it.
-        shell.update(cx, |shell, cx| shell.detach(cx));
+        // ...and leaving it returns to the root.
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.leave_host(&HostKey::Remote("last-host".into()), window, cx)
+            });
+        });
         shell.read_with(cx, |shell, cx| {
             assert!(shell.store().is_none());
-            assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [Destination::Threads]
+            );
         });
-        assert_locked_on_hosts(cx);
+        assert_on_empty_root(cx);
     }
 
     /// Navigation never raises a software keyboard: on a phone every route
@@ -7233,7 +8207,8 @@ pub(crate) mod tests {
                     && !store.chat_loading_for(Some("thread-a"), cx)
             })
         });
-        draw(cx);
+        // The page is tapped once it has slid in.
+        crate::test_frames::draw_settled(cx);
         let composer = shell.read_with(cx, |shell, cx| {
             shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
@@ -14310,9 +15285,9 @@ pub(crate) mod tests {
         cx: &mut TestAppContext,
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_initial(cx, None);
-        as_mobile(cx);
-        resize(cx, 393.);
+        let studio = saved_machine("studio", false);
+        let (shell, _hosts, _client, cx) =
+            mount_workspace(cx, vec![studio.clone()], Some(Default::default()), 393.);
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| {
@@ -14321,11 +15296,14 @@ pub(crate) mod tests {
             });
         let hosts = shell.read_with(cx, |shell, _| shell.hosts.clone());
         cx.update(|window, cx| {
-            set_back_target(window.window_handle(), &shell, cx);
-            // Connect runs inside RemotePanel's click listener. Attaching
-            // updates that same panel to point at the new workspace store.
+            // Connect runs inside RemotePanel's click listener. Opening a
+            // host updates that same panel with the new store.
             hosts.update(cx, |_, cx| {
-                switch_current(AttachmentTarget::Local, window, cx);
+                request_host(
+                    HostRequest::Open(AttachmentTarget::Remote(Box::new(studio))),
+                    window,
+                    cx,
+                );
             });
         });
         draw(cx);
@@ -14333,22 +15311,16 @@ pub(crate) mod tests {
             assert!(shell.store().is_some());
             assert_eq!(
                 shell.window_state.read(cx).history(),
-                [Destination::Hosts, Destination::Threads]
+                [Destination::Threads]
             );
         });
-        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
-        draw(cx);
-        assert_eq!(
-            shell.read_with(cx, |shell, cx| shell.destination(cx)),
-            Destination::Hosts
-        );
         assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
     }
 
     /// A local host that did not start at launch is on Machines from the
     /// first frame, whatever the window attached to. Retry asks bootstrap to
     /// start it again; a failed start keeps the machine the window is on, and
-    /// one that comes up replaces it.
+    /// one that comes up joins it.
     #[gpui::test]
     fn a_local_host_that_does_not_start_is_shown_and_retried(cx: &mut TestAppContext) {
         struct Desk {
@@ -14433,7 +15405,7 @@ pub(crate) mod tests {
             cx.set_global(crate::remote::ClientAttachment::new(
                 desk.clone(),
                 true,
-                switch_current,
+                request_host,
             ))
         });
         let mounted = Rc::new(RefCell::new(None));
@@ -14496,12 +15468,16 @@ pub(crate) mod tests {
 
         retry(cx);
         assert_eq!(attempts.get(), 2);
-        assert_eq!(attached(cx), Some(None), "the local host replaces it");
-        let store = shell.read_with(cx, |shell, _| shell.store()).unwrap();
+        assert_eq!(
+            attached(cx),
+            Some(Some("studio".into())),
+            "the window stays on the machine it is on"
+        );
+        let store = shell
+            .read_with(cx, |shell, _| shell.local_store())
+            .expect("the local host joins it");
         crate::store::tests::seed_full_scope(&store, &local_incoming, Vec::new(), cx);
         open_machines(cx);
-        // The machine left is drawn beneath the new one while it rises, and
-        // the failure folds away there.
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("hosts-local-failure").is_none());
     }
@@ -15877,29 +16853,33 @@ pub(crate) mod tests {
             );
         });
 
-        // Thread → Threads → Hosts. Neither step detaches: only connecting
-        // somewhere else, or an explicit Disconnect, does that.
+        // Thread → Threads, the root. Neither leaving the thread nor a visit
+        // to Machines leaves the host: only an explicit Disconnect does.
         assert!(back(cx));
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.destination(cx), Destination::Threads);
             assert!(shell.column.is_some(), "still attached");
         });
-        assert!(back(cx));
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.destination(cx), Destination::Hosts);
-            assert!(
-                shell.column.is_some(),
-                "walking back to the hosts list is not a decision to leave the host"
-            );
-        });
+        assert!(!back(cx), "the root belongs to the platform");
 
-        window_state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+        window_state.update(cx, |state, cx| {
+            state.go(Destination::Hosts, cx);
+            state.go(Destination::Pair, cx);
+        });
         draw(cx);
         assert!(back(cx));
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.destination(cx)),
             Destination::Hosts
         );
+        assert!(back(cx));
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Threads);
+            assert!(
+                shell.column.is_some(),
+                "walking back from the hosts list is not a decision to leave the host"
+            );
+        });
         assert!(!back(cx), "the root belongs to the platform");
     }
 
@@ -15914,7 +16894,8 @@ pub(crate) mod tests {
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
 
         window_state.update(cx, |state, cx| state.open_settings(cx));
-        draw(cx);
+        // The page is tapped once it has slid in.
+        crate::test_frames::draw_settled(cx);
         let general = cx
             .debug_bounds("settings-nav-general")
             .expect("General settings row");
@@ -16081,7 +17062,7 @@ pub(crate) mod tests {
                     .read(cx)
                     .history()
                     .to_vec()),
-                vec![Destination::Hosts, Destination::Thread]
+                vec![Destination::Threads, Destination::Thread]
             );
         }
         let state = shell.read_with(cx, |shell, _| shell.window_state());
@@ -16111,7 +17092,7 @@ pub(crate) mod tests {
             click_control(cx);
             assert_eq!(
                 state.read_with(cx, |state, _| state.history().to_vec()),
-                vec![Destination::Hosts, Destination::Thread],
+                vec![Destination::Threads, Destination::Thread],
                 "pairing: {pairing}"
             );
             assert!(cx.debug_bounds("hosts-route").is_none());
@@ -16163,15 +17144,17 @@ pub(crate) mod tests {
         assert!(cx.debug_bounds("sidebar-feature-hosts").is_none());
     }
 
-    /// Attaching, the workspace rises over Machines; detaching, Machines rises
-    /// over the workspace, whose views are let go once it is covered.
+    /// Opening the first host, its workspace rises over the empty threads;
+    /// leaving the last, the empty threads rise over the workspace, whose
+    /// views are let go once it is covered.
     #[gpui::test]
-    fn attaching_and_detaching_rise_over_what_the_window_showed(cx: &mut TestAppContext) {
+    fn the_first_host_and_the_last_rise_over_what_the_window_showed(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_initial(cx, None);
-        resize(cx, 1024.);
+        let studio = saved_machine("studio", false);
+        let (shell, _hosts, _client, cx) =
+            mount_workspace(cx, vec![studio.clone()], Some(Default::default()), 1024.);
         crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds("hosts-page").is_some());
+        assert!(cx.debug_bounds("no-hosts").is_some());
         let half_way = |cx: &mut VisualTestContext| {
             draw(cx);
             cx.executor().advance_clock(crate::edge_back::SETTLE / 2);
@@ -16180,7 +17163,7 @@ pub(crate) mod tests {
 
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.switch_to(AttachmentTarget::Local, window, cx)
+                shell.open_host(AttachmentTarget::Remote(Box::new(studio)), window, cx)
             })
         });
         half_way(cx);
@@ -16188,9 +17171,12 @@ pub(crate) mod tests {
             cx.debug_bounds("chat-route").is_some(),
             "the workspace rises"
         );
-        assert!(cx.debug_bounds("hosts-page").is_some(), "over Machines");
+        assert!(
+            cx.debug_bounds("no-hosts").is_some(),
+            "over the empty threads"
+        );
         crate::test_frames::draw_settled(cx);
-        assert!(cx.debug_bounds("hosts-page").is_none());
+        assert!(cx.debug_bounds("no-hosts").is_none());
 
         let left = shell.read_with(cx, |shell, _| {
             shell
@@ -16200,9 +17186,16 @@ pub(crate) mod tests {
                 .current_pane
                 .downgrade()
         });
-        shell.update(cx, |shell, cx| shell.detach(cx));
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.leave_host(&HostKey::Remote("studio".into()), window, cx)
+            })
+        });
         half_way(cx);
-        assert!(cx.debug_bounds("hosts-page").is_some(), "Machines rises");
+        assert!(
+            cx.debug_bounds("no-hosts").is_some(),
+            "the empty threads rise"
+        );
         assert!(
             cx.debug_bounds("chat-route").is_some(),
             "over the workspace the window left"
@@ -16296,7 +17289,8 @@ pub(crate) mod tests {
         resize(cx, 899.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         window_state.update(cx, |state, cx| state.open_settings(cx));
-        draw(cx);
+        // The page is tapped once it has slid in.
+        crate::test_frames::draw_settled(cx);
         let general = cx
             .debug_bounds("settings-nav-general")
             .expect("General settings row");
@@ -16423,9 +17417,7 @@ pub(crate) mod tests {
     #[gpui::test]
     fn the_pairing_form_glides_across_the_breakpoint(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _host, cx) = mount_initial(cx, None);
-        as_mobile(cx);
-        resize(cx, 899.);
+        let (shell, _hosts, _client, cx) = mount_workspace(cx, Vec::new(), None, 899.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         window_state.update(cx, |state, cx| state.go(Destination::Pair, cx));
         draw(cx);
