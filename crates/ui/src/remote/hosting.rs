@@ -429,7 +429,7 @@ pub struct HostingPanel {
     /// The panel's size-class motion: the window draws it under another
     /// parent when it turns compact or wide.
     motion: crate::motion::owned::Owned,
-    _subscription: gpui::Subscription,
+    _subscriptions: [gpui::Subscription; 2],
 }
 
 impl HostingPanel {
@@ -455,12 +455,23 @@ impl HostingPanel {
                 InputEvent::Change | InputEvent::Focus => {}
             },
         );
+        // Each host's settings page has its own panel: a name saved on one
+        // shows on the others, but for the field being typed in.
+        let follow = cx.observe_global_in::<RemoteController>(window, |this, window, cx| {
+            let saved = cx
+                .global::<RemoteController>()
+                .local_settings()
+                .remote_host_name
+                .clone()
+                .unwrap_or_default();
+            crate::settings_rows::follow_input(&this.host_name_input, &saved, window, cx);
+        });
         Self {
             host_name_input,
             access: cx.new(|_| AccessSection::new(store, this_machine, false)),
             observer: SpacesObserver::default(),
             motion: Default::default(),
-            _subscription: subscription,
+            _subscriptions: [subscription, follow],
         }
     }
 
@@ -610,6 +621,56 @@ impl Render for HostingPanel {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    /// Every host's settings page has its own Remote panel; the machine's
+    /// name saved on one shows on another, which was opened before it.
+    #[gpui::test]
+    fn a_machine_name_saved_on_one_page_shows_on_another(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = crate::store::tests::scratch_root("hosting-name");
+        let (to_host, _host_rx) = async_channel::unbounded::<String>();
+        let (_host_tx, from_host) = async_channel::unbounded::<String>();
+        let (attachments, _attachment_rx) = async_channel::unbounded();
+        cx.update(crate::theme::init);
+        cx.update(|cx| {
+            cx.set_global(RemoteController::new(
+                HostMux::new(attachments, from_host.clone()),
+                root,
+                HostLink::new(to_host.clone(), from_host.clone()),
+                Settings::default(),
+            ))
+        });
+        let pages: Vec<gpui::WindowHandle<HostingPanel>> = (0..2)
+            .map(|_| {
+                cx.add_window(|window, cx| {
+                    let store = cx.new(|cx| {
+                        WorkspaceStore::new_attached(
+                            HostLink::new(to_host.clone(), from_host.clone()),
+                            crate::store::WorkspaceAttachment::Local,
+                            None,
+                            None,
+                            cx,
+                        )
+                    });
+                    HostingPanel::new(store, window, cx)
+                })
+            })
+            .collect();
+        pages[0]
+            .update(cx, |panel, window, cx| {
+                panel.host_name_input.update(cx, |input, cx| {
+                    input.set_value("Studio", window, cx);
+                    cx.emit(InputEvent::Blur);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        pages[1]
+            .update(cx, |panel, _, cx| {
+                assert_eq!(panel.host_name_input.read(cx).value(), "Studio");
+            })
+            .unwrap();
+    }
 
     /// The transport publishes to the enabled sources, in order. A
     /// self-hosted instance is named by the base URL its manifest is served

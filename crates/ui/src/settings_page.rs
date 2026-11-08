@@ -455,13 +455,9 @@ impl SettingsInput {
         true
     }
 
-    /// Push `value` unless the field already shows it or is being typed in.
     fn follow(&mut self, value: String, window: &mut Window, cx: &mut App) {
-        let input = self.state.read(cx);
-        if input.value() != value.as_str()
-            && !gpui::Focusable::focus_handle(input, cx).is_focused(window)
-        {
-            self.push(value, window, cx);
+        if crate::settings_rows::follow_input(&self.state, &value, window, cx) {
+            self.pushed = value;
         }
     }
 
