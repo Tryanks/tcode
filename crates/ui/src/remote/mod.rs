@@ -692,7 +692,9 @@ impl RemotePanel {
         let part = |part: &str| SharedString::from(format!("host-{part}-{}", host.host_id));
         let reason = crate::motion::shown(
             part("reason"),
-            reason.as_ref().map(failure_description),
+            reason
+                .as_ref()
+                .map(|reason| failure_description(reason, needs_pairing)),
             SHOW,
             window,
             cx,
@@ -1538,6 +1540,16 @@ fn relay_region(relay: &str) -> Option<String> {
 /// the baseline over an up link is not a link state: the content area's
 /// skeletons show it, the line says the link is connected.
 pub(crate) fn connection_label(state: &tcode_client::ConnectionState) -> String {
+    connection_line(state, false)
+}
+
+/// [`connection_label`] beside a Pair again button, which the line leaves
+/// the remedy to.
+pub(crate) fn connection_label_beside_pair_again(state: &tcode_client::ConnectionState) -> String {
+    connection_line(state, true)
+}
+
+fn connection_line(state: &tcode_client::ConnectionState, pair_again_shown: bool) -> String {
     use tcode_client::ConnectionState;
     match state {
         ConnectionState::Connected { path } | ConnectionState::Syncing { path } => match path {
@@ -1557,18 +1569,27 @@ pub(crate) fn connection_label(state: &tcode_client::ConnectionState) -> String 
         ConnectionState::Offline { reason } => format!(
             "{} · {}",
             crate::tr!("remote.path.offline"),
-            failure_label(reason)
+            failure_label(reason, pair_again_shown)
         ),
     }
 }
 
-/// The same recovery wording is used in the shell and the machine row.
-pub(crate) fn failure_label(reason: &tcode_client::ConnectionFailure) -> String {
+/// The same recovery wording is used in the shell and the machine row: a
+/// refusal says to pair again unless a Pair again button is beside it.
+fn failure_label(reason: &tcode_client::ConnectionFailure, pair_again_shown: bool) -> String {
     use tcode_client::ConnectionFailure::*;
     match reason {
         Unreachable(_) => crate::tr!("remote.failure.unreachable"),
         Timeout => crate::tr!("remote.failure.timeout"),
-        AuthenticationRejected => crate::tr!("remote.failure.authentication_rejected"),
+        AuthenticationRejected if pair_again_shown => {
+            crate::tr!("remote.failure.authentication_rejected")
+        }
+        AuthenticationRejected => format!(
+            "{} · {}",
+            crate::tr!("remote.failure.authentication_rejected"),
+            crate::tr!("hosts.pair_again")
+        )
+        .into(),
         ProtocolMismatch => crate::tr!("remote.failure.protocol_mismatch"),
         HostClosed => crate::tr!("remote.failure.host_closed"),
     }
@@ -1588,12 +1609,12 @@ pub(crate) fn connection_failure(
 
 /// The machine row has room for the transport's cause; the shell's status
 /// line does not.
-fn failure_description(reason: &tcode_client::ConnectionFailure) -> String {
+fn failure_description(reason: &tcode_client::ConnectionFailure, pair_again_shown: bool) -> String {
     match reason {
         tcode_client::ConnectionFailure::Unreachable(Some(cause)) => {
             crate::tr!("remote.failure.unreachable_cause", reason = cause).into_owned()
         }
-        reason => failure_label(reason),
+        reason => failure_label(reason, pair_again_shown),
     }
 }
 
@@ -1677,6 +1698,17 @@ mod tests {
             }),
             "Offline · Access rejected · Pair again"
         );
+        // Beside a Pair again button, the line leaves the remedy to it.
+        assert_eq!(
+            connection_label_beside_pair_again(&ConnectionState::Offline {
+                reason: ConnectionFailure::AuthenticationRejected
+            }),
+            "Offline · Access rejected"
+        );
+        assert_eq!(
+            failure_description(&ConnectionFailure::AuthenticationRejected, true),
+            "Access rejected"
+        );
         let unreachable = ConnectionFailure::Unreachable(Some(
             "No addressing information available: Address lookup failed".into(),
         ));
@@ -1688,12 +1720,12 @@ mod tests {
             "the status line has no room for the cause"
         );
         assert_eq!(
-            failure_description(&unreachable),
+            failure_description(&unreachable, false),
             "Machine unreachable: No addressing information available: Address lookup failed",
             "the machine row says why"
         );
         assert_eq!(
-            failure_description(&ConnectionFailure::Unreachable(None)),
+            failure_description(&ConnectionFailure::Unreachable(None), false),
             "Machine unreachable"
         );
     }
