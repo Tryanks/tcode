@@ -255,9 +255,9 @@ fn host_section(
 }
 
 /// How element ids, debug selectors and row keys name `id` of `host` in a
-/// sidebar over `hosts` hosts: as it is over one, and after its host over
+/// list over `hosts` hosts: as it is over one, and after its host over
 /// several, where a session or project id is unique only on its host.
-fn named<'a>(hosts: usize, host: &HostKey, id: &'a str) -> Cow<'a, str> {
+pub(crate) fn named<'a>(hosts: usize, host: &HostKey, id: &'a str) -> Cow<'a, str> {
     if hosts <= 1 {
         return Cow::Borrowed(id);
     }

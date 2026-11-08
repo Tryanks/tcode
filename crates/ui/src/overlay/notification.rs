@@ -673,6 +673,21 @@ impl Render for NotificationList {
 
 #[cfg(test)]
 impl NotificationList {
+    /// What each card says in the compact pill, in the order shown.
+    #[cfg(test)]
+    pub(super) fn said(&self, cx: &App) -> Vec<SharedString> {
+        self.manager
+            .iter()
+            .filter_map(|(_, note, _)| {
+                let note = note.read(cx);
+                note.compact_message
+                    .clone()
+                    .or_else(|| note.message.clone())
+                    .or_else(|| note.title.clone())
+            })
+            .collect()
+    }
+
     pub(super) fn assert_messages(&self, cx: &App, expected: &[&str]) {
         let messages = self
             .manager
