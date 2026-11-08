@@ -34,8 +34,8 @@ pub fn flattened_theme_json() -> String {
     flattened
 }
 
-/// Where a client should attach at launch: the host it used last, if that
-/// record still exists. A client with no such record opens on the hosts list.
+/// The host a client's window shows first at launch: the one it was last
+/// on, if that record still exists.
 pub fn last_host_target(host: &dyn ClientHost) -> Option<AttachmentTarget> {
     let id = host.last_host_id()?;
     host.load_hosts()
@@ -203,18 +203,16 @@ pub fn run_shell(
     setup.restore_navigation |= gpui_base::is_mobile();
     let setup = Rc::new(RefCell::new(Some(setup)));
     let mounted: Rc<RefCell<Option<Entity<AppShell>>>> = Rc::new(RefCell::new(None));
-    // Who this client is, and how it re-points at another host. Installed
+    // Who this client is, and how it asks the window for a host. Installed
     // *before* the window, because the views the window builds — the pair form
     // most of all — ask this global what kind of client they are on.
-    // Switching resolves the window's shell when it is actually asked to, not
+    // A request resolves the window's shell when it is actually made, not
     // when this global is installed: the shell does not exist yet here, and the
     // cell below is emptied as soon as the window hands it over.
     cx.set_global(ClientAttachment::new(
         host,
         has_local,
-        |target, window, cx| {
-            crate::shell::switch_current(target, window, cx);
-        },
+        crate::shell::request_host,
     ));
     let captured = mounted.clone();
     let window = open_client_window(cx, options.window, title, move |window, cx| {

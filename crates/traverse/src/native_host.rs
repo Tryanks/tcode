@@ -250,6 +250,9 @@ impl ClientHost for NativeClientHost {
                 .get("sidebar_collapsed")
                 .and_then(serde_json::Value::as_bool),
             sidebar_layout: value("sidebar_layout"),
+            workspace: prefs
+                .get("workspace")
+                .and_then(|value| serde_json::from_value(value.clone()).ok()),
         }
     }
 
@@ -264,6 +267,7 @@ impl ClientHost for NativeClientHost {
         prefs["right_panel_width"] = serde_json::json!(preferences.right_panel_width);
         prefs["sidebar_collapsed"] = serde_json::json!(preferences.sidebar_collapsed);
         prefs["sidebar_layout"] = serde_json::json!(preferences.sidebar_layout);
+        prefs["workspace"] = serde_json::json!(preferences.workspace);
         self.write_prefs(&prefs);
     }
 
@@ -320,6 +324,10 @@ impl ClientHost for NativeClientHost {
         }) {
             log::error!("could not record machine connection: {error}");
         }
+    }
+
+    fn local_machine_id(&self) -> Option<String> {
+        crate::identity::existing_machine_id(&self.data_dir).map(|id| id.to_string())
     }
 
     fn last_host_id(&self) -> Option<String> {
@@ -835,6 +843,19 @@ mod tests {
             right_panel_width: Some(480),
             sidebar_collapsed: Some(true),
             sidebar_layout: Some("grouped".into()),
+            workspace: Some(tcode_client::host::WorkspacePreference {
+                hosts: vec![
+                    tcode_client::host::WorkspaceHost {
+                        host_id: "local".into(),
+                        collapsed: false,
+                    },
+                    tcode_client::host::WorkspaceHost {
+                        host_id: "studio".into(),
+                        collapsed: true,
+                    },
+                ],
+                left: vec!["attic".into()],
+            }),
         });
 
         let saved: serde_json::Value =
@@ -857,6 +878,19 @@ mod tests {
         assert_eq!(
             host.load_preferences().sidebar_layout.as_deref(),
             Some("grouped")
+        );
+        assert_eq!(
+            saved["workspace"],
+            serde_json::json!({
+                "hosts": [{"host_id": "local"}, {"host_id": "studio", "collapsed": true}],
+                "left": ["attic"]
+            })
+        );
+        assert_eq!(
+            host.load_preferences()
+                .workspace
+                .map(|workspace| workspace.hosts.len()),
+            Some(2)
         );
 
         host.set_last_host_id(Some("next-host"));

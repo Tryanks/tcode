@@ -144,6 +144,30 @@ pub struct ClientPreferences {
     /// `"flat"` or `"grouped"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_layout: Option<String>,
+    /// `None` until this device first arranges its workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspacePreference>,
+}
+
+/// The hosts this device's window lists side by side.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspacePreference {
+    /// In the order the window lists them.
+    #[serde(default)]
+    pub hosts: Vec<WorkspaceHost>,
+    /// Group members this device took out of its workspace. Every other
+    /// member of a group joins it by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceHost {
+    /// A saved host's id, or `"local"` for the host in this process.
+    pub host_id: String,
+    /// Whether the window folds this host's section away.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
 }
 
 /// One file a platform picker handed back, already read into memory.
@@ -217,6 +241,12 @@ pub trait ClientHost: 'static {
             host.last_connected_unix = Some(timestamp);
             self.save_hosts(&hosts);
         }
+    }
+
+    /// The id of the machine hosted from this client's own data, which is
+    /// never also one of its remote machines.
+    fn local_machine_id(&self) -> Option<String> {
+        None
     }
 
     /// `Some(id)` of the host to reconnect to on launch.

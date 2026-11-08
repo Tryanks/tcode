@@ -9,12 +9,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Destination {
-    /// Which host this window talks to: the root, and a place that can also be
-    /// *visited* from an attached workspace without detaching from it.
+    /// The machines this device knows, and which of them the window's
+    /// workspace holds: a page visited over the threads.
     Hosts,
-    /// The pairing form, pushed from Hosts (or from a repair row that
-    /// prefilled it).
+    /// The pairing form, pushed from Hosts, from a refused host's Pair again
+    /// or from a window with no host.
     Pair,
+    /// The threads of every host the window shows: the root.
     Threads,
     Thread,
     /// The thread's terminal, diff/plan or preview, full width.
@@ -92,8 +93,12 @@ impl NavigationSnapshot {
                     | Destination::PullRequest
             )
         });
-        if snapshot.history.first() != Some(&Destination::Hosts) {
-            snapshot.history.insert(0, Destination::Hosts);
+        // Machines was the root before the threads were.
+        if snapshot.history.first() == Some(&Destination::Hosts) {
+            snapshot.history.remove(0);
+        }
+        if snapshot.history.first() != Some(&Destination::Threads) {
+            snapshot.history.insert(0, Destination::Threads);
         }
         snapshot.history.dedup();
         if snapshot.host_id.is_none() {
@@ -107,7 +112,7 @@ impl NavigationSnapshot {
     pub fn without_host(&mut self) {
         self.host_id = None;
         self.session_id = None;
-        self.history = vec![Destination::Hosts];
+        self.history = vec![Destination::Threads];
     }
 
     fn without_thread(&mut self) {
@@ -172,7 +177,7 @@ pub struct WindowState {
     /// persisted: widening a window is not a preference.
     pub compact: bool,
     /// Where the window has been, oldest first. Never empty: `history[0]` is
-    /// [`Destination::Hosts`], the root the platform's Back gesture falls off.
+    /// [`Destination::Threads`], the root the platform's Back gesture falls off.
     history: Vec<Destination>,
     /// Whether the palette is open. A closed palette stays on screen while it
     /// leaves (see [`Self::palette_mounted`]).
@@ -193,7 +198,7 @@ impl Default for WindowState {
     fn default() -> Self {
         Self {
             compact: false,
-            history: vec![Destination::Hosts],
+            history: vec![Destination::Threads],
             palette_open: false,
             palette_leaving: false,
             palette_focuses_query: true,
@@ -230,8 +235,9 @@ impl WindowState {
         cx.notify();
     }
 
-    /// A restored thread was archived/deleted while this client was away.
-    pub(crate) fn discard_restored_thread(&mut self, cx: &mut Context<Self>) {
+    /// The thread the window showed is not there any more: a restored one
+    /// went while this client was away, or the column left its host.
+    pub(crate) fn drop_thread_pages(&mut self, cx: &mut Context<Self>) {
         if let Some(index) = self.history.iter().position(|destination| {
             matches!(
                 destination,
@@ -331,17 +337,34 @@ impl WindowState {
         true
     }
 
-    /// A fresh attachment: the previous host's pages are not this host's, so the
-    /// history restarts at its thread list.
+    /// A fresh workspace: the previous host's pages are not this host's, so
+    /// the history restarts at the threads.
     pub fn enter_workspace(&mut self, cx: &mut Context<Self>) {
-        self.history.truncate(1);
-        self.history.push(Destination::Threads);
+        self.history = vec![Destination::Threads];
         cx.notify();
     }
 
-    /// No attachment: only the root remains.
+    /// No host: what remains is the threads' empty root and a visit to
+    /// Machines, where hosts are added.
     pub fn leave_workspace(&mut self, cx: &mut Context<Self>) {
-        self.history.truncate(1);
+        self.history.retain(|destination| {
+            matches!(
+                destination,
+                Destination::Threads | Destination::Hosts | Destination::Pair
+            )
+        });
+        self.history.dedup();
+        cx.notify();
+    }
+
+    /// Leave a visit to Machines for the threads beneath it.
+    pub fn leave_hosts(&mut self, cx: &mut Context<Self>) {
+        if self.route() != Route::Hosts {
+            return;
+        }
+        while self.history.len() > 1 && self.route() == Route::Hosts {
+            self.history.pop();
+        }
         cx.notify();
     }
 
@@ -358,7 +381,11 @@ impl WindowState {
         if self.route() != Route::Chat {
             return;
         }
-        *self.history.last_mut().expect("the history is never empty") = Destination::Thread;
+        if self.history.len() == 1 {
+            self.history.push(Destination::Thread);
+        } else {
+            *self.history.last_mut().expect("the history is never empty") = Destination::Thread;
+        }
         cx.notify();
     }
 

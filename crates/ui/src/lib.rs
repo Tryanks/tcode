@@ -86,6 +86,7 @@ mod width_frame;
 mod window_caption;
 pub(crate) mod window_seam;
 mod window_state;
+mod workspace;
 mod workspace_walk;
 
 pub use i18n::{

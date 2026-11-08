@@ -5,8 +5,10 @@
 use std::rc::Rc;
 
 use gpui::{App, AppContext as _, Entity, Global, Window};
-use tcode_client::host::{ClientHost, ClientPreferences};
+use tcode_client::host::{ClientHost, ClientPreferences, WorkspacePreference};
 use tcode_core::settings::{Settings, SidebarLayout, ThemeMode};
+
+use crate::store::HostKey;
 
 pub(crate) struct DevicePreferences {
     client: Option<Rc<dyn ClientHost>>,
@@ -154,6 +156,40 @@ impl DevicePreferences {
         });
     }
 
+    /// The workspace as this device arranged it, `None` before it did.
+    pub(crate) fn workspace(cx: &App) -> Option<WorkspacePreference> {
+        Self::saved(cx)?.workspace.clone()
+    }
+
+    pub(crate) fn arrange_workspace(
+        cx: &mut App,
+        change: impl FnOnce(&mut Option<WorkspacePreference>),
+    ) {
+        Self::update(cx, |saved| change(&mut saved.workspace));
+    }
+
+    /// Whether this device folded `host`'s section away.
+    pub(crate) fn host_collapsed(host: &HostKey, cx: &App) -> bool {
+        Self::saved(cx)
+            .and_then(|saved| saved.workspace.as_ref())
+            .is_some_and(|workspace| {
+                workspace
+                    .hosts
+                    .iter()
+                    .any(|listed| listed.host_id == host.name() && listed.collapsed)
+            })
+    }
+
+    pub(crate) fn set_host_collapsed(host: &HostKey, collapsed: bool, cx: &mut App) {
+        Self::arrange_workspace(cx, |workspace| {
+            crate::workspace::set_collapsed(
+                workspace.get_or_insert_with(Default::default),
+                host,
+                collapsed,
+            )
+        });
+    }
+
     /// The name this device shows the machines it connects to.
     pub(crate) fn device_name(cx: &App) -> String {
         let this = cx
@@ -245,7 +281,7 @@ impl DevicePreferences {
     }
 
     /// Restore this device's theme, language, name, attachment limit and
-    /// panel width to their defaults; its sidebar is kept.
+    /// panel width to their defaults; its sidebar and workspace are kept.
     pub(crate) fn restore_defaults(window: &mut Window, cx: &mut App) {
         Self::update(cx, |saved| {
             *saved = ClientPreferences {
@@ -254,6 +290,7 @@ impl DevicePreferences {
                 navigation: saved.navigation.take(),
                 sidebar_collapsed: saved.sidebar_collapsed,
                 sidebar_layout: saved.sidebar_layout.take(),
+                workspace: saved.workspace.take(),
                 ..ClientPreferences::default()
             };
         });

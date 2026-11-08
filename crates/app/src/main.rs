@@ -582,14 +582,14 @@ impl MainWindow {
         }
     }
 
-    /// The window has gone: keep where it was and close its link to the
-    /// host it showed. That host, the local kernel included, keeps running.
+    /// The window has gone: keep where it was and close its links to the
+    /// hosts it showed. They, the local kernel included, keep running.
     fn release(&self, cx: &mut App) {
         let Shown::Open { shell, .. } = self.0.shown.replace(Shown::Closed(None)) else {
             return;
         };
         let place = shell.read(cx).current_place(cx);
-        shell.update(cx, |shell, cx| shell.detach(cx));
+        shell.update(cx, |shell, cx| shell.close_links(cx));
         *self.0.shown.borrow_mut() = Shown::Closed(Some(place));
     }
 
