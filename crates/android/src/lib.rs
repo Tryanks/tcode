@@ -76,6 +76,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
                         local_failure: None,
                         seed_blocking: false,
                         restore_navigation: true,
+                        reopen: None,
                     },
                     ..Default::default()
                 }

@@ -5,8 +5,9 @@
 use std::{borrow::Cow, cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
-    App, BorrowAppContext as _, Entity, ParentElement as _, Styled as _, TitlebarOptions,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
+    AnyWindowHandle, App, BorrowAppContext as _, Entity, ParentElement as _, Styled as _,
+    TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions,
+    point, px, size,
 };
 use tcode_client::{HostLink, host::ClientHost as _, host::Transport};
 use tcode_protocol::{Command, CommandResponse};
@@ -14,7 +15,9 @@ use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
 use tcode_traverse::{HostMux, NativeClientHost};
 use tcode_ui::remote::{AttachmentTarget, RemoteController, machine_name};
-use tcode_ui::{AppShell, Quit, ShellOptions, ShellSetup, WindowState, theme::ActiveTheme as _};
+use tcode_ui::{
+    AppShell, Quit, ShellOptions, ShellPlace, ShellSetup, WindowState, theme::ActiveTheme as _,
+};
 use tcode_ui::{assets, settings};
 
 use tcode_ui::overlay::{DialogActions, OverlayExt as _};
@@ -447,6 +450,173 @@ impl LocalKernel {
     }
 }
 
+gpui::actions!(tcode, [ShowMainWindow]);
+
+/// The desktop's one window. Closing it ends the process except on macOS,
+/// where the process and the local kernel it owns keep running and the window
+/// opens again, where it was, when the app is reopened.
+#[derive(Clone)]
+struct MainWindow(Rc<MainWindowState>);
+
+struct MainWindowState {
+    native_client: Rc<NativeClientHost>,
+    local: tcode_ui::attachment::LocalTransport,
+    throttle_inactive: bool,
+    shown: RefCell<Shown>,
+    /// The frame the window had as the user closed it.
+    closed_bounds: std::cell::Cell<Option<WindowBounds>>,
+}
+
+enum Shown {
+    Open {
+        window: AnyWindowHandle,
+        shell: Entity<AppShell>,
+    },
+    /// Where it was when it closed; nothing before it first opens.
+    Closed(Option<ShellPlace>),
+}
+
+impl gpui::Global for MainWindow {}
+
+impl MainWindow {
+    /// Become the process's main window, before it first opens.
+    fn install(
+        native_client: Rc<NativeClientHost>,
+        local: tcode_ui::attachment::LocalTransport,
+        throttle_inactive: bool,
+        cx: &mut App,
+    ) -> Self {
+        let this = Self(Rc::new(MainWindowState {
+            native_client,
+            local,
+            throttle_inactive,
+            shown: RefCell::new(Shown::Closed(None)),
+            closed_bounds: Default::default(),
+        }));
+        cx.on_window_closed({
+            let this = this.clone();
+            move |cx, closed| {
+                if this
+                    .window()
+                    .is_some_and(|window| window.window_id() == closed)
+                {
+                    this.release(cx);
+                }
+            }
+        })
+        .detach();
+        cx.set_global(this.clone());
+        this
+    }
+
+    fn open(
+        &self,
+        setup: ShellSetup,
+        bounds: Option<WindowBounds>,
+        cx: &mut App,
+    ) -> (AnyWindowHandle, Entity<AppShell>) {
+        let state = &self.0;
+        let mut options = window_options(cx, state.throttle_inactive);
+        if bounds.is_some() {
+            options.window_bounds = bounds;
+        }
+        let (window, shell) = tcode_ui::run_shell(
+            cx,
+            state.native_client.clone(),
+            ShellOptions {
+                title: tcode_ui::tr!("app.name").into(),
+                activate: true,
+                // A desktop window is never suspended by the OS.
+                lifecycle: None,
+                window: options,
+                setup: ShellSetup {
+                    client_host: Some(state.native_client.clone()),
+                    local: Some(state.local.clone()),
+                    // Only here: bootstrap applies locale and theme from the
+                    // host's own settings before the first frame.
+                    seed_blocking: true,
+                    ..setup
+                },
+                ..ShellOptions::default()
+            },
+        );
+        let this = self.clone();
+        let _ = window.update(cx, |_, window, cx| {
+            window.on_window_should_close(cx, move |window, cx| {
+                if cfg!(target_os = "macos") {
+                    this.0.closed_bounds.set(Some(window.window_bounds()));
+                    true
+                } else {
+                    // Closing the window quits here, so it asks what Quit
+                    // asks before stopping working threads.
+                    window.dispatch_action(Box::new(Quit), cx);
+                    false
+                }
+            });
+        });
+        *state.shown.borrow_mut() = Shown::Open {
+            window,
+            shell: shell.clone(),
+        };
+        (window, shell)
+    }
+
+    fn window(&self) -> Option<AnyWindowHandle> {
+        match &*self.0.shown.borrow() {
+            Shown::Open { window, .. } => Some(*window),
+            Shown::Closed(_) => None,
+        }
+    }
+
+    /// The open window's shell.
+    fn shell(cx: &App) -> Option<Entity<AppShell>> {
+        match &*cx.try_global::<Self>()?.0.shown.borrow() {
+            Shown::Open { shell, .. } => Some(shell.clone()),
+            Shown::Closed(_) => None,
+        }
+    }
+
+    /// The window has gone: keep where it was and close its link to the
+    /// host it showed. That host, the local kernel included, keeps running.
+    fn release(&self, cx: &mut App) {
+        let Shown::Open { shell, .. } = self.0.shown.replace(Shown::Closed(None)) else {
+            return;
+        };
+        let place = shell.read(cx).current_place(cx);
+        shell.update(cx, |shell, cx| shell.detach(cx));
+        *self.0.shown.borrow_mut() = Shown::Closed(Some(place));
+    }
+
+    /// Bring the main window to the front, opening it where it was if it
+    /// has closed. Nothing opens before launch has installed it.
+    fn show(cx: &mut App) {
+        let Some(this) = cx.try_global::<Self>().cloned() else {
+            return;
+        };
+        if let Some(window) = this.window() {
+            if window
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                cx.activate(true);
+                return;
+            }
+            this.release(cx);
+        }
+        let Shown::Closed(place) = this.0.shown.replace(Shown::Closed(None)) else {
+            return;
+        };
+        this.open(
+            ShellSetup {
+                reopen: place,
+                ..ShellSetup::default()
+            },
+            this.0.closed_bounds.take(),
+            cx,
+        );
+    }
+}
+
 fn main() {
     env_logger::init();
     tcode_services::process::raise_open_file_limit();
@@ -554,173 +724,171 @@ fn main() {
     // leaves the window without a local host, and says why there.
     let started = start_local_host();
 
-    gpui_platform::application()
-        .with_assets(assets::Assets)
-        .run(move |cx| {
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            let application_fonts: Vec<Cow<'static, [u8]>> = vec![
-                Cow::Borrowed(assets::DM_SANS),
-                Cow::Borrowed(assets::LILEX_REGULAR),
-                Cow::Borrowed(assets::LILEX_BOLD),
-                Cow::Borrowed(assets::LILEX_ITALIC),
-                Cow::Borrowed(assets::LILEX_BOLD_ITALIC),
-            ];
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            let application_fonts: Vec<Cow<'static, [u8]>> = vec![Cow::Borrowed(assets::DM_SANS)];
-            // Translucent canvas colors composite over macOS vibrancy and Windows
-            // Acrylic. Opaque windows flatten them to the solid base; macOS
-            // fullscreen applies the same fallback in material::opaque_canvas.
-            let theme_json: Cow<'static, str> = if translucent_canvas_enabled() {
-                Cow::Borrowed(tcode_ui::THEME_JSON)
-            } else {
-                Cow::Owned(tcode_ui::flattened_theme_json())
-            };
+    let application = gpui_platform::application();
+    // AppKit asks only when the app has no window on screen: a Dock click,
+    // or a launch of the running app from Finder.
+    application.on_reopen(MainWindow::show);
+    application.with_assets(assets::Assets).run(move |cx| {
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let application_fonts: Vec<Cow<'static, [u8]>> = vec![
+            Cow::Borrowed(assets::DM_SANS),
+            Cow::Borrowed(assets::LILEX_REGULAR),
+            Cow::Borrowed(assets::LILEX_BOLD),
+            Cow::Borrowed(assets::LILEX_ITALIC),
+            Cow::Borrowed(assets::LILEX_BOLD_ITALIC),
+        ];
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let application_fonts: Vec<Cow<'static, [u8]>> = vec![Cow::Borrowed(assets::DM_SANS)];
+        // Translucent canvas colors composite over macOS vibrancy and Windows
+        // Acrylic. Opaque windows flatten them to the solid base; macOS
+        // fullscreen applies the same fallback in material::opaque_canvas.
+        let theme_json: Cow<'static, str> = if translucent_canvas_enabled() {
+            Cow::Borrowed(tcode_ui::THEME_JSON)
+        } else {
+            Cow::Owned(tcode_ui::flattened_theme_json())
+        };
 
-            let shell_options = ShellOptions {
-                title: tcode_ui::tr!("app.name").into(),
-                fonts: application_fonts,
-                theme_json,
-                activate: true,
-                system_locale: None,
-                // A desktop window is never suspended by the OS.
-                lifecycle: None,
-                ..ShellOptions::default()
+        let client_options = ShellOptions {
+            fonts: application_fonts,
+            theme_json,
+            system_locale: None,
+            ..ShellOptions::default()
+        };
+        tcode_ui::init_client(cx, native_client.as_ref(), &client_options);
+        #[cfg(target_os = "macos")]
+        {
+            cx.set_menus([
+                gpui::Menu::new(tcode_ui::tr!("app.name")).items([gpui::MenuItem::action(
+                    tcode_ui::tr!("quit.menu_item"),
+                    Quit,
+                )]),
+                gpui::Menu::new(tcode_ui::tr!("app.window_menu")).items([gpui::MenuItem::action(
+                    tcode_ui::tr!("app.name"),
+                    ShowMainWindow,
+                )]),
+            ]);
+            cx.bind_keys([gpui::KeyBinding::new("cmd-0", ShowMainWindow, None)]);
+        }
+        cx.on_action(|_: &ShowMainWindow, cx| MainWindow::show(cx));
+        let appearance = native_client.load_preferences().appearance;
+        cx.on_action::<Quit>(move |action, cx| {
+            if migration::quit(cx) {
+                return;
+            }
+            match MainWindow::shell(cx) {
+                Some(shell) => handle_quit(action, &shell, cx),
+                None => cx.quit(),
+            }
+        });
+
+        let launch = move |cx: &mut App, started: Result<LocalKernel, String>| {
+            let initial_target = initial_target();
+            let (kernel, failure) = match started {
+                Ok(kernel) => (Some(Rc::new(kernel)), None),
+                Err(reason) => (None, Some(reason)),
             };
-            tcode_ui::init_client(cx, native_client.as_ref(), &shell_options);
-            #[cfg(target_os = "macos")]
-            cx.set_menus([gpui::Menu::new(tcode_ui::tr!("app.name")).items([
-                gpui::MenuItem::action(tcode_ui::tr!("quit.menu_item"), Quit),
-            ])]);
-            let appearance = native_client.load_preferences().appearance;
-            let shell_slot: Rc<RefCell<Option<Entity<AppShell>>>> = Rc::default();
-            cx.on_action::<Quit>({
-                let shell_slot = shell_slot.clone();
-                move |action, cx| {
-                    if migration::quit(cx) {
-                        return;
+            // A window without a local host has read none of its settings.
+            let local_settings = kernel
+                .as_ref()
+                .map(|kernel| kernel.own(&data_dir, cx))
+                .unwrap_or_default();
+            let owned = Rc::new(RefCell::new(kernel.clone()));
+            let local: tcode_ui::attachment::LocalTransport = Rc::new(move |cx| {
+                if let Some(kernel) = owned.borrow().as_ref() {
+                    return Ok(kernel.transport());
+                }
+                match start_local_host()? {
+                    LocalStart::Started(kernel) => {
+                        kernel.own(&data_dir, cx);
+                        let transport = kernel.transport();
+                        *owned.borrow_mut() = Some(Rc::new(kernel));
+                        Ok(transport)
                     }
-                    let shell = shell_slot.borrow().clone();
-                    match shell {
-                        Some(shell) => handle_quit(action, &shell, cx),
-                        None => cx.quit(),
+                    LocalStart::Migrate(_) => {
+                        Err(tcode_ui::tr!("hosts.local.needs_migration").into_owned())
                     }
                 }
             });
 
-            let launch = move |cx: &mut App, started: Result<LocalKernel, String>| {
-                let initial_target = initial_target();
-                let (kernel, failure) = match started {
-                    Ok(kernel) => (Some(Rc::new(kernel)), None),
-                    Err(reason) => (None, Some(reason)),
-                };
-                // A window without a local host has read none of its settings.
-                let local_settings = kernel
-                    .as_ref()
-                    .map(|kernel| kernel.own(&data_dir, cx))
-                    .unwrap_or_default();
-                let owned = Rc::new(RefCell::new(kernel.clone()));
-                let local: tcode_ui::attachment::LocalTransport = Rc::new(move |cx| {
-                    if let Some(kernel) = owned.borrow().as_ref() {
-                        return Ok(kernel.transport());
-                    }
-                    match start_local_host()? {
-                        LocalStart::Started(kernel) => {
-                            kernel.own(&data_dir, cx);
-                            let transport = kernel.transport();
-                            *owned.borrow_mut() = Some(Rc::new(kernel));
-                            Ok(transport)
-                        }
-                        LocalStart::Migrate(_) => {
-                            Err(tcode_ui::tr!("hosts.local.needs_migration").into_owned())
-                        }
-                    }
-                });
-
-                let options = window_options(cx, !local_settings.inactive_frame_throttle_disabled);
-                let (window, shell) = tcode_ui::run_shell(
-                    cx,
-                    native_client.clone(),
-                    ShellOptions {
-                        window: options,
-                        setup: ShellSetup {
-                            client_host: Some(native_client.clone()),
-                            local: Some(local),
-                            local_failure: failure,
-                            initial: Some(initial_target),
-                            initial_pairing_error: None,
-                            // Only here: bootstrap applies locale and theme from the
-                            // host's own settings before the first frame.
-                            seed_blocking: true,
-                            restore_navigation: false,
-                        },
-                        ..shell_options
-                    },
-                );
-                *shell_slot.borrow_mut() = Some(shell.clone());
-                // Restart continuity: if this launch follows a permission-grant
-                // relaunch, reopen the recorded session and Settings page. Only
-                // meaningful for a host in this process: the marker lives in this
-                // machine's data dir, and a remote host's marker is its own.
-                if let Some(kernel) = kernel
-                    && shell
-                        .read(cx)
-                        .store()
-                        .is_some_and(|store| !store.read(cx).is_remote())
-                    && let Ok(CommandResponse::PendingRelaunchSection {
-                        section: Some(section),
-                        session_id,
-                    }) = kernel
-                        .control_link
-                        .command_blocking(Command::ApplyPendingRelaunch)
+            let main_window = MainWindow::install(
+                native_client.clone(),
+                local,
+                !local_settings.inactive_frame_throttle_disabled,
+                cx,
+            );
+            let (window, shell) = main_window.open(
+                ShellSetup {
+                    local_failure: failure,
+                    initial: Some(initial_target),
+                    ..ShellSetup::default()
+                },
+                None,
+                cx,
+            );
+            // Restart continuity: if this launch follows a permission-grant
+            // relaunch, reopen the recorded session and Settings page. Only
+            // meaningful for a host in this process: the marker lives in this
+            // machine's data dir, and a remote host's marker is its own.
+            if let Some(kernel) = kernel
+                && shell
+                    .read(cx)
+                    .store()
+                    .is_some_and(|store| !store.read(cx).is_remote())
+                && let Ok(CommandResponse::PendingRelaunchSection {
+                    section: Some(section),
+                    session_id,
+                }) = kernel
+                    .control_link
+                    .command_blocking(Command::ApplyPendingRelaunch)
+            {
+                if let Some(id) = session_id
+                    && let Some(store) = shell.read(cx).store()
                 {
-                    if let Some(id) = session_id
-                        && let Some(store) = shell.read(cx).store()
+                    store.update(cx, |store, cx| store.show_thread(id, cx));
+                }
+                let window_state = shell.read(cx).window_state();
+                window_state.update(cx, |state, cx| {
+                    state.pending_settings_section = Some(section);
+                    state.open_settings(cx);
+                });
+            }
+
+            cx.spawn(async move |cx| {
+                if let Some(watchdog) = preview_smoke_watchdog {
+                    preview_smoke::run(watchdog, shell, window, cx).await;
+                    return;
+                }
+                let _ = window;
+
+                if open_latest {
+                    let Some(link) = cx.update(|cx| shell.read(cx).link()) else {
+                        return;
+                    };
+                    if let Ok(CommandResponse::SessionId(Some(id))) =
+                        link.command(Command::OpenLatestSession).await
+                        && let Some(store) = cx.update(|cx| shell.read(cx).store())
                     {
                         store.update(cx, |store, cx| store.show_thread(id, cx));
                     }
-                    let window_state = shell.read(cx).window_state();
-                    window_state.update(cx, |state, cx| {
-                        state.pending_settings_section = Some(section);
-                        state.open_settings(cx);
-                    });
                 }
+            })
+            .detach();
+        };
 
-                cx.spawn(async move |cx| {
-                    if let Some(watchdog) = preview_smoke_watchdog {
-                        preview_smoke::run(watchdog, shell, window, cx).await;
-                        return;
-                    }
-                    let _ = window;
-
-                    if open_latest {
-                        let Some(link) = cx.update(|cx| shell.read(cx).link()) else {
-                            return;
-                        };
-                        if let Ok(CommandResponse::SessionId(Some(id))) =
-                            link.command(Command::OpenLatestSession).await
-                            && let Some(store) = cx.update(|cx| shell.read(cx).store())
-                        {
-                            store.update(cx, |store, cx| store.show_thread(id, cx));
-                        }
-                    }
-                })
-                .detach();
-            };
-
-            match started {
-                Ok(LocalStart::Started(kernel)) => launch(cx, Ok(kernel)),
-                Ok(LocalStart::Migrate(store)) => {
-                    let options = window_options(cx, true);
-                    let kernel_store = store.clone();
-                    migration::run(cx, store, options, appearance, move |cx| {
-                        launch(cx, Ok(LocalKernel::start(kernel_store)?));
-                        Ok(())
-                    });
-                }
-                Err(reason) => {
-                    log::error!("the local host did not start: {reason}");
-                    launch(cx, Err(reason))
-                }
+        match started {
+            Ok(LocalStart::Started(kernel)) => launch(cx, Ok(kernel)),
+            Ok(LocalStart::Migrate(store)) => {
+                let options = window_options(cx, true);
+                let kernel_store = store.clone();
+                migration::run(cx, store, options, appearance, move |cx| {
+                    launch(cx, Ok(LocalKernel::start(kernel_store)?));
+                    Ok(())
+                });
             }
-        });
+            Err(reason) => {
+                log::error!("the local host did not start: {reason}");
+                launch(cx, Err(reason))
+            }
+        }
+    });
 }

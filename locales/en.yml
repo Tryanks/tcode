@@ -1,5 +1,6 @@
 app:
   name: "Tcode"
+  window_menu: "Window"
 chat:
   sending: "Sending…"
   waiting_connection: "Waiting for connection…"

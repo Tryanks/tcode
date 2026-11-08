@@ -1,5 +1,6 @@
 app:
   name: "Tcode"
+  window_menu: "窗口"
 chat:
   sending: "正在发送…"
   waiting_connection: "等待连接…"

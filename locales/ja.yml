@@ -1,5 +1,6 @@
 app:
   name: "Tcode"
+  window_menu: "ウィンドウ"
 chat:
   sending: "送信中…"
   waiting_connection: "接続を待っています…"
