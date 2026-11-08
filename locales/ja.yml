@@ -239,6 +239,7 @@ background:
   keeps_scheduled: "予約メッセージ"
   keeps_notify: "他のスレッドを監視中：%{count}"
   in_list: "バックグラウンド一覧で表示"
+  move: "バックグラウンドへ"
 markdown:
   math_show_rendered: "レンダリング結果を表示"
   math_show_source: "LaTeX ソースを表示"

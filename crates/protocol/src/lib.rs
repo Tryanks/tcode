@@ -370,7 +370,7 @@ pub use wire::{
 // pull_requests, scheduled_at and notify). SessionStatus.background_tasks
 // lists BackgroundTaskStatus (task, listed, stopping_since, ended), whose
 // BackgroundTask adds kind, item_id and started_reported. AgentExecution
-// adds background.
+// adds background. Command::MoveToBackground is new.
 pub const PROTOCOL_VERSION: u32 = 25;
 
 #[cfg(test)]

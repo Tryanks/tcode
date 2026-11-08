@@ -1045,4 +1045,52 @@ mod tests {
         assert_eq!(stops(&thread), [Some("98413".to_owned())]);
     }
 
+    /// A running command can be moved into the background where the
+    /// thread's harness can do that (Claude Code's own Ctrl+B), and the
+    /// move reaches the host; where it cannot, nothing offers it.
+    #[gpui::test]
+    fn a_running_call_moves_to_the_background_where_the_harness_can(cx: &mut TestAppContext) {
+        let events = vec![
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            },
+            user_event("u1", "Build it."),
+            AgentEvent::ItemStarted(ThreadItem {
+                id: "call_2".into(),
+                parent_item_id: None,
+                content: ItemContent::CommandExecution {
+                    command: "cargo build --release".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::InProgress,
+                },
+            }),
+        ];
+        let mut thread = ScriptedThread::new(cx, events, 0, true);
+        thread.status.provider = agent::ProviderKind::ClaudeCode;
+        thread.set_running(true);
+        let (_view, cx) = thread.open(cx);
+        cx.update(|_, cx| cx.set_reduce_motion(true));
+        thread.deliver(cx);
+        draw_settled(cx);
+        while thread.outgoing.try_recv().is_ok() {}
+        click(cx, "move-to-background-call_2");
+        let moved: Vec<_> = std::iter::from_fn(|| thread.outgoing.try_recv().ok())
+            .filter_map(
+                |line| match tcode_protocol::decode_client_line(&line).unwrap().payload {
+                    ClientPayload::Command(Command::MoveToBackground { item_id, .. }) => {
+                        Some(item_id)
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+        assert_eq!(moved, ["call_2"]);
+
+        thread.status.provider = agent::ProviderKind::Codex;
+        thread.set_running(true);
+        thread.deliver(cx);
+        draw_settled(cx);
+        assert!(cx.debug_bounds("move-to-background-call_2").is_none());
+    }
 }

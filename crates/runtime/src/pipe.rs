@@ -1050,6 +1050,15 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
                     .map(|()| CommandResponse::Unit),
             );
         }
+        Command::MoveToBackground {
+            session_id,
+            item_id,
+        } => {
+            return CommandOutcome::Immediate(
+                app.move_to_background(&session_id, item_id)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::StopBackgroundTask {
             session_id,
             task_id,

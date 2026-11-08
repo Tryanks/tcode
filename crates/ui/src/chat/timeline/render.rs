@@ -1652,12 +1652,26 @@ impl TimelineView {
                 .iter()
                 .any(|task| task.task.item_id.as_deref() == Some(entry.id.as_str()))
         });
+        // A running command or agent the harness can move into the
+        // background, as its own Ctrl+B does.
+        let movable = thread.is_some_and(|status| {
+            status
+                .provider
+                .caps()
+                .background
+                .is_some_and(|control| control.move_running)
+        }) && matches!(
+            &entry.content,
+            EntryContent::Item(ItemContent::CommandExecution { .. } | ItemContent::Subagent { .. })
+        );
         if entry.background && listed {
             status = agent::ItemStatus::InProgress;
             header.background = true;
         }
         if header.background {
             header.actions.push(self.background_link(&entry.id, cx));
+        } else if movable && status == agent::ItemStatus::InProgress {
+            header.actions.push(self.move_to_background(&entry.id));
         }
         // Of an output the record holds a preview of, Copy takes the whole.
         let elided = self
@@ -1799,6 +1813,32 @@ impl TimelineView {
                 cx.stop_propagation();
                 let item = item.clone();
                 let _ = chat.update(cx, |chat, cx| chat.reveal_background(item, cx));
+            })
+            .into_any_element()
+    }
+
+    /// Moves a running call into the background.
+    fn move_to_background(&self, item_id: &str) -> AnyElement {
+        let item = item_id.to_owned();
+        let selector = item.clone();
+        let store = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
+        Button::new(SharedString::from(format!("move-to-background-{item_id}")))
+            .motion(&self.motion)
+            .debug_selector(move || format!("move-to-background-{selector}"))
+            .ghost()
+            .xsmall()
+            // The window's header is the one stop the keyboard makes on it,
+            // as for the way to the background list beside it.
+            .focusable(false)
+            .label(crate::tr!("background.move").into_owned())
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                if let Some(session_id) = session_id.clone() {
+                    store.update(cx, |store, _| {
+                        store.move_to_background(session_id, item.clone())
+                    });
+                }
             })
             .into_any_element()
     }

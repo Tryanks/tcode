@@ -7299,7 +7299,8 @@ fn children_hold(activity: &tcode_protocol::SessionActivity) -> bool {
 
 /// The list a harness publishes reaches the client's status and a stop reaches
 /// the harness, which the status shows until the harness drops it; one that
-/// lists nothing is refused, not asked. A call whose work the harness has
+/// lists nothing is refused, not asked, and so is a move into the background
+/// where the harness has none. A call whose work the harness has
 /// dropped from its list but not yet ended reads as ended, and one going on
 /// in the background that the harness never lists is listed after its own.
 #[test]
@@ -7448,6 +7449,16 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
             },
         );
     }
+    for (id, session_id) in [(4, "lists"), (5, "cannot")] {
+        state.dispatch_command(
+            cx,
+            id,
+            Command::MoveToBackground {
+                session_id: session_id.into(),
+                item_id: "toolu-build".into(),
+            },
+        );
+    }
     assert!(matches!(
         next_command(&actor),
         Ok(SessionCommand::StopBackgroundTask { task_id: Some(id) }) if id == task.id
@@ -7455,6 +7466,10 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
     assert!(matches!(
         next_command(&actor),
         Ok(SessionCommand::StopBackgroundTask { task_id: None })
+    ));
+    assert!(matches!(
+        next_command(&actor),
+        Ok(SessionCommand::MoveToBackground { item_id }) if item_id == "toolu-build"
     ));
     assert!(next_command(&actor).is_err());
     assert!(
