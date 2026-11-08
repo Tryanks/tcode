@@ -4745,7 +4745,7 @@ pub(crate) mod tests {
         });
         let window_state = cx.new(|_| crate::window_state::WindowState::default());
         let (_sidebar, cx) = cx.add_window_view(|_, cx| {
-            crate::sidebar::SessionsSidebar::new(workspace.clone(), window_state, cx)
+            crate::sidebar::SessionsSidebar::new(vec![workspace.clone()], window_state, cx)
         });
         cx.simulate_resize(gpui::size(gpui::px(360.), gpui::px(800.)));
         cx.update(|window, cx| {
@@ -5484,7 +5484,7 @@ pub(crate) mod tests {
         let window_state =
             cx.new(|_| crate::window_state::WindowState::default().with_compact(true));
         let (_sidebar, cx) = cx.add_window_view(|_, cx| {
-            crate::sidebar::SessionsSidebar::new(store.clone(), window_state, cx)
+            crate::sidebar::SessionsSidebar::new(vec![store.clone()], window_state, cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         cx.update(|window, cx| {

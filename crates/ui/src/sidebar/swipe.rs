@@ -277,7 +277,7 @@ enum Motion {
 }
 
 pub(super) struct RowSwipe {
-    session_id: String,
+    thread: ThreadKey,
     width: Pixels,
     /// What the release does, as the row shows it: nothing for a busy thread.
     action: Option<DragAction>,
@@ -407,10 +407,8 @@ pub(super) struct RowSwipes {
 }
 
 impl RowSwipes {
-    fn row(&mut self, session_id: &str) -> Option<&mut RowSwipe> {
-        self.rows
-            .iter_mut()
-            .find(|swipe| swipe.session_id == session_id)
+    fn row(&mut self, thread: &ThreadKey) -> Option<&mut RowSwipe> {
+        self.rows.iter_mut().find(|swipe| swipe.thread == *thread)
     }
 
     /// GPUI follows one touch at a time, so a new one means the last ended
@@ -431,7 +429,7 @@ impl RowSwipes {
         let now = cx.background_executor().now();
         self.rows
             .iter()
-            .find(|swipe| swipe.session_id == row.meta.id)
+            .find(|swipe| swipe.thread == row.state.thread)
             .map(|swipe| swipe.flight(now))
     }
 }
@@ -439,14 +437,14 @@ impl RowSwipes {
 /// A row in the swipe's listeners, as it was painted.
 #[derive(Clone)]
 struct SwipeRow {
-    id: String,
+    thread: ThreadKey,
     action: Option<DragAction>,
     can_swipe: bool,
     bounds: Bounds<Pixels>,
 }
 
-fn can_swipe(row: &CompactThreadRow, renaming: Option<&str>) -> bool {
-    renaming != Some(row.meta.id.as_str())
+fn can_swipe(row: &CompactThreadRow, renaming: Option<&ThreadKey>) -> bool {
+    renaming != Some(&row.state.thread)
 }
 
 /// The long-press menu's rule for enabling Settle / Unsettle.
@@ -584,16 +582,13 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let id = row.meta.id.clone();
+        let thread = row.state.thread.clone();
         let uncovered = Uncovered::of(row, cx);
         let action = action(row);
-        let renaming = self
-            .renaming
-            .as_ref()
-            .map(|rename| rename.session_id.as_str());
+        let renaming = self.renaming.as_ref().map(|rename| &rename.thread);
         let can_swipe = can_swipe(row, renaming);
         let now = cx.background_executor().now();
-        let swipe = self.row_swipes.row(&id);
+        let swipe = self.row_swipes.row(&thread);
         let (offset, width) = swipe
             .as_ref()
             .map_or((px(0.), px(0.)), |swipe| (swipe.offset(now), swipe.width));
@@ -603,14 +598,14 @@ impl SessionsSidebar {
             window.request_animation_frame();
         }
         let sidebar = cx.entity().downgrade();
-        let surface_id = id.clone();
+        let surface_id = row.state.name.clone();
         swiped_surface(
             div().relative().w_full().overflow_hidden().child(
                 canvas(
                     |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                     move |bounds, hitbox, window, _| {
                         let row = SwipeRow {
-                            id,
+                            thread,
                             action,
                             can_swipe,
                             bounds,
@@ -678,7 +673,7 @@ impl SessionsSidebar {
                 let offset = flight.offset(cx.background_executor().now());
                 swiped_surface(
                     div().relative().w_full().overflow_hidden(),
-                    &thread.meta.id,
+                    &thread.state.name,
                     Uncovered::of(thread, cx),
                     offset,
                     flight.width,
@@ -778,7 +773,7 @@ impl SessionsSidebar {
         let now = cx.background_executor().now();
         if event.phase == TouchPhase::Started {
             self.row_swipes.drop_lost_fingers(now, cx);
-            let flying = self.row_swipes.row(&row.id).filter(|swipe| {
+            let flying = self.row_swipes.row(&row.thread).filter(|swipe| {
                 !swipe.sent() && !matches!(swipe.motion, Motion::Dragged(_)) && !swipe.at_rest(now)
             });
             if let Some(swipe) = flying.filter(|_| over) {
@@ -809,16 +804,16 @@ impl SessionsSidebar {
 
     fn take_row(&mut self, row: &SwipeRow, finger: Point<Pixels>, now: Instant) {
         let swipes = &mut self.row_swipes;
-        if swipes.row(&row.id).is_none() {
+        if swipes.row(&row.thread).is_none() {
             swipes.rows.push(RowSwipe {
-                session_id: row.id.clone(),
+                thread: row.thread.clone(),
                 width: row.bounds.size.width,
                 action: row.action,
                 finger: None,
                 motion: Motion::Dragged(Drag::from(px(0.), row.bounds.size.width)),
             });
         }
-        if let Some(swipe) = swipes.row(&row.id) {
+        if let Some(swipe) = swipes.row(&row.thread) {
             swipe.action = row.action;
             swipe.take(finger, now);
         }
@@ -856,16 +851,16 @@ impl SessionsSidebar {
             flight,
             sent: false,
         };
-        let id = swipe.session_id.clone();
+        let thread = swipe.thread.clone();
         let lands_after = flight.lands_after();
         if lands_after.is_zero() {
-            self.send_swiped_row(&id, flight.at, window, cx);
+            self.send_swiped_row(&thread, flight.at, window, cx);
             return;
         }
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(lands_after).await;
             let _ = this.update_in(cx, |this, window, cx| {
-                this.send_swiped_row(&id, flight.at, window, cx);
+                this.send_swiped_row(&thread, flight.at, window, cx);
             });
         })
         .detach();
@@ -875,12 +870,12 @@ impl SessionsSidebar {
     /// catch it first.
     fn send_swiped_row(
         &mut self,
-        id: &str,
+        thread: &ThreadKey,
         flown_at: Instant,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(swipe) = self.row_swipes.row(id) else {
+        let Some(swipe) = self.row_swipes.row(thread) else {
             return;
         };
         let unsettles = swipe.unsettles();
@@ -891,15 +886,16 @@ impl SessionsSidebar {
         self.compact_model_dirty = true;
         if unsettles {
             self.perform_lifecycle(
+                &thread.host,
                 vec![Command::UnsettleSession {
-                    session_id: id.to_owned(),
+                    session_id: thread.session_id.clone(),
                 }],
                 None,
                 window,
                 cx,
             );
         } else {
-            self.settle_thread(id, window, cx);
+            self.settle_thread(thread, window, cx);
         }
         cx.notify();
     }
@@ -919,27 +915,32 @@ impl SessionsSidebar {
     }
 
     /// The host refused what a swipe asked, so the list takes the row back.
-    pub(super) fn row_swipe_refused(&mut self, id: &str) {
+    pub(super) fn row_swipe_refused(&mut self, thread: &ThreadKey) {
         self.row_swipes
             .rows
-            .retain(|swipe| !(swipe.session_id == id && swipe.sent()));
+            .retain(|swipe| !(swipe.thread == *thread && swipe.sent()));
         self.compact_model_dirty = true;
+    }
+
+    /// Whether the host of `swipe`'s thread still lists it where it was
+    /// before the swipe.
+    fn unmoved(&self, swipe: &RowSwipe, cx: &App) -> bool {
+        self.store_of(&swipe.thread.host).is_some_and(|store| {
+            store
+                .read(cx)
+                .thread_meta(&swipe.thread.session_id)
+                .is_some_and(|meta| meta.is_settled() == swipe.unsettles())
+        })
     }
 
     /// The threads the list leaves out for now: they are gone by a swipe, and
     /// the host has yet to say so.
-    pub(super) fn swiped_off(&self, cx: &App) -> HashSet<String> {
-        let store = self.store.read(cx);
+    pub(super) fn swiped_off(&self, cx: &App) -> HashSet<ThreadKey> {
         self.row_swipes
             .rows
             .iter()
-            .filter(|swipe| {
-                swipe.sent()
-                    && store
-                        .thread_meta(&swipe.session_id)
-                        .is_some_and(|meta| meta.is_settled() == swipe.unsettles())
-            })
-            .map(|swipe| swipe.session_id.clone())
+            .filter(|swipe| swipe.sent() && self.unmoved(swipe, cx))
+            .map(|swipe| swipe.thread.clone())
             .collect()
     }
 
@@ -949,20 +950,17 @@ impl SessionsSidebar {
     /// finished its swipe.
     pub(super) fn reconcile_row_swipes(&mut self, rows: &[CompactListRow], cx: &App) {
         let now = cx.background_executor().now();
-        let store = self.store.read(cx);
-        let loading = store.threads_loading();
-        let renaming = self
-            .renaming
-            .as_ref()
-            .map(|rename| rename.session_id.as_str());
-        self.row_swipes.rows.retain_mut(|swipe| {
+        let mut swipes = std::mem::take(&mut self.row_swipes.rows);
+        let renaming = self.renaming.as_ref().map(|rename| &rename.thread);
+        swipes.retain_mut(|swipe| {
             if swipe.sent() {
-                return store
-                    .thread_meta(&swipe.session_id)
-                    .is_some_and(|meta| meta.is_settled() == swipe.unsettles());
+                return self.unmoved(swipe, cx);
             }
+            let loading = self
+                .store_of(&swipe.thread.host)
+                .is_none_or(|store| store.read(cx).threads_loading());
             let row = rows.iter().find_map(|row| match row {
-                CompactListRow::Thread(row) if row.meta.id == swipe.session_id => Some(row),
+                CompactListRow::Thread(row) if row.state.thread == swipe.thread => Some(row),
                 _ => None,
             });
             match row.filter(|_| !loading) {
@@ -972,6 +970,7 @@ impl SessionsSidebar {
             }
             swipe.finger.is_some() || !swipe.at_rest(now)
         });
+        self.row_swipes.rows = swipes;
     }
 
     /// Lets go of the rows that have come to rest.
