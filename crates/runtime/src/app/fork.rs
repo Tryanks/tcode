@@ -174,6 +174,39 @@ impl AppState {
         ))
     }
 
+    /// A branch thread that rewound and sent has left the branch it was
+    /// opened on for a session of its own: its claim goes, so that branch,
+    /// which the harness keeps, can be opened again as a thread of its own.
+    /// Until the send the thread can still return to it, and keeps it.
+    pub(super) fn release_left_branch(&mut self, id: &str, cx: &mut HostCx) {
+        let Some(session) = self.resident(id) else {
+            return;
+        };
+        let Some(branch) = session
+            .meta
+            .fork_origin
+            .as_ref()
+            .and_then(|origin| origin.branch.as_ref())
+        else {
+            return;
+        };
+        let left = session.timeline.entries.iter().any(|entry| {
+            matches!(&entry.content, EntryContent::Rewound(rewound)
+                if rewound.undo_token.is_none() && rewound.branch.as_ref() == Some(branch))
+        });
+        if !left {
+            return;
+        }
+        let Some(session) = self.resident_mut(id) else {
+            return;
+        };
+        if let Some(origin) = &mut session.meta.fork_origin {
+            origin.branch = None;
+        }
+        let meta = session.meta.clone();
+        self.persist_meta(&meta, cx);
+    }
+
     fn make_fork(&mut self, source: &SessionMeta, plan: ForkPlan, cx: &mut HostCx) -> String {
         let mut fork = SessionMeta::new(source.provider, source.cwd.clone(), source.model.clone());
         fork.title = format!("{} (fork)", source.title);

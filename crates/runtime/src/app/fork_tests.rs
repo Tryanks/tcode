@@ -664,6 +664,103 @@ fn a_branch_opened_after_two_rewinds_cannot_return_to_the_earlier_one() {
     );
 }
 
+/// A branch thread that rewinds and sends goes on in a session of its own,
+/// so the branch it was opened on is no longer its: the source's divider and
+/// its own both open that branch again, as one thread, which neither asks
+/// for twice.
+#[test]
+fn the_branch_a_branch_thread_left_opens_again_as_a_thread_of_its_own() {
+    const LEFT: &str = "/sessions/left.jsonl";
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-branch-left-again");
+    let cwd = store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let state = host(&store, cx);
+    state.update(cx, |state, cx| {
+        install(state, ProviderKind::Pi, cwd, cx);
+        turn(state, cx, 0, "first", &[]);
+        turn(state, cx, 1, "second", &[]);
+        state.record_event(
+            SOURCE,
+            &rewound("checkpoint-1", agent::LaterHistory::Branch, Some(LEFT)),
+            cx,
+        );
+        turn(state, cx, 2, "second, edited", &[]);
+    });
+    cx.run_until_parked();
+    let CommandResponse::SessionId(Some(branch)) =
+        send(&state, cx, 1, open_branch(1, "checkpoint-1")).unwrap()
+    else {
+        panic!("the branch answers with its thread");
+    };
+    settled(cx, &branch);
+
+    let rewound_in_branch = json!({"type": "open_rewound_branch", "content": {
+        "session_id": branch, "turn": 1, "checkpoint_id": "checkpoint-1",
+    }});
+    state.update(cx, |state, cx| {
+        state.record_event(
+            &branch,
+            &rewound("checkpoint-1", agent::LaterHistory::Branch, Some(LEFT)),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        send(&state, cx, 2, open_branch(1, "checkpoint-1")).unwrap(),
+        CommandResponse::SessionId(Some(branch.clone())),
+        "until it sends, the branch thread can go back to it"
+    );
+
+    state.update(cx, |state, cx| {
+        for event in [
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "branch-user".into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: "second, again".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            AgentEvent::TurnStarted {
+                turn_id: "branch-turn".into(),
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "branch-turn".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ] {
+            state.record_event(&branch, &event, cx);
+        }
+    });
+    cx.run_until_parked();
+    let CommandResponse::SessionId(Some(original)) =
+        send(&state, cx, 3, open_branch(1, "checkpoint-1")).unwrap()
+    else {
+        panic!("the original branch answers with its thread");
+    };
+    assert_ne!(original, branch);
+    settled(cx, &original);
+    state.read(|state| {
+        let thread = &state.residents.live[&original];
+        assert_eq!(
+            thread.meta.pending_fork,
+            Some(ForkPoint::Branch { token: LEFT.into() })
+        );
+        assert_eq!(prompts(thread), ["first", "second"]);
+    });
+    assert_eq!(
+        send(&state, cx, 4, rewound_in_branch).unwrap(),
+        CommandResponse::SessionId(Some(original.clone())),
+    );
+    assert_eq!(
+        send(&state, cx, 5, open_branch(1, "checkpoint-1")).unwrap(),
+        CommandResponse::SessionId(Some(original)),
+    );
+}
+
 /// Work the source left running in the background has no process in a fork:
 /// the fork ends it as interrupted, whichever way it was made, and the
 /// source's item and log stay as they were.

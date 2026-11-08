@@ -675,6 +675,17 @@ impl AppState {
         }
         if let Some(session) = self.resident_mut(session_id) {
             session.timeline.apply_at(Some(ts), event);
+            // What closes a rewind's undo may close the one leaving a branch.
+            if matches!(
+                event,
+                AgentEvent::ItemCompleted(ThreadItem {
+                    content: ItemContent::UserMessage { .. },
+                    ..
+                }) | AgentEvent::SteerRequested { .. }
+                    | AgentEvent::RewindUndoClosed
+            ) {
+                self.release_left_branch(session_id, cx);
+            }
         } else {
             self.release_stale_session_logs(cx);
         }
