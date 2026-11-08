@@ -1607,29 +1607,26 @@ impl Composer {
             )
             .and_then(|shown| mic.map(|mic| shown.fold_across(mic)));
 
-        // A platform picker is the only way in for phones and browsers;
-        // desktops paste and drop, and the subagent and offline states have
-        // nothing to add to.
+        // A platform picker is the only way in for phones and browsers, and
+        // desktops have the system's file picker beside paste and drop; the
+        // subagent and offline states have nothing to add to.
         let attach_shown = !subagent
             && self.interactive(cx)
-            && cx
-                .try_global::<crate::remote::ClientAttachment>()
-                .is_some_and(|client| {
-                    client.host().supports_image_picker() || client.host().supports_file_picker()
-                });
+            && (cfg!(feature = "native-dialogs")
+                || cx
+                    .try_global::<crate::remote::ClientAttachment>()
+                    .is_some_and(|client| {
+                        client.host().supports_image_picker()
+                            || client.host().supports_file_picker()
+                    }));
         // It narrows away when the host goes offline, and widens back.
-        let attach_menu = self
-            .motion
-            .shown(
-                self.motion_key("attach-menu"),
-                attach_shown.then_some(()),
-                SHOW,
-                window,
-                cx,
-            )
-            .map(|shown| {
-                shown.fold_across_gap(px(4.), div().flex_none().child(self.render_attach_menu(cx)))
-            });
+        let attach_menu = self.motion.shown(
+            self.motion_key("attach-menu"),
+            attach_shown.then_some(()),
+            SHOW,
+            window,
+            cx,
+        );
         // The model picker and the traits chip widen in once the thread has
         // a model (and the model traits), and narrow away as they go, drawn
         // with the name they last had.
@@ -1719,7 +1716,12 @@ impl Composer {
             control_row_base
                 .child(
                     leading()
-                        .children(attach_menu)
+                        .children(attach_menu.map(|shown| {
+                            shown.fold_across_gap(
+                                px(4.),
+                                div().flex_none().child(self.render_attach_menu(cx)),
+                            )
+                        }))
                         .children(model_picker)
                         .children(
                             self.motion
@@ -1827,6 +1829,11 @@ impl Composer {
                         .min_w_0()
                         .overflow_hidden()
                         .items_center()
+                        .children(attach_menu.map(|shown| {
+                            shown.fold_across(
+                                div().flex_none().pr_1().child(self.render_attach_menu(cx)),
+                            )
+                        }))
                         .children(model_picker)
                         .children(traits)
                         .children(divider)
@@ -2428,6 +2435,48 @@ mod replica_tests {
             )]
         );
         assert!(cx.debug_bounds("attached-file-0").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The desktop's "+" opens the system's file picker for any number of
+    /// files, and what is chosen attaches as a drop would: here, files on the
+    /// host's own disk, sent as their own paths.
+    #[cfg(feature = "native-dialogs")]
+    #[gpui::test]
+    fn the_desktop_plus_attaches_picked_files_as_a_drop_would(cx: &mut TestAppContext) {
+        let (store, incoming, outgoing, status) = attach(cx);
+        let root = crate::store::tests::scratch_root("composer-picked-files");
+        std::fs::create_dir_all(&root).unwrap();
+        let notes = root.join("notes.txt");
+        std::fs::write(&notes, "notes").unwrap();
+        let plan = root.join("plan.md");
+        std::fs::write(&plan, "plan").unwrap();
+        let (_composer, cx) = composer_on(&store, &incoming, status, cx);
+        let plus = cx
+            .debug_bounds("attach-files")
+            .expect("the desktop draws a +");
+        cx.simulate_click(plus.center(), gpui::Modifiers::default());
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files && options.multiple);
+            Some(vec![notes.clone(), plan.clone()])
+        });
+        draw_settled(cx);
+        assert!(cx.debug_bounds("attached-file-0").is_some());
+        assert!(cx.debug_bounds("attached-file-1").is_some());
+        while outgoing.try_recv().is_ok() {}
+        cx.simulate_input("read these");
+        cx.simulate_keystrokes("enter");
+        draw_settled(cx);
+        let sent = sent_texts(&outgoing);
+        assert_eq!(
+            sent,
+            [format!(
+                "read these\n\n{}\n{}",
+                notes.display(),
+                plan.display()
+            )]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

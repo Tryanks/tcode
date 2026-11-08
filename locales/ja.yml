@@ -1348,6 +1348,8 @@ attach:
   tunnel_body: "「%{name}」のサイズは %{size} です。このデバイスはインターネット経由でホストに接続しているため、送信に時間がかかる場合があります。"
   tunnel_confirm: "このまま送信"
   files: "ファイル"
+  attach_files: "ファイルを添付"
+  files_failed: "ファイル選択画面を開けませんでした：%{error}"
   directory_remote: "「%{name}」はフォルダーです。フォルダーはリモートのマシンに送信できません。中のファイルを添付してください。"
   file_too_large: "「%{name}」はマシンに送信できるファイルの上限 %{limit} を超えています。"
   read_failed: "「%{name}」を読み込めませんでした: %{error}"

@@ -1348,6 +1348,8 @@ attach:
   tunnel_body: "'%{name}' is %{size} and this device reaches the machine across the internet, so sending it may take a while."
   tunnel_confirm: "Send anyway"
   files: "Files"
+  attach_files: "Attach files"
+  files_failed: "Could not open the file picker: %{error}"
   directory_remote: "'%{name}' is a folder. Folders cannot be sent to a remote machine; attach the files inside it."
   file_too_large: "'%{name}' exceeds the %{limit} limit for files sent to the machine."
   read_failed: "Could not read '%{name}': %{error}"
