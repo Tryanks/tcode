@@ -49,6 +49,7 @@ pub struct MarkdownView {
     selection_entry: Option<(Entity<SelectionDocument>, u64)>,
     compact_headings: Option<bool>,
     base_dir: Option<PathBuf>,
+    image_host: Option<crate::store::ImageHost>,
     menu_extension: Option<MenuExtension>,
 }
 
@@ -63,6 +64,7 @@ impl MarkdownView {
             selection_entry: None,
             compact_headings: None,
             base_dir: None,
+            image_host: None,
             menu_extension: None,
         }
     }
@@ -84,6 +86,12 @@ impl MarkdownView {
     /// document's other entries in a [`SelectionArea`] its owner draws.
     pub fn selection_entry(mut self, document: &Entity<SelectionDocument>, entry: u64) -> Self {
         self.selection_entry = Some((document.clone(), entry));
+        self
+    }
+
+    /// The host this document's file images are read from.
+    pub(crate) fn image_host(mut self, host: crate::store::ImageHost) -> Self {
+        self.image_host = Some(host);
         self
     }
 
@@ -156,6 +164,9 @@ impl Element for MarkdownView {
                     .base_dir
                     .as_ref()
                     .is_none_or(|base_dir| current.base_dir.as_ref() == Some(base_dir))
+                && self
+                    .image_host
+                    .is_none_or(|host| current.image_host == host)
         };
         if !holds {
             state.update(cx, |state, cx| {
@@ -170,6 +181,9 @@ impl Element for MarkdownView {
                 }
                 if let Some(base_dir) = &self.base_dir {
                     state.set_base_dir(Some(base_dir.clone()), cx);
+                }
+                if let Some(host) = self.image_host {
+                    state.set_image_host(host, cx);
                 }
             });
         }

@@ -125,6 +125,7 @@ impl TimelineView {
                     .header
                     .label(call.status);
                 super::super::components::images::item_tile(
+                    self.workspace_store.read(cx).image_host(),
                     super::super::components::images::Tile::of(
                         call.entry,
                         call.images.len() - 1,

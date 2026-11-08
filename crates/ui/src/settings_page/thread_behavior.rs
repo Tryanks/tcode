@@ -431,7 +431,11 @@ impl SettingsPage {
                         .relative()
                         .child(crate::material::row_hover(gpui::px(0.), cx))
                         .text_body(true, cx)
-                        .child(crate::project_icon::artwork(project, 16.))
+                        .child(crate::project_icon::artwork(
+                            self.store.read(cx).image_host(),
+                            project,
+                            16.,
+                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -519,7 +523,11 @@ impl SettingsPage {
                         let id = project.id.clone();
                         crate::material::group_row(cx)
                             .text_body(false, cx)
-                            .child(crate::project_icon::artwork(project, 16.))
+                            .child(crate::project_icon::artwork(
+                                self.store.read(cx).image_host(),
+                                project,
+                                16.,
+                            ))
                             .child(div().flex_1().child(project.name.clone()))
                             .child(div().text_secondary(false, cx).child(summary.clone()))
                             .child(

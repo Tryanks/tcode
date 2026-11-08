@@ -50,7 +50,7 @@ pub(crate) fn group_label(project: &Project) -> String {
     }
 }
 
-pub(crate) fn artwork(project: &Project, size: f32) -> AnyElement {
+pub(crate) fn artwork(host: images::ImageHost, project: &Project, size: f32) -> AnyElement {
     if project.quick_chat {
         return Icon::empty()
             .path("icons/message-square.svg")
@@ -60,7 +60,7 @@ pub(crate) fn artwork(project: &Project, size: f32) -> AnyElement {
     }
     Artwork {
         id: format!("project-artwork-{}-{size}", project.id).into(),
-        source: images::project_icon(project, size),
+        source: images::project_icon(host, project, size),
         size,
     }
     .into_any_element()
@@ -264,7 +264,7 @@ impl Picker {
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element()
         } else {
-            let source = images::icon_thumbnail(path.clone());
+            let source = images::icon_thumbnail(self.store.read(cx).image_host(), path.clone());
             let arrived = crate::motion::image_arrival(
                 crate::motion::Clock::Element,
                 SharedString::from(format!("icon-thumbnail-{}", entry.name)),
@@ -459,7 +459,11 @@ impl Render for Picker {
                 h_flex()
                     .gap_2()
                     .items_center()
-                    .child(artwork(&self.project, 32.))
+                    .child(artwork(
+                        self.store.read(cx).image_host(),
+                        &self.project,
+                        32.,
+                    ))
                     .child(
                         v_flex()
                             .child(div().text_body(false, cx).child(self.project.name.clone()))

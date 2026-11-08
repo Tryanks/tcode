@@ -530,7 +530,11 @@ impl SettingsPage {
                                 move || format!("control-override-{id}")
                             })
                             .text_body(compact, cx)
-                            .child(crate::project_icon::artwork(project, 16.))
+                            .child(crate::project_icon::artwork(
+                                self.store.read(cx).image_host(),
+                                project,
+                                16.,
+                            ))
                             .child(
                                 v_flex()
                                     .flex_1()

@@ -3,7 +3,6 @@
 //! Shared by the composer's pending strip, sent-message thumbnails, Markdown
 //! images and image-link badges.
 
-use std::sync::Arc;
 use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
@@ -22,6 +21,7 @@ use web_time::Instant;
 use crate::icon::IconName;
 use crate::overlay::OverlayExt as _;
 use crate::sizing::Sizable as _;
+use crate::store::{ImageHost, images::HostImages};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -70,8 +70,9 @@ enum Placeholder {
 pub(crate) enum ViewerSource {
     Image(ImageSource),
     Original {
+        host: ImageHost,
         target: tcode_protocol::OriginalTarget,
-        preview: Option<ImageSource>,
+        preview: ImageSource,
     },
 }
 
@@ -80,20 +81,16 @@ impl From<ImageSource> for ViewerSource {
         Self::Image(source)
     }
 }
-impl From<tcode_protocol::OriginalTarget> for ViewerSource {
-    fn from(target: tcode_protocol::OriginalTarget) -> Self {
-        Self::Original {
-            target,
-            preview: None,
-        }
-    }
-}
-
 impl ViewerSource {
-    pub(crate) fn original(target: tcode_protocol::OriginalTarget, preview: ImageSource) -> Self {
+    pub(crate) fn original(
+        host: ImageHost,
+        target: tcode_protocol::OriginalTarget,
+        preview: ImageSource,
+    ) -> Self {
         Self::Original {
+            host,
             target,
-            preview: Some(preview),
+            preview,
         }
     }
 }
@@ -130,36 +127,23 @@ pub(crate) fn open(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let viewer = cx.new(|cx| {
-        let mut viewer = match source.into() {
-            ViewerSource::Image(source) => ImageViewer::new(source, title.into(), cx),
-            ViewerSource::Original { target, preview } => {
-                let mut viewer = ImageViewer::new(
-                    preview.unwrap_or_else(|| ImageSource::Custom(Arc::new(|_, _| None))),
-                    title.into(),
-                    cx,
-                );
-                viewer.target = Some(target);
-                viewer.start_original(cx);
-                viewer
-            }
-        };
-        let namespace = cx
-            .try_global::<crate::store::images::HostImages>()
-            .map(|images| images.namespace);
-        viewer.host_changes = Some(cx.observe_global::<crate::store::images::HostImages>(
-            move |this, cx| {
-                if cx
-                    .try_global::<crate::store::images::HostImages>()
-                    .is_none_or(|images| {
-                        images.link.is_none() || Some(images.namespace) != namespace
-                    })
-                {
+    let viewer = cx.new(|cx| match source.into() {
+        ViewerSource::Image(source) => ImageViewer::new(source, title.into(), cx),
+        ViewerSource::Original {
+            host,
+            target,
+            preview,
+        } => {
+            let mut viewer = ImageViewer::new(preview, title.into(), cx);
+            viewer.target = Some((host, target));
+            viewer.start_original(cx);
+            viewer.host_changes = Some(cx.observe_global::<HostImages>(move |this, cx| {
+                if HostImages::link(host, cx).is_none() {
                     this.cancel_original(cx);
                 }
-            },
-        ));
-        viewer
+            }));
+            viewer
+        }
     });
     let focus = viewer.read(cx).focus_handle.clone();
     window.open_dialog(cx, move |dialog, _, _| {
@@ -275,7 +259,7 @@ pub(crate) struct ImageViewer {
     /// The original's size as its metadata names it, before its bytes arrive.
     original_size: Option<Size<Pixels>>,
     failed: bool,
-    target: Option<tcode_protocol::OriginalTarget>,
+    target: Option<(ImageHost, tcode_protocol::OriginalTarget)>,
     remote_progress: bool,
     /// The preview the original replaced, and when: it stays under the
     /// original while the original fades in over it.
@@ -320,13 +304,10 @@ impl ImageViewer {
 
     fn start_original(&mut self, cx: &mut Context<Self>) {
         self.cancel_original(cx);
-        let Some(target) = self.target.clone() else {
+        let Some((host, target)) = self.target.clone() else {
             return;
         };
-        let Some(host) = cx
-            .try_global::<crate::store::images::HostImages>()
-            .and_then(|images| images.link.clone())
-        else {
+        let Some(host) = HostImages::link(host, cx) else {
             self.original_state = Some(OriginalState::Failed(
                 crate::tr!("image_viewer.load_failed").into_owned().into(),
             ));
@@ -937,6 +918,8 @@ impl Render for ImageViewer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use gpui::{Modifiers, RenderImage, TestAppContext, TouchPhase, VisualTestContext};
     use image::{Frame, ImageBuffer, Rgba};
@@ -1041,10 +1024,7 @@ mod tests {
         let (_replies, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new_local(to_host, from_host, Some(Arc::new(Sized)));
         cx.update(|window, cx| {
-            cx.set_global(crate::store::images::HostImages {
-                link: Some(link),
-                namespace: 1,
-            });
+            let host = HostImages::open(link, cx);
             let preview = Arc::new(RenderImage::new(vec![Frame::new(ImageBuffer::from_pixel(
                 120,
                 90,
@@ -1052,6 +1032,7 @@ mod tests {
             ))]));
             open(
                 ViewerSource::original(
+                    host,
                     tcode_protocol::OriginalTarget::File {
                         path: "/host/small.png".into(),
                     },
@@ -1116,10 +1097,7 @@ mod tests {
             Some(Arc::new(Delivered(png.into_inner()))),
         );
         cx.update(|window, cx| {
-            cx.set_global(crate::store::images::HostImages {
-                link: Some(link),
-                namespace: 1,
-            });
+            let host = HostImages::open(link, cx);
             let preview = Arc::new(RenderImage::new(vec![Frame::new(ImageBuffer::from_pixel(
                 120,
                 90,
@@ -1127,6 +1105,7 @@ mod tests {
             ))]));
             open(
                 ViewerSource::original(
+                    host,
                     tcode_protocol::OriginalTarget::File {
                         path: "/host/delivered.png".into(),
                     },
@@ -1362,10 +1341,7 @@ mod tests {
             })),
         );
         cx.update(|window, cx| {
-            cx.set_global(crate::store::images::HostImages {
-                link: Some(link),
-                namespace: 1,
-            });
+            let host = HostImages::open(link, cx);
             let preview = Arc::new(RenderImage::new(vec![Frame::new(ImageBuffer::from_pixel(
                 240,
                 120,
@@ -1373,6 +1349,7 @@ mod tests {
             ))]));
             open(
                 ViewerSource::original(
+                    host,
                     tcode_protocol::OriginalTarget::File {
                         path: "/host/pending.png".into(),
                     },

@@ -76,6 +76,7 @@ pub struct MarkdownState {
     pub(super) bounds: Bounds<Pixels>,
     pub(super) compact_headings: bool,
     pub(super) base_dir: Option<PathBuf>,
+    pub(super) image_host: crate::store::ImageHost,
     pub(super) image_resolver: Option<ImageResolver>,
     link_targets: LinkTargetCache,
     /// The block the pointer is over, whose actions (a formula's, a
@@ -166,6 +167,7 @@ impl MarkdownState {
             bounds: Bounds::default(),
             compact_headings: false,
             base_dir: None,
+            image_host: crate::store::ImageHost::NONE,
             image_resolver: None,
             link_targets: LinkTargetCache::default(),
             hover: crate::motion::ListHover::new(crate::material::HOVER),
@@ -364,6 +366,13 @@ impl MarkdownState {
         cx.notify();
     }
 
+    pub(crate) fn set_image_host(&mut self, host: crate::store::ImageHost, cx: &mut Context<Self>) {
+        if self.image_host != host {
+            self.image_host = host;
+            cx.notify();
+        }
+    }
+
     pub fn set_image_resolver(&mut self, resolver: Option<ImageResolver>, cx: &mut Context<Self>) {
         self.image_resolver = resolver;
         cx.notify();
@@ -381,7 +390,12 @@ impl MarkdownState {
     /// does not depend on the width it lays out at.
     pub(super) fn image_source(&self, uri: &SharedUri) -> ImageSource {
         self.resolve_image(uri, |path| {
-            crate::store::image_preview(path, crate::store::MAX_PREVIEW_PIXELS as f32, false)
+            crate::store::image_preview(
+                self.image_host,
+                path,
+                crate::store::MAX_PREVIEW_PIXELS as f32,
+                false,
+            )
         })
     }
 
@@ -389,6 +403,7 @@ impl MarkdownState {
     pub(super) fn opened_image_source(&self, uri: &SharedUri) -> crate::image_viewer::ViewerSource {
         self.resolve_image(uri, |path| {
             crate::image_viewer::ViewerSource::original(
+                self.image_host,
                 tcode_protocol::OriginalTarget::File { path },
                 self.image_source(uri),
             )

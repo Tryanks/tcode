@@ -16,8 +16,8 @@
 //! memory and every atlas only after the frame that let go of its last lease, and only what no
 //! element claims is let go of to keep within the budget.
 use gpui::{
-    App, AsyncApp, ElementId, EntityId, Global, ImageCacheError, ImageSource, RenderImage,
-    SharedString, SharedUri, Task, Window, WindowId,
+    App, AsyncApp, BorrowAppContext as _, ElementId, EntityId, Global, ImageCacheError,
+    ImageSource, RenderImage, SharedString, SharedUri, Task, Window, WindowId,
 };
 #[cfg(not(target_family = "wasm"))]
 use std::time::Instant;
@@ -37,11 +37,48 @@ use tcode_protocol::{Query, QueryResponse};
 #[cfg(target_family = "wasm")]
 use web_time::Instant;
 
+/// The host a picture is read from. Several hosts' pictures are on screen at once, so a caller
+/// names its host, through its store, and nothing here assumes one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ImageHost(u64);
+
+impl ImageHost {
+    /// No host: what it asks for reads as unreached, and draws a surface's fallback.
+    pub(crate) const NONE: Self = Self(0);
+}
+
+/// The link each open host's pictures are read through.
+#[derive(Default)]
 pub(crate) struct HostImages {
-    pub link: Option<HostLink>,
-    pub namespace: u64,
+    links: HashMap<ImageHost, HostLink>,
 }
 impl Global for HostImages {}
+
+impl HostImages {
+    pub(crate) fn open(link: HostLink, cx: &mut App) -> ImageHost {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let host = ImageHost(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        if !cx.has_global::<Self>() {
+            cx.set_global(Self::default());
+        }
+        cx.update_global::<Self, _>(|images, _| {
+            images.links.insert(host, link);
+        });
+        host
+    }
+
+    pub(crate) fn close(host: ImageHost, cx: &mut App) {
+        if cx.has_global::<Self>() {
+            cx.update_global::<Self, _>(|images, _| {
+                images.links.remove(&host);
+            });
+        }
+    }
+
+    pub(crate) fn link(host: ImageHost, cx: &App) -> Option<HostLink> {
+        cx.try_global::<Self>()?.links.get(&host).cloned()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ImageRequest {
@@ -77,16 +114,16 @@ struct MediaRequest {
 /// Where an image is read from.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Source {
-    Host(u64, ImageRequest),
-    Media(u64, MediaRequest),
+    Host(ImageHost, ImageRequest),
+    Media(ImageHost, MediaRequest),
     Url(SharedUri),
 }
 
 impl Source {
     /// The host whose answer this is, for a source a host reads.
-    fn namespace(&self) -> Option<u64> {
+    fn host(&self) -> Option<ImageHost> {
         match self {
-            Self::Host(namespace, _) | Self::Media(namespace, _) => Some(*namespace),
+            Self::Host(host, _) | Self::Media(host, _) => Some(*host),
             Self::Url(_) => None,
         }
     }
@@ -283,7 +320,7 @@ impl AfterFrame {
 struct Images {
     entries: HashMap<Source, Entry>,
     /// The account each host's GitHub host was last read as.
-    accounts: HashMap<(u64, String), String>,
+    accounts: HashMap<(ImageHost, String), String>,
     after_frame: Rc<AfterFrame>,
     _alive: Rc<()>,
 }
@@ -369,15 +406,10 @@ fn start_read(source: &Source, cx: &mut App) {
 }
 
 fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading {
-    fn host(namespace: u64, cx: &App) -> Option<HostLink> {
-        cx.try_global::<HostImages>()
-            .filter(|images| images.namespace == namespace)
-            .and_then(|images| images.link.clone())
-    }
     let renderer = cx.svg_renderer();
     match source.clone() {
-        Source::Host(namespace, request) => {
-            let host = host(namespace, cx);
+        Source::Host(host, request) => {
+            let host = HostImages::link(host, cx);
             Box::pin(async move {
                 let query = match request {
                     ImageRequest::Preview {
@@ -429,8 +461,8 @@ fn reading(source: &Source, validator: Option<String>, cx: &mut App) -> Reading 
                 }
             })
         }
-        Source::Media(namespace, request) => {
-            let host = host(namespace, cx);
+        Source::Media(host, request) => {
+            let host = HostImages::link(host, cx);
             Box::pin(async move {
                 let unavailable = || Read::Unavailable("pull request media is unavailable".into());
                 let Some(host) = host else {
@@ -604,12 +636,15 @@ fn draw(
 /// once answers without a picture and those of a host this client no longer reads; then every
 /// retired image's atlas tiles.
 fn sweep(cx: &mut App) {
-    let open: Vec<WindowId> = cx
+    let windows: Vec<WindowId> = cx
         .windows()
         .iter()
         .map(|window| window.window_id())
         .collect();
-    let namespace = cx.try_global::<HostImages>().map(|images| images.namespace);
+    let open: HashSet<ImageHost> = cx
+        .try_global::<HostImages>()
+        .map(|images| images.links.keys().copied().collect())
+        .unwrap_or_default();
     let images = images(cx);
     let after_frame = images.after_frame.clone();
     let mut total = 0;
@@ -620,7 +655,7 @@ fn sweep(cx: &mut App) {
                 decoded
                     .windows
                     .borrow_mut()
-                    .retain(|window| open.contains(window));
+                    .retain(|window| windows.contains(window));
                 decoded.cost()
             }
             _ => 0,
@@ -628,9 +663,7 @@ fn sweep(cx: &mut App) {
         total += cost;
         // An answer without a picture is kept only while something asks for it.
         let pictureless = entry.answer.is_some() && cost == 0;
-        let gone = source
-            .namespace()
-            .is_some_and(|held| Some(held) != namespace);
+        let gone = source.host().is_some_and(|held| !open.contains(&held));
         if !entry.held() && (cost > 0 || pictureless || gone) {
             let keep = !(pictureless || gone);
             unheld.push((keep, entry.hold.released.get(), cost, source.clone()));
@@ -674,18 +707,22 @@ impl Owned {
 }
 
 /// Draws a host image; an `img` shows its fallback for every read without an image.
-fn source(request: impl Fn(&Window) -> ImageRequest + 'static) -> ImageSource {
+fn source(host: ImageHost, request: impl Fn(&Window) -> ImageRequest + 'static) -> ImageSource {
     ImageSource::from(move |window: &mut Window, cx: &mut App| {
-        let namespace = cx.try_global::<HostImages>()?.namespace;
-        draw(Source::Host(namespace, request(window)), window, cx)
+        draw(Source::Host(host, request(window)), window, cx)
     })
 }
 
 /// The host's preview of `path` for a `logical_pixels` square, covering it when `cover` is set.
 /// It never falls back to the original: without a preview, the tile draws its fallback and
 /// opening it reads the original.
-pub(crate) fn image_preview(path: PathBuf, logical_pixels: f32, cover: bool) -> ImageSource {
-    source(move |window| ImageRequest::Preview {
+pub(crate) fn image_preview(
+    host: ImageHost,
+    path: PathBuf,
+    logical_pixels: f32,
+    cover: bool,
+) -> ImageSource {
+    source(host, move |window| ImageRequest::Preview {
         path: path.clone(),
         pixels: preview_pixels(logical_pixels, window),
         cover,
@@ -699,13 +736,14 @@ fn preview_pixels(logical: f32, window: &Window) -> u32 {
 }
 
 pub(crate) fn item_image_preview(
+    host: ImageHost,
     session_id: String,
     item_id: String,
     image_index: usize,
     width: f32,
     height: f32,
 ) -> ImageSource {
-    source(move |window| ImageRequest::ItemPreview {
+    source(host, move |window| ImageRequest::ItemPreview {
         session_id: session_id.clone(),
         item_id: item_id.clone(),
         image_index,
@@ -734,6 +772,7 @@ pub(crate) enum MediaState {
 /// The host's answer for a media URL; an image past its expiry keeps drawing while it is read
 /// again with its validator.
 fn media_answer(
+    host: ImageHost,
     session_id: &str,
     key: &tcode_core::pull_request::PullRequestKey,
     account: &str,
@@ -741,35 +780,35 @@ fn media_answer(
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Answer> {
-    let namespace = cx.try_global::<HostImages>()?.namespace;
     let request = MediaRequest {
         session_id: session_id.to_owned(),
         key: key.clone(),
         account: account.to_owned(),
         url: url.to_owned(),
     };
-    read_as(namespace, &request, cx);
-    answer(&Source::Media(namespace, request), window, cx)
+    read_as(host, &request, cx);
+    answer(&Source::Media(host, request), window, cx)
 }
 
 /// Each account's copies are its own: reading a host's conversations as another account forgets
 /// every copy the previous one read.
-fn read_as(namespace: u64, request: &MediaRequest, cx: &mut App) {
+fn read_as(host: ImageHost, request: &MediaRequest, cx: &mut App) {
     let images = images(cx);
-    let partition = (namespace, request.key.host.clone());
+    let partition = (host, request.key.host.clone());
     if images.accounts.get(&partition) == Some(&request.account) {
         return;
     }
     images.accounts.insert(partition, request.account.clone());
     images.entries.retain(|source, _| {
-        !matches!(source, Source::Media(held_namespace, held)
-            if *held_namespace == namespace
+        !matches!(source, Source::Media(held_host, held)
+            if *held_host == host
                 && held.key.host == request.key.host
                 && held.account != request.account)
     });
 }
 
 pub(crate) fn pull_request_media_state(
+    host: ImageHost,
     session_id: &str,
     key: &tcode_core::pull_request::PullRequestKey,
     account: &str,
@@ -777,7 +816,7 @@ pub(crate) fn pull_request_media_state(
     window: &mut Window,
     cx: &mut App,
 ) -> MediaState {
-    match media_answer(session_id, key, account, url, window, cx) {
+    match media_answer(host, session_id, key, account, url, window, cx) {
         None => MediaState::Loading,
         // An image elsewhere is drawn by its URL, as any page would draw it.
         Some(Answer::Image(_) | Answer::Elsewhere) => MediaState::Ready,
@@ -791,13 +830,14 @@ pub(crate) fn pull_request_media_state(
 /// its own: a conversation read as another account names another `account`, and reading
 /// one drops every copy the previous account read.
 pub(crate) fn pull_request_media(
+    host: ImageHost,
     session_id: String,
     key: tcode_core::pull_request::PullRequestKey,
     account: String,
     url: String,
 ) -> ImageSource {
     ImageSource::from(move |window: &mut Window, cx: &mut App| {
-        match media_answer(&session_id, &key, &account, &url, window, cx)? {
+        match media_answer(host, &session_id, &key, &account, &url, window, cx)? {
             Answer::Elsewhere => draw(Source::Url(url.clone().into()), window, cx),
             answer => Some(drawn(answer, window)),
         }
@@ -821,17 +861,18 @@ pub(crate) fn retry_failed_pull_request_media(
     });
 }
 
-pub(crate) fn icon_thumbnail(path: PathBuf) -> ImageSource {
-    source(move |_| ImageRequest::Thumbnail(path.clone()))
+pub(crate) fn icon_thumbnail(host: ImageHost, path: PathBuf) -> ImageSource {
+    source(host, move |_| ImageRequest::Thumbnail(path.clone()))
 }
 
 pub(crate) fn project_icon(
+    host: ImageHost,
     project: &tcode_core::project::Project,
     logical_size: f32,
 ) -> ImageSource {
     let id = project.id.clone();
     let override_path = project.icon_path.clone();
-    source(move |window| ImageRequest::Project {
+    source(host, move |window| ImageRequest::Project {
         id: id.clone(),
         override_path: override_path.clone(),
         pixels: (logical_size * window.scale_factor())
@@ -855,13 +896,11 @@ pub(crate) enum IconReset {
 
 /// Every display scale's icon of `project`, error included, is read again when next drawn.
 pub(crate) fn invalidate_project_icon(
+    host: ImageHost,
     project: &tcode_core::project::Project,
     reset: IconReset,
     cx: &mut App,
 ) {
-    let Some(namespace) = cx.try_global::<HostImages>().map(|images| images.namespace) else {
-        return;
-    };
     if !cx.has_global::<Images>() {
         return;
     }
@@ -873,7 +912,7 @@ pub(crate) fn invalidate_project_icon(
                 id, override_path, ..
             },
         ) = source
-            && *held == namespace
+            && *held == host
             && *id == project.id
             && *override_path == project.icon_path
         {
@@ -921,6 +960,7 @@ mod tests {
 
     /// The host end of a scripted link.
     struct Host {
+        image: ImageHost,
         requests: async_channel::Receiver<String>,
         replies: async_channel::Sender<String>,
         _pump: gpui::Task<()>,
@@ -931,17 +971,13 @@ mod tests {
             let (to_host, requests) = async_channel::unbounded();
             let (replies, from_host) = async_channel::unbounded();
             let link = HostLink::new(to_host, from_host);
-            cx.update(|cx| {
-                cx.set_global(HostImages {
-                    link: Some(link.clone()),
-                    namespace: 1,
-                })
-            });
+            let image = cx.update(|cx| HostImages::open(link.clone(), cx));
             let executor = cx.background_executor.clone();
             let pump = cx.background_executor.spawn(async move {
                 link.pump_with_timer(|delay| executor.timer(delay)).await;
             });
             Self {
+                image,
                 requests,
                 replies,
                 _pump: pump,
@@ -1013,10 +1049,13 @@ mod tests {
 
     impl Kind {
         /// The `index`th picture read this way, named `…/{index}.bmp`.
-        fn source(self, index: usize) -> ImageSource {
+        fn source(self, host: ImageHost, index: usize) -> ImageSource {
             match self {
-                Kind::Preview => image_preview(format!("/host/{index}.bmp").into(), 64., false),
+                Kind::Preview => {
+                    image_preview(host, format!("/host/{index}.bmp").into(), 64., false)
+                }
                 Kind::Media => pull_request_media(
+                    host,
                     "session".into(),
                     pull_request(),
                     "reader".into(),
@@ -1190,7 +1229,7 @@ mod tests {
         let count = BUDGET / COST + 1;
         let (mut first, mut last_released) = (None, None);
         for index in 0..count {
-            show(&shelf, kind.source(index), cx);
+            show(&shelf, kind.source(script.host.image, index), cx);
             assert_eq!(settle(&script, cx), [index], "each picture is read once");
             let image = drawn.borrow_mut().take().expect("the picture is drawn");
             assert!(atlas_holds(&image, cx));
@@ -1219,7 +1258,7 @@ mod tests {
             "the picture let go of last stays"
         );
 
-        show(&shelf, kind.source(count - 2), cx);
+        show(&shelf, kind.source(script.host.image, count - 2), cx);
         assert!(
             settle(&script, cx).is_empty(),
             "a picture still held is drawn again without a read"
@@ -1228,7 +1267,7 @@ mod tests {
         assert!(Arc::ptr_eq(&again, &last_released));
         drop((again, last_released));
 
-        show(&shelf, kind.source(0), cx);
+        show(&shelf, kind.source(script.host.image, 0), cx);
         assert_eq!(
             settle(&script, cx),
             [0],
@@ -1274,7 +1313,7 @@ mod tests {
     #[gpui::test]
     fn a_picture_drawn_from_last_frame_outlasts_pressure_past_the_budget(cx: &mut TestAppContext) {
         let script = Script::new(bmp(SIDE), cx);
-        let still = Shelf::new(Some(Kind::Preview.source(0)));
+        let still = Shelf::new(Some(Kind::Preview.source(script.host.image, 0)));
         let (still_drawn, still_renders) = (still.drawn.clone(), still.renders.clone());
         let churn = Shelf::new(None);
         let churn_drawn = churn.drawn.clone();
@@ -1291,7 +1330,7 @@ mod tests {
         let renders = still_renders.get();
         let mut first_churned = None;
         for index in 1..=BUDGET / COST + 2 {
-            show(&churn, Kind::Preview.source(index), cx);
+            show(&churn, Kind::Preview.source(script.host.image, index), cx);
             assert_eq!(
                 settle_reusing(&script, cx),
                 [index],
@@ -1322,7 +1361,7 @@ mod tests {
     #[gpui::test]
     fn pull_request_media_past_its_expiry_draws_while_it_is_read_again(cx: &mut TestAppContext) {
         let host = Host::attach(cx);
-        let shelf = Shelf::new(Some(Kind::Media.source(0)));
+        let shelf = Shelf::new(Some(Kind::Media.source(host.image, 0)));
         let drawn = shelf.drawn.clone();
         let (_, cx) = cx.add_window_view(|_, _| shelf);
         let validators = |asked: Vec<Query>| -> Vec<Option<String>> {
@@ -1390,11 +1429,69 @@ mod tests {
         );
     }
 
+    /// Each open host's pictures are read through its own link, so a second host opening takes
+    /// nothing from the first, and a host closing takes nothing from the one still open.
+    #[gpui::test]
+    fn open_hosts_read_their_own_pictures_and_outlast_each_other(cx: &mut TestAppContext) {
+        let first = Host::attach(cx);
+        let second = Host::attach(cx);
+        let picture = bmp(SIDE);
+        let reply = |query: &Query| match query {
+            Query::ReadImagePreview { .. } => Ok(QueryResponse::FileBytes(picture.clone())),
+            other => panic!("unexpected read {other:?}"),
+        };
+        let read = |asked: Vec<Query>| -> Vec<usize> {
+            asked
+                .iter()
+                .map(|query| match query {
+                    Query::ReadImagePreview { path, .. } => index(&path.to_string_lossy()),
+                    other => panic!("unexpected read {other:?}"),
+                })
+                .collect()
+        };
+        let shelf = Shelf::new(Some(Kind::Preview.source(first.image, 0)));
+        let drawn = shelf.drawn.clone();
+        let (shelf, cx) = cx.add_window_view(|_, _| shelf);
+
+        draw(cx);
+        cx.run_until_parked();
+        assert_eq!(read(first.answer(reply)), [0]);
+        assert_eq!(read(second.answer(reply)), [] as [usize; 0]);
+        cx.run_until_parked();
+        draw(cx);
+        assert!(drawn.borrow().is_some(), "the first host's picture draws");
+
+        show(&shelf, Kind::Preview.source(second.image, 1), cx);
+        draw(cx);
+        cx.run_until_parked();
+        assert_eq!(read(first.answer(reply)), [] as [usize; 0]);
+        assert_eq!(read(second.answer(reply)), [1]);
+        cx.run_until_parked();
+        draw(cx);
+        assert!(drawn.borrow().is_some(), "the second host's picture draws");
+
+        cx.update(|_, cx| HostImages::close(first.image, cx));
+        show(&shelf, Kind::Preview.source(second.image, 2), cx);
+        draw(cx);
+        cx.run_until_parked();
+        assert_eq!(read(second.answer(reply)), [2], "the open host still reads");
+        cx.run_until_parked();
+        draw(cx);
+        assert!(drawn.borrow().is_some(), "and its picture still draws");
+
+        show(&shelf, Kind::Preview.source(first.image, 3), cx);
+        draw(cx);
+        cx.run_until_parked();
+        assert_eq!(read(first.answer(reply)), [] as [usize; 0]);
+        assert!(drawn.borrow().is_none(), "a closed host reads nothing");
+    }
+
     /// What a reader answered a frame.
     type Drawn = Option<Result<Arc<RenderImage>, ImageCacheError>>;
 
     /// Draws a project's icon at two display sizes, noting what each decoded to.
     struct ProjectIcons {
+        host: ImageHost,
         project: tcode_core::project::Project,
         drawn: Rc<RefCell<Vec<Drawn>>>,
     }
@@ -1404,7 +1501,7 @@ mod tests {
             let mut icons = div().flex();
             let mut drawn = Vec::new();
             for size in [16., 32.] {
-                let source = project_icon(&self.project, size);
+                let source = project_icon(self.host, &self.project, size);
                 let ImageSource::Custom(load) = &source else {
                     unreachable!("project icons are read through `store::images`");
                 };
@@ -1447,7 +1544,12 @@ mod tests {
         let drawn = Rc::new(RefCell::new(Vec::new()));
         let (_, cx) = cx.add_window_view({
             let (project, drawn) = (project.clone(), drawn.clone());
-            move |_, _| ProjectIcons { project, drawn }
+            let host = store.read_with(cx, |store, _| store.image_host());
+            move |_, _| ProjectIcons {
+                host,
+                project,
+                drawn,
+            }
         });
         let scale = cx.update(|window, _| window.scale_factor());
         let pixels = [16., 32.].map(|size: f32| (size * scale).round() as u32);
@@ -1575,17 +1677,18 @@ mod tests {
     }
 
     struct ImageMessage {
+        host: ImageHost,
         markdown: Entity<MarkdownState>,
         cwd: PathBuf,
     }
 
     impl Render for ImageMessage {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .id("image-message")
-                .tab_index(0)
-                .w(px(320.))
-                .child(MarkdownView::new(&self.markdown).base_dir(self.cwd.clone()))
+            div().id("image-message").tab_index(0).w(px(320.)).child(
+                MarkdownView::new(&self.markdown)
+                    .image_host(self.host)
+                    .base_dir(self.cwd.clone()),
+            )
         }
     }
 
@@ -1596,12 +1699,7 @@ mod tests {
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
-        cx.update(|cx| {
-            cx.set_global(HostImages {
-                link: Some(link.clone()),
-                namespace: 1,
-            });
-        });
+        let host = cx.update(|cx| HostImages::open(link.clone(), cx));
         let executor = cx.background_executor.clone();
         let _pump = cx.background_executor.spawn(async move {
             link.pump_with_timer(|delay| executor.timer(delay)).await;
@@ -1611,6 +1709,7 @@ mod tests {
         let mut message = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|cx| ImageMessage {
+                host,
                 markdown: cx.new(|cx| MarkdownState::new("", cx)),
                 cwd: cwd.clone(),
             });

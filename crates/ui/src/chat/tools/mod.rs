@@ -996,6 +996,7 @@ pub(in crate::chat) fn thumbnails_titled(
         .collect();
     let id = SharedString::from(format!("call-tiles-{}", call.id()));
     Some(super::components::images::sampled_tile_row(
+        ctx.chat.workspace_store.read(ctx.cx).image_host(),
         id,
         tiles,
         session_id,

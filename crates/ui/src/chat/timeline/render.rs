@@ -152,6 +152,7 @@ impl TimelineView {
                 }
                 Segment::Images(images) => {
                     column = column.child(components::images::image_tiles(
+                        self.workspace_store.read(cx).image_host(),
                         images,
                         cwd,
                         self.session_key.as_deref().unwrap_or_default(),
@@ -223,6 +224,7 @@ impl TimelineView {
                     }
                     column = column.child(components::assistant::assistant(
                         components::assistant::AssistantData {
+                            image_host: self.workspace_store.read(cx).image_host(),
                             id: &entry.id,
                             text,
                             copy_text: copy_text.clone(),
@@ -927,6 +929,7 @@ impl TimelineView {
         let copied = self.copied.is(&copy_key);
         let mark = copy_key;
         let copy_text: Arc<str> = Arc::from(visible);
+        let image_host = self.workspace_store.read(cx).image_host();
         let images = attachments
             .iter()
             .map(|path| {
@@ -938,8 +941,9 @@ impl TimelineView {
                 Box::new(cx.listener(move |_, _, window, cx| {
                     crate::image_viewer::open(
                         crate::image_viewer::ViewerSource::original(
+                            image_host,
                             tcode_protocol::OriginalTarget::File { path: path.clone() },
-                            crate::store::image_preview(path.clone(), 120., true),
+                            crate::store::image_preview(image_host, path.clone(), 120., true),
                         ),
                         title.clone(),
                         window,
@@ -966,6 +970,7 @@ impl TimelineView {
             .map(|transit| transit.progress);
         let bubble = components::bubble::user_bubble(
             components::bubble::BubbleData {
+                image_host,
                 entry_id,
                 taken,
                 visible,
@@ -1080,6 +1085,7 @@ impl TimelineView {
         let copied = self.copied.is(&copy_key);
         components::plan::plan_block(
             components::plan::PlanData {
+                image_host: self.workspace_store.read(cx).image_host(),
                 id: &entry.id,
                 text,
                 copy_text: copy_text.clone(),

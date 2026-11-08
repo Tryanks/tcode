@@ -178,8 +178,10 @@ pub(super) fn body(
     // width following its height, before the card scrolls.
     let height = scaled(rail).get().unwrap_or(full * ASPECT);
     let width = height / ASPECT;
+    let host = rail.workspace_store.read(cx).image_host();
     let preview = |shot: &Shot| {
         crate::store::item_image_preview(
+            host,
             session_id.clone(),
             shot.entry_id.clone(),
             shot.index,
@@ -266,11 +268,14 @@ pub(super) fn body(
         let name = name.clone();
         let shot = current;
         move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
-            crate::chat::components::images::open_item_image(
-                &session_id,
-                &shot.entry_id,
-                shot.index,
-                preview.clone(),
+            crate::image_viewer::open(
+                crate::chat::components::images::item_original(
+                    host,
+                    &session_id,
+                    &shot.entry_id,
+                    shot.index,
+                    preview.clone(),
+                ),
                 name.clone(),
                 window,
                 cx,

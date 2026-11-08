@@ -42,6 +42,7 @@ pub fn user_bubble(
 ) -> AnyElement {
     bubble::user_bubble(
         bubble::BubbleData {
+            image_host: crate::store::ImageHost::NONE,
             entry_id: id,
             taken: None,
             visible: text,
@@ -123,6 +124,7 @@ pub fn assistant(
 ) -> AnyElement {
     assistant::assistant(
         assistant::AssistantData {
+            image_host: crate::store::ImageHost::NONE,
             id,
             text: "",
             copy_text: std::sync::Arc::from(""),
@@ -165,6 +167,7 @@ pub fn plan(
     });
     plan::plan_block(
         plan::PlanData {
+            image_host: crate::store::ImageHost::NONE,
             id,
             text: "",
             copy_text: std::sync::Arc::from(""),

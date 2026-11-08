@@ -819,14 +819,20 @@ impl CommandPalette {
                 .cursor_pointer()
                 .child(match &item.action {
                     Action::ChangeProjectIcon(project) => {
-                        crate::project_icon::artwork(project, 16.).into_any_element()
+                        crate::project_icon::artwork(self.store.read(cx).image_host(), project, 16.)
+                            .into_any_element()
                     }
                     Action::NewThread { project_id, .. } => self
                         .store
                         .read(cx)
                         .project(project_id)
                         .map(|project| {
-                            crate::project_icon::artwork(project, 16.).into_any_element()
+                            crate::project_icon::artwork(
+                                self.store.read(cx).image_host(),
+                                project,
+                                16.,
+                            )
+                            .into_any_element()
                         })
                         .unwrap_or_else(|| {
                             Icon::new(item.icon.clone())

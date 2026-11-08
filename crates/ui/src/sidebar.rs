@@ -2700,7 +2700,11 @@ impl SessionsSidebar {
             self.fold_progress(&fold_key(Fold::Project, &project_id), !collapsed),
             cx,
         ))
-        .child(crate::project_icon::artwork(&group.project, 16.))
+        .child(crate::project_icon::artwork(
+            self.store.read(cx).image_host(),
+            &group.project,
+            16.,
+        ))
         .child(
             sidebar_label(name)
                 .font_medium()
@@ -3900,7 +3904,12 @@ impl SessionsSidebar {
                             .read(cx)
                             .project(meta.project_id.as_deref().unwrap_or_default())
                             .map(|project| {
-                                crate::project_icon::artwork(project, 12.).into_any_element()
+                                crate::project_icon::artwork(
+                                    self.store.read(cx).image_host(),
+                                    project,
+                                    12.,
+                                )
+                                .into_any_element()
                             })
                             .unwrap_or_else(|| Icon::new(IconName::Folder).into_any_element()),
                     )
@@ -4793,7 +4802,13 @@ impl SessionsSidebar {
         .text_caption(cx)
         .when_some(
             self.store.read(cx).project(&row.project_id),
-            |el, project| el.child(crate::project_icon::artwork(project, 14.)),
+            |el, project| {
+                el.child(crate::project_icon::artwork(
+                    self.store.read(cx).image_host(),
+                    project,
+                    14.,
+                ))
+            },
         )
         .child(
             div()
@@ -4918,6 +4933,7 @@ impl SessionsSidebar {
                 });
             }))
             .child(compact_status_glyph(
+                self.store.read(cx).image_host(),
                 &session_id,
                 CompactGlyph::of(state, working, cx),
                 project.as_ref(),
@@ -5056,6 +5072,7 @@ impl CompactGlyph {
 /// cross-fades. The slot is always taken so titles line up. Idle ungrouped
 /// rows show their project artwork.
 fn compact_status_glyph(
+    image_host: crate::store::ImageHost,
     id: &str,
     glyph: CompactGlyph,
     project: Option<&tcode_core::project::Project>,
@@ -5072,12 +5089,15 @@ fn compact_status_glyph(
             CHANGE,
             window,
             cx,
-            move |glyph, _, cx| compact_glyph(*glyph, project.as_ref(), cx).into_any_element(),
+            move |glyph, _, cx| {
+                compact_glyph(image_host, *glyph, project.as_ref(), cx).into_any_element()
+            },
         ))
         .into_any_element()
 }
 
 fn compact_glyph(
+    image_host: crate::store::ImageHost,
     glyph: CompactGlyph,
     project: Option<&tcode_core::project::Project>,
     cx: &App,
@@ -5112,7 +5132,7 @@ fn compact_glyph(
         CompactGlyph::Idle => slot
             .text_color(cx.theme().muted_foreground)
             .when_some(project, |slot, project| {
-                slot.child(crate::project_icon::artwork(project, 20.))
+                slot.child(crate::project_icon::artwork(image_host, project, 20.))
             }),
     }
 }

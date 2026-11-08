@@ -44,8 +44,8 @@ mod preview;
 pub(crate) use preview::{PreviewPlace, PreviewReleased};
 mod thread;
 pub(crate) use images::{
-    MAX_PREVIEW_PIXELS, MediaState, image_preview, item_image_preview, pull_request_media,
-    pull_request_media_state, remote_image, retry_failed_pull_request_media,
+    ImageHost, MAX_PREVIEW_PIXELS, MediaState, image_preview, item_image_preview,
+    pull_request_media, pull_request_media_state, remote_image, retry_failed_pull_request_media,
 };
 use thread::{Part, ThreadReplica};
 mod snapshots;
@@ -185,7 +185,7 @@ pub struct WorkspaceStore {
     #[cfg_attr(not(preview_backend), allow(dead_code))]
     current_host: Option<LiveHost>,
     client_preferences: ClientPreferences,
-    image_namespace: u64,
+    image_host: images::ImageHost,
     attachment_tasks: Vec<Task<()>>,
     /// Replicated terminal grids, keyed by the host's terminal id.
     terminals: HashMap<u64, std::rc::Rc<ClientTerminal>>,
@@ -407,14 +407,7 @@ impl WorkspaceStore {
         seed_blocking: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        static NEXT_IMAGE_NAMESPACE: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(1);
-        let image_namespace =
-            NEXT_IMAGE_NAMESPACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        cx.set_global(images::HostImages {
-            link: Some(host.clone()),
-            namespace: image_namespace,
-        });
+        let image_host = images::HostImages::open(host.clone(), cx);
         let client_preferences = client_host
             .as_ref()
             .map(|host| host.load_preferences())
@@ -428,7 +421,7 @@ impl WorkspaceStore {
             client_host,
             current_host,
             client_preferences,
-            image_namespace,
+            image_host,
             attachment_tasks: Vec::new(),
             terminals: HashMap::new(),
             remote_preview: async_channel::unbounded(),
@@ -820,6 +813,11 @@ impl WorkspaceStore {
         }
     }
 
+    /// The host this store's pictures are read from.
+    pub(crate) fn image_host(&self) -> images::ImageHost {
+        self.image_host
+    }
+
     pub fn remote_host_id(&self) -> Option<&str> {
         match &self.attachment {
             WorkspaceAttachment::Local => None,
@@ -1092,14 +1090,7 @@ impl WorkspaceStore {
         self.host.close();
         self.remote_preview.0.close();
         self.remote_preview.1.close();
-        if let Some(images) = cx.try_global::<images::HostImages>()
-            && images.namespace == self.image_namespace
-        {
-            cx.set_global(images::HostImages {
-                link: None,
-                namespace: self.image_namespace,
-            });
-        }
+        images::HostImages::close(self.image_host, cx);
     }
 
     /// Point the thread's conversation state at where its status says it
@@ -1446,7 +1437,12 @@ impl WorkspaceStore {
                     self.close_unshown_pull_requests();
                 }
                 (Topic::Index, ServerEvent::IndexUpsertProject(project)) => {
-                    images::invalidate_project_icon(project, images::IconReset::Changed, cx);
+                    images::invalidate_project_icon(
+                        self.image_host,
+                        project,
+                        images::IconReset::Changed,
+                        cx,
+                    );
                     match self
                         .index_replica
                         .1
@@ -1500,12 +1496,14 @@ impl WorkspaceStore {
                             });
                         if changed {
                             images::invalidate_project_icon(
+                                self.image_host,
                                 project,
                                 images::IconReset::Changed,
                                 cx,
                             );
                         } else if fresh_baseline {
                             images::invalidate_project_icon(
+                                self.image_host,
                                 project,
                                 images::IconReset::Baseline,
                                 cx,
@@ -1552,6 +1550,7 @@ impl WorkspaceStore {
                         if self.baseline_topics.insert(index_topic.clone()) {
                             for project in &self.index_replica.1 {
                                 images::invalidate_project_icon(
+                                    self.image_host,
                                     project,
                                     images::IconReset::Baseline,
                                     cx,
