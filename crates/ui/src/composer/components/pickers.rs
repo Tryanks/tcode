@@ -611,8 +611,8 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The "+" of clients with a platform picker: a menu of ways to add to
-    /// the message.
+    /// The "+": a menu of the platform's pickers on a client that has them,
+    /// and otherwise, on a desktop, the system's file picker.
     pub(in super::super) fn render_attach_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = cx.entity();
         let compact = self.compact;
@@ -622,6 +622,18 @@ impl Composer {
                     let host = client.host();
                     (host.supports_image_picker(), host.supports_file_picker())
                 });
+        #[cfg(feature = "native-dialogs")]
+        if !photos && !files {
+            return crate::material::toolbar_icon_button(
+                "attach-files",
+                IconName::Plus,
+                crate::tr!("attach.attach_files"),
+                compact,
+            )
+            .debug_selector(|| "attach-files".into())
+            .on_click(cx.listener(|composer, _, window, cx| composer.pick_paths(window, cx)))
+            .into_any_element();
+        }
         let trigger = crate::material::toolbar_icon_button(
             "attach-menu",
             IconName::Plus,

@@ -461,6 +461,44 @@ impl Composer {
         .detach();
     }
 
+    /// Open the system's file picker and attach what is chosen as if it had
+    /// been dropped: images as images, any other file by its path.
+    #[cfg(feature = "native-dialogs")]
+    pub(in super::super) fn pick_paths(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = match picked.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    let _ = this.update_in(cx, |_, window, cx| {
+                        window.push_notification(
+                            Notification::error(
+                                crate::tr!("attach.files_failed", error = error.to_string())
+                                    .into_owned(),
+                            ),
+                            cx,
+                        );
+                    });
+                    return;
+                }
+            };
+            let _ = this.update_in(cx, |composer, window, cx| {
+                for path in paths {
+                    composer.add_path(path, window, cx);
+                }
+                // The field takes the keys again, as it does after a drop.
+                composer.focus(window, cx);
+            });
+        })
+        .detach();
+    }
+
     /// The chip of the pending file at `index`: its name and folder, and how
     /// its upload stands.
     pub(in super::super) fn render_file_chip(
