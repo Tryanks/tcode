@@ -340,6 +340,8 @@ sidebar:
   path_placeholder: "Enter an absolute directory path"
   host_path_placeholder: "Absolute path on %{host}"
   host_path_hint: "This path is on %{host}, not on this device."
+  folders: "Folders"
+  folders_failed: "Couldn't list folders: %{reason}"
   recent_activity_host: "Recently active on %{host}"
   browse: "Browse…"
   open: "Open"
@@ -441,6 +443,10 @@ settings:
   threads_section: "THREADS"
   settling_section: "SETTLING"
   panels_section: "PANELS"
+  projects_section: "PROJECTS"
+  project_start_dir:
+    title: "Add Project start folder"
+    description: "Where the folder list in Add Project starts. The path is on the host; ~ is its home folder."
   threads: "Threads"
   auto_settle:
     title: "Auto-settle inactive threads"

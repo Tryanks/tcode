@@ -142,6 +142,11 @@ impl SettingsPage {
         }
         let settling = self.settling_rows(&settings, window, cx);
         let panels = self.panel_rows(&settings, cx);
+        let can_manage_host = self.store.read(cx).can_manage_host();
+        if can_manage_host {
+            self.fetch_host_home(cx);
+        }
+        let projects = vec![self.project_start_dir_row(cx)];
         let compact = self.window_state.read(cx).compact;
         v_flex()
             .gap(crate::material::section_gap(cx))
@@ -167,6 +172,13 @@ impl SettingsPage {
                 panels,
                 cx,
             ))
+            .when(can_manage_host, |page| {
+                page.child(crate::settings_rows::settings_group(
+                    crate::tr!("settings.projects_section"),
+                    projects,
+                    cx,
+                ))
+            })
     }
 
     fn panel_rows(&mut self, settings: &Settings, cx: &mut Context<Self>) -> Vec<AnyElement> {

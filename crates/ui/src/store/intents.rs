@@ -269,6 +269,9 @@ impl WorkspaceStore {
     pub fn set_browser_home_url(&mut self, value: Option<String>) {
         self.patch_settings(SettingsPatch::BrowserHomeUrl(value));
     }
+    pub fn set_project_start_dir(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::ProjectStartDir(value));
+    }
     pub fn set_browser_allow_evaluate(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::BrowserAllowEvaluate(value));
     }

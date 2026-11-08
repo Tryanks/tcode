@@ -427,6 +427,22 @@ impl Section {
 /// field against later snapshots so a host update cannot overwrite what the
 /// user is in the middle of typing.
 /// The remote attachment ceiling as the settings field shows it, in MiB.
+/// The default Add Project start folder as the host writes it, under its home
+/// once that is known.
+fn default_start_directory(home: Option<&str>) -> SharedString {
+    let default = crate::add_project_dialog::DEFAULT_START_DIRECTORY;
+    let Some(home) = home else {
+        return default.into();
+    };
+    let separator = if home.contains('\\') && !home.contains('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let rest = default.trim_start_matches("~/");
+    format!("{}{separator}{rest}", home.trim_end_matches(separator)).into()
+}
+
 fn remote_attachment_limit_value(cx: &App) -> String {
     (DevicePreferences::remote_attachment_limit_bytes(cx) / (1024 * 1024)).to_string()
 }
@@ -527,6 +543,12 @@ pub struct SettingsPage {
     usage_refresh_sent: bool,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: SettingsInput,
+    /// Editable "Add Project start folder"; committed on change.
+    project_start_dir_input: SettingsInput,
+    /// The host's home, which the default start folder's placeholder is
+    /// written under. Asked of the host the first time its row is drawn.
+    host_home: Option<SharedString>,
+    host_home_requested: bool,
     auto_settle_input: SettingsInput,
     project_rules_editor: Option<Entity<thread_behavior::ProjectRulesEditor>>,
     project_rules_subscription: Option<Subscription>,
@@ -727,6 +749,7 @@ impl SettingsPage {
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
         let home_url_input = cx.new(|cx| InputState::new(window, cx));
+        let project_start_dir_input = cx.new(|cx| InputState::new(window, cx));
         let device_name = DevicePreferences::device_name(cx);
         let device_name_input =
             cx.new(|cx| InputState::new(window, cx).default_value(device_name.clone()));
@@ -785,6 +808,9 @@ impl SettingsPage {
             rail_opacity: 1.,
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
+            project_start_dir_input: SettingsInput::new(project_start_dir_input.clone()),
+            host_home: None,
+            host_home_requested: false,
             auto_settle_input: SettingsInput::new(auto_settle_input.clone()),
             project_rules_editor: None,
             project_rules_subscription: None,
@@ -818,6 +844,17 @@ impl SettingsPage {
                     }
                 }
             }));
+        page._subscriptions.push(cx.subscribe(
+            &project_start_dir_input,
+            |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    if this.project_start_dir_input.is_user_edit(&value) {
+                        this.commit_project_start_dir(cx);
+                    }
+                }
+            },
+        ));
         page._subscriptions
             .push(cx.subscribe(&device_name_input, |this, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -890,6 +927,41 @@ impl SettingsPage {
             let value = settings.browser.home_url.clone().unwrap_or_default();
             self.home_url_input.push(value, window, cx);
         }
+        if !self.project_start_dir_input.dirty {
+            let value = settings.project_start_dir.clone().unwrap_or_default();
+            self.project_start_dir_input.push(value, window, cx);
+        }
+    }
+
+    /// Ask the host where its home is, once: listing `~` answers with it.
+    pub(super) fn fetch_host_home(&mut self, cx: &mut Context<Self>) {
+        if self.host_home_requested || !self.store.read(cx).can_manage_host() {
+            return;
+        }
+        self.host_home_requested = true;
+        let listing = self
+            .store
+            .update(cx, |store, cx| store.browse_directories("~".into(), cx));
+        cx.spawn(async move |this, cx| {
+            let home = listing.await.ok().and_then(|listing| listing.home);
+            let _ = this.update(cx, |page, cx| {
+                page.host_home = home.map(|home| home.to_string_lossy().into_owned().into());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn commit_project_start_dir(&self, cx: &mut Context<Self>) {
+        let value = self
+            .project_start_dir_input
+            .state
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let dir = (!value.is_empty()).then_some(value);
+        self.dispatch_settings(move |store| store.set_project_start_dir(dir), cx);
     }
 
     fn commit_home_url(&self, cx: &mut Context<Self>) {
@@ -1531,6 +1603,7 @@ impl SettingsPage {
                             .clone()
                             .unwrap_or_default();
                         page.home_url_input.push(home_url, window, cx);
+                        page.project_start_dir_input.push(String::new(), window, cx);
                         let device_name = DevicePreferences::device_name(cx);
                         page.device_name_input.push(device_name, window, cx);
                         let limit = remote_attachment_limit_value(cx);
@@ -2889,6 +2962,36 @@ impl SettingsPage {
                 ))
                 .child(crate::material::group(cx).children(rows)),
         )
+    }
+
+    pub(super) fn project_start_dir_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
+        let overridden = self.store.read(cx).settings().project_start_dir.is_some();
+        let reset = crate::settings_rows::reset_action(
+            "reset-project-start-dir",
+            overridden,
+            cx.listener(|this, _, window, cx| {
+                this.dispatch_settings(|store| store.set_project_start_dir(None), cx);
+                this.project_start_dir_input.push(String::new(), window, cx);
+            }),
+        );
+        let placeholder = default_start_directory(self.host_home.as_deref());
+        let row = self.flip_row("project-start-dir", cx);
+        let layout = row.row(
+            crate::settings_rows::row_labels(
+                crate::tr!("settings.project_start_dir.title"),
+                Some(crate::tr!("settings.project_start_dir.description").into()),
+                reset,
+                compact,
+                cx,
+            ),
+            row.field(
+                Input::new(&self.project_start_dir_input.state).placeholder(placeholder),
+                cx,
+            ),
+            cx,
+        );
+        row.render(layout)
     }
 
     fn home_url_row(&self, cx: &mut Context<Self>) -> AnyElement {

@@ -700,6 +700,7 @@ pub enum SettingsPatch {
     Traverse(TraverseSetting),
     RemoteHostName(Option<String>),
     LastProject(Option<String>),
+    ProjectStartDir(Option<String>),
 }
 
 /// The Traverse instances this machine publishes to while hosting: relay
@@ -984,6 +985,10 @@ pub struct Settings {
     /// background activity cannot move it. UI state; absent in legacy files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_project_id: Option<String>,
+    /// The host directory Add Project's folder list opens on, `~` standing for
+    /// the host's home. `None` opens on `~/TcodeProjects`; absent in legacy files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_start_dir: Option<String>,
     /// ACP agents the user installed from the marketplace (or defined by hand),
     /// keyed by registry id. Each carries its resolved launch recipe, so a
     /// session can start without consulting the registry again.
@@ -1070,6 +1075,7 @@ impl Default for Settings {
             remote_host_name: None,
             last_visited: HashMap::new(),
             last_project_id: None,
+            project_start_dir: None,
             acp_agents: BTreeMap::new(),
             unknown: serde_json::Map::new(),
         }
@@ -1189,6 +1195,9 @@ impl Settings {
             SettingsPatch::Traverse(value) => self.traverse = TraverseSetting::new(value.sources),
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
             SettingsPatch::LastProject(value) => self.last_project_id = value,
+            SettingsPatch::ProjectStartDir(value) => {
+                self.project_start_dir = value.filter(|dir| !dir.trim().is_empty());
+            }
         }
         Ok(())
     }

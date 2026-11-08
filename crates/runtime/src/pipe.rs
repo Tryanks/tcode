@@ -1270,6 +1270,15 @@ fn dispatch_query(
             let task = cx.unblock(move || tcode_services::project_icons::browse(&directory));
             cx.spawn_background(async move { task.await.map_err(io_protocol_error) })
         }
+        Query::BrowseDirectories { path } => {
+            let directories = app.user_directories().clone();
+            let task = cx.unblock(move || directories.browse_directories(&path));
+            cx.spawn_background(async move {
+                task.await
+                    .map(QueryResponse::Directories)
+                    .map_err(io_protocol_error)
+            })
+        }
         Query::ReadIconImage { path } => {
             let task = cx.unblock(move || tcode_services::project_icons::thumbnail(&path));
             cx.spawn_background(async move {

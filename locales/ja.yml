@@ -340,6 +340,8 @@ sidebar:
   path_placeholder: "ディレクトリの絶対パスを入力"
   host_path_placeholder: "%{host} 上の絶対パス"
   host_path_hint: "このパスはこのデバイスではなく %{host} 上のものです。"
+  folders: "フォルダ"
+  folders_failed: "フォルダを一覧できません：%{reason}"
   recent_activity_host: "%{host} 上の最近のアクティビティ"
   browse: "参照…"
   open: "開く"
@@ -441,6 +443,10 @@ settings:
   threads_section: "スレッド"
   settling_section: "完了"
   panels_section: "パネル"
+  projects_section: "プロジェクト"
+  project_start_dir:
+    title: "プロジェクト追加の開始フォルダ"
+    description: "「プロジェクトを追加」のフォルダ一覧が最初に開く場所です。パスはホスト上のもので、~ はホームフォルダです。"
   threads: "スレッド"
   auto_settle:
     title: "非アクティブなスレッドを自動で完了にする"

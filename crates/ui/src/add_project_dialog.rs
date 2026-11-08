@@ -2,14 +2,14 @@
 //! external-agent threads it already has.
 //!
 //! Everything here is host state reached over the pipe — the recents scan, the
-//! project root and the import run. The only native step is the directory
-//! picker, which browses *this* machine; it is offered when this build has one
-//! and the attachment is local, and never as a substitute for the host's own
-//! judgment about a path.
+//! folders listed under the path field, the project root and the import run.
+//! Nothing browses *this* machine, so a local and a remote host pick a folder
+//! the same way.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::icon::{Icon, IconName};
 use crate::overlay::{DialogActions, OverlayExt as _};
 use crate::scroll::ScrollableElement as _;
 use crate::sizing::fit_viewport;
@@ -27,7 +27,9 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
-use tcode_protocol::{CommandResponse, ExternalImportState, ExternalThread, RecentDir, SourceTool};
+use tcode_protocol::{
+    CommandResponse, DirectoryListing, ExternalImportState, ExternalThread, RecentDir, SourceTool,
+};
 
 /// How long a value drawn here takes to glide to a new one.
 const GLIDE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -49,15 +51,48 @@ const RECENT_VIEWPORT_MAX_HEIGHT: f32 = 390.;
 /// project inputs and footer so recents scroll instead of pushing the Open
 /// button off a short window.
 const RECENT_VIEWPORT_CHROME: f32 = 380.;
+/// Where the folder list starts when Settings names no start folder: where
+/// Create puts a new project. A host where nothing was created yet has no such
+/// folder, and the list starts at the home instead.
+pub(crate) const DEFAULT_START_DIRECTORY: &str = "~/TcodeProjects";
+const FOLDER_ROW_HEIGHT: f32 = 30.;
+const FOLDER_VIEWPORT_MAX_HEIGHT: f32 = 6.5 * FOLDER_ROW_HEIGHT;
+const FOLDER_VIEWPORT_MIN_HEIGHT: f32 = 2. * FOLDER_ROW_HEIGHT;
+/// The folder list's caption line, above its viewport.
+const FOLDER_CAPTION: f32 = 28.;
+/// The least the recents viewport is given before the folder list gives up
+/// rows to it on a short window.
+const RECENT_VIEWPORT_FLOOR: f32 = 120.;
+
+/// The tallest the folder list may be in this window: what the recents do not
+/// need of the room both lists share, so a short window shrinks the folder
+/// list first instead of pushing the footer off.
+fn folder_viewport_cap(window: &Window) -> f32 {
+    let lists = f32::from(window.viewport_size().height)
+        - RECENT_VIEWPORT_CHROME
+        - FOLDER_CAPTION
+        - RECENT_VIEWPORT_FLOOR;
+    lists.clamp(FOLDER_VIEWPORT_MIN_HEIGHT, FOLDER_VIEWPORT_MAX_HEIGHT)
+}
+
+/// The host folders under the path field: those of the directory the typed
+/// path is in, narrowed to the names that start with what follows its last
+/// separator. With nothing typed, those of the start directory in Settings.
+#[derive(Default)]
+struct FolderBrowser {
+    /// The directory text last asked of the host.
+    requested: Option<String>,
+    generation: u64,
+    listing: Option<DirectoryListing>,
+    /// Why the host could not list `requested`.
+    error: Option<String>,
+}
 
 enum RecentState {
     Loading,
     Ready(Vec<RecentDir>),
     Failed(String),
 }
-
-/// Whether this build can put up a directory picker at all.
-const NATIVE_DIRECTORY_PICKER: bool = cfg!(feature = "native-dialogs");
 
 pub(super) struct AddProjectDialog {
     store: Entity<WorkspaceStore>,
@@ -68,6 +103,7 @@ pub(super) struct AddProjectDialog {
     error: Option<String>,
     name_input: Entity<InputState>,
     pending_created_project: Option<String>,
+    folders: FolderBrowser,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -118,6 +154,12 @@ impl AddProjectDialog {
                     cx.notify();
                 }
             }),
+            cx.subscribe(&path_input, |dialog, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    dialog.refresh_folders(cx);
+                    cx.notify();
+                }
+            }),
             cx.subscribe_in(
                 &store,
                 window,
@@ -128,22 +170,84 @@ impl AddProjectDialog {
                 },
             ),
         ];
-        Self {
+        let mut dialog = Self {
             name_input,
             pending_created_project: None,
+            folders: FolderBrowser::default(),
             _subscriptions: subscriptions,
             store,
             path_input,
             recent: RecentState::Loading,
             error: None,
-        }
+        };
+        dialog.refresh_folders(cx);
+        dialog
     }
 
-    /// Whether the platform directory picker is meaningful here. It browses this
-    /// machine, so a remote attachment must type a host path instead — the
-    /// picker would silently produce a path the host cannot resolve.
-    fn can_browse(&self, cx: &App) -> bool {
-        NATIVE_DIRECTORY_PICKER && !self.store.read(cx).is_remote()
+    /// Where the folder list starts when nothing is typed: the host directory
+    /// Settings names, or [`DEFAULT_START_DIRECTORY`].
+    fn start_directory(&self, cx: &App) -> String {
+        self.store
+            .read(cx)
+            .settings()
+            .project_start_dir
+            .filter(|dir| !dir.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_START_DIRECTORY.to_owned())
+    }
+
+    /// Ask the host for the folders of the directory the typed path is in,
+    /// unless that is the directory already asked for.
+    fn refresh_folders(&mut self, cx: &mut Context<Self>) {
+        let typed = self.path_input.read(cx).value().to_string();
+        let (directory, _) = browse_target(&typed, &self.start_directory(cx));
+        if self.folders.requested.as_ref() == Some(&directory) {
+            return;
+        }
+        self.folders.requested = Some(directory.clone());
+        self.folders.generation += 1;
+        self.list_folders(directory, cx);
+    }
+
+    fn list_folders(&mut self, directory: String, cx: &mut Context<Self>) {
+        let generation = self.folders.generation;
+        let listing = self.store.update(cx, |store, cx| {
+            store.browse_directories(directory.clone(), cx)
+        });
+        cx.spawn(async move |this, cx| {
+            let listing = listing.await;
+            let _ = this.update(cx, |dialog, cx| {
+                if dialog.folders.generation != generation {
+                    return;
+                }
+                match listing {
+                    Ok(listing) => {
+                        dialog.folders.listing = Some(listing);
+                        dialog.folders.error = None;
+                    }
+                    // The default start exists only once a project has been
+                    // created there; until then the list starts at the home.
+                    Err(_) if directory == DEFAULT_START_DIRECTORY => {
+                        dialog.list_folders("~".to_owned(), cx);
+                    }
+                    // The last listing stays up, so a half-typed name does
+                    // not blank the list.
+                    Err(error) => dialog.folders.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Put `path` in the path field, as a directory to go on typing in.
+    fn enter_folder(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
+        self.path_input.update(cx, |input, cx| {
+            input.replace_all(path, window, cx);
+            input.focus(window, cx);
+        });
+        self.refresh_folders(cx);
+        cx.notify();
     }
 
     fn scan(&mut self, cx: &mut Context<Self>) {
@@ -162,26 +266,6 @@ impl AddProjectDialog {
         .detach();
     }
 
-    #[cfg(feature = "native-dialogs")]
-    fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some(crate::tr!("sidebar.select_project").into_owned().into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(mut paths))) = rx.await
-                && let Some(path) = paths.pop()
-            {
-                let _ = this.update_in(cx, |dialog, window, cx| {
-                    dialog.create_draft(path, window, cx);
-                });
-            }
-        })
-        .detach();
-    }
-
     /// Send the typed text to the host as-is. Whether it is absolute and whether
     /// it is a directory are facts about the host's filesystem and path rules,
     /// so the host decides and its answer is what the user reads. The path is
@@ -193,7 +277,7 @@ impl AddProjectDialog {
             cx.notify();
             return;
         }
-        self.create_draft(PathBuf::from(typed), window, cx);
+        self.create_draft(PathBuf::from(trim_trailing_separators(&typed)), window, cx);
     }
 
     fn create_draft(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -333,6 +417,122 @@ impl AddProjectDialog {
         .detach();
     }
 
+    /// The folders of the typed path's directory, t3code-style: `..` first,
+    /// then each folder whose name starts with what follows the last separator.
+    /// Choosing one puts it in the path field to go on from.
+    fn render_folders(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let typed = self.path_input.read(cx).value().to_string();
+        // The filter does not depend on where an untyped path starts.
+        let (_, filter) = browse_target(&typed, "");
+        let mut rows = Vec::new();
+        let mut shown_directory = None;
+        if let Some(listing) = &self.folders.listing {
+            let directory = with_separator(&listing.directory.to_string_lossy());
+            if let Some(parent) = &listing.parent {
+                rows.push(self.folder_row(
+                    "project-folder-parent".into(),
+                    IconName::CornerLeftUp,
+                    "..".into(),
+                    with_separator(&parent.to_string_lossy()),
+                    cx,
+                ));
+            }
+            let separator = separator_of(&directory);
+            for name in matching_folders(&listing.entries, &filter) {
+                rows.push(self.folder_row(
+                    SharedString::from(format!("project-folder-{name}")),
+                    IconName::Folder,
+                    name.clone(),
+                    format!("{directory}{name}{separator}"),
+                    cx,
+                ));
+            }
+            shown_directory = Some(directory);
+        }
+        let viewport_height = gpui_base::motion::transition(
+            "project-folder-viewport",
+            px((rows.len() as f32 * FOLDER_ROW_HEIGHT).min(folder_viewport_cap(window))),
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        v_flex()
+            .w_full()
+            .gap_1()
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_caption(cx)
+                            .child(crate::tr!("sidebar.folders")),
+                    )
+                    .when_some(shown_directory, |row, directory| {
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .text_secondary(false, cx)
+                                .overflow_hidden()
+                                .child(crate::widgets::fade_text(directory)),
+                        )
+                    }),
+            )
+            .when_some(self.folders.error.clone(), |column, error| {
+                column.child(
+                    div()
+                        .text_secondary(false, cx)
+                        .text_color(cx.theme().danger)
+                        .child(crate::tr!("sidebar.folders_failed", reason = error).into_owned()),
+                )
+            })
+            .child(
+                div()
+                    .id("project-folder-list")
+                    .role(gpui::Role::List)
+                    .aria_label(crate::tr!("sidebar.folders").into_owned())
+                    .w_full()
+                    .h(viewport_height)
+                    .overflow_y_scrollbar()
+                    .child(v_flex().w_full().children(rows)),
+            )
+            .into_any_element()
+    }
+
+    fn folder_row(
+        &self,
+        id: SharedString,
+        icon: IconName,
+        name: String,
+        target: String,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        crate::material::menu_item_frame(false, crate::material::ItemFill::Hover, cx)
+            .id(id)
+            .role(gpui::Role::Button)
+            .aria_label(target.clone())
+            .w_full()
+            .h(px(FOLDER_ROW_HEIGHT))
+            .flex_none()
+            .items_center()
+            .cursor_pointer()
+            .on_click(cx.listener(move |dialog, _, window, cx| {
+                dialog.enter_folder(target.clone(), window, cx);
+            }))
+            .child(Icon::new(icon).text_color(cx.theme().muted_foreground))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .text_body(false, cx)
+                    .overflow_hidden()
+                    .child(crate::widgets::fade_text(name)),
+            )
+            .into_any_element()
+    }
+
     fn render_recent(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let state = crate::motion::CrossFade::new(
             "recent-directories-state",
@@ -464,7 +664,10 @@ impl AddProjectDialog {
                     "recent-directory-viewport",
                     fit_viewport(
                         (visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT),
-                        window.viewport_size().height - px(RECENT_VIEWPORT_CHROME),
+                        window.viewport_size().height
+                            - px(RECENT_VIEWPORT_CHROME
+                                + FOLDER_CAPTION
+                                + folder_viewport_cap(window)),
                     ),
                     gpui_base::motion::Transition::new(GLIDE),
                     window,
@@ -493,7 +696,6 @@ impl Render for AddProjectDialog {
         let path_hint = host
             .as_ref()
             .map(|host| crate::tr!("sidebar.host_path_hint", host = host).into_owned());
-        let can_browse = self.can_browse(cx);
         let destination = format!(
             "~/TcodeProjects/{}",
             self.name_input.read(cx).value().trim()
@@ -535,24 +737,11 @@ impl Render for AddProjectDialog {
             .child(
                 v_flex()
                     .gap_1()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .child(Input::new(&self.path_input).flex_1())
-                            .when(can_browse, |row| {
-                                row.child(
-                                    Button::new("browse-project-directory")
-                                        .label(crate::tr!("sidebar.browse"))
-                                        .on_click(cx.listener(|dialog, _, window, cx| {
-                                            dialog.browse_clicked(window, cx);
-                                        })),
-                                )
-                            }),
-                    )
+                    .child(Input::new(&self.path_input).w_full())
                     .when_some(path_hint, |column, hint| {
                         column.child(div().text_secondary(false, cx).child(hint))
                     })
+                    .child(div().pt_1().child(self.render_folders(window, cx)))
                     .children(
                         crate::motion::shown(
                             "add-project-error",
@@ -587,18 +776,6 @@ impl Render for AddProjectDialog {
                     .child(self.render_recent(window, cx)),
             )
     }
-}
-
-impl AddProjectDialog {
-    #[cfg(feature = "native-dialogs")]
-    fn browse_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.browse(window, cx);
-    }
-
-    /// Unreachable: the button is only rendered when `can_browse`, which is
-    /// false without the feature.
-    #[cfg(not(feature = "native-dialogs"))]
-    fn browse_clicked(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 }
 
 /// Renders the host's replicated import status. It owns no progress state of
@@ -730,6 +907,64 @@ fn render_add_footer(dialog: &Entity<AddProjectDialog>) -> AnyElement {
                 }),
         )
         .into_any_element()
+}
+
+/// The directory to list for `typed`, and the start of the folder names to
+/// show from it. The directory is everything up to the last separator; with
+/// none, the typed text narrows the `start` directory instead. A path is the
+/// host's, so both separators count: a host may be Windows.
+fn browse_target(typed: &str, start: &str) -> (String, String) {
+    let typed = typed.trim_start();
+    if typed.is_empty() {
+        return (start.to_owned(), String::new());
+    }
+    if typed == "~" {
+        return ("~".to_owned(), String::new());
+    }
+    match typed.rfind(['/', '\\']) {
+        Some(at) => (typed[..=at].to_owned(), typed[at + 1..].to_owned()),
+        None => (start.to_owned(), typed.to_owned()),
+    }
+}
+
+/// The folders whose names start with `filter`, ignoring case. Hidden ones
+/// show only once a `.` is typed.
+fn matching_folders<'a>(entries: &'a [String], filter: &str) -> impl Iterator<Item = &'a String> {
+    let lower = filter.to_lowercase();
+    let hidden = filter.starts_with('.');
+    entries.iter().filter(move |name| {
+        (hidden || !name.starts_with('.')) && name.to_lowercase().starts_with(&lower)
+    })
+}
+
+/// The separator a host path is written with: `\` for a Windows host's.
+fn separator_of(path: &str) -> char {
+    if path.contains('\\') && !path.contains('/') {
+        '\\'
+    } else {
+        '/'
+    }
+}
+
+/// `path` ending in its separator, to go on typing a folder name after.
+fn with_separator(path: &str) -> String {
+    let separator = separator_of(path);
+    let mut path = path.to_owned();
+    if !path.ends_with(separator) {
+        path.push(separator);
+    }
+    path
+}
+
+/// The typed path without the separators a folder chosen from the list leaves
+/// at its end, unless that is all there is (a root).
+fn trim_trailing_separators(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        path
+    } else {
+        trimmed
+    }
 }
 
 fn directory_name(path: &Path) -> String {
@@ -877,6 +1112,33 @@ mod tests {
             0,
             "a refused root must not create a project"
         );
+
+        // The folder list under the field is the host's too: typing a host
+        // directory and the start of a name lists the matching folders there.
+        let typed = format!("{}/work", root.to_str().unwrap());
+        cx.update(|window, cx| {
+            dialog.update(cx, |dialog, cx| {
+                dialog
+                    .path_input
+                    .update(cx, |input, cx| input.replace_all(typed.clone(), window, cx));
+            });
+        });
+        wait_until(cx, &store, pump.as_mut(), "host folder listing", |cx| {
+            dialog.read_with(cx, |dialog, _| {
+                dialog
+                    .folders
+                    .listing
+                    .as_ref()
+                    .is_some_and(|listing| listing.directory == root)
+            })
+        });
+        let shown = dialog.read_with(cx, |dialog, _| {
+            let listing = dialog.folders.listing.as_ref().unwrap();
+            matching_folders(&listing.entries, "work")
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(shown, ["workspace"]);
 
         // A directory that exists on the host is accepted even though this
         // client never looked at it.

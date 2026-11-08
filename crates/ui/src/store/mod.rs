@@ -3021,6 +3021,27 @@ impl WorkspaceStore {
         )
     }
 
+    /// The folders inside a *host* directory, for Add Project's picker. The
+    /// path is the host's to resolve (`~` included); its refusal is returned in
+    /// its own words.
+    pub fn browse_directories(
+        &self,
+        path: String,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::DirectoryListing, String>> {
+        if !self.can_manage_host() {
+            return cx.spawn(async |_| Err(crate::tr!("member.unavailable").into_owned()));
+        }
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::BrowseDirectories { path }).await {
+                Ok(QueryResponse::Directories(listing)) => Ok(listing),
+                Ok(other) => Err(format!("unexpected directory response: {other:?}")),
+                Err(error) => Err(error.message),
+            },
+        )
+    }
+
     /// Subscribe to a project's import status. Callers must do this *before*
     /// starting a run: a fast completion is only recoverable through the
     /// subscription snapshot, not through the start reply.

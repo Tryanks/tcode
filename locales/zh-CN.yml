@@ -340,6 +340,8 @@ sidebar:
   path_placeholder: "输入绝对目录路径"
   host_path_placeholder: "%{host} 上的绝对路径"
   host_path_hint: "该路径在 %{host} 上解析，而不是这台设备。"
+  folders: "文件夹"
+  folders_failed: "无法列出文件夹：%{reason}"
   recent_activity_host: "%{host} 上最近活跃"
   browse: "浏览…"
   open: "打开"
@@ -441,6 +443,10 @@ settings:
   threads_section: "线程"
   settling_section: "收尾"
   panels_section: "面板"
+  projects_section: "项目"
+  project_start_dir:
+    title: "添加项目的起始位置"
+    description: "“添加项目”中的文件夹列表从这里开始。路径在主机上解析，~ 表示主目录。"
   threads: "线程"
   auto_settle:
     title: "自动收尾不活跃的线程"

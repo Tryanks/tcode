@@ -101,6 +101,75 @@ impl Default for UserDirectories {
 }
 
 impl UserDirectories {
+    /// The folders directly inside `path` on this machine, for picking a
+    /// project root. A leading `~` is the home and an empty path the home
+    /// itself; anything else must be absolute. `..` and `.` are folded away
+    /// without following links, so the path keeps the shape the user typed.
+    pub fn browse_directories(&self, path: &str) -> io::Result<tcode_protocol::DirectoryListing> {
+        let directory = self.resolve_browse_path(path)?;
+        let read = std::fs::read_dir(&directory).map_err(|error| {
+            io::Error::new(error.kind(), format!("{}: {error}", directory.display()))
+        })?;
+        let mut entries = Vec::new();
+        for entry in read.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            // A link counts as the folder it leads to.
+            let is_dir = kind.is_dir()
+                || (kind.is_symlink() && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir()));
+            if is_dir {
+                entries.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        entries.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
+        Ok(tcode_protocol::DirectoryListing {
+            parent: directory.parent().map(Path::to_path_buf),
+            directory,
+            home: self.home.clone(),
+            entries,
+        })
+    }
+
+    fn resolve_browse_path(&self, path: &str) -> io::Result<PathBuf> {
+        let path = path.trim();
+        let home = || {
+            self.home.clone().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Host home directory is unavailable.",
+                )
+            })
+        };
+        let under_home = path
+            .strip_prefix("~/")
+            .or_else(|| cfg!(windows).then(|| path.strip_prefix("~\\")).flatten());
+        let expanded = if path.is_empty() || path == "~" {
+            home()?
+        } else if let Some(rest) = under_home {
+            home()?.join(rest)
+        } else {
+            PathBuf::from(path)
+        };
+        if !expanded.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{path} is not an absolute path."),
+            ));
+        }
+        let mut normal = PathBuf::new();
+        for component in expanded.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normal.pop();
+                }
+                other => normal.push(other),
+            }
+        }
+        Ok(normal)
+    }
+
     pub fn new_project_root(&self, name: &str) -> std::io::Result<PathBuf> {
         let name = name.trim();
         if name.is_empty()
@@ -219,4 +288,55 @@ fn create_directory(path: &Path) -> std::io::Result<()> {
             format!("Could not create {}: {error}", path.display()),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Add Project's folder list: `~` is this host's home, `..` folds without
+    /// following links, only folders are listed (a link to one included, in
+    /// name order ignoring case), and a path the host cannot place is refused.
+    #[test]
+    fn browsing_lists_the_folders_of_a_host_directory() {
+        let home = std::env::temp_dir().join(format!("tcode-browse-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("dev/beta")).unwrap();
+        std::fs::create_dir_all(home.join("dev/Alpha")).unwrap();
+        std::fs::create_dir_all(home.join("dev/.hidden")).unwrap();
+        std::fs::write(home.join("dev/notes.txt"), b"").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(home.join("dev/beta"), home.join("dev/linked")).unwrap();
+        let directories = UserDirectories {
+            home: Some(home.clone()),
+            documents: None,
+        };
+
+        let listing = directories.browse_directories("~/dev/beta/../").unwrap();
+        assert_eq!(listing.directory, home.join("dev"));
+        assert_eq!(listing.parent.as_deref(), Some(home.as_path()));
+        assert_eq!(listing.home.as_deref(), Some(home.as_path()));
+        let mut expected = vec![".hidden", "Alpha", "beta"];
+        if cfg!(unix) {
+            expected.push("linked");
+        }
+        assert_eq!(listing.entries, expected);
+
+        assert_eq!(directories.browse_directories("").unwrap().directory, home);
+        assert_eq!(
+            directories.browse_directories("~").unwrap().entries,
+            ["dev"]
+        );
+        assert_eq!(
+            directories.browse_directories("dev").unwrap_err().kind(),
+            io::ErrorKind::InvalidInput,
+        );
+        assert_eq!(
+            directories
+                .browse_directories(home.join("missing").to_str().unwrap())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound,
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }
