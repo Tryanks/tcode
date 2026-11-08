@@ -212,6 +212,7 @@ rail:
   commands_running: "%{count} running"
   commands_failed: "%{count} failed"
   commands_more: "%{count} more"
+  commands_backgrounded: "%{count} moved to the background"
 background:
   title: "Background"
   pill: "Background %{count}"

@@ -212,6 +212,7 @@ rail:
   commands_running: "%{count} 件実行中"
   commands_failed: "%{count} 件失敗"
   commands_more: "ほか %{count} 件"
+  commands_backgrounded: "%{count} 件をバックグラウンドへ"
 background:
   title: "バックグラウンド"
   pill: "バックグラウンド %{count}"
