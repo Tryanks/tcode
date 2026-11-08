@@ -16,7 +16,7 @@ use tcode_core::pull_request::{
 
 use super::RailView;
 use crate::icon::IconName;
-use crate::sizing::Size;
+use crate::sizing::{Sizable as _, Size};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::tooltip::{Tooltip, TooltipTrigger as _};
@@ -50,10 +50,12 @@ struct Line {
     /// Checks and review, which only an open pull request's row tells.
     checks: Option<tcode_core::pull_request::ChecksState>,
     review: Option<tcode_core::pull_request::ReviewDecision>,
+    /// A watch follows it, which wakes the thread when it changes.
+    watched: bool,
 }
 
 impl Line {
-    fn of(link: &ThreadPullRequestLink) -> Self {
+    fn of(link: &ThreadPullRequestLink, watched: &[u64]) -> Self {
         let snapshot = link.snapshot.as_ref();
         let open = snapshot.filter(|snapshot| snapshot.state == PullRequestState::Open);
         Self {
@@ -64,6 +66,7 @@ impl Line {
             state: PullRequestBadgeState::of(snapshot),
             checks: open.and_then(|snapshot| snapshot.checks_state),
             review: open.and_then(|snapshot| snapshot.review_decision),
+            watched: watched.contains(&link.key.number),
         }
     }
 
@@ -87,7 +90,15 @@ pub(super) fn body(
     let last = rail
         .motion
         .keep::<Rc<RefCell<Vec<Line>>>>("rail-pull-request-lines");
-    let lines: Vec<Line> = links(rail, cx).map(Line::of).collect();
+    let watched = rail
+        .session_id
+        .as_deref()
+        .and_then(|id| rail.workspace_store.read(cx).activity(id))
+        .map(|activity| activity.wakes.pull_requests.clone())
+        .unwrap_or_default();
+    let lines: Vec<Line> = links(rail, cx)
+        .map(|link| Line::of(link, &watched))
+        .collect();
     if !lines.is_empty() {
         last.replace(lines);
     }
@@ -145,6 +156,27 @@ fn row(
         window,
         cx,
     );
+    let watch = crate::motion::shown(
+        SharedString::from(format!("rail-pr-watch-{id}")),
+        line.watched.then_some(line.key.number),
+        CHANGE,
+        window,
+        cx,
+    )
+    .map(|shown| {
+        let number = shown.value;
+        shown.fold_across(
+            div()
+                .id(SharedString::from(format!("rail-pr-watch-{id}-tip")))
+                .pl_1()
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::icon::Icon::new(IconName::Eye).xsmall())
+                .with_tooltip(move |_, _| {
+                    Tooltip::new(crate::tr!("background.keeps_watch", number = number))
+                })
+                .into_any_element(),
+        )
+    });
     let detail = std::iter::once(crate::pull_requests::appearance(line.state, cx).2)
         .chain(
             line.checks
@@ -196,6 +228,7 @@ fn row(
     .child(state)
     .children(checks)
     .children(review)
+    .children(watch)
     // The panel this opens replaces the rail, and the keyboard would go with
     // the row.
     .on_mouse_down(gpui::MouseButton::Left, crate::chat::header::stop_press)
