@@ -527,7 +527,8 @@ impl CommandPalette {
                 Action::CheckUpdates,
             );
         }
-        if let Some(session_id) = crate::shell::current_thread(cx)
+        if let Some(session_id) =
+            crate::shell::current_thread(cx).and_then(|thread| store.session_of(thread))
             && let Some(meta) = store.thread_meta(&session_id)
         {
             if meta.worktree.is_some() {
@@ -672,7 +673,7 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleDiff => {
-                if let Some(session_id) = crate::shell::current_thread(cx) {
+                if let Some(session_id) = self.current_thread(cx) {
                     self.store.update(cx, |store, cx| {
                         store.toggle_tab_panel_for(&session_id, tcode_core::ui::RightTab::Diff, cx)
                     });
@@ -680,14 +681,14 @@ impl CommandPalette {
                 self.close(cx);
             }
             Action::ToggleTerminal => {
-                let session_id = crate::shell::current_thread(cx).unwrap_or_default();
+                let session_id = self.current_thread(cx).unwrap_or_default();
                 self.store.update(cx, |store, cx| {
                     store.toggle_terminal_panel_for(session_id, cx)
                 });
                 self.close(cx);
             }
             Action::OpenPreview => {
-                let session_id = crate::shell::current_thread(cx);
+                let session_id = self.current_thread(cx);
                 self.store.update(cx, |store, cx| {
                     store.open_preview_panel_for(session_id.as_deref(), cx)
                 });
@@ -756,6 +757,11 @@ impl CommandPalette {
             self.list_scroll.reveal(&self.list_state, row, cx);
         }
         cx.notify();
+    }
+
+    /// The window's current thread, when it is on this palette's host.
+    fn current_thread(&self, cx: &gpui::App) -> Option<String> {
+        crate::shell::current_thread(cx).and_then(|thread| self.store.read(cx).session_of(thread))
     }
 }
 

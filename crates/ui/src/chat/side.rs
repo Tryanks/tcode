@@ -1444,7 +1444,7 @@ fn side_grip(
 fn close_side_thread(store: &Entity<WorkspaceStore>, host: &SideHost, cx: &mut App) {
     if host.opened
         && store.read(cx).is_thread_open(&host.session_id)
-        && !crate::shell::shown_in_pane(&host.session_id, cx)
+        && !crate::shell::shown_in_pane(&store.read(cx).thread_key(&host.session_id), cx)
     {
         store.update(cx, |store, cx| store.close_thread(&host.session_id, cx));
     }

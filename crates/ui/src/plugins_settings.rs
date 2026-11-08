@@ -377,7 +377,7 @@ impl PluginsSettingsPanel {
             .project
             .clone()
             .or_else(|| {
-                let thread = crate::shell::current_thread(cx)?;
+                let thread = store.session_of(crate::shell::current_thread(cx)?)?;
                 store.thread_meta(&thread)?.project_id.clone()
             })
             .or_else(|| store.last_project_id().map(str::to_string))?;
@@ -747,6 +747,7 @@ impl PluginsSettingsPanel {
     fn default_account(&self, accounts: &[Account], cx: &App) -> Option<String> {
         let store = self.store.read(cx);
         let thread_profile = crate::shell::current_thread(cx)
+            .and_then(|thread| store.session_of(thread))
             .and_then(|thread| store.thread_meta(&thread).cloned())
             .map(|meta| {
                 meta.profile_id

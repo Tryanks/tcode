@@ -35,7 +35,7 @@ fn casts_shadow(panel: gpui::Bounds<Pixels>, cx: &mut VisualTestContext) -> bool
 fn typing(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> gpui::FocusHandle {
     let input = shell.read_with(cx, |shell, cx| {
         shell
-            .attachment
+            .column
             .as_ref()
             .expect("attached")
             .chat(cx)

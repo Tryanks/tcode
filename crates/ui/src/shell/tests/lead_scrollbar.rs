@@ -94,7 +94,7 @@ fn open_agent(shell: &Entity<AppShell>, host: &MountedShell, cx: &mut VisualTest
         crate::agents_panel::open_agent(
             &store,
             "agent-1".into(),
-            crate::shell::side_host_for("thread-1", cx),
+            crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
             None,
             window,
             cx,

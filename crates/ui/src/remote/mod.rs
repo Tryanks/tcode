@@ -33,7 +33,7 @@ use crate::material::{
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::pairing::PairForm;
 use crate::settings_rows::{CONTENT_MAX_WIDTH, settings_group};
-use crate::store::WorkspaceStore;
+use crate::store::{HostKey, WorkspaceStore};
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -78,6 +78,15 @@ pub use traverse::TraversePanel;
 pub enum AttachmentTarget {
     Local,
     Remote(Box<PairedHost>),
+}
+
+impl AttachmentTarget {
+    pub fn key(&self) -> HostKey {
+        match self {
+            Self::Local => HostKey::Local,
+            Self::Remote(host) => HostKey::Remote(host.host_id.clone()),
+        }
+    }
 }
 
 pub type SwitchAttachment = Rc<dyn Fn(AttachmentTarget, &mut Window, &mut App)>;
@@ -293,9 +302,9 @@ fn group_entry(
 }
 
 pub struct RemotePanel {
-    /// The window's current attachment, when it has one. Hosts is also the
-    /// root of a window that has none.
-    store: Option<Entity<WorkspaceStore>>,
+    /// The stores of the hosts the window is linked to. Hosts is also the
+    /// root of a window linked to none.
+    stores: Vec<Entity<WorkspaceStore>>,
     /// Why the host in this process did not start the last time this window
     /// tried to attach to it.
     local_failure: Option<String>,
@@ -326,7 +335,6 @@ pub struct RemotePanel {
 
 impl RemotePanel {
     pub fn new(
-        store: Option<Entity<WorkspaceStore>>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -380,7 +388,7 @@ impl RemotePanel {
             ),
         ];
         Self {
-            store,
+            stores: Vec::new(),
             local_failure: None,
             window_state,
             form,
@@ -399,9 +407,9 @@ impl RemotePanel {
         }
     }
 
-    /// Follow the window onto another attachment, or off every attachment.
-    pub fn set_store(&mut self, store: Option<Entity<WorkspaceStore>>, cx: &mut Context<Self>) {
-        self.store = store;
+    /// Follow the window onto the hosts it is linked to now.
+    pub fn set_stores(&mut self, stores: Vec<Entity<WorkspaceStore>>, cx: &mut Context<Self>) {
+        self.stores = stores;
         cx.notify();
     }
 
@@ -497,26 +505,18 @@ impl RemotePanel {
         cx.notify();
     }
 
-    fn attached_host_id(&self, cx: &App) -> Option<String> {
-        self.store
-            .as_ref()?
-            .read(cx)
-            .remote_host_id()
-            .map(str::to_owned)
-    }
-
-    fn attached_locally(&self, cx: &App) -> bool {
-        self.store
-            .as_ref()
-            .is_some_and(|store| store.read(cx).remote_host_id().is_none())
+    /// The store of `host`, while the window is linked to it.
+    fn store_of(&self, host: &HostKey, cx: &App) -> Option<&Entity<WorkspaceStore>> {
+        self.stores
+            .iter()
+            .find(|store| store.read(cx).host_key() == *host)
     }
 
     /// The dot that says how this window's link to the attached machine is
     /// doing. Only a remote link has a state to show.
     fn status_glyph(&self, host_id: &str, window: &mut Window, cx: &mut App) -> AnyElement {
         let color = self
-            .store
-            .as_ref()
+            .store_of(&HostKey::Remote(host_id.to_owned()), cx)
             .map(|store| {
                 cx.theme()
                     .connection_color(&store.read(cx).connection_state())
@@ -553,7 +553,7 @@ impl RemotePanel {
         cx.try_global::<ClientAttachment>()
             .is_some_and(ClientAttachment::can_attach_local)
             .then(|| {
-                let current = self.attached_locally(cx);
+                let current = self.store_of(&HostKey::Local, cx).is_some();
                 let failure = self.local_failure.clone();
                 let failed = failure.is_some();
                 let failure =
@@ -653,8 +653,7 @@ impl RemotePanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let reason = if current {
-            self.store
-                .as_ref()
+            self.store_of(&HostKey::Remote(host.host_id.clone()), cx)
                 .and_then(|store| match store.read(cx).connection_state() {
                     tcode_client::ConnectionState::Offline { reason } => Some(reason),
                     tcode_client::ConnectionState::Reconnecting { reason, .. } => reason,
@@ -805,7 +804,6 @@ impl RemotePanel {
             .client(cx)
             .map(|client| client.load_hosts())
             .unwrap_or_default();
-        let current_id = self.attached_host_id(cx);
         let mut column = v_flex().gap(section_gap(cx));
 
         let mut this_machine: Vec<AnyElement> = Vec::new();
@@ -837,7 +835,9 @@ impl RemotePanel {
             hosts
                 .into_iter()
                 .map(|host| {
-                    let current = current_id.as_deref() == Some(host.host_id.as_str());
+                    let current = self
+                        .store_of(&HostKey::Remote(host.host_id.clone()), cx)
+                        .is_some();
                     (
                         format!("host-{}", host.host_id).into(),
                         Some((host, current)),
@@ -1677,7 +1677,7 @@ mod tests {
         cx.update(|cx| cx.set_global(ClientAttachment::new(Rc::new(Browser), false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
             let state = cx.new(|_| WindowState::new(false));
-            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+            HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
         cx.run_until_parked();
@@ -1766,7 +1766,7 @@ mod tests {
         });
         let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
             let state = cx.new(|_| WindowState::new(false));
-            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+            HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let probe = window.root(cx).unwrap();
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
@@ -1873,7 +1873,7 @@ mod tests {
         let state = cx.new(|_| WindowState::new(false));
         let window = cx.open_window(gpui::size(px(1024.), px(852.)), |window, cx| {
             PairProbe(
-                cx.new(|cx| RemotePanel::new(None, state.clone(), window, cx)),
+                cx.new(|cx| RemotePanel::new(state.clone(), window, cx)),
                 state.clone(),
             )
         });
@@ -1986,7 +1986,7 @@ mod tests {
         cx.update(|cx| cx.set_global(ClientAttachment::new(phone.clone(), false, |_, _, _| {})));
         let window = cx.open_window(gpui::size(px(393.), px(852.)), |window, cx| {
             let state = cx.new(|_| WindowState::new(true));
-            HostsProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+            HostsProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let panel = window.update(cx, |probe, _, _| probe.0.clone()).unwrap();
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
@@ -2094,7 +2094,7 @@ mod tests {
         }
         let state = cx.new(|_| WindowState::new(false));
         let window = cx.open_window(gpui::size(px(1024.), px(768.)), |window, cx| {
-            HostsProbe(cx.new(|cx| RemotePanel::new(None, state.clone(), window, cx)))
+            HostsProbe(cx.new(|cx| RemotePanel::new(state.clone(), window, cx)))
         });
         let cx = gpui::VisualTestContext::from_window(window.into(), cx).into_mut();
         // One frame starts whatever the change moves, the next draws it
@@ -2192,7 +2192,7 @@ mod tests {
         cx.update(|cx| cx.set_global(ClientAttachment::new(client.clone(), false, |_, _, _| {})));
         let (probe, cx) = cx.add_window_view(|window, cx| {
             let state = cx.new(|_| WindowState::new(false));
-            PairingProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+            PairingProbe(cx.new(|cx| RemotePanel::new(state, window, cx)))
         });
         let host = |name: &str| PairedHost {
             host_id: "09e5c592f3234ef329634a0baa6bfe06193be6b64801121d84242af1d27dbecf".into(),
