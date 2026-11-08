@@ -571,11 +571,17 @@ impl SettingsPage {
         cx.notify();
     }
 
-    /// The hosts the machine group can show, in the window's order.
+    /// The hosts the machine group can show, in the window's order. One that
+    /// is down is left out unless the page shows it, or a page over a down
+    /// host would lose its way to the others.
     fn settings_hosts(&self, cx: &App) -> Vec<&Entity<WorkspaceStore>> {
         self.hosts
             .iter()
-            .filter(|store| store.read(cx).scope().is_full())
+            .filter(|store| {
+                let host = store.read(cx);
+                host.scope().is_full()
+                    && (*store == &self.store || !crate::sidebar::host_down(host))
+            })
             .collect()
     }
 

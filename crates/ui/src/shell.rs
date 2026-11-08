@@ -7999,6 +7999,20 @@ pub(crate) mod tests {
         crate::test_frames::draw_settled(cx);
         click("delete-confirm", cx);
         assert_eq!((patches(&hosts[&key_a]), patches(&hosts[&key_b])), (1, 0));
+
+        // A host that refuses the device is not one to set: A's rail names
+        // A alone.
+        hosts[&key_b]
+            .host
+            .states
+            .try_send(tcode_client::ConnectionState::Offline {
+                reason: tcode_client::ConnectionFailure::AuthenticationRejected,
+            })
+            .unwrap();
+        resize(cx, 1200.);
+        crate::test_frames::draw_settled(cx);
+        assert!(cx.debug_bounds("settings-host-selector").is_none());
+        assert!(cx.debug_bounds("settings-machine-caption").is_some());
     }
 
     /// `store` takes in what `host` sent it, and what it sent `host` so far
