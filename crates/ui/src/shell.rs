@@ -612,6 +612,17 @@ pub struct ShellSetup {
     /// Mobile bootstrap restores client-local navigation. Desktop defaults to
     /// a fresh path; the phone example can opt into the mobile policy.
     pub restore_navigation: bool,
+    /// A window opened in place of one that closed: where that one was. It
+    /// stands in for `initial` and for any saved navigation.
+    pub reopen: Option<ShellPlace>,
+}
+
+/// Where a window was: the host it was attached to, the thread and page it
+/// showed there, and whether its sidebar was collapsed.
+pub struct ShellPlace {
+    target: Option<AttachmentTarget>,
+    navigation: NavigationSnapshot,
+    sidebar_collapsed: bool,
 }
 
 struct NavigationPersistence {
@@ -762,28 +773,38 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut restored = setup
-            .restore_navigation
-            .then(|| {
-                setup
-                    .client_host
-                    .as_ref()?
-                    .load_preferences()
-                    .navigation
-                    .and_then(NavigationSnapshot::from_preferences)
-            })
-            .flatten();
-        if let Some(snapshot) = &mut restored {
-            setup.initial = setup.client_host.as_ref().and_then(|host| {
-                host.load_hosts()
-                    .into_iter()
-                    .find(|saved| Some(&saved.host_id) == snapshot.host_id.as_ref())
-                    .map(|host| AttachmentTarget::Remote(Box::new(host)))
-            });
-            if setup.initial.is_none() {
-                snapshot.without_host();
+        let mut restored = match setup.reopen.take() {
+            Some(place) => {
+                setup.initial = place.target;
+                window_state.update(cx, |state, _| {
+                    state.sidebar_collapsed = place.sidebar_collapsed;
+                });
+                Some(place.navigation)
             }
-        }
+            None => setup
+                .restore_navigation
+                .then(|| {
+                    setup
+                        .client_host
+                        .as_ref()?
+                        .load_preferences()
+                        .navigation
+                        .and_then(NavigationSnapshot::from_preferences)
+                })
+                .flatten()
+                .map(|mut snapshot| {
+                    setup.initial = setup.client_host.as_ref().and_then(|host| {
+                        host.load_hosts()
+                            .into_iter()
+                            .find(|saved| Some(&saved.host_id) == snapshot.host_id.as_ref())
+                            .map(|host| AttachmentTarget::Remote(Box::new(host)))
+                    });
+                    if setup.initial.is_none() {
+                        snapshot.without_host();
+                    }
+                    snapshot
+                }),
+        };
         if let Some(host) = setup.client_host.as_ref().and_then(|client| {
             client.load_hosts().into_iter().find(|host| {
                 client
@@ -911,6 +932,19 @@ impl AppShell {
         self.attachment
             .as_ref()
             .map(|attachment| attachment.link.link())
+    }
+
+    /// Where this window is, for a window that opens once it has closed
+    /// ([`ShellSetup::reopen`]).
+    pub fn current_place(&self, cx: &App) -> ShellPlace {
+        ShellPlace {
+            target: self
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.link.target.clone()),
+            navigation: self.navigation_snapshot(cx),
+            sidebar_collapsed: self.window_state.read(cx).sidebar_collapsed,
+        }
     }
 
     #[cfg(preview_backend)]
@@ -6450,6 +6484,99 @@ pub(crate) mod tests {
             cx.debug_bounds("compact-threads-page").is_some(),
             "the Threads page is what shows it"
         );
+    }
+
+    /// A desktop window opened in place of one that closed — macOS keeps the
+    /// app and its local host running when the window closes, and the Dock
+    /// opens it again — is where the closed one was: on the same host, on the
+    /// same thread, with the sidebar as it was left.
+    #[gpui::test]
+    fn a_reopened_window_is_where_the_closed_one_was(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let scripted = || {
+            let (to_host, outgoing) = async_channel::unbounded();
+            let (incoming, from_host) = async_channel::unbounded();
+            let (states, state) = async_channel::unbounded();
+            (
+                Transport {
+                    originals: None,
+                    to_host: to_host.into(),
+                    from_host,
+                    state,
+                    current_host: None,
+                },
+                MountedShell {
+                    outgoing,
+                    observed: RefCell::new(Vec::new()),
+                    incoming,
+                    states,
+                },
+            )
+        };
+        let (first, closed_host) = scripted();
+        let (second, reopened_host) = scripted();
+        let transports = Rc::new(RefCell::new(vec![first, second]));
+        let local: crate::attachment::LocalTransport = {
+            let transports = transports.clone();
+            Rc::new(move |_| Ok(transports.borrow_mut().remove(0)))
+        };
+        let open = |setup: ShellSetup, cx: &mut TestAppContext| {
+            let window = cx.open_window(size(px(1200.), px(800.)), move |window, cx| {
+                let state = cx.new(|_| WindowState::new(false));
+                AppShell::new(state, setup, window, cx)
+            });
+            let shell = window.root(cx).unwrap();
+            let mut window_cx = VisualTestContext::from_window(window.into(), cx);
+            draw(&mut window_cx);
+            (shell, window_cx)
+        };
+
+        let (closed, mut closed_cx) = open(
+            ShellSetup {
+                local: Some(local.clone()),
+                initial: Some(AttachmentTarget::Local),
+                ..Default::default()
+            },
+            cx,
+        );
+        restore_index(&closed, &closed_host, true, &mut closed_cx);
+        store_of(&closed, &closed_cx).update(&mut closed_cx, |store, cx| {
+            store.show_thread("thread-a".into(), cx)
+        });
+        closed
+            .read_with(&closed_cx, |shell, _| shell.window_state())
+            .update(&mut closed_cx, |state, _| state.sidebar_collapsed = true);
+        draw(&mut closed_cx);
+        assert_eq!(
+            closed.read_with(&closed_cx, |shell, cx| shell.page_thread(cx)),
+            Some("thread-a".into())
+        );
+
+        // As desktop bootstrap does once the window has gone.
+        closed_cx.update(|window, _| window.remove_window());
+        closed_cx.run_until_parked();
+        let place = closed.read_with(cx, |shell, cx| shell.current_place(cx));
+        closed.update(cx, |shell, cx| shell.detach(cx));
+
+        let (reopened, mut reopened_cx) = open(
+            ShellSetup {
+                local: Some(local),
+                reopen: Some(place),
+                ..Default::default()
+            },
+            cx,
+        );
+        assert!(
+            transports.borrow().is_empty(),
+            "the reopened window attaches to the local host again"
+        );
+        restore_index(&reopened, &reopened_host, true, &mut reopened_cx);
+        reopened.read_with(&reopened_cx, |shell, cx| {
+            assert!(!shell.store().unwrap().read(cx).is_remote());
+            assert_eq!(shell.page_thread(cx).as_deref(), Some("thread-a"));
+            assert!(shell.window_state.read(cx).sidebar_collapsed);
+        });
     }
 
     #[gpui::test]

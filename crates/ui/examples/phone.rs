@@ -97,6 +97,7 @@ fn main() {
                         local_failure: None,
                         seed_blocking: local,
                         restore_navigation: true,
+                        reopen: None,
                     },
                     ..Default::default()
                 },

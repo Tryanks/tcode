@@ -138,6 +138,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                         local_failure: None,
                         seed_blocking: false,
                         restore_navigation: false,
+                        reopen: None,
                     },
                     ..Default::default()
                 }

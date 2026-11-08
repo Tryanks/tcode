@@ -98,7 +98,8 @@ pub use run::{
 };
 pub(crate) use shell::window_drag_area;
 pub use shell::{
-    AppShell, Quit, ShellSetup, TogglePalette, can_swipe_back, handle_back, update_edge_back,
+    AppShell, Quit, ShellPlace, ShellSetup, TogglePalette, can_swipe_back, handle_back,
+    update_edge_back,
 };
 pub use thread_export::format_size;
 pub use window_seam::force_mobile_layout;

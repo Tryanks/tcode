@@ -57,6 +57,7 @@ pub extern "C" fn tcode_ios_start() {
                             local_failure: None,
                             seed_blocking: false,
                             restore_navigation: true,
+                            reopen: None,
                         },
                         ..Default::default()
                     }
