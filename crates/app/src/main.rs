@@ -268,7 +268,10 @@ fn exit_with_startup_failure(error: std::io::Error) -> ! {
 /// Every desktop window: the main one and the startup migration's.
 fn window_options(cx: &App, throttle_inactive: bool) -> WindowOptions {
     let mut options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(1200.), px(800.)), cx)),
+        window_bounds: Some(WindowBounds::centered(
+            size(px(tcode_ui::DEFAULT_WINDOW_WIDTH), px(800.)),
+            cx,
+        )),
         // Low enough that the window can actually be dragged into the
         // compact layout; the launch geometry above is unchanged.
         window_min_size: Some(size(px(360.), px(480.))),
