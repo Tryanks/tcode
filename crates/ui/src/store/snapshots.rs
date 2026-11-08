@@ -61,7 +61,6 @@ pub struct ComposerState {
     pub usage: Option<tcode_core::usage::ProviderUsage>,
     pub provider: Option<agent::ProviderKind>,
     pub queue: Option<ComposerQueue>,
-    pub background_tasks: Vec<tcode_protocol::BackgroundTaskStatus>,
     pub steering_supported: bool,
     pub preparing_worktree: bool,
     pub checkout: Option<ComposerCheckoutState>,
@@ -193,9 +192,6 @@ pub(crate) fn composer_state(
             agent: status.provider.display_name(),
             held: status.queue_held,
         }),
-        background_tasks: status
-            .map(|status| status.background_tasks.clone())
-            .unwrap_or_default(),
         steering_supported: status.is_some_and(|status| status.steering_supported),
         preparing_worktree: status.is_some_and(|status| status.preparing_worktree),
         checkout,
