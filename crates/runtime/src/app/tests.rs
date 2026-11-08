@@ -7534,6 +7534,126 @@ fn a_report_queued_when_the_host_stops_reaches_the_lead_once_after_it_starts() {
     assert!(next_command(&actor).is_err(), "taken once, sent once");
 }
 
+/// Work a thread left running in the background ends as interrupted when
+/// the thread is reopened after the host restarted, since no process can
+/// finish it; a thread whose process still runs keeps it open, and so does
+/// a native subagent's mirror whose parent's process does.
+#[test]
+fn background_work_no_process_can_finish_ends_as_interrupted_on_load() {
+    fn backgrounded(state: &mut AppState, id: &str, cx: &mut HostCx) {
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "turn".into(),
+            },
+            AgentEvent::ItemStarted(ThreadItem {
+                id: "serve".into(),
+                parent_item_id: None,
+                content: ItemContent::CommandExecution {
+                    command: "serve".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::InProgress,
+                },
+            }),
+            AgentEvent::ItemBackgrounded {
+                item_id: "serve".into(),
+                parent_item_id: None,
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "turn".into(),
+                status: TurnStatus::Completed,
+                usage: None,
+            },
+        ] {
+            state.record_event(id, &event, cx);
+        }
+    }
+    fn status(state: &AppState, id: &str) -> ItemStatus {
+        state
+            .resident(id)
+            .unwrap()
+            .timeline
+            .entries
+            .iter()
+            .find_map(|entry| match &entry.content {
+                tcode_core::session::EntryContent::Item(ItemContent::CommandExecution {
+                    status,
+                    ..
+                }) => Some(*status),
+                _ => None,
+            })
+            .unwrap()
+    }
+    let test_store = TestStore::new("tcode-unowned-background-test");
+    let (commands, _actor) = smol::channel::unbounded();
+    let mut live = live_session(ProviderKind::ClaudeCode, commands);
+    live.meta.id = "live".into();
+    let mut cold = SessionMeta::new(ProviderKind::ClaudeCode, test_store.root().clone(), None);
+    cold.id = "cold".into();
+    {
+        let mut cx = TestAppContext::default();
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        state.update(&mut cx, |state, cx| {
+            state.sessions.push(cold.clone());
+            state.persist_meta(&cold, cx);
+            let mut process = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
+            process.meta = cold.clone();
+            state.residents.live.insert(cold.id.clone(), process);
+            backgrounded(state, "cold", cx);
+        });
+        cx.run_until_parked();
+    }
+
+    let mut cx = TestAppContext::default();
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.update(&mut cx, |state, cx| {
+        let mut mirror =
+            SessionMeta::new(ProviderKind::ClaudeCode, test_store.root().clone(), None);
+        mirror.id = "mirror".into();
+        mirror.parent_session_id = Some("live".into());
+        mirror.native_subagent = Some("task".into());
+        state.sessions.push(mirror.clone());
+        state.persist_meta(&mirror, cx);
+        state.residents.parked.insert(
+            mirror.id.clone(),
+            ActiveSession::new(mirror, false, Vec::new()),
+        );
+        backgrounded(state, "mirror", cx);
+        state.sessions.push(live.meta.clone());
+        state.install_selected(live);
+        backgrounded(state, "live", cx);
+        state.park_active(cx);
+        state.select_session("cold", cx);
+    });
+    cx.run_until_parked();
+    state.update(&mut cx, |state, cx| {
+        assert_eq!(status(state, "cold"), ItemStatus::Interrupted);
+        state.park_active(cx);
+        state.select_session("live", cx);
+    });
+    cx.run_until_parked();
+    state.update(&mut cx, |state, cx| {
+        assert_eq!(status(state, "live"), ItemStatus::InProgress);
+        state.park_active(cx);
+        state.select_session("mirror", cx);
+    });
+    cx.run_until_parked();
+    state.update(&mut cx, |state, _| {
+        assert_eq!(status(state, "mirror"), ItemStatus::InProgress);
+    });
+    let log = test_store.read_events("cold").unwrap();
+    assert!(matches!(
+        &log.last().unwrap().event,
+        AgentEvent::ItemCompleted(ThreadItem {
+            content: ItemContent::CommandExecution {
+                status: ItemStatus::Interrupted,
+                ..
+            },
+            ..
+        })
+    ));
+}
+
 /// A report steered into the lead's running turn is delivered once the
 /// provider takes the steer, and a restart does not send it again.
 #[test]

@@ -2230,9 +2230,36 @@ impl AppState {
                     session.timeline = timeline;
                 }
                 state.repair_orphaned_mirror_turn(&session_id, cx);
-                state.interrupt_inherited_background_work(&session_id, cx);
+                state.interrupt_unowned_background_work(&session_id, cx);
             });
         });
+    }
+
+    /// Background work still open in a log no process can finish any more
+    /// ends as interrupted in Tcode's log: a log loaded while the thread has
+    /// no process, as a fork not started yet or a thread reopened after the
+    /// host restarted, and for a native subagent's mirror while its parent
+    /// has none either. The harness's session, which the model reads, is left
+    /// as it is.
+    pub(super) fn interrupt_unowned_background_work(&mut self, id: &str, cx: &mut HostCx) {
+        let has_process = |session: &ActiveSession| !matches!(session.runtime, Runtime::Idle);
+        let Some(session) = self.resident(id).filter(|session| !has_process(session)) else {
+            return;
+        };
+        if session.meta.native_subagent.is_some()
+            && (self.native_subagent_turns.get(id) == Some(&true)
+                || session
+                    .meta
+                    .parent_session_id
+                    .as_deref()
+                    .and_then(|parent| self.resident(parent))
+                    .is_some_and(has_process))
+        {
+            return;
+        }
+        for item in session.timeline.interrupted_background_items() {
+            self.record_event(id, &AgentEvent::ItemCompleted(item), cx);
+        }
     }
 
     /// Adopt a subscribed session, including an uncommitted parked draft. Stored
