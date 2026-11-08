@@ -254,7 +254,7 @@ struct ShellAttachment {
     /// Whether this attachment's saved record has been stamped with the time
     /// this window reached it.
     stamped: bool,
-    attention: Option<crate::system_notifications::AttentionNotices>,
+    attention: crate::attention::ApprovalAttention,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -1180,12 +1180,12 @@ impl AppShell {
         let sidebar =
             cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
         let mut subscriptions = vec![
-            cx.observe(&store, |this, store, cx| {
+            cx.observe_in(&store, window, |this, store, window, cx| {
                 this.reconcile_panes(cx);
                 if let Some(attachment) = &mut this.attachment
-                    && let Some(attention) = &mut attachment.attention
+                    && attachment.attention.update(store.read(cx), cx)
                 {
-                    attention.sync(store.read(cx), cx);
+                    crate::attention::request(window);
                 }
                 this.stamp_connected(cx);
                 this.reconcile_navigation_restore(cx);
@@ -1326,7 +1326,7 @@ impl AppShell {
             sidebar_overlay_visible: false,
             adopted: false,
             stamped: false,
-            attention: crate::system_notifications::AttentionNotices::new(&store, cx),
+            attention: Default::default(),
             link: Link {
                 target: link.target.clone(),
                 store: link.store.clone(),

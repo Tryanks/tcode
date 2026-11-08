@@ -11273,16 +11273,12 @@ name = "tcode"
 version = "0.1.0"
 dependencies = [
  "async-channel",
- "block2 0.6.2",
  "computer-use-mcp",
  "embed-resource",
  "env_logger",
  "gpui-fast",
  "gpui-fast-platform",
  "log",
- "objc2 0.6.5",
- "objc2-foundation 0.3.2",
- "objc2-user-notifications",
  "serde_json",
  "smol",
  "tcode-client",

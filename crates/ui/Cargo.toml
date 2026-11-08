@@ -24,6 +24,7 @@ desktop = [
     "voice",
     "local-permissions",
     "pasteboard-image",
+    "window-attention",
 ]
 # GPUI's platform file dialogs (`prompt_for_paths` / `prompt_for_new_path`).
 # Guards only the Browse and Save-to-disk actions.
@@ -61,6 +62,8 @@ voice = ["tcode-client/voice"]
 local-permissions = ["dep:computer-use-mcp"]
 # Reading an image off the macOS AppKit pasteboard.
 pasteboard-image = ["dep:objc2-foundation"]
+# Flashing a Windows taskbar button until its window comes to the front.
+window-attention = ["dep:windows"]
 
 [dependencies]
 url = "2"

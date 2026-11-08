@@ -1336,8 +1336,6 @@ notice:
   tcode_update_available: "Tcode %{version} が利用可能です"
   review_recorded: "レビューを記録しました：%{items} 項目、カバレッジ %{coverage}"
   reference_boundary_crossed: "「%{thread}」のモデルが、別のプロジェクトまたはハーネスの「%{title}」を参照しました。そこで読み取った内容は、そのモデルの提供元に送信されます"
-system_notifications:
-  waiting: "%{harness} があなたの判断を待っています。"
 attach:
   unsupported_type: "「%{name}」を画像として読み込めませんでした。"
   too_large: "「%{name}」は添付ファイルの上限（10MB）を超えています。"
