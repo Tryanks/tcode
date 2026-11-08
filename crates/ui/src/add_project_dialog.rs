@@ -26,9 +26,10 @@ use crate::widgets::input::{Input, InputEvent, InputState};
 use crate::widgets::progress::Progress;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, ScrollHandle, SharedString,
+    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
+use gpui_base::actions::{Confirm, SelectDown, SelectUp};
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
@@ -40,13 +41,21 @@ use tcode_protocol::{
 
 gpui::actions!(add_project, [CompleteFolder]);
 
-/// The key context the field and list share, so Tab completes there.
+/// The key context the field and list share.
 const CONTEXT: &str = "AddProject";
 
-/// Tab completes the field to a folder. The binding is in the dialog's own
-/// context, so it is matched before the root's Tab focus step.
+/// The list's keys. The field binds the same keys in its own context (Up and
+/// Down move its caret, Enter submits it), deeper than the dialog's, so these
+/// name the field inside the dialog to be matched before the field's own.
 pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new("tab", CompleteFolder, Some(CONTEXT))]);
+    let field = Some("AddProject > Input");
+    cx.bind_keys([
+        gpui::KeyBinding::new("up", SelectUp, field),
+        gpui::KeyBinding::new("down", SelectDown, field),
+        gpui::KeyBinding::new("enter", Confirm { secondary: false }, field),
+        crate::shortcut::secondary("secondary-enter", Confirm { secondary: true }, field, cx),
+        gpui::KeyBinding::new("tab", CompleteFolder, field),
+    ]);
 }
 
 /// How long what is drawn here only some of the time takes to come in or go.
@@ -68,14 +77,22 @@ const LIST_CHROME: f32 = 300.;
 struct FolderBrowser {
     /// The directory text last asked of the host.
     requested: Option<String>,
-    /// The directory text `listing` answers. It differs from `requested` while
-    /// a new listing is on its way, and when the start folder fell back to the
-    /// home.
-    answered: Option<String>,
     generation: u64,
-    listing: Option<DirectoryListing>,
-    /// Why the host could not list `requested`.
-    error: Option<String>,
+    /// The host's last answer, with the directory text it answers: the
+    /// listing, or why the host could not list it. While a new one is on its
+    /// way it answers an older directory. A start folder that fell back to the
+    /// home is answered with the home's listing.
+    answer: Option<(String, Result<DirectoryListing, String>)>,
+}
+
+impl FolderBrowser {
+    /// The answer for `directory`, once the host has given it.
+    fn answer_for(&self, directory: &str) -> Option<&Result<DirectoryListing, String>> {
+        self.answer
+            .as_ref()
+            .filter(|(answered, _)| answered == directory)
+            .map(|(_, answer)| answer)
+    }
 }
 
 enum RecentState {
@@ -106,17 +123,43 @@ enum Row {
     },
 }
 
+/// Which row a row is, whatever place it takes in the list: rows come and go
+/// above it as recents and listings arrive.
+#[derive(Clone, PartialEq, Debug)]
+enum RowKey {
+    Recent(PathBuf),
+    Up,
+    Folder(String),
+    Create,
+}
+
+impl Row {
+    fn key(&self) -> RowKey {
+        match self {
+            Row::Recent(recent) => RowKey::Recent(recent.path.clone()),
+            Row::Up(_) => RowKey::Up,
+            Row::Folder { name, .. } => RowKey::Folder(name.clone()),
+            Row::Create { .. } => RowKey::Create,
+        }
+    }
+}
+
 /// The rows, and where the list's captions go.
 struct Rows {
     rows: Vec<Row>,
-    /// The directory the folder rows are in, as the host writes it.
-    directory: Option<String>,
+    /// The directory the folder rows are in: as the host writes it once
+    /// listed, as typed until then.
+    directory: String,
     /// The first folder row, under the Folders caption.
     folders_from: usize,
     /// The first recent row, under the Recent caption.
     recents_from: Option<usize>,
     /// The typed name, the part after the last separator.
     filter: String,
+    /// The host has not yet answered for the typed directory.
+    waiting: bool,
+    /// Why the host could not list the typed directory.
+    error: Option<String>,
     /// The listed directory is the new-project folder, which does not exist yet.
     new_folder_missing: bool,
 }
@@ -147,7 +190,7 @@ pub(super) struct AddProjectDialog {
     folders: FolderBrowser,
     /// The row the arrow keys or a click put the highlight on. `None` while the
     /// highlight follows what is typed.
-    highlight: Option<usize>,
+    highlight: Option<RowKey>,
     list_scroll: ScrollHandle,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -165,8 +208,7 @@ pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut 
             .content(move |content_el, _, _| content_el.child(dialog_content.clone()))
             .footer(render_add_footer(&content, cx))
             .on_ok(move |_, window, cx| {
-                let secondary = window.modifiers().secondary(cx);
-                confirm.update(cx, |dialog, cx| dialog.confirm(secondary, window, cx));
+                confirm.update(cx, |dialog, cx| dialog.confirm(false, window, cx));
                 // The host result owns dismissal, including validation failures.
                 false
             })
@@ -265,33 +307,32 @@ impl AddProjectDialog {
         let fall_back_home = typed.trim().is_empty()
             && self.store.read(cx).settings_ref().project_start == ProjectStart::NewProjectDir
             && self.is_new_project_dir(&directory, cx);
-        self.list_folders(directory, fall_back_home, cx);
+        self.list_folders(directory.clone(), directory, fall_back_home, cx);
     }
 
-    fn list_folders(&mut self, directory: String, fall_back_home: bool, cx: &mut Context<Self>) {
+    /// List `path` as the answer for the directory text `directory`.
+    fn list_folders(
+        &mut self,
+        directory: String,
+        path: String,
+        fall_back_home: bool,
+        cx: &mut Context<Self>,
+    ) {
         let generation = self.folders.generation;
-        let listing = self.store.update(cx, |store, cx| {
-            store.browse_directories(directory.clone(), cx)
-        });
+        let listing = self
+            .store
+            .update(cx, |store, cx| store.browse_directories(path, cx));
         cx.spawn(async move |this, cx| {
             let listing = listing.await;
             let _ = this.update(cx, |dialog, cx| {
                 if dialog.folders.generation != generation {
                     return;
                 }
-                match listing {
-                    Ok(listing) => {
-                        dialog.folders.listing = Some(listing);
-                        dialog.folders.answered = Some(directory);
-                        dialog.folders.error = None;
-                    }
-                    Err(_) if fall_back_home => dialog.list_folders("~".to_owned(), false, cx),
-                    Err(error) => {
-                        dialog.folders.listing = None;
-                        dialog.folders.answered = None;
-                        dialog.folders.error = Some(error);
-                    }
+                if listing.is_err() && fall_back_home {
+                    dialog.list_folders(directory, "~".to_owned(), false, cx);
+                    return;
                 }
+                dialog.folders.answer = Some((directory, listing));
                 cx.notify();
             });
         })
@@ -327,7 +368,9 @@ impl AddProjectDialog {
         .detach();
     }
 
-    /// The list for what is typed now.
+    /// The list for what is typed now. Folder rows come only from the host's
+    /// answer for the typed directory: one for another directory would name
+    /// folders that are not there.
     fn rows(&self, cx: &App) -> Rows {
         let typed = self.typed(cx);
         let (directory, filter) = browse_target(&self.path(cx), &self.start_directory(cx));
@@ -341,12 +384,11 @@ impl AddProjectDialog {
             rows.extend(recent.iter().take(RECENT_LIMIT).cloned().map(Row::Recent));
         }
         let folders_from = rows.len();
-        let current = self.folders.answered.as_deref() == Some(directory.as_str());
-        let mut exact = false;
+        let answer = self.folders.answer_for(&directory);
+        let name = filter.trim();
         let mut shown = None;
-        // A listing on its way leaves the last one up, so the list does not
-        // blank between keystrokes.
-        if let Some(listing) = &self.folders.listing {
+        let mut exact = false;
+        if let Some(Ok(listing)) = answer {
             let listed = with_separator(&listing.directory.to_string_lossy());
             let separator = separator_of(&listed);
             let projects = self.store.read(cx).projects();
@@ -362,13 +404,22 @@ impl AddProjectDialog {
                     target,
                 });
             }
-            exact = current && listing.entries.iter().any(|name| *name == filter.trim());
+            // A folder differing only in case is the same folder on a host
+            // that ignores case, as macOS and Windows do by default; the list
+            // already matches names that way.
+            exact = listing
+                .entries
+                .iter()
+                .any(|entry| entry.to_lowercase() == name.to_lowercase());
             shown = Some(listed);
         }
-        let new_folder_missing =
-            self.folders.error.is_some() && self.is_new_project_dir(&directory, cx);
-        let name = filter.trim();
-        if is_folder_name(name) && ((current && !exact) || new_folder_missing) {
+        let error = match answer {
+            Some(Err(error)) => Some(error.clone()),
+            _ => None,
+        };
+        let new_folder_missing = error.is_some() && self.is_new_project_dir(&directory, cx);
+        let listed = matches!(answer, Some(Ok(_)));
+        if is_folder_name(name) && ((listed && !exact) || new_folder_missing) {
             rows.push(Row::Create {
                 in_new_dir: self.is_new_project_dir(&directory, cx),
                 parent: directory.clone(),
@@ -377,10 +428,12 @@ impl AddProjectDialog {
         }
         Rows {
             rows,
-            directory: shown.or(new_folder_missing.then_some(directory)),
+            directory: shown.unwrap_or(directory),
             folders_from,
             recents_from,
             filter,
+            waiting: answer.is_none(),
+            error: error.filter(|_| !new_folder_missing),
             new_folder_missing,
         }
     }
@@ -388,8 +441,12 @@ impl AddProjectDialog {
     /// The highlighted row: the one the user moved to, or, while a name is
     /// typed, the first folder it matches, else the folder it would create.
     fn highlighted(&self, rows: &Rows) -> Option<usize> {
-        if let Some(index) = self.highlight {
-            return (index < rows.rows.len()).then_some(index);
+        if let Some(index) = self
+            .highlight
+            .as_ref()
+            .and_then(|key| rows.rows.iter().position(|row| row.key() == *key))
+        {
+            return Some(index);
         }
         if rows.filter.trim().is_empty() {
             return None;
@@ -428,28 +485,23 @@ impl AddProjectDialog {
             Some(Row::Up(_)) | None => {}
         }
         // Otherwise the typed path, whatever this client makes of it: whether
-        // it is a directory is the host's to say.
+        // it is a directory, and what `~` and `..` in it mean, is the host's to
+        // say.
         let typed = self.path(cx);
         let typed = typed.trim();
         if typed.is_empty() {
             return Primary::Nothing;
         }
         let project = rows.filter.is_empty()
-            && self
-                .folders
-                .listing
-                .as_ref()
-                .filter(|_| {
-                    self.folders.answered.as_deref() == Some(browse_target(typed, "").0.as_str())
-                })
-                .is_some_and(|listing| {
-                    let root = &listing.directory;
-                    self.store
-                        .read(cx)
-                        .projects()
-                        .iter()
-                        .any(|project| project.root == *root)
-                });
+            && matches!(
+                self.folders.answer_for(&browse_target(typed, "").0),
+                Some(Ok(listing)) if self
+                    .store
+                    .read(cx)
+                    .projects()
+                    .iter()
+                    .any(|project| project.root == listing.directory)
+            );
         Primary::Add {
             root: trim_trailing_separators(typed).to_owned(),
             project,
@@ -484,64 +536,77 @@ impl AddProjectDialog {
         }
     }
 
-    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let rows = self.rows(cx);
-        let total = rows.rows.len();
-        let current = self.highlighted(&rows);
-        match event.keystroke.key.as_str() {
-            "down" if total > 0 => {
-                let next = current.map_or(0, |index| (index + 1).min(total - 1));
-                self.move_highlight(next, &rows, cx);
-            }
-            "up" => {
-                if let Some(index) = current.filter(|index| *index > 0) {
-                    self.move_highlight(index - 1, &rows, cx);
-                }
-            }
-            _ => return,
-        }
-        cx.stop_propagation();
+    fn on_confirm(&mut self, action: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm(action.secondary, window, cx);
     }
 
-    /// Tab: complete to the highlighted folder, or the first one. With no
-    /// folder to complete to, Tab moves focus on as everywhere else.
+    // The field binds Shift+Up and Shift+Down to these same gpui-base actions
+    // and, being one line, swallows them; the list takes them on the way down.
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        let rows = self.rows(cx);
+        if let Some(index) = self.highlighted(&rows).filter(|index| *index > 0) {
+            self.move_highlight(index - 1, &rows, cx);
+        }
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        let rows = self.rows(cx);
+        let Some(last) = rows.rows.len().checked_sub(1) else {
+            return;
+        };
+        let next = self
+            .highlighted(&rows)
+            .map_or(0, |index| (index + 1).min(last));
+        self.move_highlight(next, &rows, cx);
+    }
+
+    /// Tab: complete to the folder the user moved to, or else to the first
+    /// folder matching a typed name. With nothing new to complete to, Tab
+    /// moves focus on as everywhere else.
     fn complete_folder(&mut self, _: &CompleteFolder, window: &mut Window, cx: &mut Context<Self>) {
         let rows = self.rows(cx);
-        let target = self
-            .highlighted(&rows)
-            .and_then(|index| rows.rows.get(index))
-            .filter(|row| matches!(row, Row::Folder { .. }))
-            .or_else(|| {
-                rows.rows
-                    .iter()
-                    .find(|row| matches!(row, Row::Folder { .. }))
-            });
-        if let Some(Row::Folder { target, .. }) = target {
-            let target = target.clone();
-            self.enter_folder(target, window, cx);
-        } else if let Ok(step) = cx.build_action("root::Tab", None) {
-            window.dispatch_action(step, cx);
+        let chosen = self
+            .highlight
+            .as_ref()
+            .and_then(|key| rows.rows.iter().find(|row| row.key() == *key));
+        let first = || {
+            rows.rows
+                .iter()
+                .find(|row| matches!(row, Row::Folder { .. }))
+                .filter(|_| !rows.filter.is_empty())
+        };
+        match chosen.or_else(first) {
+            Some(Row::Folder { target, .. }) => {
+                let target = target.clone();
+                self.enter_folder(target, window, cx);
+            }
+            _ => cx.propagate(),
         }
     }
 
     fn move_highlight(&mut self, index: usize, rows: &Rows, cx: &mut Context<Self>) {
-        self.highlight = Some(index);
+        self.highlight = rows.rows.get(index).map(Row::key);
         self.list_scroll.scroll_to_item(child_index(rows, index));
         cx.notify();
     }
 
     fn click_row(
         &mut self,
-        index: usize,
+        key: &RowKey,
         event: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let rows = self.rows(cx);
-        let Some(row) = rows.rows.get(index).cloned() else {
+        let Some(index) = rows.rows.iter().position(|row| row.key() == *key) else {
             return;
         };
-        match row {
+        match rows.rows[index].clone() {
+            // One click goes in or creates; the second click of a double
+            // click lands on the list it brought and is not a second step.
+            Row::Up(_) | Row::Folder { .. } | Row::Create { .. } if event.click_count() >= 2 => {}
             Row::Up(target) | Row::Folder { target, .. } => self.enter_folder(target, window, cx),
             Row::Create { .. } => {
                 let primary = self.primary(&rows, Some(index), cx);
@@ -551,7 +616,7 @@ impl AddProjectDialog {
             // click picks it and the footer says what it will do; a double
             // click does it.
             Row::Recent(_) => {
-                self.highlight = Some(index);
+                self.highlight = Some(key.clone());
                 if event.click_count() >= 2 {
                     let primary = self.primary(&rows, Some(index), cx);
                     self.run(primary, window, cx);
@@ -561,35 +626,11 @@ impl AddProjectDialog {
         }
     }
 
-    fn create_draft(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.error = None;
+    fn create_draft(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let create = self
             .store
-            .update(cx, |store, cx| store.create_project(path.clone(), cx));
-        cx.spawn_in(window, async move |this, cx| {
-            let project_id = match create.await {
-                Ok(CommandResponse::ProjectId(Some(project_id))) => project_id,
-                Ok(other) => {
-                    let _ = this.update_in(cx, |dialog, _, cx| {
-                        dialog.fail(format!("unexpected create-project response: {other:?}"), cx);
-                    });
-                    return;
-                }
-                Err(error) => {
-                    let _ = this.update_in(cx, |dialog, _, cx| {
-                        dialog.fail(error.message, cx);
-                    });
-                    return;
-                }
-            };
-            let _ = this.update_in(cx, |dialog, window, cx| {
-                dialog.store.update(cx, |store, cx| {
-                    store.start_draft(project_id, path, cx);
-                });
-                window.close_dialog(cx);
-            });
-        })
-        .detach();
+            .update(cx, |store, cx| store.create_project(root, cx));
+        self.open_when_created(create, window, cx);
     }
 
     fn create_new_project(
@@ -599,10 +640,22 @@ impl AddProjectDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.error = None;
         let create = self
             .store
             .update(cx, |store, cx| store.create_new_project(name, parent, cx));
+        self.open_when_created(create, window, cx);
+    }
+
+    /// Open a draft in the project `create` answers with, at the root the
+    /// host gave it: the host reads `~` and `..` in what was sent, so the
+    /// text typed is not the project's directory.
+    fn open_when_created(
+        &mut self,
+        create: gpui::Task<Result<CommandResponse, tcode_protocol::ProtocolError>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.error = None;
         cx.spawn_in(window, async move |this, cx| {
             let response = create.await;
             let _ = this.update_in(cx, |dialog, window, cx| match response {
@@ -639,17 +692,6 @@ impl AddProjectDialog {
         cx.notify();
     }
 
-    /// Send the typed text to the host as-is. Whether it is absolute and whether
-    /// it is a directory are facts about the host's filesystem and path rules,
-    /// so the host decides and its answer is what the user reads.
-    #[cfg(test)]
-    fn open_typed_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.path(cx);
-        let typed = trim_trailing_separators(typed.trim()).to_owned();
-        if !typed.is_empty() {
-            self.create_draft(PathBuf::from(typed), window, cx);
-        }
-    }
     fn choose_recent(&mut self, recent: RecentDir, window: &mut Window, cx: &mut Context<Self>) {
         self.error = None;
         let path = recent.path.clone();
@@ -813,8 +855,16 @@ impl AddProjectDialog {
         } else {
             crate::material::ItemFill::Hover
         };
+        let key = row.key();
+        let selector = key.clone();
         crate::material::menu_item_frame(false, fill, cx)
             .id(("add-project-row", index))
+            .debug_selector(move || match selector {
+                RowKey::Recent(path) => format!("add-project-recent-{}", path.display()),
+                RowKey::Up => "add-project-up".to_owned(),
+                RowKey::Folder(name) => format!("add-project-folder-{name}"),
+                RowKey::Create => "add-project-create".to_owned(),
+            })
             .role(gpui::Role::ListBoxOption)
             .aria_selected(highlighted)
             .w_full()
@@ -823,7 +873,7 @@ impl AddProjectDialog {
             .items_center()
             .cursor_pointer()
             .on_click(cx.listener(move |dialog, event, window, cx| {
-                dialog.click_row(index, event, window, cx);
+                dialog.click_row(&key, event, window, cx);
             }))
             .child(Icon::new(icon).text_color(if accent { cx.theme().primary } else { muted }))
             .child(
@@ -864,7 +914,7 @@ impl Render for AddProjectDialog {
             if index == rows.folders_from {
                 children.push(caption(
                     crate::tr!("sidebar.folders").into_owned(),
-                    rows.directory.clone(),
+                    Some(rows.directory.clone()),
                     cx,
                 ));
             }
@@ -873,14 +923,14 @@ impl Render for AddProjectDialog {
         if rows.folders_from == rows.rows.len() {
             children.push(caption(
                 crate::tr!("sidebar.folders").into_owned(),
-                rows.directory.clone(),
+                Some(rows.directory.clone()),
                 cx,
             ));
         }
         // Notes the rows cannot carry.
         let note = if rows.new_folder_missing {
             Some((crate::tr!("sidebar.new_folder_missing").into_owned(), false))
-        } else if let Some(error) = &self.folders.error {
+        } else if let Some(error) = &rows.error {
             Some((
                 crate::tr!("sidebar.folders_failed", reason = error.clone()).into_owned(),
                 true,
@@ -907,8 +957,8 @@ impl Render for AddProjectDialog {
                     .into_any_element(),
             );
         }
-        let loading_recents =
-            typed.trim().is_empty() && matches!(self.recent, RecentState::Loading);
+        let loading = rows.waiting
+            || (typed.trim().is_empty() && matches!(self.recent, RecentState::Loading));
         let list_height =
             fit_viewport(LIST_HEIGHT, window.viewport_size().height - px(LIST_CHROME));
         let path_hint = host
@@ -923,9 +973,10 @@ impl Render for AddProjectDialog {
             .id("add-project")
             .gap_2()
             .key_context(CONTEXT)
+            .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::complete_folder))
-            // The arrows move the highlight before the field sees them.
-            .capture_key_down(cx.listener(Self::on_key_down))
+            .capture_action(cx.listener(Self::select_up))
+            .capture_action(cx.listener(Self::select_down))
             .child(Input::new(&self.path_input).w_full())
             .when_some(path_hint, |column, hint| {
                 column.child(div().text_secondary(false, cx).child(hint))
@@ -952,8 +1003,8 @@ impl Render for AddProjectDialog {
                     .track_scroll(&self.list_scroll)
                     .children(children),
             )
-            .when(loading_recents, |column| {
-                column.child(Progress::new("recent-directories-loading").loading(true))
+            .when(loading, |column| {
+                column.child(Progress::new("add-project-loading").loading(true))
             })
             .child(
                 div().text_secondary(false, cx).child(
@@ -1313,14 +1364,436 @@ fn tool_counts(threads: &[ExternalThread]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::future::Future as _;
 
     use gpui::{TestAppContext, VisualTestContext};
+    use tcode_protocol::{ClientPayload, Command, HostMessage, Query, QueryResponse};
     use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
+    use tcode_services::user_files::UserDirectories;
 
     use super::*;
     use crate::store::WorkspaceAttachment;
+
+    struct Body;
+
+    impl Render for Body {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    /// A host this test answers by hand, so a reply can arrive after the
+    /// keys that should not wait for it.
+    struct Host {
+        store: Entity<WorkspaceStore>,
+        link: tcode_client::HostLink,
+        incoming: async_channel::Sender<String>,
+        outgoing: async_channel::Receiver<String>,
+        unanswered: RefCell<Vec<tcode_protocol::ClientMessage>>,
+    }
+
+    const HOME: &str = "/host/home";
+
+    impl Host {
+        /// The Add Project dialog open on a host, its field focused, the
+        /// home's listing asked for and the recents scan not yet answered.
+        fn open(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
+            cx.update(|cx| {
+                crate::theme::init(cx);
+                crate::shortcut::init(cx);
+                init(cx);
+                // The list shows a spinner while the recents scan runs.
+                cx.set_reduce_motion(true);
+            });
+            let (to_host, outgoing) = async_channel::unbounded();
+            let (incoming, from_host) = async_channel::unbounded();
+            let link = tcode_client::HostLink::new(to_host, from_host);
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(
+                    link.clone(),
+                    WorkspaceAttachment::Local,
+                    None,
+                    None,
+                    cx,
+                )
+            });
+            crate::store::tests::seed_full_scope(&store, &incoming, vec![], cx);
+            let host = Self {
+                store,
+                link,
+                incoming,
+                outgoing,
+                unanswered: RefCell::default(),
+            };
+            let (_, cx) = cx.add_window_view(|window, cx| {
+                let body = cx.new(|_| Body);
+                gpui_base::Root::new(body, window, cx)
+            });
+            cx.update(|window, cx| open(host.store.clone(), window, cx));
+            crate::test_frames::draw_settled(cx);
+            // Tab follows the rendered form's focus order, starting at the modal.
+            cx.simulate_keystrokes("tab");
+            (host, cx)
+        }
+
+        fn send(&self, message: HostMessage, cx: &mut VisualTestContext) {
+            self.incoming
+                .try_send(tcode_protocol::encode_line(&message).unwrap())
+                .unwrap();
+            let mut pump = std::pin::pin!(self.link.pump());
+            let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(pump.as_mut().poll(&mut task).is_pending());
+            self.store
+                .update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw_settled(cx);
+        }
+
+        fn take(
+            &self,
+            mut wanted: impl FnMut(&ClientPayload) -> bool,
+        ) -> Vec<(u64, ClientPayload)> {
+            let mut unanswered = self.unanswered.borrow_mut();
+            unanswered.extend(
+                std::iter::from_fn(|| self.outgoing.try_recv().ok())
+                    .map(|line| tcode_protocol::decode_client_line(&line).unwrap()),
+            );
+            let (taken, kept) = unanswered
+                .drain(..)
+                .partition::<Vec<_>, _>(|message| wanted(&message.payload));
+            *unanswered = kept;
+            taken
+                .into_iter()
+                .map(|message| (message.id, message.payload))
+                .collect()
+        }
+
+        /// The folder listings asked for and not yet answered.
+        fn listings(&self) -> Vec<(u64, String)> {
+            self.take(|payload| {
+                matches!(
+                    payload,
+                    ClientPayload::Query(Query::BrowseDirectories { .. })
+                )
+            })
+            .into_iter()
+            .map(|(id, payload)| match payload {
+                ClientPayload::Query(Query::BrowseDirectories { path }) => (id, path),
+                _ => unreachable!(),
+            })
+            .collect()
+        }
+
+        /// The listing last asked for, of `path`: typing asks for each
+        /// directory the text passes through.
+        fn listing_of(&self, path: &str) -> u64 {
+            let asked = self.listings();
+            match asked.last() {
+                Some((id, asked)) if asked == path => *id,
+                _ => panic!("expected a listing of {path} last, asked: {asked:?}"),
+            }
+        }
+
+        fn list(&self, id: u64, directory: &str, entries: &[&str], cx: &mut VisualTestContext) {
+            let directory = PathBuf::from(directory);
+            self.send(
+                HostMessage::QueryResult {
+                    id,
+                    result: Ok(QueryResponse::Directories(DirectoryListing {
+                        parent: directory.parent().map(std::path::Path::to_path_buf),
+                        directory,
+                        home: Some(HOME.into()),
+                        entries: entries.iter().map(|entry| entry.to_string()).collect(),
+                    })),
+                },
+                cx,
+            );
+        }
+
+        fn refuse(&self, id: u64, cx: &mut VisualTestContext) {
+            self.send(
+                HostMessage::QueryResult {
+                    id,
+                    result: Err(tcode_protocol::ProtocolError {
+                        code: "io".into(),
+                        message: "No such file or directory".into(),
+                    }),
+                },
+                cx,
+            );
+        }
+
+        fn recents(&self, paths: &[&str], cx: &mut VisualTestContext) {
+            let asked = self.take(|payload| {
+                matches!(payload, ClientPayload::Query(Query::ScanExternalHistory))
+            });
+            let [(id, _)] = asked.as_slice() else {
+                panic!("expected one recents scan, asked: {asked:?}");
+            };
+            let recent = paths
+                .iter()
+                .map(|path| RecentDir {
+                    path: path.into(),
+                    last_active_ms: 0,
+                    threads: vec![],
+                })
+                .collect();
+            self.send(
+                HostMessage::QueryResult {
+                    id: *id,
+                    result: Ok(QueryResponse::ExternalHistory(recent)),
+                },
+                cx,
+            );
+        }
+
+        fn commands(&self) -> Vec<(u64, Command)> {
+            self.take(|payload| matches!(payload, ClientPayload::Command(_)))
+                .into_iter()
+                .map(|(id, payload)| match payload {
+                    ClientPayload::Command(command) => (id, command),
+                    _ => unreachable!(),
+                })
+                .collect()
+        }
+
+        /// The home listed with `entries`, as the dialog opened on it.
+        fn list_home(&self, entries: &[&str], cx: &mut VisualTestContext) {
+            let id = self.listing_of("~");
+            self.list(id, HOME, entries, cx);
+        }
+    }
+
+    fn shown(cx: &mut VisualTestContext, row: &str) -> bool {
+        cx.debug_bounds(row.to_owned().leak()).is_some()
+    }
+
+    fn type_text(cx: &mut VisualTestContext, text: &str) {
+        cx.simulate_input(text);
+        crate::test_frames::draw_settled(cx);
+    }
+
+    fn press(cx: &mut VisualTestContext, keys: &str) {
+        cx.simulate_keystrokes(keys);
+        crate::test_frames::draw_settled(cx);
+    }
+
+    const SECONDARY_ENTER: &str = if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    };
+
+    /// A path pasted while the last directory's folders are shown is not
+    /// read against them: until the host lists the new directory there is no
+    /// folder to go into, and Enter adds the path as typed.
+    #[gpui::test]
+    fn a_listing_on_its_way_offers_no_folder_of_the_last_one(cx: &mut TestAppContext) {
+        let (host, cx) = Host::open(cx);
+        host.list_home(&["Applications", "src"], cx);
+        assert!(shown(cx, "add-project-folder-Applications"));
+
+        type_text(cx, "/Users/me/src/app");
+        assert!(!shown(cx, "add-project-folder-Applications"));
+        press(cx, "enter");
+        assert_eq!(
+            host.commands()
+                .into_iter()
+                .map(|(_, command)| command)
+                .collect::<Vec<_>>(),
+            [Command::CreateProject {
+                root: "/Users/me/src/app".into()
+            }]
+        );
+    }
+
+    /// The host reads `~` in the typed path, and the draft opens in the
+    /// project's root as the host names it, not in the text typed.
+    #[gpui::test]
+    fn a_typed_path_opens_where_the_host_put_the_project(cx: &mut TestAppContext) {
+        let (host, cx) = Host::open(cx);
+        host.list_home(&["src"], cx);
+        type_text(cx, "~/src/app");
+        press(cx, "enter");
+        let commands = host.commands();
+        let [(id, command)] = commands.as_slice() else {
+            panic!("expected one command: {commands:?}");
+        };
+        assert_eq!(
+            *command,
+            Command::CreateProject {
+                root: "~/src/app".into()
+            }
+        );
+        host.send(
+            HostMessage::Ack {
+                id: *id,
+                result: Ok(CommandResponse::ProjectId(Some("app".into()))),
+            },
+            cx,
+        );
+        assert!(host.commands().is_empty(), "the root is the host's to name");
+        host.send(
+            HostMessage::Event(tcode_protocol::EventEnvelope {
+                request_id: None,
+                topic: tcode_protocol::Topic::Index,
+                event: tcode_protocol::ServerEvent::IndexUpsertProject(
+                    tcode_core::project::Project {
+                        id: "app".into(),
+                        ..tcode_core::project::Project::from_root(PathBuf::from(
+                            "/host/home/src/app",
+                        ))
+                    },
+                ),
+            }),
+            cx,
+        );
+        let started: Vec<_> = host
+            .commands()
+            .into_iter()
+            .map(|(_, command)| command)
+            .filter(|command| matches!(command, Command::StartDraft { .. }))
+            .collect();
+        assert_eq!(
+            started,
+            [Command::StartDraft {
+                project_id: "app".into(),
+                cwd: "/host/home/src/app".into(),
+            }]
+        );
+    }
+
+    /// A typed name finds its folder whatever its case, as the list matches
+    /// names and as the default macOS and Windows filesystems do, so it is
+    /// not offered as a folder to create; Ctrl+Enter (⌘ on macOS) does the
+    /// footer's action where Enter would go into it: it adds that folder.
+    #[gpui::test]
+    fn the_secondary_enter_adds_the_folder_a_name_finds(cx: &mut TestAppContext) {
+        let (host, cx) = Host::open(cx);
+        host.list_home(&[], cx);
+        type_text(cx, "~/SRC");
+        let id = host.listing_of("~/");
+        host.list(id, HOME, &["src"], cx);
+        assert!(shown(cx, "add-project-folder-src"));
+        assert!(!shown(cx, "add-project-create"));
+        press(cx, SECONDARY_ENTER);
+        assert_eq!(
+            host.commands()
+                .into_iter()
+                .map(|(_, command)| command)
+                .collect::<Vec<_>>(),
+            [Command::CreateProject {
+                root: "/host/home/src".into()
+            }]
+        );
+        assert!(host.listings().is_empty(), "it does not go into the folder");
+    }
+
+    /// The row the arrows chose stays chosen when the recents arrive above it.
+    #[gpui::test]
+    fn the_chosen_row_stays_chosen_when_rows_arrive_above_it(cx: &mut TestAppContext) {
+        let (host, cx) = Host::open(cx);
+        host.list_home(&["alpha", "beta"], cx);
+        press(cx, "down down");
+        host.recents(&["/elsewhere/one", "/elsewhere/two"], cx);
+        assert!(shown(cx, "add-project-recent-/elsewhere/two"));
+        press(cx, "enter");
+        assert_eq!(host.commands(), [], "Enter goes into the chosen folder");
+        host.listing_of("/host/home/alpha/");
+    }
+
+    /// A double click on a folder goes into that folder once: its second
+    /// click lands on the list the first one brought.
+    #[gpui::test]
+    fn a_double_click_goes_into_one_folder(cx: &mut TestAppContext) {
+        let (host, cx) = Host::open(cx);
+        host.list_home(&["alpha"], cx);
+        let position = cx
+            .debug_bounds("add-project-folder-alpha")
+            .expect("the folder row")
+            .center();
+        let click = |cx: &mut VisualTestContext, click_count| {
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                modifiers: Default::default(),
+                click_count,
+                first_mouse: false,
+            });
+            cx.simulate_event(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                modifiers: Default::default(),
+                click_count,
+            });
+            crate::test_frames::draw_settled(cx);
+        };
+        click(cx, 1);
+        let id = host.listing_of("/host/home/alpha/");
+        host.list(id, "/host/home/alpha", &["beta"], cx);
+        assert!(shown(cx, "add-project-folder-beta"));
+        click(cx, 2);
+        assert!(
+            host.listings().is_empty(),
+            "the second click must not go on into a folder"
+        );
+    }
+
+    /// Tab completes a typed name to its folder; with nothing typed to
+    /// complete it moves focus on, out of the field.
+    #[gpui::test]
+    fn tab_completes_a_typed_name_and_otherwise_moves_on(cx: &mut TestAppContext) {
+        let (host, cx) = Host::open(cx);
+        host.list_home(&["alpha"], cx);
+        type_text(cx, "~/al");
+        let id = host.listing_of("~/");
+        host.list(id, HOME, &["alpha"], cx);
+        press(cx, "tab");
+        let id = host.listing_of("/host/home/alpha/");
+        host.list(id, "/host/home/alpha", &["beta"], cx);
+        press(cx, "tab");
+        assert!(
+            host.listings().is_empty(),
+            "Tab must not go on into a folder nobody typed"
+        );
+        type_text(cx, "x");
+        assert!(
+            host.listings().is_empty() && host.commands().is_empty(),
+            "the field no longer has the keyboard"
+        );
+    }
+
+    /// A folder the host could not list says nothing about the next
+    /// directory: no Create row stands in for the folders not yet listed.
+    #[gpui::test]
+    fn a_failed_listing_does_not_outlive_its_directory(cx: &mut TestAppContext) {
+        let (host, cx) = Host::open(cx);
+        host.list_home(&[], cx);
+        type_text(cx, "/nowhere/x");
+        let id = host.listing_of("/nowhere/");
+        host.refuse(id, cx);
+        press(
+            cx,
+            if cfg!(target_os = "macos") {
+                "cmd-a"
+            } else {
+                "ctrl-a"
+            },
+        );
+        type_text(cx, "app");
+        assert!(!shown(cx, "add-project-create"));
+        press(cx, "enter");
+        assert_eq!(
+            host.commands()
+                .into_iter()
+                .map(|(_, command)| command)
+                .collect::<Vec<_>>(),
+            [Command::CreateProject {
+                root: "~/TcodeProjects/app".into()
+            }]
+        );
+    }
 
     /// A remote client types a path that means nothing on its own machine. The
     /// answer — accept or reject, and why — comes from the host's filesystem,
@@ -1328,13 +1801,25 @@ mod tests {
     /// against its own path rules.
     #[gpui::test]
     fn a_remote_project_root_is_judged_by_the_host(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
+        cx.update(|cx| {
+            crate::theme::init(cx);
+            crate::shortcut::init(cx);
+            init(cx);
+            // The list shows a spinner while the recents scan runs.
+            cx.set_reduce_motion(true);
+        });
         let root = crate::store::tests::scratch_root("add-project-remote");
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let host = spawn_host(
             SessionStore::open_at(root.join("data")).unwrap(),
-            HostServices::default(),
+            HostServices {
+                user_directories: UserDirectories {
+                    home: Some(root.clone()),
+                    documents: None,
+                },
+                ..HostServices::default()
+            },
         )
         .expect("spawn add-project test host");
         let link = tcode_client::HostLink::new(host.to_host.clone(), host.from_host.clone());
@@ -1392,22 +1877,23 @@ mod tests {
         });
         let cx: &mut VisualTestContext = cx;
         let dialog = built.borrow().clone().expect("dialog was built");
-
-        let type_and_open = |cx: &mut VisualTestContext, path: &str| {
-            let path = path.to_owned();
-            cx.update(|window, cx| {
-                dialog.update(cx, |dialog, cx| {
-                    dialog
-                        .path_input
-                        .update(cx, |input, cx| input.set_value(path.clone(), window, cx));
-                    dialog.open_typed_path(window, cx);
-                });
+        cx.update(|window, cx| {
+            let field = dialog.read(cx).path_input.clone();
+            field.update(cx, |field, cx| field.focus(window, cx));
+        });
+        let retype = |cx: &mut VisualTestContext, text: &str| {
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+                "cmd-a"
+            } else {
+                "ctrl-a"
             });
+            cx.simulate_input(text);
         };
 
         // A Windows-style path on a Unix host (or a nonexistent one on Windows):
         // rejected there, not here.
-        type_and_open(cx, r"C:\Users\dev\src");
+        retype(cx, r"C:\Users\dev\src");
+        cx.simulate_keystrokes("enter");
         wait_until(cx, &store, pump.as_mut(), "host path refusal", |cx| {
             dialog.read_with(cx, |dialog, _| dialog.error.is_some())
         });
@@ -1423,36 +1909,31 @@ mod tests {
             "a refused root must not create a project"
         );
 
-        // The folder list under the field is the host's too: typing a host
-        // directory and the start of a name lists the matching folders there.
-        let typed = format!("{}/work", root.to_str().unwrap());
-        cx.update(|window, cx| {
-            dialog.update(cx, |dialog, cx| {
-                dialog
-                    .path_input
-                    .update(cx, |input, cx| input.replace_all(typed.clone(), window, cx));
-            });
-        });
-        wait_until(cx, &store, pump.as_mut(), "host folder listing", |cx| {
-            dialog.read_with(cx, |dialog, _| {
-                dialog
-                    .folders
-                    .listing
-                    .as_ref()
-                    .is_some_and(|listing| listing.directory == root)
-            })
-        });
-        let shown = dialog.read_with(cx, |dialog, _| {
-            let listing = dialog.folders.listing.as_ref().unwrap();
-            matching_folders(&listing.entries, "work")
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(shown, ["workspace"]);
+        // The folder list under the field is the host's too: typing the start
+        // of a name in the host's home lists the matching folders there.
+        retype(cx, "~/work");
+        let deadline = crate::store::tests::host_deadline();
+        loop {
+            let _ = pump
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            crate::test_frames::draw_settled(cx);
+            if cx.debug_bounds("add-project-folder-workspace").is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waiting for the host's folder listing"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(cx.debug_bounds("add-project-folder-data").is_none());
 
         // A directory that exists on the host is accepted even though this
-        // client never looked at it.
-        type_and_open(cx, workspace.to_str().unwrap());
+        // client never looked at it, written as the host reads it.
+        retype(cx, "~/workspace/");
+        cx.simulate_keystrokes(SECONDARY_ENTER);
         wait_until(cx, &store, pump.as_mut(), "host project draft", |cx| {
             store.read_with(cx, |store, _| store.sole_thread().is_some())
         });

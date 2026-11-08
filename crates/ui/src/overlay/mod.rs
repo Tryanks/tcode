@@ -785,11 +785,11 @@ mod tests {
             },
             cx,
         );
-        if kind == "create" {
+        if kind != "change" {
             assert_eq!(
                 overlays(&root, cx).read_with(cx, |host, _| host.open_dialogs()),
                 1,
-                "creation waits until the project appears in the host index"
+                "a new project opens once it appears in the host index"
             );
             host.index(cx);
         }
