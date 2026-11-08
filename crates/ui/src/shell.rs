@@ -654,7 +654,7 @@ struct NavigationPersistence {
 }
 
 struct PendingNavigationRestore {
-    session_id: String,
+    thread: ThreadKey,
     panel: NavigationPanel,
     panel_open: bool,
 }
@@ -828,20 +828,30 @@ impl AppShell {
                 .then(|| {
                     DevicePreferences::navigation(cx).and_then(NavigationSnapshot::from_preferences)
                 })
-                .flatten()
-                .map(|mut snapshot| {
-                    setup.initial = setup.client_host.as_ref().and_then(|host| {
-                        host.load_hosts()
-                            .into_iter()
-                            .find(|saved| Some(&saved.host_id) == snapshot.host_id.as_ref())
-                            .map(|host| AttachmentTarget::Remote(Box::new(host)))
-                    });
-                    if setup.initial.is_none() {
-                        snapshot.without_host();
-                    }
-                    snapshot
-                }),
+                .flatten(),
         };
+        if let Some(thread) = restored
+            .as_ref()
+            .and_then(|snapshot| snapshot.thread.as_ref())
+        {
+            match &thread.host {
+                HostKey::Local => {
+                    if setup.local.is_some() {
+                        setup.initial = Some(AttachmentTarget::Local);
+                    }
+                }
+                HostKey::Remote(host_id) => {
+                    if let Some(saved) = setup.client_host.as_ref().and_then(|client| {
+                        client
+                            .load_hosts()
+                            .into_iter()
+                            .find(|saved| saved.host_id == *host_id)
+                    }) {
+                        setup.initial = Some(AttachmentTarget::Remote(Box::new(saved)));
+                    }
+                }
+            }
+        }
         if let Some(host) = setup.client_host.as_ref().and_then(|client| {
             client.load_hosts().into_iter().find(|host| {
                 client
@@ -935,23 +945,27 @@ impl AppShell {
         };
         let initial = shell.setup.initial.take();
         shell.open_workspace(initial, local_started, window, cx);
-        if let Some(snapshot) = restored {
+        if let Some(mut snapshot) = restored {
+            let pane = shell.column.as_ref().and_then(|column| {
+                let thread = snapshot.thread.as_ref()?;
+                (column.host == thread.host).then(|| column.current_pane.clone())
+            });
+            if pane.is_none() {
+                snapshot.without_thread();
+            }
             shell
                 .window_state
                 .update(cx, |state, cx| state.restore(&snapshot, cx));
             shell.panel_shows_terminal = snapshot.panel == NavigationPanel::Terminal;
-            if let Some(session_id) = snapshot.session_id
-                && let Some(pane) = shell
-                    .column
-                    .as_ref()
-                    .map(|column| column.current_pane.clone())
+            if let Some(pane) = pane
+                && let Some(thread) = snapshot.thread
             {
                 // Bind once, before the baseline can trigger an empty-workspace
                 // draft fallback. Validation below never binds it again.
-                shell.bind_pane(&pane, &session_id, window, cx);
+                shell.bind_pane(&pane, &thread.session_id, window, cx);
                 shell.return_keyboard(window, cx);
                 shell.pending_navigation_restore = Some(PendingNavigationRestore {
-                    session_id,
+                    thread,
                     panel: snapshot.panel,
                     panel_open: snapshot.history.contains(&Destination::Panel),
                 });
@@ -1016,11 +1030,7 @@ impl AppShell {
 
 impl AppShell {
     fn navigation_snapshot(&self, cx: &App) -> NavigationSnapshot {
-        let store = self.store();
-        let host_id = store
-            .as_ref()
-            .and_then(|store| store.read(cx).remote_host_id().map(str::to_owned));
-        let session_id = self.page_thread(cx).map(|thread| thread.session_id);
+        let thread = self.page_thread(cx);
         let panel = self
             .pending_navigation_restore
             .as_ref()
@@ -1029,11 +1039,9 @@ impl AppShell {
                 if self.panel_shows_terminal {
                     NavigationPanel::Terminal
                 } else {
-                    match store.as_ref().map(|store| {
-                        store
-                            .read(cx)
-                            .panel_state_for(session_id.as_deref())
-                            .right_tab
+                    match thread.as_ref().and_then(|thread| {
+                        let store = self.link_of(&thread.host)?.store.read(cx);
+                        Some(store.panel_state_for(Some(&thread.session_id)).right_tab)
                     }) {
                         Some(RightTab::Plan) => NavigationPanel::Plan,
                         Some(RightTab::Agents) => NavigationPanel::Agents,
@@ -1045,8 +1053,7 @@ impl AppShell {
             });
         NavigationSnapshot {
             history: self.window_state.read(cx).history().to_vec(),
-            host_id,
-            session_id,
+            thread,
             panel,
         }
     }
@@ -1075,40 +1082,48 @@ impl AppShell {
         let Some(pending) = &self.pending_navigation_restore else {
             return;
         };
-        let Some(store) = self.store() else {
+        let Some(store) = self
+            .link_of(&pending.thread.host)
+            .map(|link| link.store.clone())
+        else {
             self.pending_navigation_restore = None;
             return;
         };
-        let shown = self.page_thread(cx).map(|thread| thread.session_id);
+        let shown = self
+            .page_thread(cx)
+            .filter(|shown| *shown == pending.thread);
         if !store.read(cx).index_hydrated() {
-            if shown.as_deref() != Some(&pending.session_id) {
+            if shown.is_none() {
                 self.pending_navigation_restore = None;
             }
             return;
         }
+        let session_id = &pending.thread.session_id;
         if !store
             .read(cx)
             .sidebar_sessions()
             .iter()
-            .any(|meta| meta.id == pending.session_id && meta.archived_at.is_none())
+            .any(|meta| meta.id == *session_id && meta.archived_at.is_none())
         {
             let pending = self
                 .pending_navigation_restore
                 .take()
                 .expect("checked above");
-            if shown.as_deref() == Some(&pending.session_id) {
-                store.update(cx, |store, cx| store.close_thread(&pending.session_id, cx));
+            if shown.is_some() {
+                store.update(cx, |store, cx| {
+                    store.close_thread(&pending.thread.session_id, cx)
+                });
             }
             self.window_state
                 .update(cx, |state, cx| state.drop_thread_pages(cx));
             return;
         }
-        if shown.as_deref() != Some(&pending.session_id) {
+        if shown.is_none() {
             // A user selection made while syncing supersedes restoration.
             self.pending_navigation_restore = None;
             return;
         }
-        if store.read(cx).chat_loading_for(shown.as_deref(), cx) {
+        if store.read(cx).chat_loading_for(Some(session_id), cx) {
             return;
         }
         let pending = self
@@ -1126,7 +1141,7 @@ impl AppShell {
                 _ => RightTab::Diff,
             };
             store.update(cx, |store, cx| {
-                store.set_right_tab_for(Some(&pending.session_id), tab, cx)
+                store.set_right_tab_for(Some(&pending.thread.session_id), tab, cx)
             });
         }
     }
@@ -2089,7 +2104,10 @@ impl AppShell {
         if self
             .pending_navigation_restore
             .as_ref()
-            .is_some_and(|pending| pending.session_id != session_id)
+            .is_some_and(|pending| {
+                pending.thread.session_id != session_id
+                    || self.column.as_ref().map(|column| &column.host) != Some(&pending.thread.host)
+            })
         {
             self.pending_navigation_restore = None;
         }
@@ -6792,12 +6810,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// A tablet `width` wide that has added `saved` and arranged its
-    /// workspace as `workspace`, with a link offered to each machine saved.
+    /// A tablet `width` wide that has added `saved` and holds
+    /// `preferences`, with a link offered to each machine saved.
     fn mount_workspace(
         cx: &mut TestAppContext,
         saved: Vec<tcode_client::pairing::PairedHost>,
-        workspace: Option<tcode_client::host::WorkspacePreference>,
+        preferences: tcode_client::host::ClientPreferences,
         width: f32,
     ) -> (
         Entity<AppShell>,
@@ -6810,10 +6828,7 @@ pub(crate) mod tests {
         let client = Rc::new(WorkspaceClient {
             saved: RefCell::new(saved.clone()),
             transports: RefCell::default(),
-            preferences: RefCell::new(tcode_client::host::ClientPreferences {
-                workspace,
-                ..Default::default()
-            }),
+            preferences: RefCell::new(preferences),
             last_host_id: RefCell::default(),
             pairs: RefCell::default(),
         });
@@ -6843,6 +6858,8 @@ pub(crate) mod tests {
                     window_state,
                     ShellSetup {
                         client_host: Some(setup_client),
+                        // As every mobile build does.
+                        restore_navigation: true,
                         ..Default::default()
                     },
                     window,
@@ -6911,7 +6928,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_host_refused_and_paired_again_changes_nothing_on_another(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        let (shell, hosts, client, cx) =
+            mount_workspace(cx, two_hosts(), Default::default(), 1200.);
         cx.update(|_, cx| {
             crate::shortcut::init(cx);
             DevicePreferences::set_sidebar_layout(tcode_core::settings::SidebarLayout::Grouped, cx)
@@ -7003,7 +7021,8 @@ pub(crate) mod tests {
     fn park_and_reconnect_reach_every_host(cx: &mut TestAppContext) {
         use tcode_client::recovery::Wake;
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 393.);
+        let (shell, hosts, _client, cx) =
+            mount_workspace(cx, two_hosts(), Default::default(), 393.);
         for wake in [Wake::Park, Wake::Reconnect] {
             shell.read_with(cx, |shell, _| shell.wake_connection(wake.clone()));
             for host in ["host-a", "host-b"] {
@@ -7022,7 +7041,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn only_the_columns_host_offers_its_draft_until_it_leaves(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        let (shell, hosts, client, cx) =
+            mount_workspace(cx, two_hosts(), Default::default(), 1200.);
         let project =
             |id: &str| crate::store::tests::project_at(id, std::path::Path::new(PANES_CWD));
         let drafted = |host: &WorkspaceHost| -> Vec<String> {
@@ -7059,14 +7079,128 @@ pub(crate) mod tests {
         assert!(workspace.hosts.iter().all(|host| host.host_id != "host-a"));
     }
 
+    /// A window reopens on the thread it showed and on that thread's host:
+    /// the column starts there though another host comes first, with the
+    /// thread in its pane before the baseline, so no host is asked for a
+    /// draft. The other host is opened and listened to, nothing more.
+    #[gpui::test]
+    fn a_cold_start_reopens_the_thread_on_the_host_it_showed(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, _client, cx) = mount_workspace(
+            cx,
+            two_hosts(),
+            tcode_client::host::ClientPreferences {
+                navigation: Some(serde_json::json!({
+                    "history": ["threads", "thread"],
+                    "thread": { "host": "host-b", "session_id": "thread-2" },
+                    "panel": "diff"
+                })),
+                ..Default::default()
+            },
+            393.,
+        );
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let thread = ThreadKey {
+            host: key_b.clone(),
+            session_id: "thread-2".into(),
+        };
+        assert_eq!(linked(&shell, cx), [key_a.clone(), key_b.clone()]);
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        assert_eq!(store_of(&shell, cx), b, "the column is on B");
+        let restored = |cx: &mut VisualTestContext| {
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(
+                    shell.window_state.read(cx).history(),
+                    [Destination::Threads, Destination::Thread]
+                );
+                assert_eq!(shell.page_thread(cx), Some(thread.clone()));
+            })
+        };
+        restored(cx);
+
+        let project =
+            |id: &str| crate::store::tests::project_at(id, std::path::Path::new(PANES_CWD));
+        hosts[&key_a].come_up(&a, vec![project("on-a")], Some("on-a"), cx);
+        let on_b = &hosts[&key_b].host;
+        crate::store::tests::seed_full_scope(&b, &on_b.incoming, Vec::new(), cx);
+        let (index, ServerEvent::IndexSnapshot(mut listed)) = panes_index(&[]) else {
+            unreachable!("an index")
+        };
+        listed.projects = vec![project("on-b")];
+        send_events(
+            on_b,
+            vec![
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                        last_project_id: Some("on-b".into()),
+                        ..Default::default()
+                    }),
+                ),
+                (index, ServerEvent::IndexSnapshot(listed)),
+            ],
+        );
+        serve_thread(on_b, "thread-2");
+        on_b.states
+            .try_send(tcode_client::ConnectionState::Connected { path: None })
+            .unwrap();
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
+        });
+        restored(cx);
+        assert!(shell.read_with(cx, |shell, _| shell.pending_navigation_restore.is_none()));
+
+        let to_b = sent(on_b);
+        assert_eq!(
+            to_b.iter()
+                .filter(|payload| matches!(payload,
+                    ClientPayload::Subscribe(subscription) if subscription.topic == Topic::SessionEvents { session_id: "thread-2".into() }
+                ))
+                .count(),
+            1,
+            "B is asked for the thread once"
+        );
+        assert!(
+            !to_b.iter().any(|payload| matches!(
+                payload,
+                ClientPayload::Command(Command::StartDraft { .. } | Command::StartScratchDraft)
+            )),
+            "B is asked for no draft"
+        );
+        let to_a = sent(&hosts[&key_a].host);
+        for payload in &to_a {
+            assert!(
+                !matches!(payload, ClientPayload::Command(_)),
+                "A is asked to do nothing: {payload:?}"
+            );
+        }
+        assert!(
+            !to_a.iter().any(|payload| matches!(payload,
+                ClientPayload::Subscribe(subscription) if matches!(subscription.topic, Topic::SessionEvents { .. } | Topic::SessionStatus { .. })
+            )),
+            "A is asked for no thread"
+        );
+        assert!(a.read_with(cx, |store, _| store.open_threads().is_empty()));
+    }
+
     /// Pairing with a machine adds it beside the window's hosts, leaving
     /// their links as they are; pairing into a space replaces them, as a
     /// space is reached alone.
     #[gpui::test]
     fn pairing_adds_a_machine_beside_the_others_and_a_space_replaces_them(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, client, cx) =
-            mount_workspace(cx, vec![saved_machine("host-a", true)], None, 1200.);
+        let (shell, hosts, client, cx) = mount_workspace(
+            cx,
+            vec![saved_machine("host-a", true)],
+            Default::default(),
+            1200.,
+        );
         let key_a = HostKey::Remote("host-a".into());
         let a = store_on(&shell, "host-a", cx);
         hosts[&key_a].come_up(&a, Vec::new(), None, cx);
@@ -7105,7 +7239,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_thread_asked_for_on_another_host_takes_the_column_there(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        let (shell, hosts, _client, cx) =
+            mount_workspace(cx, two_hosts(), Default::default(), 1200.);
         let (key_a, key_b) = (
             HostKey::Remote("host-a".into()),
             HostKey::Remote("host-b".into()),
@@ -7193,7 +7328,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_new_thread_with_none_current_starts_on_the_host_picked(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 393.);
+        let (shell, hosts, _client, cx) =
+            mount_workspace(cx, two_hosts(), Default::default(), 393.);
         cx.update(|_, cx| cx.set_reduce_motion(true));
         let (key_a, key_b) = (
             HostKey::Remote("host-a".into()),
@@ -7239,7 +7375,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_split_drafts_on_the_current_threads_host(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        let (shell, hosts, _client, cx) =
+            mount_workspace(cx, two_hosts(), Default::default(), 1200.);
         cx.update(|_, cx| crate::shortcut::init(cx));
         let (key_a, key_b) = (
             HostKey::Remote("host-a".into()),
@@ -7297,7 +7434,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_draft_answered_after_the_column_left_its_host_stays_off(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, hosts, _client, cx) = mount_workspace(cx, two_hosts(), None, 1200.);
+        let (shell, hosts, _client, cx) =
+            mount_workspace(cx, two_hosts(), Default::default(), 1200.);
         let (key_a, key_b) = (
             HostKey::Remote("host-a".into()),
             HostKey::Remote("host-b".into()),
@@ -8180,11 +8318,13 @@ pub(crate) mod tests {
         cx.executor().advance_clock(Duration::from_millis(151));
         draw(cx);
         assert_eq!(client.saves.get(), 1);
-        let same_page = client.load_preferences().navigation.unwrap();
-        assert_eq!(same_page["session_id"], "thread-b");
         assert_eq!(
-            same_page["history"],
-            serde_json::json!(["threads", "thread"])
+            client.load_preferences().navigation.unwrap(),
+            serde_json::json!({
+                "history": ["threads", "thread"],
+                "thread": { "host": "last-host", "session_id": "thread-b" },
+                "panel": "diff"
+            })
         );
 
         store.update(cx, |store, cx| {
@@ -8199,7 +8339,10 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(client.saves.get(), 2);
         let navigation = client.load_preferences().navigation.unwrap();
-        assert_eq!(navigation["session_id"], "thread-c");
+        assert_eq!(
+            navigation["thread"],
+            serde_json::json!({ "host": "last-host", "session_id": "thread-c" })
+        );
         assert_eq!(
             navigation["history"],
             serde_json::json!(["threads", "thread", "settings"])
@@ -15535,8 +15678,15 @@ pub(crate) mod tests {
     ) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let studio = saved_machine("studio", false);
-        let (shell, _hosts, _client, cx) =
-            mount_workspace(cx, vec![studio.clone()], Some(Default::default()), 393.);
+        let (shell, _hosts, _client, cx) = mount_workspace(
+            cx,
+            vec![studio.clone()],
+            tcode_client::host::ClientPreferences {
+                workspace: Some(Default::default()),
+                ..Default::default()
+            },
+            393.,
+        );
         shell
             .read_with(cx, |shell, _| shell.window_state())
             .update(cx, |state, cx| {
@@ -17400,8 +17550,15 @@ pub(crate) mod tests {
     fn the_first_host_and_the_last_rise_over_what_the_window_showed(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let studio = saved_machine("studio", false);
-        let (shell, _hosts, _client, cx) =
-            mount_workspace(cx, vec![studio.clone()], Some(Default::default()), 1024.);
+        let (shell, _hosts, _client, cx) = mount_workspace(
+            cx,
+            vec![studio.clone()],
+            tcode_client::host::ClientPreferences {
+                workspace: Some(Default::default()),
+                ..Default::default()
+            },
+            1024.,
+        );
         crate::test_frames::draw_settled(cx);
         assert!(cx.debug_bounds("no-hosts").is_some());
         let half_way = |cx: &mut VisualTestContext| {
@@ -17666,7 +17823,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn the_pairing_form_glides_across_the_breakpoint(cx: &mut TestAppContext) {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let (shell, _hosts, _client, cx) = mount_workspace(cx, Vec::new(), None, 899.);
+        let (shell, _hosts, _client, cx) =
+            mount_workspace(cx, Vec::new(), Default::default(), 899.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         window_state.update(cx, |state, cx| state.go(Destination::Pair, cx));
         draw(cx);
