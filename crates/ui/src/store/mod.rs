@@ -2148,6 +2148,16 @@ impl WorkspaceStore {
             .count()
     }
 
+    /// Threads not working whose harness still runs background work, which
+    /// ending the host stops.
+    pub fn background_sessions_count(&self) -> usize {
+        self.index_summary
+            .activity
+            .values()
+            .filter(|activity| !activity.working && activity.background.tasks > 0)
+            .count()
+    }
+
     /// Open the diff of `session_id`'s `turn`, at `path` if one is given.
     pub fn open_diff(
         &mut self,

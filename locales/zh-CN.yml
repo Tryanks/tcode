@@ -423,6 +423,7 @@ quit:
   menu_item: "退出 Tcode"
   title: "退出 Tcode？"
   description: "仍有 %{count} 个线程正在工作。退出将停止它们。"
+  description_background: "仍有 %{count} 个线程有后台工作，退出会停止它们。"
   confirm: "退出"
   startup_failed: "Tcode 无法启动"
 migration:

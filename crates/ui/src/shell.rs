@@ -934,6 +934,17 @@ impl AppShell {
             .map(|attachment| attachment.link.link())
     }
 
+    /// Whether the window shows this machine's own host, which ends with
+    /// the app.
+    pub fn attached_locally(&self) -> bool {
+        self.attachment.as_ref().is_some_and(|attachment| {
+            matches!(
+                attachment.link.target,
+                crate::remote::AttachmentTarget::Local
+            )
+        })
+    }
+
     /// Where this window is, for a window that opens once it has closed
     /// ([`ShellSetup::reopen`]).
     pub fn current_place(&self, cx: &App) -> ShellPlace {
