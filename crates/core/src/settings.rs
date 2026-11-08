@@ -708,6 +708,20 @@ pub enum SettingsPatch {
 /// Where Create puts a new project when Settings names no folder.
 pub const DEFAULT_NEW_PROJECT_DIR: &str = "~/TcodeProjects";
 
+/// A folder Settings name on the host: `~` (its home) or a path under it, or
+/// an absolute path by this host's rules. A blank one is no folder.
+fn host_folder(value: Option<String>) -> Result<Option<String>, &'static str> {
+    let Some(value) = value.filter(|dir| !dir.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let path = std::path::Path::new(value.trim());
+    if path.strip_prefix("~").is_ok() || path.is_absolute() {
+        Ok(Some(value))
+    } else {
+        Err("A folder must be an absolute path, ~ or a path under ~.")
+    }
+}
+
 /// Where Add Project's folder list opens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1248,11 +1262,11 @@ impl Settings {
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
             SettingsPatch::LastProject(value) => self.last_project_id = value,
             SettingsPatch::NewProjectDir(value) => {
-                self.new_project_dir = value.filter(|dir| !dir.trim().is_empty());
+                self.new_project_dir = host_folder(value)?;
             }
             SettingsPatch::ProjectStart(value) => self.project_start = value,
             SettingsPatch::ProjectStartCustom(value) => {
-                self.project_start_custom = value.filter(|dir| !dir.trim().is_empty());
+                self.project_start_custom = host_folder(value)?;
             }
         }
         Ok(())
