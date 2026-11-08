@@ -1,6 +1,8 @@
 use gpui::{Context, EventEmitter, SharedString};
 use serde::{Deserialize, Serialize};
 
+use crate::store::{HostKey, ThreadKey};
+
 /// One place the window can be. The window keeps a *history* of them, and every
 /// Back — the toolbar control, the Android gesture, the desktop Back row — pops
 /// that one history. There is no second navigation authority: the compact
@@ -37,13 +39,28 @@ pub enum Destination {
 }
 
 /// The shell's client-local checkpoint, independent of the host's settings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct NavigationSnapshot {
     pub history: Vec<Destination>,
-    pub host_id: Option<String>,
-    pub session_id: Option<String>,
-    #[serde(default)]
+    /// The thread the window showed.
+    pub thread: Option<ThreadKey>,
     pub panel: NavigationPanel,
+}
+
+/// A checkpoint as saved: this version's, or an earlier one's, which named
+/// the thread by its id and its host's id, with none for the host in the
+/// window's process.
+#[derive(Deserialize)]
+struct SavedNavigation {
+    history: Vec<Destination>,
+    #[serde(default)]
+    thread: Option<ThreadKey>,
+    #[serde(default)]
+    host_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    panel: NavigationPanel,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +90,18 @@ impl NavigationPanel {
 
 impl NavigationSnapshot {
     pub fn from_preferences(value: serde_json::Value) -> Option<Self> {
-        let mut snapshot: Self = serde_json::from_value(value).ok()?;
+        let saved: SavedNavigation = serde_json::from_value(value).ok()?;
+        let thread = saved.thread.or_else(|| {
+            Some(ThreadKey {
+                host: saved.host_id.map_or(HostKey::Local, HostKey::Remote),
+                session_id: saved.session_id?,
+            })
+        });
+        let mut snapshot = Self {
+            history: saved.history,
+            thread,
+            panel: saved.panel,
+        };
         // Ignore malformed/unbounded local state rather than building an
         // arbitrary number of mounted views during startup.
         if snapshot.history.len() > 128 {
@@ -101,22 +129,15 @@ impl NavigationSnapshot {
             snapshot.history.insert(0, Destination::Threads);
         }
         snapshot.history.dedup();
-        if snapshot.host_id.is_none() {
-            snapshot.without_host();
-        } else if snapshot.session_id.is_none() {
+        if snapshot.thread.is_none() {
             snapshot.without_thread();
         }
         Some(snapshot)
     }
 
-    pub fn without_host(&mut self) {
-        self.host_id = None;
-        self.session_id = None;
-        self.history = vec![Destination::Threads];
-    }
-
-    fn without_thread(&mut self) {
-        self.session_id = None;
+    /// The thread is not one the window can show again.
+    pub fn without_thread(&mut self) {
+        self.thread = None;
         if let Some(index) = self.history.iter().position(|destination| {
             matches!(
                 destination,
