@@ -30,7 +30,9 @@ use gpui::{
 use gpui_base::motion::transition;
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
-use tcode_core::thread_sort::{ThreadSection, ThreadSections, partition_threads};
+use tcode_core::thread_sort::{
+    ThreadSection, ThreadSections, merge_by_shown_time, partition_threads,
+};
 use tcode_protocol::{Command, ThreadExportFormat};
 
 use tcode_core::{
@@ -203,10 +205,11 @@ fn faded_status<T: Clone + PartialEq + 'static>(
     Some(shown.fade(content))
 }
 
-/// The disclosures of a sidebar list: a project's rows, a project's rows
-/// past the first few, and a Settled shelf (by its shelf key).
+/// The disclosures of a sidebar list: a host's section, a project's rows, a
+/// project's rows past the first few, and a Settled shelf (by its shelf key).
 #[derive(Clone, Copy)]
 enum Fold {
+    Host,
     Project,
     More,
     Shelf,
@@ -214,10 +217,34 @@ enum Fold {
 
 fn fold_key(fold: Fold, id: &str) -> String {
     match fold {
+        Fold::Host => format!("host:{id}"),
         Fold::Project => format!("project:{id}"),
         Fold::More => format!("more:{id}"),
         Fold::Shelf => format!("shelf:{id}"),
     }
+}
+
+/// How element ids and disclosures name a host's section.
+fn host_id(host: &HostKey) -> &str {
+    match host {
+        HostKey::Local => "local",
+        HostKey::Remote(host_id) => host_id,
+    }
+}
+
+/// The name a host's section and rows carry.
+fn host_title(store: &WorkspaceStore) -> SharedString {
+    match store.host_key() {
+        HostKey::Local => crate::tr!("hosts.this_computer").into_owned().into(),
+        HostKey::Remote(_) => store.machine_label().into(),
+    }
+}
+
+/// Whether a list over several hosts shows `store`'s heading alone: the host
+/// is out of reach, refused this device or speaks another protocol, and its
+/// threads are not shown from what the client last held.
+fn host_down(store: &WorkspaceStore) -> bool {
+    crate::remote::connection_failure(store.connection_state()).is_some()
 }
 
 /// How element ids, debug selectors and row keys name `id` of `host` in a
@@ -285,6 +312,17 @@ fn tagged<'a>(
     rows.into_iter().map(move |meta| (host, meta))
 }
 
+fn tagged_sections<'a>(
+    host: &'a HostKey,
+    sections: ThreadSections<&'a SessionMeta>,
+) -> ThreadSections<Listed<'a>> {
+    ThreadSections {
+        pinned: tagged(host, sections.pinned).collect(),
+        active: tagged(host, sections.active).collect(),
+        settled: tagged(host, sections.settled).collect(),
+    }
+}
+
 /// A row key as a list kept it, to compare with one it draws now.
 fn drawn_key<'a>((kind, id): &'a (&'static str, String)) -> (&'static str, Cow<'a, str>) {
     (kind, Cow::Borrowed(id.as_str()))
@@ -295,6 +333,25 @@ fn no_sections<T>() -> ThreadSections<T> {
         pinned: vec![],
         active: vec![],
         settled: vec![],
+    }
+}
+
+fn listed_meta<'a>(row: &'a Listed<'_>) -> &'a SessionMeta {
+    row.1
+}
+
+/// Each host's sections, in the sidebar's order of hosts, as one list's.
+fn merged<'a>(hosts: Vec<ThreadSections<Listed<'a>>>) -> ThreadSections<Listed<'a>> {
+    let mut sections = no_sections::<Vec<Listed>>();
+    for host in hosts {
+        sections.pinned.push(host.pinned);
+        sections.active.push(host.active);
+        sections.settled.push(host.settled);
+    }
+    ThreadSections {
+        pinned: merge_by_shown_time(sections.pinned, listed_meta),
+        active: merge_by_shown_time(sections.active, listed_meta),
+        settled: merge_by_shown_time(sections.settled, listed_meta),
     }
 }
 
@@ -621,6 +678,68 @@ struct StartDraftForProject(ProjectKey);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_sidebar, no_json)]
 struct QuickChat(HostKey);
+/// Prompt for a directory and make it a project of this host.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct AddProject(HostKey);
+/// Order this host's projects the next way.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct SortProjects(HostKey);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_sidebar, no_json)]
+struct ManageHosts;
+
+/// What a host's heading offers: a thread in one of its projects or a quick
+/// thread, a new project, its projects' order, and the Machines page.
+#[derive(Clone)]
+struct HostMenu {
+    host: HostKey,
+    /// Its projects, while it is up and holds them.
+    projects: Option<Vec<(ProjectKey, String)>>,
+    /// How its projects are ordered, while it is up.
+    sort: Option<String>,
+}
+
+impl HostMenu {
+    fn build(&self, menu: crate::widgets::menu::PopupMenu) -> crate::widgets::menu::PopupMenu {
+        let host = &self.host;
+        let mut menu = menu;
+        if let Some(projects) = &self.projects {
+            menu = menu.label(crate::tr!("sidebar.create_thread")).menu(
+                crate::tr!("sidebar.quick_chat"),
+                Box::new(QuickChat(host.clone())),
+            );
+            for (project, name) in projects {
+                menu = menu.menu(
+                    name.clone(),
+                    Box::new(StartDraftForProject(project.clone())),
+                );
+            }
+            menu = menu.separator().menu(
+                crate::tr!("sidebar.add_project"),
+                Box::new(AddProject(host.clone())),
+            );
+        }
+        if let Some(sort) = &self.sort {
+            menu = menu.menu(
+                crate::tr!("sidebar.sort", mode = sort.clone()),
+                Box::new(SortProjects(host.clone())),
+            );
+        }
+        menu.separator()
+            .menu(crate::tr!("sidebar.manage_hosts"), Box::new(ManageHosts))
+    }
+}
+
+/// The parts of a host's heading, drawn in each layout's own row.
+struct HostHeadingParts {
+    title: SharedString,
+    dot: gpui::Hsla,
+    status: Option<gpui::AnyElement>,
+    pair: Option<gpui::AnyElement>,
+    menu: gpui::AnyElement,
+}
 
 /// In-progress inline rename of a thread row.
 struct RenameState {
@@ -638,6 +757,8 @@ struct CompactThreadRow {
     row_id: SharedString,
     label: SharedString,
     project_name: Option<SharedString>,
+    /// Its host's name, in a list of several hosts' threads by time.
+    host_name: Option<SharedString>,
     /// The time the row shows, the one its list sorts it by.
     timestamp: u64,
     relative_time: SharedString,
@@ -656,8 +777,18 @@ struct CompactProjectRow {
     collapsed: bool,
 }
 
+/// The heading of a host's section, in a list over several hosts.
+#[derive(Clone)]
+struct CompactHostRow {
+    host: HostKey,
+    row_id: SharedString,
+    /// Whether the section is shut; `None` where nothing under it folds.
+    collapsed: Option<bool>,
+}
+
 #[derive(Clone)]
 enum CompactListRow {
+    Host(CompactHostRow),
     Project(CompactProjectRow),
     Caption {
         key: String,
@@ -683,6 +814,7 @@ enum CompactListRow {
 impl CompactListRow {
     fn key(&self) -> &str {
         match self {
+            Self::Host(row) => &row.row_id,
             Self::Project(row) => &row.row_id,
             Self::Caption { key, .. } => key,
             Self::Settled { key, .. } => key,
@@ -695,6 +827,9 @@ impl CompactListRow {
 }
 
 enum FlatListRow {
+    /// The heading of a host whose link is down, which lists none of its
+    /// threads.
+    Host(HostKey),
     Thread(Box<ListedThread>),
     /// The start of Pinned or Active, drawn only while dragging; whether the
     /// section is empty.
@@ -709,6 +844,7 @@ enum FlatListRow {
 impl FlatListRow {
     fn key(&self) -> (&'static str, &str) {
         match self {
+            Self::Host(host) => ("host", host_id(host)),
             Self::Thread(row) => ("thread", &row.name),
             Self::Boundary(ThreadSection::Pinned, _) => ("pinned", ""),
             Self::Boundary(_, _) => ("active", ""),
@@ -732,9 +868,14 @@ struct FlatFrame {
     lists: ThreadLists,
 }
 
-/// A row of the desktop grouped list. Project-scoped rows index into the
-/// frame's lists: `host` names the host's, `group` its project group.
+/// A row of the desktop grouped list. Host- and project-scoped rows index
+/// into the frame's lists: `host` names the host's, `group` its project group.
 enum GroupedListRow {
+    /// The heading of a host's section, in a list over several hosts.
+    Host {
+        host: usize,
+        collapsed: bool,
+    },
     Project {
         host: usize,
         group: usize,
@@ -777,6 +918,7 @@ impl GroupedListRow {
             named(lists.len(), &of.host, &of.groups[*group].project.id)
         };
         match self {
+            Self::Host { host, .. } => ("host", Cow::Borrowed(host_id(&lists[*host].host))),
             Self::Project { host, group, .. } => ("project", project(host, group)),
             Self::Thread(row) => ("thread", Cow::Borrowed(row.name.as_str())),
             Self::ToggleThreads { host, group, .. } => ("toggle", project(host, group)),
@@ -793,6 +935,9 @@ impl GroupedListRow {
 struct HostLists {
     host: HostKey,
     revision: u64,
+    /// The host's link is down in a list over several hosts: it lists none
+    /// of the host's threads ([`host_down`]).
+    down: bool,
     groups: Rc<Vec<ProjectGroup>>,
     flat: Rc<Vec<SessionMeta>>,
     flags: Rc<HashMap<String, ThreadFlags>>,
@@ -806,7 +951,9 @@ struct CompactListModel {
     rows: Vec<CompactListRow>,
     /// Each row's fold factor, as `SessionsSidebar::fold_row` takes it.
     folds: Vec<f32>,
-    has_projects: bool,
+    /// Whether the list has anything to show in place of its empty page:
+    /// a project, or a host's heading.
+    has_rows: bool,
     locale: String,
     minute: u64,
 }
@@ -823,6 +970,8 @@ pub struct SessionsSidebar {
     /// The hosts it lists, in order.
     hosts: Vec<SidebarHost>,
     window_state: Entity<WindowState>,
+    /// The hosts whose section the user shut, in a list over several.
+    collapsed_hosts: HashSet<HostKey>,
     /// Projects whose thread list is expanded past the collapsed limit.
     expanded_groups: HashSet<ProjectKey>,
     expanded_settled: HashSet<Shelf>,
@@ -925,8 +1074,12 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
 impl SessionsSidebar {
     fn thread_lists(&mut self, cx: &App) -> ThreadLists {
         let cached = self.thread_lists.take().unwrap_or_default();
+        let sectioned = self.sectioned();
+        let down = |host: &SidebarHost| sectioned && host_down(host.store.read(cx));
         let current = |host: &SidebarHost, lists: &HostLists| {
-            lists.host == host.key && lists.revision == host.store.read(cx).thread_list_revision()
+            lists.host == host.key
+                && lists.revision == host.store.read(cx).thread_list_revision()
+                && lists.down == down(host)
         };
         if cached.len() == self.hosts.len()
             && self
@@ -945,9 +1098,21 @@ impl SessionsSidebar {
                 let kept = cached.iter().find(|lists| current(host, lists));
                 kept.cloned().unwrap_or_else(|| {
                     let store = host.store.read(cx);
+                    let revision = store.thread_list_revision();
+                    if down(host) {
+                        return HostLists {
+                            host: host.key.clone(),
+                            revision,
+                            down: true,
+                            groups: Rc::default(),
+                            flat: Rc::default(),
+                            flags: Rc::default(),
+                        };
+                    }
                     HostLists {
                         host: host.key.clone(),
-                        revision: store.thread_list_revision(),
+                        revision,
+                        down: false,
                         groups: Rc::new(store.grouped_sessions()),
                         flat: Rc::new(store.flat_sessions()),
                         flags: Rc::new(session_flags(store.sidebar_sessions(), store)),
@@ -957,6 +1122,18 @@ impl SessionsSidebar {
             .collect();
         self.thread_lists = Some(lists.clone());
         lists
+    }
+
+    /// Whether the list is over several hosts, each in its own section.
+    fn sectioned(&self) -> bool {
+        self.hosts.len() > 1
+    }
+
+    /// Whether any host the list shows holds its projects, not only a space.
+    fn full_scope(&self, cx: &App) -> bool {
+        self.hosts
+            .iter()
+            .any(|host| host.store.read(cx).scope().is_full())
     }
 
     /// The store of `host`, while the sidebar lists it.
@@ -1004,29 +1181,27 @@ impl SessionsSidebar {
             .is_some_and(|selected| selected.host == *host && selected.session_id == id)
     }
 
-    /// The rows `scope` shows, as a drag over them would leave them: each
-    /// host's in turn within each section.
+    /// The rows `scope` shows, as a drag over them would leave them, each
+    /// section of every host's merged by time ([`merged`]).
     fn thread_rows<'a>(
         &self,
         lists: &'a [HostLists],
         scope: Option<&ProjectKey>,
         shelf: &Shelf,
     ) -> ThreadRows<'a> {
-        let mut sections = no_sections();
-        for lists in lists {
-            let Some(project) = host_scope(scope, &lists.host) else {
-                continue;
-            };
-            let host = self.arranged(&lists.host, scope, project_threads(&lists.flat, project));
-            sections.pinned.extend(tagged(&lists.host, host.pinned));
-            sections.active.extend(tagged(&lists.host, host.active));
-            sections.settled.extend(tagged(&lists.host, host.settled));
-        }
+        let hosts = lists
+            .iter()
+            .filter_map(|lists| {
+                let project = host_scope(scope, &lists.host)?;
+                let host = self.arranged(&lists.host, scope, project_threads(&lists.flat, project));
+                Some(tagged_sections(&lists.host, host))
+            })
+            .collect();
         let ThreadSections {
             pinned,
             active,
             mut settled,
-        } = sections;
+        } = merged(hosts);
         let settled_count = settled.len();
         self.limit_settled_rows(shelf, &mut settled);
         ThreadRows {
@@ -1049,14 +1224,30 @@ impl SessionsSidebar {
 
     /// [`Self::grouped_rows`] with the rows a moving disclosure leaves out of
     /// the list, at a negative factor. Each host's projects follow the last
-    /// host's.
+    /// host's, under its heading when there are several.
     fn grouped_rows_folding(&self, lists: &[HostLists], cx: &App) -> Vec<(GroupedListRow, f32)> {
         let mut rows = Vec::new();
+        let sectioned = lists.len() > 1;
         for (host, of) in lists.iter().enumerate() {
             let Some(store) = self.store_of(&of.host) else {
                 continue;
             };
             let store = store.read(cx);
+            let host_collapsed = self.collapsed_hosts.contains(&of.host);
+            let host_key = fold_key(Fold::Host, host_id(&of.host));
+            if sectioned {
+                rows.push((
+                    GroupedListRow::Host {
+                        host,
+                        collapsed: host_collapsed,
+                    },
+                    1.,
+                ));
+                if !self.fold_shown(&host_key, !host_collapsed) {
+                    continue;
+                }
+            }
+            let host_start = rows.len();
             for (group, project) in of.groups.iter().enumerate() {
                 let project_id = &project.project.id;
                 let name = self.name(&of.host, project_id);
@@ -1130,6 +1321,13 @@ impl SessionsSidebar {
                 let progress = self.fold_progress(&project_key, !collapsed);
                 let count = rows.len() - start;
                 for (index, (_, factor)) in rows[start..].iter_mut().enumerate() {
+                    *factor = nested_fold(fold_factor(progress, index, count), *factor);
+                }
+            }
+            if sectioned {
+                let progress = self.fold_progress(&host_key, !host_collapsed);
+                let count = rows.len() - host_start;
+                for (index, (_, factor)) in rows[host_start..].iter_mut().enumerate() {
                     *factor = nested_fold(fold_factor(progress, index, count), *factor);
                 }
             }
@@ -1258,11 +1456,18 @@ impl SessionsSidebar {
             )),
             SidebarLayout::Grouped => {
                 let groups: usize = lists.iter().map(|lists| lists.groups.len()).sum();
-                let headers = !compact || groups > 1;
+                let sectioned = self.sectioned();
+                let headers = !compact || groups > 1 || sectioned;
                 for lists in lists.iter() {
                     let Some(store) = self.store_of(&lists.host) else {
                         continue;
                     };
+                    if sectioned {
+                        targets.push((
+                            fold_key(Fold::Host, host_id(&lists.host)),
+                            !self.collapsed_hosts.contains(&lists.host),
+                        ));
+                    }
                     for group in lists.groups.iter() {
                         let id = group.project.id.as_str();
                         let name = self.name(&lists.host, id);
@@ -1333,11 +1538,14 @@ impl SessionsSidebar {
     }
 
     /// Whether the threads are loading on every host: once one host has
-    /// them, the list shows them.
+    /// them, the list shows them. A host whose link is down in a list over
+    /// several is not loading: it shows its heading.
     fn threads_loading(&self, cx: &App) -> bool {
-        self.hosts
-            .iter()
-            .all(|host| host.store.read(cx).threads_loading())
+        let sectioned = self.sectioned();
+        self.hosts.iter().all(|host| {
+            let store = host.store.read(cx);
+            store.threads_loading() && !(sectioned && host_down(store))
+        })
     }
 
     /// The list's body: while threads load, the skeleton (or the rows still
@@ -1423,6 +1631,7 @@ impl SessionsSidebar {
         let mut sidebar = Self {
             hosts: Vec::new(),
             window_state,
+            collapsed_hosts: HashSet::new(),
             expanded_groups: HashSet::new(),
             expanded_settled: HashSet::new(),
             settled_limits: HashMap::new(),
@@ -1507,6 +1716,7 @@ impl SessionsSidebar {
             return;
         }
         let listed = |host: &HostKey| self.hosts.iter().any(|listed| listed.key == *host);
+        self.collapsed_hosts.retain(listed);
         self.expanded_groups.retain(|project| listed(&project.host));
         let shelf_listed = |shelf: &Shelf| match shelf {
             Shelf::Recent => true,
@@ -1597,6 +1807,29 @@ impl SessionsSidebar {
         if let Some(store) = self.store_of(&action.0) {
             store.update(cx, |store, cx| store.start_scratch_draft(cx));
         }
+    }
+
+    fn on_add_project(&mut self, action: &AddProject, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_project(&action.0, window, cx);
+    }
+
+    fn on_sort_projects(&mut self, action: &SortProjects, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(store) = self.store_of(&action.0) {
+            store.update(cx, |store, cx| store.cycle_project_sort(cx));
+        }
+    }
+
+    fn on_manage_hosts(&mut self, _: &ManageHosts, _: &mut Window, cx: &mut Context<Self>) {
+        self.window_state
+            .update(cx, |state, cx| state.go(Destination::Hosts, cx));
+    }
+
+    fn toggle_host(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        if !self.collapsed_hosts.remove(host) {
+            self.collapsed_hosts.insert(host.clone());
+        }
+        self.compact_model_dirty = true;
+        cx.notify();
     }
 
     fn on_start_draft_for_project(
@@ -2725,9 +2958,10 @@ impl SessionsSidebar {
             )
     }
 
-    /// The machine of `lead`, the sidebar's first host, as the control that
-    /// leads to Machines. Compact has none; Machines is the root its Back
-    /// returns to.
+    /// The control that leads to Machines: over one host, that host's
+    /// machine and how its link is; over several, whose headings say that
+    /// of each, Machines itself. Compact has none; Machines is the root its
+    /// Back returns to.
     fn render_machine_control(
         &self,
         lead: &Entity<WorkspaceStore>,
@@ -2737,27 +2971,31 @@ impl SessionsSidebar {
         let active = self.window_state.read(cx).route() == Route::Hosts;
         let store = lead.read(cx);
         let connection_state = store.connection_state();
-        let dot = cx.theme().connection_color(&connection_state);
 
         // Local, the control says "This machine" and the tooltip its name;
         // remote, the control names the machine and the tooltip the link.
-        let (name, detail): (SharedString, Option<SharedString>) = match store.remote_host_name() {
-            Some(_) => (
-                store.machine_label().into(),
-                Some(crate::remote::connection_label(&connection_state).into()),
-            ),
-            None => (
-                crate::tr!("hosts.this_computer").into_owned().into(),
-                crate::remote::local_machine_name(cx).map(SharedString::from),
-            ),
+        let (name, detail): (SharedString, Option<SharedString>) = if self.sectioned() {
+            (crate::tr!("hosts.title").into_owned().into(), None)
+        } else {
+            (
+                host_title(store),
+                match store.host_key() {
+                    HostKey::Remote(_) => {
+                        Some(crate::remote::connection_label(&connection_state).into())
+                    }
+                    HostKey::Local => crate::remote::local_machine_name(cx).map(SharedString::from),
+                },
+            )
         };
-        let dot = transition(
-            ("sidebar-hosts", "connection"),
-            dot,
-            gpui_base::motion::Transition::new(GLIDE),
-            window,
-            cx,
-        );
+        let dot = (!self.sectioned()).then(|| {
+            transition(
+                ("sidebar-hosts", "connection"),
+                cx.theme().connection_color(&connection_state),
+                gpui_base::motion::Transition::new(GLIDE),
+                window,
+                cx,
+            )
+        });
         let tooltip_name = name.clone();
         let control = Button::new("sidebar-hosts")
             .ghost()
@@ -2783,7 +3021,7 @@ impl SessionsSidebar {
                     .gap(cx.theme().tokens.spacing.sm)
                     .items_center()
                     .text_body(false, cx)
-                    .child(crate::material::status_dot(dot))
+                    .children(dot.map(crate::material::status_dot))
                     .child(
                         div()
                             .flex_1()
@@ -2834,9 +3072,8 @@ impl SessionsSidebar {
         })
     }
 
-    /// The "add project" control, for `lead`.
-    fn add_project_button(&self, lead: &HostKey, cx: &mut Context<Self>) -> Button {
-        let lead = lead.clone();
+    /// The "add project" control, which a caller points at a host.
+    fn add_project_button(&self, cx: &mut Context<Self>) -> Button {
         Button::new("add-project")
             .ghost()
             .xsmall()
@@ -2847,13 +3084,11 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground),
             )
             .tooltip(crate::tr!("sidebar.add_project"))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.add_project(&lead, window, cx);
-            }))
     }
 
-    /// The project view's header; its sort, quick chat and new project are
-    /// `lead`'s, the sidebar's first host.
+    /// The project view's header. Over one host its sort, quick chat and
+    /// new project are that host's; over several, each host's heading
+    /// carries its own.
     fn render_projects_header(
         &self,
         lead: &Entity<WorkspaceStore>,
@@ -2862,27 +3097,30 @@ impl SessionsSidebar {
         let host = lead.read(cx).host_key();
         let sort_label = crate::settings::project_sort_label(lead.read(cx).project_sort());
         let sort = lead.clone();
+        let one_host = !self.sectioned();
         bar("sidebar-projects-header", Bar::Section, false, cx)
             .items_center()
             .justify_end()
             .child(
                 h_flex()
                     .gap(cx.theme().tokens.spacing.xxs)
-                    .child(
-                        Button::new("sort-projects")
-                            .ghost()
-                            .xsmall()
-                            .compact()
-                            .icon(IconName::SortAscending)
-                            .tooltip(crate::tr!("sidebar.sort", mode = sort_label))
-                            .on_click(move |_, _, cx| {
-                                sort.update(cx, |store, cx| {
-                                    store.cycle_project_sort(cx);
-                                });
-                            }),
-                    )
+                    .when(one_host, |row| {
+                        row.child(
+                            Button::new("sort-projects")
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .icon(IconName::SortAscending)
+                                .tooltip(crate::tr!("sidebar.sort", mode = sort_label))
+                                .on_click(move |_, _, cx| {
+                                    sort.update(cx, |store, cx| {
+                                        store.cycle_project_sort(cx);
+                                    });
+                                }),
+                        )
+                    })
                     .child(self.render_layout_toggle(SidebarLayout::Grouped, cx))
-                    .when(lead.read(cx).scope().is_full(), |row| {
+                    .when(one_host && lead.read(cx).scope().is_full(), |row| {
                         let quick_chat = QuickChat(host.clone());
                         row.child(
                             Button::new("quick-chat-grouped")
@@ -2895,32 +3133,61 @@ impl SessionsSidebar {
                                     this.on_quick_chat(&quick_chat, window, cx)
                                 })),
                         )
-                        .child(self.add_project_button(&host, cx))
+                        .child(self.add_project_button(cx).on_click(cx.listener(
+                            move |this, _, window, cx| this.add_project(&host, window, cx),
+                        )))
                     }),
             )
     }
 
     /// The threads view's header. Its filter and new thread list every
-    /// host's projects; its quick chat and new project are `lead`'s.
-    fn render_flat_header(
-        &self,
-        lead: &Entity<WorkspaceStore>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let projects: Vec<(ProjectKey, tcode_core::project::Project)> = self
-            .hosts
-            .iter()
-            .flat_map(|host| {
-                host.store.read(cx).projects().into_iter().map(|project| {
-                    let key = ProjectKey {
-                        host: host.key.clone(),
-                        project_id: project.id.clone(),
-                    };
-                    (key, project)
+    /// host's projects, under each host's name when there are several, as
+    /// its new project lists the hosts that hold their projects.
+    fn render_flat_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sectioned = self.sectioned();
+        // Each host whose threads the list shows: its name, whether it holds
+        // its projects, and its projects.
+        type HostProjects = (
+            HostKey,
+            SharedString,
+            bool,
+            Vec<(ProjectKey, tcode_core::project::Project)>,
+        );
+        let hosts: Rc<Vec<HostProjects>> = Rc::new(
+            self.hosts
+                .iter()
+                .filter_map(|host| {
+                    let store = host.store.read(cx);
+                    if sectioned && host_down(store) {
+                        return None;
+                    }
+                    let projects = store
+                        .projects()
+                        .into_iter()
+                        .map(|project| {
+                            let key = ProjectKey {
+                                host: host.key.clone(),
+                                project_id: project.id.clone(),
+                            };
+                            (key, project)
+                        })
+                        .collect();
+                    Some((
+                        host.key.clone(),
+                        host_title(store),
+                        store.scope().is_full(),
+                        projects,
+                    ))
                 })
-            })
-            .collect();
+                .collect(),
+        );
+        let host_section = move |menu: crate::widgets::menu::PopupMenu, title: &SharedString| {
+            if sectioned {
+                menu.separator().label(title.clone())
+            } else {
+                menu
+            }
+        };
         let active_filter = self.project_filter.clone();
         let filter_icon_color = gpui_base::motion::transition(
             "sidebar-filter-icon",
@@ -2933,7 +3200,7 @@ impl SessionsSidebar {
             window,
             cx,
         );
-        let filter_projects = projects.clone();
+        let filter_hosts = hosts.clone();
         let filter_for_menu = active_filter.clone();
         let filter_button = Button::new("filter-sidebar-project")
             .ghost()
@@ -2947,23 +3214,25 @@ impl SessionsSidebar {
                     filter_for_menu.is_none(),
                     Box::new(FilterProject(None)),
                 );
-                for (key, project) in &filter_projects {
-                    menu = menu.menu_with_check(
-                        project.name.clone(),
-                        filter_for_menu.as_ref() == Some(key),
-                        Box::new(FilterProject(Some(key.clone()))),
-                    );
+                for (_, title, _, projects) in filter_hosts.iter() {
+                    menu = host_section(menu, title);
+                    for (key, project) in projects {
+                        menu = menu.menu_with_check(
+                            project.name.clone(),
+                            filter_for_menu.as_ref() == Some(key),
+                            Box::new(FilterProject(Some(key.clone()))),
+                        );
+                    }
                 }
                 menu
             });
 
-        let draft_project = active_filter
-            .as_ref()
-            .and_then(|filter| projects.iter().find(|(key, _)| key == filter))
-            .cloned()
-            .or_else(|| (projects.len() == 1).then(|| projects[0].clone()));
-        let lead_key = lead.read(cx).host_key();
-        let full_scope = lead.read(cx).scope().is_full();
+        let mut projects = hosts.iter().flat_map(|(_, _, _, projects)| projects);
+        let draft_project = match &active_filter {
+            Some(filter) => projects.find(|(key, _)| key == filter),
+            None => projects.next().filter(|_| projects.next().is_none()),
+        }
+        .cloned();
         let new_thread = if let Some((key, project)) = draft_project {
             let cwd = project.root;
             Button::new("new-flat-thread")
@@ -2981,8 +3250,7 @@ impl SessionsSidebar {
                 }))
                 .into_any_element()
         } else {
-            let draft_projects = projects.clone();
-            let quick_chat = lead_key.clone();
+            let draft_hosts = hosts.clone();
             Button::new("new-flat-thread")
                 .ghost()
                 .xsmall()
@@ -2990,21 +3258,53 @@ impl SessionsSidebar {
                 .icon(IconName::Plus)
                 .tooltip(crate::tr!("sidebar.create_thread"))
                 .dropdown_menu(move |menu, _window, _cx| {
-                    let mut menu = menu.when(full_scope, |menu| {
-                        menu.menu(
-                            crate::tr!("sidebar.quick_chat"),
-                            Box::new(QuickChat(quick_chat.clone())),
-                        )
-                    });
-                    for (key, project) in &draft_projects {
-                        menu = menu.menu(
-                            project.name.clone(),
-                            Box::new(StartDraftForProject(key.clone())),
-                        );
+                    let mut menu = menu;
+                    for (host, title, full, projects) in draft_hosts.iter() {
+                        menu = host_section(menu, title).when(*full, |menu| {
+                            menu.menu(
+                                crate::tr!("sidebar.quick_chat"),
+                                Box::new(QuickChat(host.clone())),
+                            )
+                        });
+                        for (key, project) in projects {
+                            menu = menu.menu(
+                                project.name.clone(),
+                                Box::new(StartDraftForProject(key.clone())),
+                            );
+                        }
                     }
                     menu
                 })
                 .into_any_element()
+        };
+
+        let full: Vec<(HostKey, SharedString)> = hosts
+            .iter()
+            .filter(|(_, _, full, _)| *full)
+            .map(|(host, title, _, _)| (host.clone(), title.clone()))
+            .collect();
+        let add_project = match full.as_slice() {
+            [] => None,
+            // Over several hosts the menu names the host before it is asked.
+            [(host, _)] if !sectioned => {
+                let host = host.clone();
+                Some(
+                    self.add_project_button(cx)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.add_project(&host, window, cx)
+                        }))
+                        .into_any_element(),
+                )
+            }
+            _ => Some(
+                self.add_project_button(cx)
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        full.iter().fold(menu, |menu, (host, title)| {
+                            menu.menu(title.clone(), Box::new(AddProject(host.clone())))
+                        })
+                    })
+                    .into_any_element(),
+            ),
         };
 
         bar("sidebar-flat-header", Bar::Section, false, cx)
@@ -3016,9 +3316,7 @@ impl SessionsSidebar {
                     .child(filter_button)
                     .child(self.render_layout_toggle(SidebarLayout::Flat, cx))
                     .child(new_thread)
-                    .when(full_scope, |row| {
-                        row.child(self.add_project_button(&lead_key, cx))
-                    }),
+                    .children(add_project),
             )
     }
 
@@ -3212,6 +3510,179 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
+    /// The parts of `host`'s heading every layout draws: its link's dot,
+    /// how the link is while it is not up, Pair again while the host refuses
+    /// this device, and the menu of its actions.
+    fn host_heading_parts(
+        &self,
+        host: &HostKey,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<HostHeadingParts> {
+        let store = self.store_of(host)?;
+        let store = store.read(cx);
+        let state = store.connection_state();
+        let failure = crate::remote::connection_failure(state.clone());
+        let up = failure.is_none();
+        let title = host_title(store);
+        let menu = HostMenu {
+            host: host.clone(),
+            projects: (up && store.scope().is_full()).then(|| {
+                store
+                    .projects()
+                    .into_iter()
+                    .map(|project| {
+                        let key = ProjectKey {
+                            host: host.clone(),
+                            project_id: project.id,
+                        };
+                        (key, project.name)
+                    })
+                    .collect()
+            }),
+            sort: up.then(|| crate::settings::project_sort_label(store.project_sort())),
+        };
+        let status = (!matches!(
+            state,
+            tcode_client::ConnectionState::Connected { .. }
+                | tcode_client::ConnectionState::Syncing { .. }
+        ))
+        .then(|| crate::remote::connection_label(&state));
+        let refused = failure == Some(tcode_client::ConnectionFailure::AuthenticationRejected);
+        let id = host_id(host);
+        let part = |part: &str| SharedString::from(format!("host-{part}-{id}"));
+        let dot = transition(
+            (part("dot"), "connection"),
+            cx.theme().connection_color(&state),
+            gpui_base::motion::Transition::new(GLIDE),
+            window,
+            cx,
+        );
+        let status_id = part("status");
+        let status =
+            crate::motion::shown(status_id.clone(), status, SHOW, window, cx).map(|shown| {
+                shown.fold(
+                    div()
+                        .debug_selector(move || status_id.to_string())
+                        .text_secondary(compact, cx)
+                        .overflow_hidden()
+                        .child(crate::widgets::fade_text(shown.value.clone())),
+                )
+            });
+        let pair = crate::motion::shown(part("pair"), refused.then_some(()), SHOW, window, cx).map(
+            |shown| {
+                let pair_id = part("pair-again");
+                shown.fade(
+                    Button::new(pair_id.clone())
+                        .debug_selector(move || pair_id.to_string())
+                        .primary()
+                        .xsmall()
+                        .compact()
+                        .label(crate::tr!("hosts.pair_again"))
+                        // A new pairing needs a new invitation from the machine.
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.window_state
+                                .update(cx, |state, cx| state.go(Destination::Pair, cx));
+                        })),
+                )
+            },
+        );
+        let menu_id = gpui::ElementId::from(part("menu"));
+        let (menu_focus, menu_focused) =
+            crate::motion::focus_ring::focus_reveal(&menu_id, true, window, cx);
+        let reveal = if compact {
+            1.
+        } else {
+            self.hover_progress(&format!("host-{id}"), window, cx)
+                .max(menu_focused)
+        };
+        let menu = Button::new(menu_id)
+            .track_focus(&menu_focus)
+            .ghost()
+            .xsmall()
+            .icon(Icon::new(IconName::Ellipsis).text_color(cx.theme().muted_foreground))
+            .aria_label(crate::tr!("hosts.actions", name = title.clone()))
+            // Opacity keeps the button a tab stop, as a project's "+" does.
+            .opacity(reveal)
+            .dropdown_menu(move |popup, _, _| menu.build(popup))
+            .touch(compact);
+        Some(HostHeadingParts {
+            title,
+            dot,
+            status,
+            pair,
+            // The heading must not arm its own press before the menu opens.
+            menu: div()
+                .flex_none()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(menu)
+                .into_any_element(),
+        })
+    }
+
+    /// The heading of `host`'s section of a list over several hosts.
+    /// `collapsed` is `None` where nothing under it folds.
+    fn render_host_heading(
+        &self,
+        host: &HostKey,
+        collapsed: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(parts) = self.host_heading_parts(host, false, window, cx) else {
+            return div().into_any_element();
+        };
+        let id = host_id(host).to_owned();
+        let group = format!("host-{id}");
+        let toggle = host.clone();
+        let heading = selectable_row(
+            crate::material::accessible_clickable(
+                h_flex(),
+                SharedString::from(format!("host-heading-{id}")),
+                Role::Button,
+                crate::tr!("sidebar.host", name = parts.title.clone()),
+                cx,
+            ),
+            false,
+            false,
+            cx,
+        )
+        .debug_selector({
+            let id = id.clone();
+            move || format!("host-heading-{id}")
+        })
+        .text_body(false, cx)
+        .when_some(collapsed, |heading, collapsed| {
+            heading
+                .aria_expanded(!collapsed)
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_host(&toggle, cx)))
+                .child(collapse_chevron(
+                    self.fold_progress(&fold_key(Fold::Host, &id), !collapsed),
+                    cx,
+                ))
+        })
+        .child(crate::material::status_dot(parts.dot))
+        .child(
+            sidebar_label(parts.title)
+                .font_semibold()
+                .text_color(cx.theme().sidebar_foreground),
+        )
+        .children(parts.pair)
+        .child(parts.menu);
+        v_flex()
+            .w_full()
+            .child(self.track_hover(heading, &group))
+            .children(
+                parts
+                    .status
+                    .map(|status| div().pl(px(THREAD_INDENT)).pr_2().child(status)),
+            )
+            .into_any_element()
+    }
+
     fn render_grouped_row(
         &self,
         index: usize,
@@ -3229,6 +3700,10 @@ impl SessionsSidebar {
             (of, &of.groups[*group].project)
         };
         match row {
+            GroupedListRow::Host { host, collapsed } => item
+                .when(index > 0, |item| item.pt(cx.theme().tokens.spacing.sm))
+                .child(self.render_host_heading(&lists[*host].host, Some(*collapsed), window, cx))
+                .into_any_element(),
             GroupedListRow::Project {
                 host,
                 group,
@@ -4257,6 +4732,7 @@ impl SessionsSidebar {
         listed: &ListedThread,
         flags: &HashMap<String, ThreadFlags>,
         project_name: Option<String>,
+        host_name: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -4407,8 +4883,22 @@ impl SessionsSidebar {
                     .child(sidebar_label(project_name))
                 })
                 // Without a project label there is no flex-1 element on the
-                // line, so a spacer keeps the worktree glyph bottom-right.
+                // line, so a spacer keeps the host and worktree glyph
+                // bottom-right.
                 .when(!has_project, |line| line.child(div().flex_1()))
+                .when_some(host_name, |line, host| {
+                    line.child(
+                        div()
+                            .debug_selector({
+                                let name = name.clone();
+                                move || format!("flat-host-{name}")
+                            })
+                            .min_w_0()
+                            .max_w(gpui::relative(0.5))
+                            .overflow_hidden()
+                            .child(crate::widgets::fade_text(host)),
+                    )
+                })
                 .when(meta.worktree.is_some(), |line| {
                     line.child(
                         Icon::empty()
@@ -4714,6 +5204,14 @@ impl SessionsSidebar {
                 .flatten()
                 .collect();
             let group_count: usize = hosts.iter().map(|(_, _, groups)| groups.len()).sum();
+            let sectioned = self.sectioned();
+            let host_row = |host: &HostKey, collapsed| {
+                CompactListRow::Host(CompactHostRow {
+                    host: host.clone(),
+                    row_id: format!("compact-host-{}", host_id(host)).into(),
+                    collapsed,
+                })
+            };
 
             let mut rows = Vec::new();
             let mut folds: Vec<f32> = Vec::new();
@@ -4754,6 +5252,7 @@ impl SessionsSidebar {
                     } else {
                         project_view_timestamp(meta)
                     };
+                    let host_name = (recent && sectioned).then(|| host_title(store.read(cx)));
                     rows.push(CompactListRow::Thread(Rc::new(CompactThreadRow {
                         title: meta.title.clone().into(),
                         row_id: format!("compact-thread-row-{}", listed.name).into(),
@@ -4766,6 +5265,7 @@ impl SessionsSidebar {
                         state,
                         meta: meta.clone(),
                         project_name,
+                        host_name,
                         separator: index != last,
                     })));
                 }
@@ -4774,18 +5274,24 @@ impl SessionsSidebar {
             if layout == SidebarLayout::Flat {
                 let key = "recent";
                 let shelf = Shelf::Recent;
-                let mut sections = no_sections();
-                for (host, sessions, _) in &hosts {
-                    let host_sections = project_threads(sessions, None);
-                    sections.pinned.extend(tagged(host, host_sections.pinned));
-                    sections.active.extend(tagged(host, host_sections.active));
-                    sections.settled.extend(tagged(host, host_sections.settled));
-                }
+                rows.extend(
+                    lists
+                        .iter()
+                        .filter(|lists| lists.down)
+                        .map(|lists| host_row(&lists.host, None)),
+                );
                 let ThreadSections {
                     pinned,
                     active,
                     settled,
-                } = sections;
+                } = merged(
+                    hosts
+                        .iter()
+                        .map(|(host, sessions, _)| {
+                            tagged_sections(host, project_threads(sessions, None))
+                        })
+                        .collect(),
+                );
                 let pinned_and_active_empty = pinned.is_empty() && active.is_empty();
                 // A phone has no hover to reveal section labels, so they stay.
                 if !pinned.is_empty() {
@@ -4834,6 +5340,17 @@ impl SessionsSidebar {
                 }
             } else {
                 for (host, _, groups) in &hosts {
+                    let host_collapsed = self.collapsed_hosts.contains(host);
+                    let host_key = fold_key(Fold::Host, host_id(host));
+                    if sectioned {
+                        folds.resize(rows.len(), 1.);
+                        rows.push(host_row(host, Some(host_collapsed)));
+                        folds.push(1.);
+                        if !self.fold_shown(&host_key, !host_collapsed) {
+                            continue;
+                        }
+                    }
+                    let host_start = rows.len();
                     for group in groups {
                         let project = ProjectKey {
                             host: host.clone(),
@@ -4842,7 +5359,7 @@ impl SessionsSidebar {
                         let name = self.name(host, &group.project.id).into_owned();
                         let key = name.as_str();
                         let count = group.sessions.len();
-                        let has_header = group_count > 1 || group.project.quick_chat;
+                        let has_header = sectioned || group_count > 1 || group.project.quick_chat;
                         let collapsed = has_header && collapsed_projects.contains(&project);
                         let start = rows.len();
                         let project_key = fold_key(Fold::Project, key);
@@ -4907,6 +5424,14 @@ impl SessionsSidebar {
                                     collapsed,
                                 }),
                             );
+                        }
+                    }
+                    if sectioned {
+                        folds.resize(rows.len(), 1.);
+                        let progress = self.fold_progress(&host_key, !host_collapsed);
+                        let count = rows.len() - host_start;
+                        for (index, factor) in folds[host_start..].iter_mut().enumerate() {
+                            *factor = nested_fold(fold_factor(progress, index, count), *factor);
                         }
                     }
                 }
@@ -4990,7 +5515,7 @@ impl SessionsSidebar {
             self.compact_model = Some(Rc::new(CompactListModel {
                 rows,
                 folds,
-                has_projects: group_count > 0,
+                has_rows: group_count > 0 || sectioned,
                 locale: locale.to_string(),
                 minute: now / 60,
             }));
@@ -5099,6 +5624,7 @@ impl SessionsSidebar {
                 self.render_settled_more(shelf, *count, cx)
             }
             CompactListRow::Empty { .. } => self.render_active_empty(cx),
+            CompactListRow::Host(row) => self.render_compact_host_heading(row, window, cx),
             CompactListRow::Project(row) => self
                 .render_compact_group_header(row, window, cx)
                 .into_any_element(),
@@ -5125,15 +5651,10 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
-    fn render_compact(
-        &mut self,
-        lead: &Entity<WorkspaceStore>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         #[cfg(test)]
         self.compact_rows_rendered.set(0);
-        let full_scope = lead.read(cx).scope().is_full();
+        let full_scope = self.full_scope(cx);
         self.tidy_row_swipes(cx);
         let model = self.compact_model(Some(window), cx);
         let layout = crate::device::DevicePreferences::sidebar_layout(cx);
@@ -5142,12 +5663,12 @@ impl SessionsSidebar {
                 // The empty page fades in where the last project's list was.
                 let empty = crate::motion::shown(
                     "threads-empty",
-                    (!model.has_projects).then_some(()),
+                    (!model.has_rows).then_some(()),
                     SHOW,
                     window,
                     cx,
                 );
-                if let Some(empty) = empty.filter(|_| !model.has_projects) {
+                if let Some(empty) = empty.filter(|_| !model.has_rows) {
                     div()
                         .id("threads-empty")
                         .opacity(empty.progress())
@@ -5301,6 +5822,11 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_arrange))
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_start_draft_for_project))
+            .on_action(cx.listener(Self::on_quick_chat))
+            .on_action(cx.listener(Self::on_add_project))
+            .on_action(cx.listener(Self::on_sort_projects))
+            .on_action(cx.listener(Self::on_manage_hosts))
             .child(self.render_compact_search(cx))
             .child(
                 bar("compact-layout-bar", Bar::Section, true, cx)
@@ -5337,6 +5863,69 @@ impl SessionsSidebar {
                 true,
                 cx,
             ))
+    }
+
+    /// A host's heading in the phone's list over several hosts: a section's
+    /// caption, at body size since projects are captions under it.
+    fn render_compact_host_heading(
+        &self,
+        row: &CompactHostRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(parts) = self.host_heading_parts(&row.host, true, window, cx) else {
+            return div().into_any_element();
+        };
+        let id = host_id(&row.host).to_owned();
+        let toggle = row.host.clone();
+        let spacing = &cx.theme().tokens.spacing;
+        let heading = crate::material::accessible_clickable(
+            h_flex(),
+            row.row_id.clone(),
+            Role::Button,
+            crate::tr!("sidebar.host", name = parts.title.clone()),
+            cx,
+        )
+        .debug_selector({
+            let id = id.clone();
+            move || format!("compact-host-{id}")
+        })
+        .w_full()
+        .items_center()
+        .gap(spacing.sm)
+        .text_body(true, cx)
+        .font_semibold()
+        .child(crate::material::status_dot(parts.dot))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .child(crate::widgets::fade_text(parts.title)),
+        )
+        .children(parts.pair)
+        .child(parts.menu)
+        .when_some(row.collapsed, |heading, collapsed| {
+            heading
+                .aria_expanded(!collapsed)
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_host(&toggle, cx)))
+                .child(
+                    collapse_chevron(
+                        self.fold_progress(&fold_key(Fold::Host, &id), !collapsed),
+                        cx,
+                    )
+                    .text_color(cx.theme().foreground),
+                )
+        });
+        v_flex()
+            .w_full()
+            .px(px(COMPACT_PAGE_INSET))
+            .pt(spacing.lg)
+            .pb(spacing.xs)
+            .child(heading)
+            .children(parts.status)
+            .into_any_element()
     }
 
     fn render_compact_group_header(
@@ -5594,6 +6183,15 @@ impl SessionsSidebar {
                                 )
                                 .child(div().flex_none().child("·"))
                             })
+                            .when_some(cached.host_name.clone(), |line, host| {
+                                line.child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(crate::widgets::fade_text(host)),
+                                )
+                                .child(div().flex_none().child("·"))
+                            })
                             .children(status)
                             .when_some(keeps_going(state), |line, keeps| {
                                 line.child(div().flex_none().whitespace_nowrap().child(keeps))
@@ -5772,7 +6370,7 @@ impl SessionsSidebar {
     ) -> (gpui::AnyElement, gpui::AnyElement) {
         let mut rows = self.grouped_rows_folding(&lists, cx);
         if lists.iter().all(|lists| lists.groups.is_empty()) {
-            let hint = if lead.read(cx).scope().is_full() {
+            let hint = if self.full_scope(cx) {
                 crate::tr!("sidebar.empty")
             } else {
                 crate::tr!("member.empty_description")
@@ -5873,7 +6471,6 @@ impl SessionsSidebar {
     /// The Flat layout's header and list.
     fn render_flat_layout(
         &mut self,
-        lead: &Entity<WorkspaceStore>,
         lists: ThreadLists,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -5886,7 +6483,11 @@ impl SessionsSidebar {
             settled_count,
             settled_hidden_count,
         } = self.thread_rows(&lists, scope.as_ref(), &Shelf::Recent);
-        let mut visible = Vec::new();
+        let mut visible: Vec<FlatListRow> = lists
+            .iter()
+            .filter(|lists| lists.down)
+            .map(|lists| FlatListRow::Host(lists.host.clone()))
+            .collect();
         for (section, rows) in [
             (ThreadSection::Pinned, &pinned),
             (ThreadSection::Active, &active),
@@ -5904,7 +6505,7 @@ impl SessionsSidebar {
             // An active project filter can empty the list while threads
             // exist; that state gets its own hint, not the no-projects one.
             let no_threads = lists.iter().all(|lists| lists.flat.is_empty());
-            let hint = if !lead.read(cx).scope().is_full() && no_threads {
+            let hint = if !self.full_scope(cx) && no_threads {
                 if self
                     .hosts
                     .iter()
@@ -6047,7 +6648,7 @@ impl SessionsSidebar {
         .min_h_0()
         .into_any_element();
         (
-            self.render_flat_header(lead, window, cx).into_any_element(),
+            self.render_flat_header(window, cx).into_any_element(),
             v_flex()
                 .id("flat-thread-list")
                 .flex_1()
@@ -6089,6 +6690,14 @@ impl SessionsSidebar {
         };
         let scope = frame.scope.clone();
         let listed = match row {
+            FlatListRow::Host(host) => {
+                return div()
+                    .w_full()
+                    .px_2()
+                    .pb(px(2.))
+                    .child(self.render_host_heading(host, None, window, cx))
+                    .into_any_element();
+            }
             FlatListRow::Thread(listed) => listed,
             FlatListRow::Boundary(section, empty) => {
                 return div()
@@ -6137,7 +6746,12 @@ impl SessionsSidebar {
         let Some(of) = frame.lists.iter().find(|lists| lists.host == listed.host) else {
             return div().into_any_element();
         };
-        let thread = self.render_flat_thread(listed, &of.flags, project_name, window, cx);
+        let host_name = self
+            .store_of(&listed.host)
+            .filter(|_| self.sectioned())
+            .map(|store| host_title(store.read(cx)));
+        let thread =
+            self.render_flat_thread(listed, &of.flags, project_name, host_name, window, cx);
         let row = div().w_full().px_2().pb(px(2.)).child(drag_ghost::slot(
             arrange::thread_slot(&listed.name),
             thread,
@@ -6175,7 +6789,7 @@ impl Render for SessionsSidebar {
             host.spaces_observer.watch(spaces.as_ref(), cx);
         }
         if self.compact(cx) {
-            return self.render_compact(&lead, window, cx);
+            return self.render_compact(window, cx);
         }
 
         let layout = crate::device::DevicePreferences::sidebar_layout(cx);
@@ -6202,7 +6816,7 @@ impl Render for SessionsSidebar {
             lists.push((0, v_flex().size_full().child(list).into_any_element()));
         }
         if fade.shows(1) {
-            let (header, list) = self.render_flat_layout(&lead, thread_lists, window, cx);
+            let (header, list) = self.render_flat_layout(thread_lists, window, cx);
             headers.push((1, header));
             lists.push((1, v_flex().size_full().child(list).into_any_element()));
         }
@@ -6261,6 +6875,9 @@ impl Render for SessionsSidebar {
         .on_action(cx.listener(Self::on_filter_project))
         .on_action(cx.listener(Self::on_start_draft_for_project))
         .on_action(cx.listener(Self::on_quick_chat))
+        .on_action(cx.listener(Self::on_add_project))
+        .on_action(cx.listener(Self::on_sort_projects))
+        .on_action(cx.listener(Self::on_manage_hosts))
         .on_action(cx.listener(Self::on_toggle_share))
         .on_action(cx.listener(Self::on_new_space_and_share))
         .child(self.render_app_row(window, cx))
@@ -6545,6 +7162,88 @@ mod tests {
         }
     }
 
+    /// A host of its own holding `threads` (id and last activity) in one
+    /// project at a fresh root, and a store over it as `attachment` names it.
+    struct TestHost {
+        store: Entity<WorkspaceStore>,
+        driver: crate::store::tests::LocalHostDriver,
+        host: tcode_runtime::pipe::SpawnedHost,
+        root: PathBuf,
+    }
+
+    impl TestHost {
+        fn spawn(
+            cx: &mut TestAppContext,
+            name: &str,
+            attachment: crate::store::WorkspaceAttachment,
+            threads: &[(&str, u64)],
+        ) -> Self {
+            let root = crate::store::tests::scratch_root(name);
+            let session_store = SessionStore::open_at(root.clone()).unwrap();
+            let project = Project::from_root(root.clone());
+            let sessions: Vec<SessionMeta> = threads
+                .iter()
+                .map(|(id, at)| {
+                    let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+                    meta.project_id = Some(project.id.clone());
+                    meta.id = (*id).into();
+                    meta.title = (*id).into();
+                    meta.created_at = *at;
+                    meta.updated_at = *at;
+                    meta
+                })
+                .collect();
+            let host = spawn_host(session_store, HostServices::default())
+                .expect("spawn sidebar test host");
+            smol::block_on(host.update_state_for_test(move |state, _| {
+                state.projects = vec![project];
+                state.sessions = sessions.into();
+            }))
+            .expect("seed sidebar host");
+            let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+            let store = cx.new(|cx| {
+                WorkspaceStore::new_attached(driver.link.clone(), attachment, None, None, cx)
+            });
+            driver.wait_until(cx, &store, "sidebar baseline", |cx| {
+                store.read_with(cx, |store, _| store.baseline_ready())
+            });
+            Self {
+                store,
+                driver,
+                host,
+                root,
+            }
+        }
+
+        /// A machine of its own, `host_id`, to the client.
+        fn remote(cx: &mut TestAppContext, host_id: &str, threads: &[(&str, u64)]) -> Self {
+            let attachment = crate::store::WorkspaceAttachment::Remote {
+                host_id: host_id.into(),
+                host_name: format!("{host_id} name"),
+            };
+            Self::spawn(cx, &format!("sidebar-{host_id}"), attachment, threads)
+        }
+
+        /// Session ids in the order the host lists them.
+        fn listed(&self, cx: &mut TestAppContext) -> Vec<String> {
+            self.store.read_with(cx, |store, _| {
+                store
+                    .flat_sessions()
+                    .iter()
+                    .map(|meta| meta.id.clone())
+                    .collect()
+            })
+        }
+
+        fn shutdown(mut self, cx: &mut TestAppContext) {
+            self.driver
+                .link
+                .set_connection_state(tcode_client::ConnectionState::Connected { path: None });
+            self.driver.shutdown(cx, &self.store, &self.host);
+            let _ = std::fs::remove_dir_all(self.root);
+        }
+    }
+
     /// A local host holding `threads` (newest first) in one project, and a
     /// desktop sidebar over it in a window, with motion on.
     fn sidebar_over_host(
@@ -6560,46 +7259,52 @@ mod tests {
         PathBuf,
     ) {
         cx.update(crate::theme::init);
-        let root = crate::store::tests::scratch_root(name);
-        let session_store = SessionStore::open_at(root.clone()).unwrap();
-        let project = Project::from_root(root.clone());
-        let sessions: Vec<SessionMeta> = threads
+        let threads: Vec<(&str, u64)> = threads
             .iter()
             .enumerate()
-            .map(|(index, id)| {
-                let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
-                meta.project_id = Some(project.id.clone());
-                meta.id = (*id).into();
-                meta.title = (*id).into();
-                meta.created_at = 1_000 - index as u64;
-                meta.updated_at = meta.created_at;
-                meta
-            })
+            .map(|(index, id)| (*id, 1_000 - index as u64))
             .collect();
-        let host =
-            spawn_host(session_store, HostServices::default()).expect("spawn sidebar test host");
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.projects = vec![project];
-            state.sessions = sessions.into();
-        }))
-        .expect("seed sidebar host");
-        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
-        let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                crate::store::WorkspaceAttachment::Local,
-                None,
-                None,
-                cx,
-            )
-        });
-        driver.wait_until(cx, &store, "sidebar baseline", |cx| {
-            store.read_with(cx, |store, _| store.baseline_ready())
-        });
+        let TestHost {
+            store,
+            driver,
+            host,
+            root,
+        } = TestHost::spawn(cx, name, crate::store::WorkspaceAttachment::Local, &threads);
         let window_state = cx.new(|_| WindowState::default());
         let sidebar =
             cx.new(|cx| SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx));
         (sidebar, store, window_state, driver, host, root)
+    }
+
+    /// A desktop sidebar over two machines, `host-a` holding `a` and
+    /// `host-b` holding `b`, drawn in a window of `height` in `layout`.
+    fn sidebar_over_two_hosts<'a>(
+        cx: &'a mut TestAppContext,
+        layout: SidebarLayout,
+        a: &[(&str, u64)],
+        b: &[(&str, u64)],
+        height: f32,
+    ) -> (
+        Entity<SessionsSidebar>,
+        Entity<WindowState>,
+        TestHost,
+        TestHost,
+        &'a mut VisualTestContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| crate::device::DevicePreferences::set_sidebar_layout(layout, cx));
+        let (a, b) = (
+            TestHost::remote(cx, "host-a", a),
+            TestHost::remote(cx, "host-b", b),
+        );
+        let window_state = cx.new(|_| WindowState::default());
+        let stores = vec![a.store.clone(), b.store.clone()];
+        let sidebar = cx.new(|cx| SessionsSidebar::new(stores, window_state.clone(), cx));
+        let (_, cx) =
+            cx.add_window_view(|window, cx| gpui_base::Root::new(sidebar.clone(), window, cx));
+        cx.simulate_resize(size(px(320.), px(height)));
+        crate::test_frames::draw_settled(cx);
+        (sidebar, window_state, a, b, cx)
     }
 
     /// A thread that moves in the list (pinned here) is drawn where it was,
@@ -9873,5 +10578,328 @@ mod tests {
             ]
         );
         driver.link.close();
+    }
+
+    /// Over two machines the project view lists each under its heading,
+    /// host › project › thread. A thread id both hosts use is a row under
+    /// each, and choosing one shows it on its own host; a heading shuts its
+    /// own host's section alone, on the desktop and the phone alike.
+    #[gpui::test]
+    fn two_hosts_list_their_projects_and_threads_under_their_headings(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let (_, window_state, a, b, cx) = sidebar_over_two_hosts(
+            cx,
+            SidebarLayout::Grouped,
+            &[("shared", 300), ("a-only", 200)],
+            &[("shared", 250), ("b-only", 100)],
+            800.,
+        );
+        let project = |host: &TestHost, cx: &mut VisualTestContext| {
+            host.store
+                .read_with(cx, |store, _| store.projects()[0].id.clone())
+        };
+        let (project_a, project_b) = (project(&a, cx), project(&b, cx));
+        let drawn = |selector: &str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(selector.to_owned().leak())
+        };
+        let order = [
+            "host-heading-host-a".to_owned(),
+            format!("project-header-host-a/{project_a}"),
+            "sidebar-thread-host-a/shared".into(),
+            "sidebar-thread-host-a/a-only".into(),
+            "host-heading-host-b".into(),
+            format!("project-header-host-b/{project_b}"),
+            "sidebar-thread-host-b/shared".into(),
+            "sidebar-thread-host-b/b-only".into(),
+        ];
+        let tops: Vec<_> = order
+            .iter()
+            .map(|selector| {
+                drawn(selector, cx)
+                    .unwrap_or_else(|| panic!("{selector} is drawn"))
+                    .top()
+            })
+            .collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "{order:?} lie in that order: {tops:?}"
+        );
+
+        let shown = Rc::new(std::cell::RefCell::new(Vec::new()));
+        for (host, store) in [("host-a", &a.store), ("host-b", &b.store)] {
+            let shown = shown.clone();
+            cx.update(|_, cx| {
+                cx.subscribe(store, move |_, event: &crate::store::ShowThread, _| {
+                    shown.borrow_mut().push((host, event.session_id.clone()));
+                })
+                .detach()
+            });
+        }
+        let row = drawn("sidebar-thread-host-b/shared", cx).unwrap();
+        cx.simulate_click(row.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(*shown.borrow(), [("host-b", "shared".to_owned())]);
+
+        let heading = drawn("host-heading-host-a", cx).unwrap();
+        cx.simulate_click(heading.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        for selector in &order[1..4] {
+            assert!(drawn(selector, cx).is_none(), "{selector} folds away");
+        }
+        for selector in order.iter().take(1).chain(&order[4..]) {
+            assert!(drawn(selector, cx).is_some(), "{selector} stays");
+        }
+
+        // The phone's list has the same sections, and the same one is shut.
+        window_state.update(cx, |state, cx| state.set_compact(true, cx));
+        crate::test_frames::draw_settled(cx);
+        let compact = [
+            "compact-host-host-a",
+            "compact-host-host-b",
+            "compact-row-host-b/shared",
+            "compact-row-host-b/b-only",
+        ];
+        let tops: Vec<_> = compact
+            .iter()
+            .map(|selector| {
+                drawn(selector, cx)
+                    .unwrap_or_else(|| panic!("{selector} is drawn"))
+                    .top()
+            })
+            .collect();
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "{compact:?} lie in that order: {tops:?}"
+        );
+        assert!(drawn("compact-row-host-a/shared", cx).is_none());
+        let heading = drawn("compact-host-host-a", cx).unwrap();
+        cx.simulate_click(heading.center(), gpui::Modifiers::default());
+        crate::test_frames::draw_settled(cx);
+        let opened = drawn("compact-row-host-a/shared", cx).expect("host A's section opens");
+        assert!(
+            heading.top() < opened.top() && opened.top() < drawn(compact[1], cx).unwrap().top()
+        );
+
+        a.shutdown(cx);
+        b.shutdown(cx);
+    }
+
+    /// Over two machines the threads view lists their threads by time, each
+    /// row naming its host. A thread carried over another host's row lands
+    /// among its own host's rows, after those above that row; only its host
+    /// is asked to move it, and the list keeps each host's order after.
+    #[gpui::test]
+    fn a_thread_carried_over_another_hosts_row_lands_among_its_own(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        let (_, _, mut a, mut b, cx) = sidebar_over_two_hosts(
+            cx,
+            SidebarLayout::Flat,
+            &[("a1", 300), ("a2", 250), ("a3", 100)],
+            &[("b1", 280), ("b2", 200)],
+            800.,
+        );
+        let row = |id: &str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(format!("sidebar-thread-{id}").leak())
+                .unwrap_or_else(|| panic!("{id} is drawn"))
+        };
+        let drawn = |cx: &mut VisualTestContext| {
+            let mut rows: Vec<_> = [
+                "host-a/a1",
+                "host-a/a2",
+                "host-a/a3",
+                "host-b/b1",
+                "host-b/b2",
+            ]
+            .into_iter()
+            .map(|id| (row(id, cx).top(), id))
+            .collect();
+            rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            rows.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            drawn(cx),
+            [
+                "host-a/a1",
+                "host-b/b1",
+                "host-a/a2",
+                "host-b/b2",
+                "host-a/a3"
+            ]
+        );
+        assert!(
+            cx.debug_bounds("flat-host-host-b/b1").is_some(),
+            "a row names its host"
+        );
+
+        let (left, none) = (gpui::MouseButton::Left, gpui::Modifiers::default());
+        let frame = |cx: &mut VisualTestContext| {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            draw(cx);
+        };
+        let (from, over) = (row("host-a/a3", cx), row("host-b/b1", cx));
+        cx.simulate_mouse_down(from.center(), left, none);
+        cx.simulate_mouse_move(from.center() + gpui::point(px(0.), px(8.)), left, none);
+        draw(cx);
+        let to = gpui::point(over.center().x, over.top() + px(4.));
+        cx.simulate_mouse_move(to, left, none);
+        for _ in 0..20 {
+            frame(cx);
+        }
+        cx.simulate_mouse_up(to, left, none);
+        draw(cx);
+        let store = a.store.clone();
+        a.driver.wait_until(cx, &store, "the move", |cx| {
+            store.read_with(cx, |store, _| {
+                store
+                    .flat_sessions()
+                    .iter()
+                    .map(|meta| meta.id.as_str())
+                    .eq(["a1", "a3", "a2"])
+            })
+        });
+        let store = b.store.clone();
+        b.driver.step(cx, &store);
+        assert_eq!(b.listed(cx), ["b1", "b2"]);
+        assert!(
+            b.store.read_with(cx, |store, _| store
+                .flat_sessions()
+                .iter()
+                .all(|meta| meta.active_order.is_none() && meta.pinned_at.is_none())),
+            "the other host is not asked to move anything"
+        );
+        crate::test_frames::draw_settled(cx);
+        assert_eq!(
+            drawn(cx),
+            [
+                "host-a/a1",
+                "host-b/b1",
+                "host-b/b2",
+                "host-a/a3",
+                "host-a/a2"
+            ],
+            "host A's arranged order holds among host B's rows by time"
+        );
+
+        a.shutdown(cx);
+        b.shutdown(cx);
+    }
+
+    /// One host's link going down leaves the other host's rows alone: their
+    /// keys and where the list is scrolled stay. The host that went shows
+    /// its heading and how its link is in place of its threads, and Pair
+    /// again once it refused this device.
+    #[gpui::test]
+    fn a_host_going_down_leaves_the_other_hosts_rows_and_scroll(cx: &mut TestAppContext) {
+        use tcode_client::{ConnectionFailure, ConnectionState};
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        crate::settings::apply_locale(Some(crate::LANGUAGE_ENGLISH));
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let a: Vec<(String, u64)> = (0..30)
+            .map(|index| (format!("a-{index:02}"), 1_000 - 2 * index))
+            .collect();
+        let b: Vec<(String, u64)> = (0..5)
+            .map(|index| (format!("b-{index}"), 999 - 2 * index))
+            .collect();
+        fn refs(threads: &[(String, u64)]) -> Vec<(&str, u64)> {
+            threads.iter().map(|(id, at)| (id.as_str(), *at)).collect()
+        }
+        let (sidebar, window_state, a, b, cx) =
+            sidebar_over_two_hosts(cx, SidebarLayout::Flat, &refs(&a), &refs(&b), 400.);
+        let list = sidebar.read_with(cx, |sidebar, _| sidebar.flat_list_state.clone());
+        let keys = |cx: &mut VisualTestContext| {
+            sidebar.read_with(cx, |sidebar, _| sidebar.flat_row_keys.clone())
+        };
+        let scroll_to = |item_ix, cx: &mut VisualTestContext| {
+            list.scroll_to(gpui::ListOffset {
+                item_ix,
+                offset_in_item: px(10.),
+            });
+            sidebar.update(cx, |_, cx| cx.notify());
+            draw(cx);
+        };
+        fn host_a(keys: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+            keys.iter()
+                .filter(|(_, id)| id.starts_with("host-a/"))
+                .cloned()
+                .collect()
+        }
+        for (state, refused) in [
+            (
+                ConnectionState::Reconnecting {
+                    attempt: 1,
+                    reason: Some(ConnectionFailure::Unreachable(None)),
+                },
+                false,
+            ),
+            (
+                ConnectionState::Offline {
+                    reason: ConnectionFailure::AuthenticationRejected,
+                },
+                true,
+            ),
+        ] {
+            let before = keys(cx);
+            let anchor = before
+                .iter()
+                .position(|key| *key == ("thread", "host-a/a-20".to_owned()))
+                .expect("a-20 is listed");
+            scroll_to(anchor, cx);
+            let offset = list.logical_scroll_top();
+            let top = cx
+                .debug_bounds("sidebar-thread-host-a/a-20")
+                .expect("a-20 is drawn")
+                .top();
+
+            b.driver.link.set_connection_state(state.clone());
+            cx.run_until_parked();
+            draw(cx);
+            let after = keys(cx);
+            assert_eq!(host_a(&after), host_a(&before), "{state:?}");
+            assert_eq!(
+                after[list.logical_scroll_top().item_ix],
+                ("thread", "host-a/a-20".to_owned()),
+                "{state:?}"
+            );
+            assert_eq!(
+                list.logical_scroll_top().offset_in_item,
+                offset.offset_in_item
+            );
+            assert_eq!(
+                cx.debug_bounds("sidebar-thread-host-a/a-20")
+                    .map(|row| row.top()),
+                Some(top),
+                "{state:?}"
+            );
+            assert!(
+                !after.iter().any(|(_, id)| id.starts_with("host-b/")),
+                "{state:?} lists none of its threads"
+            );
+            assert_eq!(after[0], ("host", "host-b".to_owned()));
+
+            list.scroll_to(gpui::ListOffset::default());
+            sidebar.update(cx, |_, cx| cx.notify());
+            draw(cx);
+            assert!(cx.debug_bounds("host-heading-host-b").is_some());
+            assert!(cx.debug_bounds("host-status-host-b").is_some());
+            assert_eq!(
+                cx.debug_bounds("host-pair-again-host-b").is_some(),
+                refused,
+                "{state:?}"
+            );
+        }
+        let pair = cx.debug_bounds("host-pair-again-host-b").unwrap();
+        cx.simulate_click(pair.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert_eq!(
+            window_state.read_with(cx, |state, _| state.destination()),
+            Destination::Pair
+        );
+
+        a.shutdown(cx);
+        b.shutdown(cx);
     }
 }

@@ -350,9 +350,17 @@ impl RemotePanel {
                 &window_state,
                 window,
                 |this: &mut Self, state, window, cx| {
+                    // Every way onto the paste page opens it with an empty
+                    // field: an invitation is single use, so whatever the
+                    // field held last time is spent.
                     let pairing = state.read(cx).destination() == Destination::Pair;
-                    if std::mem::replace(&mut this.pairing, pairing) && !pairing {
-                        this.form.leave(window, cx);
+                    match (std::mem::replace(&mut this.pairing, pairing), pairing) {
+                        (true, false) => this.form.leave(window, cx),
+                        (false, true) => {
+                            this.form.restart();
+                            this.form.clear(window, cx);
+                        }
+                        _ => {}
                     }
                 },
             ),
@@ -492,16 +500,6 @@ impl RemotePanel {
             let switch = attachment.switcher();
             switch(AttachmentTarget::Remote(Box::new(host)), window, cx);
         }
-        cx.notify();
-    }
-
-    /// Open the paste form with an empty field. An invitation is single use,
-    /// so whatever the field held last time is spent.
-    fn open_pair(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.form.restart();
-        self.form.clear(window, cx);
-        self.window_state
-            .update(cx, |state, cx| state.go(Destination::Pair, cx));
         cx.notify();
     }
 
@@ -654,11 +652,7 @@ impl RemotePanel {
     ) -> AnyElement {
         let reason = if current {
             self.store_of(&HostKey::Remote(host.host_id.clone()), cx)
-                .and_then(|store| match store.read(cx).connection_state() {
-                    tcode_client::ConnectionState::Offline { reason } => Some(reason),
-                    tcode_client::ConnectionState::Reconnecting { reason, .. } => reason,
-                    _ => None,
-                })
+                .and_then(|store| connection_failure(store.read(cx).connection_state()))
         } else {
             None
         };
@@ -699,8 +693,10 @@ impl RemotePanel {
                     .label(crate::tr!("hosts.pair_again"))
                     // A new pairing needs a new invitation from the
                     // machine; nothing from the stale record carries over.
-                    .on_click(cx.listener(move |panel, _, window, cx| {
-                        panel.open_pair(window, cx);
+                    .on_click(cx.listener(move |panel, _, _, cx| {
+                        panel
+                            .window_state
+                            .update(cx, |state, cx| state.go(Destination::Pair, cx));
                     })),
             )
         });
@@ -1064,7 +1060,11 @@ impl RemotePanel {
                 crate::tr!("hosts.pair.paste").into_owned().into(),
                 cx,
             )
-            .on_click(cx.listener(|panel, _, window, cx| panel.open_pair(window, cx)))
+            .on_click(cx.listener(|panel, _, _, cx| {
+                panel
+                    .window_state
+                    .update(cx, |state, cx| state.go(Destination::Pair, cx));
+            }))
             .into_any_element(),
         );
         let in_row = |line: AnyElement, cx: &App| group_row(cx).child(line);
@@ -1495,6 +1495,17 @@ pub(crate) fn failure_label(reason: &tcode_client::ConnectionFailure) -> String 
         HostClosed => crate::tr!("remote.failure.host_closed"),
     }
     .into_owned()
+}
+
+/// Why a link is down, while it is: it stopped, or it failed and dials again.
+pub(crate) fn connection_failure(
+    state: tcode_client::ConnectionState,
+) -> Option<tcode_client::ConnectionFailure> {
+    match state {
+        tcode_client::ConnectionState::Offline { reason } => Some(reason),
+        tcode_client::ConnectionState::Reconnecting { reason, .. } => reason,
+        _ => None,
+    }
 }
 
 /// The machine row has room for the transport's cause; the shell's status

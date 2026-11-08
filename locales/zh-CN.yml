@@ -317,6 +317,8 @@ sidebar:
   layout_grouped: "按项目分组"
   filter_empty: "该项目还没有线程。"
   project: "项目 %{name}"
+  host: "主机 %{name}"
+  manage_hosts: "管理主机"
   thread: "线程 %{title}"
   thread_in_pane: "线程 %{title}，%{place}窗格"
   sort: "排序：%{mode}"
