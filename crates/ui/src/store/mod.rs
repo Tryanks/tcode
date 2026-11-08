@@ -1958,8 +1958,7 @@ impl WorkspaceStore {
     /// unless it holds an authored write still undelivered, whose failure
     /// needs its Retry and Discard controls on screen. What comes next is
     /// the shell's, whose panes know what they showed
-    /// ([`Self::show_after_left`]). An index that took nothing away and
-    /// leaves nothing open is the empty workspace.
+    /// ([`Self::show_after_left`]).
     pub(super) fn reconcile_destination(&mut self, cx: &mut Context<Self>) {
         let left: Vec<String> = self
             .threads
@@ -1974,9 +1973,6 @@ impl WorkspaceStore {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        if left.is_empty() && self.open_threads().is_empty() {
-            self.open_last_project_draft(cx);
-        }
         for session_id in left {
             let parent = self
                 .index_replica
@@ -1993,25 +1989,19 @@ impl WorkspaceStore {
         }
     }
 
-    /// What the last pane shows once `session_id` has left it: its parent,
-    /// while that is visible, or else the last interacted project's draft.
-    /// True when the parent is on its way, so the pane need not empty.
+    /// Show the parent `session_id` left for, while that is visible. True
+    /// when the parent is on its way, so the pane it left need not empty.
     pub(crate) fn show_after_left(&mut self, session_id: &str, cx: &mut Context<Self>) -> bool {
-        let parent = self
+        let Some(parent) = self
             .left_parents
             .get(session_id)
             .filter(|parent| self.session_visible(parent))
-            .cloned();
-        match parent {
-            Some(parent) => {
-                self.place_thread(parent, Some(session_id.to_owned()), false, cx);
-                true
-            }
-            None => {
-                self.open_last_project_draft(cx);
-                false
-            }
-        }
+            .cloned()
+        else {
+            return false;
+        };
+        self.place_thread(parent, Some(session_id.to_owned()), false, cx);
+        true
     }
 
     /// After a baseline: a thread still listed is subscribed again, what the
@@ -2062,13 +2052,12 @@ impl WorkspaceStore {
             .any(|meta| meta.id == session_id && meta.archived_at.is_none())
     }
 
-    /// Open the new-thread draft of the project the user last interacted with,
-    /// so an empty workspace offers a composer instead of a dead end. The
-    /// runtime returns that project's standing draft when it already has one,
-    /// keeping its composer attachments. A remembered project that is gone
-    /// falls back to the first listed one; with no projects at all the chat
-    /// view keeps its add-project state.
-    fn open_last_project_draft(&mut self, cx: &mut Context<Self>) {
+    /// Open the new-thread draft of the project the user last interacted with.
+    /// The runtime returns that project's standing draft when it already has
+    /// one, keeping its composer attachments. A remembered project that is
+    /// gone falls back to the first listed one; with no projects at all the
+    /// chat view keeps its add-project state.
+    pub(crate) fn open_last_project_draft(&mut self, cx: &mut Context<Self>) {
         if self.draft_fallback_pending {
             return;
         }
@@ -8013,7 +8002,11 @@ pub(crate) mod tests {
     }
 
     /// Archived threads leave the index; the host still has them.
-    fn archived(cx: &TestAppContext, workspace: &gpui::Entity<WorkspaceStore>, id: &str) -> bool {
+    pub(crate) fn archived(
+        cx: &TestAppContext,
+        workspace: &gpui::Entity<WorkspaceStore>,
+        id: &str,
+    ) -> bool {
         workspace.read_with(cx, |store, _| {
             !store.index_replica.0.iter().any(|meta| meta.id == id)
                 && store.index_summary.archived_counts.values().sum::<usize>() > 0
@@ -8316,99 +8309,6 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Archiving a parent archives its children in one batch. Viewing one of
-    /// those children leaves no visible parent to return to, so the workspace
-    /// falls back to the standing draft of the last interacted project —
-    /// the same draft session id, so its composer state survives.
-    #[gpui::test]
-    fn batch_archive_without_a_visible_parent_reopens_the_standing_draft(cx: &mut TestAppContext) {
-        let root = scratch_root("archive-to-draft");
-        let disk = SessionStore::open_at(root.clone()).expect("open test store");
-        // "other" is listed first, so a draft for it proves nothing about the
-        // remembered project; "p" is the one the user last worked in.
-        disk.upsert_project(&project_at("other", &root.join("other")))
-            .expect("persist project");
-        disk.upsert_project(&project_at("p", &root))
-            .expect("persist project");
-        for meta in [
-            thread(&root, "parent", "p", None),
-            thread(&root, "child", "p", Some("parent")),
-        ] {
-            disk.upsert_meta(&meta).expect("persist session");
-        }
-        let host = test_host(disk);
-        let mut driver = LocalHostDriver::new(&host);
-        let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        crate::store::tests::place_shown_threads(&workspace, cx);
-
-        // Let the launch fallback settle on the first project before the user
-        // navigates into "p" themselves.
-        driver.wait_until(cx, &workspace, "launch draft", |cx| {
-            workspace.read_with(cx, |store, _| store.sole_thread().is_some())
-        });
-        workspace.update(cx, |store, cx| {
-            store.start_draft("p".into(), root.clone(), cx)
-        });
-        driver.wait_until(cx, &workspace, "draft for the last project", |cx| {
-            workspace.read_with(cx, |store, cx| {
-                store
-                    .sole_status(cx)
-                    .is_some_and(|status| status.draft && status.project_id.as_deref() == Some("p"))
-            })
-        });
-        let draft_id = workspace
-            .read_with(cx, |store, _| store.sole_thread())
-            .expect("draft selected");
-        workspace.update(cx, |store, _| {
-            store
-                .conversation_ui
-                .get_mut(&ConversationDestination::ProjectDraft("p".into()))
-                .expect("draft conversation state")
-                .right_panel_open = true;
-        });
-
-        workspace.update(cx, |store, cx| store.show_alone("child".into(), cx));
-        driver.wait_until(cx, &workspace, "child selected", |cx| {
-            selected_status(cx, &workspace, "child")
-        });
-
-        driver.command(
-            cx,
-            &workspace,
-            Command::ArchiveSession {
-                session_id: "parent".into(),
-            },
-        );
-        driver.wait_until(cx, &workspace, "the standing draft reopened", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store.sole_thread().as_deref() == Some(draft_id.as_str())
-            })
-        });
-        workspace.read_with(cx, |store, _| {
-            assert!(
-                store
-                    .conversation_ui
-                    .get(&ConversationDestination::ProjectDraft("p".into()))
-                    .is_some_and(|ui| ui.right_panel_open),
-                "the reopened draft lost the state the user left in it"
-            );
-        });
-        assert!(archived(cx, &workspace, "parent"));
-        assert!(archived(cx, &workspace, "child"));
-
-        driver.shutdown(cx, &workspace, &host);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     /// A pane split beside a thread asks for a draft in the thread's project,
     /// and the thread split from stays open for the pane still showing it.
     #[gpui::test]
@@ -8511,76 +8411,6 @@ pub(crate) mod tests {
         });
         driver.shutdown(cx, &workspace, &host);
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Launching with nothing selected opens the remembered project's new
-    /// thread page instead of a dead empty page; a workspace with no project
-    /// at all keeps its add-project state.
-    #[gpui::test]
-    fn a_workspace_with_no_conversation_opens_the_remembered_projects_draft(
-        cx: &mut TestAppContext,
-    ) {
-        let root = scratch_root("remembered-project");
-        let disk = SessionStore::open_at(root.clone()).expect("open test store");
-        disk.upsert_project(&project_at("first", &root.join("first")))
-            .expect("persist project");
-        disk.upsert_project(&project_at("remembered", &root))
-            .expect("persist project");
-        tcode_services::settings::SettingsStore::new(root.clone())
-            .save(&tcode_core::settings::Settings {
-                last_project_id: Some("remembered".into()),
-                ..Default::default()
-            })
-            .expect("persist remembered project");
-        let host = test_host(disk);
-        let mut driver = LocalHostDriver::new(&host);
-        let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                driver.link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        place_shown_threads(&workspace, cx);
-        driver.wait_until(cx, &workspace, "remembered project draft", |cx| {
-            workspace.read_with(cx, |store, cx| {
-                store.sole_status(cx).is_some_and(|status| {
-                    status.draft && status.project_id.as_deref() == Some("remembered")
-                })
-            })
-        });
-        driver.shutdown(cx, &workspace, &host);
-        let _ = std::fs::remove_dir_all(&root);
-
-        let empty_root = scratch_root("no-projects");
-        let empty_host = test_host(SessionStore::open_at(empty_root.clone()).expect("open store"));
-        let mut empty_driver = LocalHostDriver::new(&empty_host);
-        let empty = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                empty_driver.link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
-        });
-        empty_driver.wait_until(cx, &empty, "empty workspace baseline", |cx| {
-            empty.read_with(cx, |store, _| store.baseline_ready())
-        });
-        empty.read_with(cx, |store, _| {
-            assert!(store.projects().is_empty());
-            assert_eq!(
-                store.sole_thread(),
-                None,
-                "a workspace with no project must stay on its add-project state"
-            );
-        });
-        empty_driver.shutdown(cx, &empty, &empty_host);
-        let _ = std::fs::remove_dir_all(&empty_root);
     }
 
     #[gpui::test]
@@ -9329,13 +9159,11 @@ pub(crate) mod tests {
             });
             assert_no_draft_state(cx, &workspace);
             if viewing_draft {
-                driver.wait_until(cx, &workspace, "kept project's draft", |cx| {
-                    workspace.read_with(cx, |store, cx| {
-                        store.sole_status(cx).is_some_and(|status| {
-                            status.draft && status.project_id.as_deref() == Some("kept")
-                        })
-                    })
-                });
+                assert_eq!(
+                    workspace.read_with(cx, |store, _| store.sole_thread()),
+                    None,
+                    "the deleted project's draft stayed open"
+                );
             } else {
                 assert!(
                     selected_status(cx, &workspace, "kept-thread"),

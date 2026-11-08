@@ -1283,11 +1283,13 @@ impl AppShell {
             cx.subscribe_in(
                 &store,
                 window,
-                |this, store, change: &StoreChange, window, cx| {
-                    if change.topic == TopicKind::Settings {
+                |this, store, change: &StoreChange, window, cx| match change.topic {
+                    TopicKind::Settings => {
                         let host = store.read(cx).host_key();
                         this.adopt_host_settings(&host, window, cx);
                     }
+                    TopicKind::Index => this.fill_empty_column(store, cx),
+                    _ => {}
                 },
             ),
         ];
@@ -1478,8 +1480,8 @@ impl AppShell {
     }
 
     /// A pane whose thread the store closed leaves the column, and the last
-    /// one, on a compact window the page, takes what the store says follows
-    /// that thread.
+    /// one, on a compact window the page, takes that thread's parent, or
+    /// else the host's draft.
     fn reconcile_panes(&mut self, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
         if compact {
@@ -1514,6 +1516,7 @@ impl AppShell {
                 if !follows {
                     self.drop_leads(0, cx);
                     pane.update(cx, |pane, cx| pane.set_session(None, cx));
+                    store.update(cx, |store, cx| store.open_last_project_draft(cx));
                 }
             } else {
                 if let Some(column) = self.column.as_mut()
@@ -1633,6 +1636,25 @@ impl AppShell {
                     .then(|| column.current_pane.clone())
             })
             .or_else(|| panes.first().cloned())
+    }
+
+    /// A column showing nothing offers its host's draft once that host's
+    /// index is in, instead of a dead end. Only the column's host is asked:
+    /// a draft on any other host would have no pane to show it.
+    fn fill_empty_column(&mut self, store: &Entity<WorkspaceStore>, cx: &mut Context<Self>) {
+        let Some(column) = &self.column else {
+            return;
+        };
+        if column.host != store.read(cx).host_key()
+            || !store.read(cx).index_hydrated()
+            || column
+                .panes(cx)
+                .iter()
+                .any(|pane| pane.read(cx).session_id().is_some())
+        {
+            return;
+        }
+        store.update(cx, |store, cx| store.open_last_project_draft(cx));
     }
 
     /// What a change of `store` changes for the window.
@@ -13853,6 +13875,211 @@ pub(crate) mod tests {
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.destination(cx), Destination::Threads);
         });
+    }
+
+    /// A column showing nothing opens the remembered project's new thread
+    /// page instead of a dead empty page, though another project is listed
+    /// first; a host with no project at all is asked for nothing and the
+    /// column keeps its add-project state.
+    #[gpui::test]
+    fn an_empty_column_opens_the_remembered_projects_draft(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let project =
+            |id: &str| crate::store::tests::project_at(id, std::path::Path::new(PANES_CWD));
+        for (projects, asked) in [
+            (
+                vec![project("first"), project("remembered")],
+                vec!["remembered"],
+            ),
+            (Vec::new(), Vec::new()),
+        ] {
+            let (shell, host, cx) = mount(cx);
+            send_events(
+                &host,
+                vec![
+                    (
+                        Topic::Settings,
+                        ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                            last_project_id: Some("remembered".into()),
+                            ..Default::default()
+                        }),
+                    ),
+                    (
+                        Topic::Index,
+                        ServerEvent::IndexSnapshot(IndexSnapshot {
+                            summary: Default::default(),
+                            sessions: Vec::new(),
+                            projects,
+                        }),
+                    ),
+                ],
+            );
+            await_restore_update(&shell, cx, |store, _| store.index_hydrated());
+            draw(cx);
+            let drafted: Vec<String> = std::iter::from_fn(|| host.outgoing.try_recv().ok())
+                .filter_map(
+                    |line| match decode_client_line(&line).expect("client line").payload {
+                        ClientPayload::Command(Command::StartDraft { project_id, .. }) => {
+                            Some(project_id)
+                        }
+                        _ => None,
+                    },
+                )
+                .collect();
+            assert_eq!(drafted, asked);
+            assert_eq!(pane_threads(&shell, cx), [None]);
+        }
+    }
+
+    /// A shell on a real host over `disk`, showing nothing yet.
+    fn mount_on_host(
+        cx: &mut TestAppContext,
+        disk: tcode_services::store::SessionStore,
+    ) -> (
+        Entity<AppShell>,
+        Entity<WorkspaceStore>,
+        tcode_runtime::pipe::SpawnedHost,
+        crate::store::tests::LocalHostDriver,
+        &mut VisualTestContext,
+    ) {
+        let host =
+            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
+                .expect("spawn test host");
+        let driver = crate::store::tests::LocalHostDriver::new(&host);
+        let (shell, _transport, cx) = mount(cx);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| {
+            *store = WorkspaceStore::new_attached(
+                driver.link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            );
+        });
+        (shell, store, host, driver, cx)
+    }
+
+    /// Deleting the project of the draft on screen takes the draft away; the
+    /// pane takes the draft of a project still listed rather than emptying.
+    #[gpui::test]
+    fn deleting_the_shown_drafts_project_opens_another_projects_draft(cx: &mut TestAppContext) {
+        use crate::store::tests::{project_at, scratch_root, thread};
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = scratch_root("remove-shown-draft-project");
+        let disk =
+            tcode_services::store::SessionStore::open_at(root.clone()).expect("open test store");
+        for project in ["doomed", "kept"] {
+            disk.upsert_project(&project_at(project, &root))
+                .expect("persist project");
+        }
+        disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
+            .expect("persist session");
+        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk);
+        let shows_draft_of = |project: &'static str| {
+            let store = store.clone();
+            move |cx: &TestAppContext| {
+                store.read_with(cx, |store, cx| {
+                    store.sole_status(cx).is_some_and(|status| {
+                        status.draft && status.project_id.as_deref() == Some(project)
+                    })
+                })
+            }
+        };
+
+        store.update(cx, |store, cx| {
+            store.start_draft("doomed".into(), root.clone(), cx)
+        });
+        driver.wait_until(
+            cx,
+            &store,
+            "draft for the doomed project",
+            shows_draft_of("doomed"),
+        );
+        store.update(cx, |store, _| store.delete_project("doomed".into()));
+        driver.wait_until(cx, &store, "kept project's draft", shows_draft_of("kept"));
+        let draft = store.read_with(cx, |store, _| store.sole_thread());
+        assert_eq!(pane_threads(&shell, cx), [draft]);
+
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Archiving a parent archives its children in one batch. A pane showing
+    /// one of those children has no visible parent to return to, so it takes
+    /// the standing draft of the last interacted project: the same draft
+    /// session id, so its composer state survives.
+    #[gpui::test]
+    fn batch_archive_without_a_visible_parent_reopens_the_standing_draft(cx: &mut TestAppContext) {
+        use crate::store::tests::{archived, project_at, scratch_root, thread};
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let root = scratch_root("archive-to-draft");
+        let disk =
+            tcode_services::store::SessionStore::open_at(root.clone()).expect("open test store");
+        // "other" is listed first, so a draft for it proves nothing about the
+        // remembered project; "p" is the one the user last worked in.
+        disk.upsert_project(&project_at("other", &root.join("other")))
+            .expect("persist project");
+        disk.upsert_project(&project_at("p", &root))
+            .expect("persist project");
+        for meta in [
+            thread(&root, "parent", "p", None),
+            thread(&root, "child", "p", Some("parent")),
+        ] {
+            disk.upsert_meta(&meta).expect("persist session");
+        }
+        let (shell, store, host, mut driver, cx) = mount_on_host(cx, disk);
+
+        // Let the launch draft settle on the first project before the user
+        // goes into "p" themselves.
+        driver.wait_until(cx, &store, "launch draft", |cx| {
+            store.read_with(cx, |store, _| store.sole_thread().is_some())
+        });
+        store.update(cx, |store, cx| {
+            store.start_draft("p".into(), root.clone(), cx)
+        });
+        driver.wait_until(cx, &store, "draft for the last project", |cx| {
+            store.read_with(cx, |store, cx| {
+                store
+                    .sole_status(cx)
+                    .is_some_and(|status| status.draft && status.project_id.as_deref() == Some("p"))
+            })
+        });
+        let draft_id = store
+            .read_with(cx, |store, _| store.sole_thread())
+            .expect("draft shown");
+        store.update(cx, |store, cx| {
+            store.open_tab_for(&draft_id, RightTab::Diff, cx)
+        });
+
+        store.update(cx, |store, cx| store.show_thread("child".into(), cx));
+        driver.wait_until(cx, &store, "child shown", |cx| {
+            store.read_with(cx, |store, cx| {
+                store
+                    .sole_status(cx)
+                    .is_some_and(|status| status.session_id == "child")
+            })
+        });
+
+        store.update(cx, |store, _| store.archive_session("parent".into()));
+        driver.wait_until(cx, &store, "the standing draft reopened", |cx| {
+            store.read_with(cx, |store, _| {
+                store.sole_thread().as_deref() == Some(draft_id.as_str())
+            })
+        });
+        assert_eq!(pane_threads(&shell, cx), [Some(draft_id.clone())]);
+        store.read_with(cx, |store, _| {
+            assert!(
+                store.panel_state_for(Some(&draft_id)).right_panel_open,
+                "the reopened draft lost the state the user left in it"
+            );
+        });
+        assert!(archived(cx, &store, "parent"));
+        assert!(archived(cx, &store, "child"));
+
+        driver.shutdown(cx, &store, &host);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]
