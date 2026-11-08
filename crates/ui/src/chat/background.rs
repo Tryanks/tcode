@@ -159,22 +159,18 @@ impl Place {
     }
 }
 
-/// The stop for more than one piece at once, beside the title, where the
-/// harness stops them: "Stop all" where it stops everything in one request
-/// of its own, else a stop for each of the pieces named. It asks first.
+/// The stop for every piece at once, beside the title, wherever the harness
+/// stops them. More than one piece asks first: a stop takes a dev server
+/// down along with what the reader meant to end.
 pub(in crate::chat) fn stop_all(
     background: &Background,
     place: &Place,
     cx: &App,
 ) -> Option<AnyElement> {
     let stoppable = background.stoppable();
-    if stoppable.len() < 2 {
+    if stoppable.is_empty() {
         return None;
     }
-    let label = match background.stop {
-        BackgroundStop::EachAndAll => crate::tr!("background.stop_all").into_owned(),
-        _ => crate::tr!("background.stop_these", count = stoppable.len()).into_owned(),
-    };
     let names: Vec<String> = stoppable
         .iter()
         .map(|row| crate::chat::model::one_line(&row.task.name))
@@ -190,10 +186,16 @@ pub(in crate::chat) fn stop_all(
         .xsmall()
         .touch(place.touch)
         .text_secondary(false, cx)
-        .label(label)
+        .label(crate::tr!("background.stop_all").into_owned())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             let (store, session_id, names) = (store.clone(), session_id.clone(), names.clone());
+            if names.len() < 2 {
+                store.update(cx, |store, _| {
+                    store.stop_background_task(session_id.clone(), None)
+                });
+                return;
+            }
             window.open_alert_dialog(cx, move |alert, _, _| {
                 let (store, session_id) = (store.clone(), session_id.clone());
                 alert
@@ -344,7 +346,7 @@ fn row(
     let id = task.id.clone();
     let key = format!("{}-bg-{}", place.key, id);
     let theme = cx.theme();
-    let (muted, warning) = (theme.muted_foreground, theme.warning);
+    let muted = theme.muted_foreground;
     let name = crate::chat::model::one_line(&task.name);
     let highlighted = place.highlight.is_some() && place.highlight == task.item_id;
     let accent = theme.accent;
@@ -394,18 +396,13 @@ fn row(
         |standing, _, cx| {
             let theme = cx.theme();
             match standing {
-                Standing::Running => div().into_any_element(),
+                Standing::Running | Standing::Unanswered => div().into_any_element(),
                 Standing::Stopping => h_flex()
                     .gap_1()
                     .items_center()
                     .whitespace_nowrap()
                     .child(Spinner::new().xsmall().color(theme.muted_foreground))
                     .child(crate::tr!("background.stopping"))
-                    .into_any_element(),
-                Standing::Unanswered => div()
-                    .whitespace_nowrap()
-                    .text_color(theme.warning)
-                    .child(crate::tr!("background.unanswered"))
                     .into_any_element(),
                 Standing::Ended => div()
                     .whitespace_nowrap()
@@ -437,8 +434,37 @@ fn row(
                 });
             })
         });
+    // A stop gone unanswered too long takes the stop's place with the one
+    // way past it: ending the harness's processes.
+    let force = (standing == Standing::Unanswered).then(|| {
+        let (store, session_id, harness) = (
+            place.store.clone(),
+            place.session_id.clone(),
+            background.harness.clone(),
+        );
+        Button::new(SharedString::from(format!("{key}-force")))
+            .debug_selector(|| "background-force-terminate".into())
+            .danger()
+            .xsmall()
+            .touch(place.touch)
+            .label(crate::tr!("background.force_terminate").into_owned())
+            .tooltip(crate::tr!(
+                "background.unanswered_detail",
+                harness = harness.as_str()
+            ))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                crate::composer::confirm_force_terminate(
+                    &store,
+                    session_id.clone(),
+                    harness.clone(),
+                    window,
+                    cx,
+                );
+            })
+    });
     // A subagent running in the background keeps its own transcript, which
-    // the row leads to.
+    // its row opens; any other row leads to its call in the timeline.
     let transcript = (standing == Standing::Running && task.kind == BackgroundKind::Agent)
         .then(|| {
             let item = task.item_id.as_deref()?;
@@ -453,113 +479,13 @@ fn row(
                 })
                 .map(|meta| meta.id.clone())
         })
-        .flatten()
-        .map(|mirror| {
-            let place = place.clone();
-            h_flex()
-                .id(SharedString::from(format!("{key}-transcript")))
-                .debug_selector({
-                    let id = id.clone();
-                    move || format!("background-transcript-{id}")
-                })
-                .w_full()
-                .min_w_0()
-                .pl(px(22.))
-                .gap_0p5()
-                .items_center()
-                .cursor_pointer()
-                .text_secondary(place.touch, cx)
-                .text_color(muted)
-                .hover(|line| line.text_color(cx.theme().foreground))
-                .child(crate::tr!("background.subagent_transcript"))
-                .child(Icon::new(IconName::ChevronRight).xsmall())
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    let mirror = mirror.clone();
-                    place.go(window, cx, move |chat, window, cx| {
-                        chat.open_subagent(mirror, window, cx)
-                    });
-                })
-        });
-    let detail = match standing {
-        Standing::Running => None,
-        Standing::Stopping => Some((
-            crate::tr!(
-                "background.stopping_detail",
-                harness = background.harness.as_str()
-            )
-            .into_owned(),
-            muted,
-        )),
-        Standing::Unanswered => Some((
-            crate::tr!("background.unanswered_detail").into_owned(),
-            warning,
-        )),
-        Standing::Ended => Some((
-            crate::tr!(
-                "background.ended_detail",
-                harness = background.harness.as_str()
-            )
-            .into_owned(),
-            muted,
-        )),
-    };
-    let detail = crate::motion::shown(
-        SharedString::from(format!("{key}-detail")),
-        detail,
-        ROWS,
-        window,
-        cx,
-    )
-    .map(|shown| {
-        let (text, color) = shown.value.clone();
-        shown.fold(
-            div()
-                .w_full()
-                .min_w_0()
-                .pl(px(22.))
-                .text_secondary(place.touch, cx)
-                .text_color(color)
-                .child(crate::widgets::fade_text(SharedString::from(text)))
-                .into_any_element(),
-        )
-    });
-    let force = (standing == Standing::Unanswered).then(|| {
-        let (store, session_id, harness) = (
-            place.store.clone(),
-            place.session_id.clone(),
-            background.harness.clone(),
-        );
-        h_flex().w_full().pl(px(22.)).pt_1().child(
-            Button::new(SharedString::from(format!("{key}-force")))
-                .debug_selector(|| "background-force-terminate".into())
-                .danger()
-                .xsmall()
-                .text_secondary(place.touch, cx)
-                .text_color(cx.theme().danger)
-                .touch(place.touch)
-                .label(
-                    crate::tr!("background.force_terminate", harness = harness.as_str())
-                        .into_owned(),
-                )
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    crate::composer::confirm_force_terminate(
-                        &store,
-                        session_id.clone(),
-                        harness.clone(),
-                        window,
-                        cx,
-                    );
-                }),
-        )
-    });
-    let title = h_flex()
+        .flatten();
+    let line = h_flex()
         .w_full()
         .min_w_0()
         .gap_2()
         .items_center()
-        .when(place.touch, |title| title.min_h(px(44.)))
+        .when(place.touch, |line| line.min_h(px(44.)))
         .child(
             Icon::new(kind_icon(task.kind))
                 .small()
@@ -594,7 +520,8 @@ fn row(
                 .text_color(muted)
                 .children(elapsed)
                 .child(state)
-                .children(stop),
+                .children(stop)
+                .children(force),
         );
     let item = task.item_id.clone();
     let place = place.clone();
@@ -616,17 +543,21 @@ fn row(
     .when_some(wash, |row, wash| row.bg(wash))
     .when(standing == Standing::Ended, |row| row.opacity(0.6))
     .child(crate::material::row_hover(radius, cx))
-    .child(title)
-    .children(detail)
-    .children(transcript)
-    .children(force)
-    .when_some(item, |row, item| {
-        row.cursor_pointer().on_click(move |_, window, cx| {
+    .child(line)
+    .map(|row| match (transcript, item) {
+        (Some(mirror), _) => row.cursor_pointer().on_click(move |_, window, cx| {
+            let mirror = mirror.clone();
+            place.go(window, cx, move |chat, window, cx| {
+                chat.open_subagent(mirror, window, cx)
+            });
+        }),
+        (None, Some(item)) => row.cursor_pointer().on_click(move |_, window, cx| {
             let item = item.clone();
             place.go(window, cx, move |chat, window, cx| {
                 chat.locate_item(&item, window, cx)
             });
-        })
+        }),
+        (None, None) => row,
     })
     .into_any_element()
 }
