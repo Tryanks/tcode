@@ -2084,7 +2084,6 @@ impl Composer {
             panels.push(column_fold(&shown, panel));
         }
         panels.extend(self.render_force_terminate(window, cx));
-        panels.extend(self.render_background_strip(window, cx));
         panels.extend(self.render_queue_strip(window, cx));
         // The checkout row under the card carries the space above it; it
         // folds away as the window turns compact.
@@ -3605,60 +3604,6 @@ mod replica_tests {
         assert!(cx.debug_bounds("steer-gesture-queue").is_none());
         touch(cx, TouchPhase::Cancelled, button.center());
         assert!(sent(cx).is_empty());
-    }
-
-    /// The background work the host lists shows above the field with a stop
-    /// for each piece and for all of it, while no turn runs.
-    #[gpui::test]
-    fn background_tasks_stop_from_the_composer(cx: &mut TestAppContext) {
-        let (store, incoming, outgoing, mut status) = attach(cx);
-        let session_id = Some(status.session_id.clone());
-        status.background_tasks = vec![tcode_protocol::BackgroundTaskStatus {
-            task: agent::BackgroundTask {
-                id: "bl5ti808a".into(),
-                name: "npm run dev".into(),
-                kind: agent::BackgroundKind::Command,
-                item_id: None,
-                started_at: 1,
-                started_reported: false,
-            },
-            listed: true,
-            stopping_since: None,
-            ended: false,
-        }];
-        replace(
-            &incoming,
-            Topic::SessionStatus {
-                session_id: status.session_id.clone(),
-            },
-            ServerEvent::SessionStatusReplaced(Box::new(status.clone())),
-        );
-        cx.run_until_parked();
-        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-        let (_composer, cx) = cx.add_window_view(|window, cx| {
-            Composer::new(store.clone(), session_id.clone(), window, cx)
-        });
-        cx.simulate_resize(gpui::size(px(1024.), px(768.)));
-        cx.update(|_, cx| cx.set_reduce_motion(true));
-        cx.update(|window, cx| _ = window.draw(cx));
-        while outgoing.try_recv().is_ok() {}
-        for selector in ["background-stop-bl5ti808a", "background-stop-all"] {
-            let button = cx.debug_bounds(selector).expect("stop shown");
-            cx.simulate_click(button.center(), Modifiers::default());
-            cx.update(|window, cx| _ = window.draw(cx));
-        }
-        cx.run_until_parked();
-        let stops: Vec<_> = std::iter::from_fn(|| outgoing.try_recv().ok())
-            .filter_map(
-                |line| match tcode_protocol::decode_client_line(&line).unwrap().payload {
-                    tcode_protocol::ClientPayload::Command(
-                        tcode_protocol::Command::StopBackgroundTask { task_id, .. },
-                    ) => Some(task_id),
-                    _ => None,
-                },
-            )
-            .collect();
-        assert_eq!(stops, [Some("bl5ti808a".to_owned()), None]);
     }
 
     /// A stop the harness has not answered for a while offers to kill its
