@@ -433,10 +433,10 @@ impl Composer {
                         .ghost()
                         .xsmall()
                         .touch(self.compact)
-                        .icon(IconName::Close)
+                        .icon(IconName::Undo)
                         .cursor_default()
                         .disabled(!editable || !self.interactive(cx))
-                        .tooltip(crate::tr!("composer.drop_queued"))
+                        .tooltip(crate::tr!("composer.edit_queued"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.drop_queued_and_refill(id, text.clone(), window, cx);
                         })),
