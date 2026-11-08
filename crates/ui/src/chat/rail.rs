@@ -1262,4 +1262,35 @@ mod tests {
             "the agents body {agents:?} shows only {agents_shown} agents"
         );
     }
+
+    /// An agent that starts while the rail has room for it shows: the
+    /// agents card, beside a commands card that takes the rest of the rail,
+    /// grows to hold the newest agent, which comes in at its top, rather
+    /// than keeping the height it had and leaving that agent above what it
+    /// shows.
+    #[gpui::test]
+    fn an_agent_that_starts_shows_while_the_rail_has_room(cx: &mut TestAppContext) {
+        const COMMANDS: usize = 15;
+        let (threads, cx) = short_rail(cx, || dispatched(2, COMMANDS));
+        for agents in [3, 4] {
+            threads.store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(
+                    threads.first.clone(),
+                    dispatched(agents, COMMANDS),
+                    cx,
+                )
+            });
+            draw_settled(cx);
+            let body = bounds(cx, "rail-card-body-agents").expect("the agents card shows");
+            let commands = bounds(cx, "rail-card-body-commands").expect("the commands card shows");
+            for index in 0..agents {
+                let row = bounds(cx, &format!("rail-agent-agent-{index}"));
+                assert!(
+                    row.is_some_and(|row| row.top() >= body.top() && row.bottom() <= body.bottom()),
+                    "with {agents} agents, agent {index} ({row:?}) is not shown whole in the \
+                     agents body {body:?}, beside the commands body {commands:?}"
+                );
+            }
+        }
+    }
 }

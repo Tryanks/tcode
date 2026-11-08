@@ -718,7 +718,6 @@ impl RenderOnce for VirtualList {
                     .to_pixels(bounds.size.into(), window.rem_size());
                 let width = bounds.size.width;
                 let row_width = (width > px(0.)).then(|| width - padding.right);
-                width_probe = Some(width_probe_for(state.clone(), width));
                 let mut motion = motion;
                 let render = move |index, window: &mut Window, cx: &mut App| {
                     let row = render(index, window, cx);
@@ -762,7 +761,9 @@ impl RenderOnce for VirtualList {
                 // list that has measured them all takes their height
                 // instead, which `ListState` does not report but places its
                 // last row by.
-                let rows = self.measure_all.then(|| rows_height(&state)).flatten();
+                let rows = self.measure_all.then(|| rows_height(&state));
+                width_probe = Some(width_probe_for(state.clone(), width, rows));
+                let rows = rows.flatten();
                 let viewport = list(state.clone(), render)
                     .with_sizing_behavior(if rows.is_some() {
                         ListSizingBehavior::Auto
@@ -859,11 +860,16 @@ fn reveal_row(state: &ListState, index: usize) {
 }
 
 /// Renders the list's view again once the list lays out at a width other than
-/// `width`, the one its rows were given.
-fn width_probe_for(state: ListState, width: Pixels) -> AnyElement {
+/// `width`, the one its rows were given, or, for a list that measures all its
+/// rows, once it has measured them to a height other than `rows`, the one it
+/// was given: the list measures a row that came in or settled only as it is
+/// laid out, after a layout around it has read the list's height.
+fn width_probe_for(state: ListState, width: Pixels, rows: Option<Option<Pixels>>) -> AnyElement {
     canvas(
         move |_, window, _| {
-            if state.viewport_bounds().size.width != width {
+            if state.viewport_bounds().size.width != width
+                || rows.is_some_and(|rows| rows != rows_height(&state))
+            {
                 window.request_animation_frame();
             }
         },
