@@ -232,11 +232,7 @@ background:
   ended: "已结束"
   no_stop: "%{harness} 只报告它在运行什么，没有从外部停止的方式。"
   first_seen: "%{harness} 不报告开始时间，时长从 Tcode 第一次看到它算起。"
-  keeps: "也让这个线程保持活跃"
-  keeps_agents: "委派线程 %{count} 个运行中"
   keeps_watch: "关注 #%{number}"
-  keeps_scheduled: "定时消息"
-  keeps_notify: "关注其他线程的动静：%{count}"
   in_list: "在后台列表中"
   move: "转入后台"
 markdown:

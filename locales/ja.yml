@@ -232,11 +232,7 @@ background:
   ended: "終了"
   no_stop: "%{harness} は実行中の作業を報告するだけで、外から停止する方法はありません。"
   first_seen: "%{harness} は開始時刻を報告しないため、Tcode が最初に確認した時点から数えています。"
-  keeps: "このスレッドを動かし続けているもの"
-  keeps_agents: "実行中のサブエージェント：%{count}"
   keeps_watch: "#%{number} を監視中"
-  keeps_scheduled: "予約メッセージ"
-  keeps_notify: "他のスレッドを監視中：%{count}"
   in_list: "バックグラウンド一覧で表示"
   move: "バックグラウンドへ"
 markdown:
