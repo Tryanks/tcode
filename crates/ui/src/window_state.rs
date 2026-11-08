@@ -213,6 +213,9 @@ pub struct WindowState {
     pub quit_prompt_epoch: u64,
     pub quit_prompt_open: bool,
     pub pending_settings_section: Option<String>,
+    /// The host whose settings the Settings route shows; `None` for the
+    /// current pane's host.
+    pub settings_host: Option<HostKey>,
 }
 
 impl Default for WindowState {
@@ -226,6 +229,7 @@ impl Default for WindowState {
             quit_prompt_epoch: 0,
             quit_prompt_open: false,
             pending_settings_section: None,
+            settings_host: None,
         }
     }
 }
@@ -410,12 +414,20 @@ impl WindowState {
         cx.notify();
     }
 
-    /// Switch to the settings route (closes the palette).
+    /// Switch to the settings route (closes the palette), on the current
+    /// pane's host.
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_host = None;
         // Settings replaces the window the palette would leave over.
         self.palette_open = false;
         self.palette_leaving = false;
         self.go(Destination::Settings, cx);
+    }
+
+    /// Switch to the settings route on `host`.
+    pub fn open_settings_on(&mut self, host: HostKey, cx: &mut Context<Self>) {
+        self.open_settings(cx);
+        self.settings_host = Some(host);
     }
 
     /// Leave settings, however deep in it the window is.

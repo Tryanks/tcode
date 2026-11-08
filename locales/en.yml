@@ -471,6 +471,7 @@ settings:
   this_device: "This device"
   machine_settings: "%{name} settings"
   machine_settings_fallback: "Machine settings"
+  choose_host: "Choose the machine these settings are for"
   advanced: "Advanced"
   general: "General"
   providers: "Harnesses"

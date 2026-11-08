@@ -471,6 +471,7 @@ settings:
   this_device: "このデバイス"
   machine_settings: "%{name} の設定"
   machine_settings_fallback: "ホストの設定"
+  choose_host: "設定するホストを選ぶ"
   advanced: "詳細"
   general: "一般"
   providers: "ハーネス"

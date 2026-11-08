@@ -455,6 +455,16 @@ impl SettingsInput {
         true
     }
 
+    /// Push `value` unless the field already shows it or is being typed in.
+    fn follow(&mut self, value: String, window: &mut Window, cx: &mut App) {
+        let input = self.state.read(cx);
+        if input.value() != value.as_str()
+            && !gpui::Focusable::focus_handle(input, cx).is_focused(window)
+        {
+            self.push(value, window, cx);
+        }
+    }
+
     fn push(&mut self, value: String, window: &mut Window, cx: &mut App) {
         self.pushed = value.clone();
         self.state
@@ -475,6 +485,9 @@ pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
 
 pub struct SettingsPage {
     store: Entity<WorkspaceStore>,
+    /// The window's hosts, whose settings the machine group chooses between
+    /// when more than one is this device's to manage.
+    hosts: Vec<Entity<WorkspaceStore>>,
     window_state: Entity<WindowState>,
     /// The harness shown as a page of the compact settings stack.
     harness_page: Option<Entity<HarnessDialog>>,
@@ -553,36 +566,69 @@ impl SettingsPage {
         crate::settings_rows::flip_row(&self.motion, id, self.window_state.read(cx).compact)
     }
 
+    pub(crate) fn set_hosts(&mut self, hosts: Vec<Entity<WorkspaceStore>>, cx: &mut Context<Self>) {
+        self.hosts = hosts;
+        cx.notify();
+    }
+
+    /// The hosts the machine group can show, in the window's order.
+    fn settings_hosts(&self, cx: &App) -> Vec<&Entity<WorkspaceStore>> {
+        self.hosts
+            .iter()
+            .filter(|store| store.read(cx).scope().is_full())
+            .collect()
+    }
+
     fn section_applies(&self, section: &Section, cx: &App) -> bool {
         section.available(&self.capabilities, self.store.read(cx).scope().is_full())
     }
-    fn take_requested_section(
-        window_state: &Entity<WindowState>,
-        cx: &mut Context<Self>,
-    ) -> Option<Section> {
-        window_state
-            .update(cx, |state, _| state.pending_settings_section.take())
-            .map(|section| match section.as_str() {
-                "providers" => Section::Providers,
-                "usage" => Section::Usage,
-                "source_control" => Section::SourceControl,
-                "browser" => Section::Browser,
-                "computer_use" => Section::ComputerUse,
-                "control" => Section::Control,
-                "plugins" => Section::Plugins,
-                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-                "remote" => Section::Remote,
-                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-                "spaces" => Section::Spaces,
-                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
-                "group" => Section::Group,
-                #[cfg(feature = "remote-hosting")]
-                "traverse" => Section::Traverse,
-                "archived" => Section::Archived,
-                "thread_behavior" | "threads" => Section::Threads,
-                "maintenance" => Section::Maintenance,
-                _ => Section::General,
-            })
+    /// Open the section a link elsewhere in the app names, the way choosing
+    /// it here would.
+    pub(crate) fn open_section(&mut self, name: &str, cx: &mut Context<Self>) {
+        let section = match name {
+            "providers" => Section::Providers,
+            "usage" => Section::Usage,
+            "source_control" => Section::SourceControl,
+            "browser" => Section::Browser,
+            "computer_use" => Section::ComputerUse,
+            "control" => Section::Control,
+            "plugins" => Section::Plugins,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            "remote" => Section::Remote,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            "spaces" => Section::Spaces,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            "group" => Section::Group,
+            #[cfg(feature = "remote-hosting")]
+            "traverse" => Section::Traverse,
+            "archived" => Section::Archived,
+            "thread_behavior" | "threads" => Section::Threads,
+            "maintenance" => Section::Maintenance,
+            _ => Section::General,
+        };
+        self.select_section(section, cx);
+    }
+
+    /// Show on `to` the section `from` shows, so choosing another host keeps
+    /// the page where it was.
+    pub(crate) fn carry_section(from: &Entity<Self>, to: &Entity<Self>, cx: &mut App) {
+        let section = match from.read(cx).section {
+            Section::ProjectThreadRules => Section::Threads,
+            Section::Harness => Section::Providers,
+            Section::SourceControlHost => Section::SourceControl,
+            section => section,
+        };
+        to.update(cx, |page, cx| {
+            if page.section == section || !page.section_applies(&section, cx) {
+                return;
+            }
+            page.section = section;
+            page.sync_holds(cx);
+            if section.advanced() {
+                page.advanced_expanded = Some(true);
+            }
+            cx.notify();
+        });
     }
 
     fn return_to_settings_root(window_state: &Entity<WindowState>, cx: &mut Context<Self>) {
@@ -614,6 +660,7 @@ impl SettingsPage {
                 cx,
             )
         });
+        let device = DevicePreferences::entity(cx);
         let subscriptions = vec![
             cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
                 if change.topic != TopicKind::Settings {
@@ -631,15 +678,18 @@ impl SettingsPage {
                 });
                 cx.notify();
             }),
-            cx.observe(&window_state, |this, _, cx| {
-                let window_state = this.window_state.clone();
-                if let Some(section) = Self::take_requested_section(&window_state, cx) {
-                    this.select_section(section, cx);
-                }
-                cx.notify();
-            }),
+            cx.observe(&window_state, |_, _, cx| cx.notify()),
             cx.observe_in(&store, window, |this, _, window, cx| {
                 this.hydrate_inputs(window, cx);
+            }),
+            // Each host's page draws this device's fields: what is set on one,
+            // or anywhere else, shows on the others, but for the field being
+            // typed in.
+            cx.observe_in(&device, window, |this, _, window, cx| {
+                let name = DevicePreferences::device_name(cx);
+                this.device_name_input.follow(name, window, cx);
+                let limit = remote_attachment_limit_value(cx);
+                this.remote_attachment_limit_input.follow(limit, window, cx);
             }),
             cx.subscribe(&title_model_picker, |this, _, event, cx| {
                 let selected = event.0.clone();
@@ -654,16 +704,6 @@ impl SettingsPage {
             }),
         ];
 
-        // Consume relaunch and in-app navigation requests through the same
-        // channel used by in-app Settings links.
-        let requested_section = Self::take_requested_section(&window_state, cx);
-        let full_scope = store.read(cx).scope().is_full();
-        let section = requested_section
-            .filter(|section| section.available(&capabilities, full_scope))
-            .unwrap_or(Section::General);
-        if requested_section.is_some_and(|section| !section.available(&capabilities, full_scope)) {
-            Self::return_to_settings_root(&window_state, cx);
-        }
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let content_scroll = ScrollHandle::new();
         let plugins_panel = cx.new(|cx| {
@@ -714,6 +754,7 @@ impl SettingsPage {
         );
         let mut page = Self {
             store,
+            hosts: Vec::new(),
             window_state,
             harness_page: None,
             harness_page_scroll: ScrollHandle::new(),
@@ -729,7 +770,7 @@ impl SettingsPage {
                 pushed: device_name,
                 dirty: false,
             },
-            section,
+            section: Section::General,
             archived_held: false,
             maintenance_held: false,
             disk_usage_open: Default::default(),
@@ -1065,6 +1106,9 @@ impl SettingsPage {
                 crate::tr!("settings.this_device").into_owned(),
                 "settings-device-caption",
             ),
+            SectionGroup::Machine if self.settings_hosts(cx).len() > 1 => {
+                return self.host_selector(cx);
+            }
             SectionGroup::Machine => {
                 let store = self.store.read(cx);
                 let name = if store.is_remote() {
@@ -1086,6 +1130,59 @@ impl SettingsPage {
         };
         crate::material::group_caption(label, cx)
             .debug_selector(move || selector.into())
+            .into_any_element()
+    }
+
+    /// The machine group's caption over several hosts: it names the host
+    /// whose settings the group holds and chooses another.
+    fn host_selector(&self, cx: &Context<Self>) -> AnyElement {
+        let shown = self.store.read(cx).host_key();
+        let options = self
+            .settings_hosts(cx)
+            .into_iter()
+            .map(|store| {
+                let store = store.read(cx);
+                let host = store.host_key();
+                SelectRowOption {
+                    id: format!("settings-host-{}", host.name()).into(),
+                    label: store.host_title(),
+                    description: None,
+                    selected: host == shown,
+                    value: host,
+                }
+            })
+            .collect();
+        let label = crate::tr!(
+            "settings.machine_settings",
+            name = self.store.read(cx).host_title()
+        );
+        let trigger = Button::new("settings-host-selector")
+            .debug_selector(|| "settings-host-selector".into())
+            .ghost()
+            .compact()
+            .aria_label(crate::tr!("settings.choose_host"))
+            .child(
+                gpui_base::h_flex()
+                    .gap_1()
+                    .text_caption(cx)
+                    .child(label)
+                    .child(
+                        Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
+                    ),
+            );
+        div()
+            .pb(cx.theme().tokens.spacing.sm)
+            .child(crate::settings_rows::select_menu(
+                trigger,
+                "settings-host-popover",
+                "settings-host-menu",
+                200.,
+                crate::tr!("settings.choose_host").into_owned().into(),
+                options,
+                self.window_state.read(cx).compact,
+                |host, _, cx| crate::shell::choose_settings_host(host, cx),
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -1547,32 +1644,18 @@ impl SettingsPage {
     }
 
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings();
         let language = DevicePreferences::language(cx);
         let theme = DevicePreferences::theme(cx);
         let device_name_overridden = DevicePreferences::device_name_overridden(cx);
         let attachment_limit_overridden =
             DevicePreferences::remote_attachment_limit_mib(cx).is_some();
-        let provider_marks_reset = crate::settings_rows::reset_action(
-            "reset-sidebar-provider-marks",
-            settings.sidebar_provider_marks,
-            cx.listener(|this, _, _, cx| {
-                this.dispatch_settings(|store| store.set_sidebar_provider_marks(false), cx)
-            }),
-        );
-        let appearance = vec![
+        let mut appearance = vec![
             self.language_row(language.as_deref(), cx),
             self.theme_row(theme, cx),
-            self.toggle_row(
-                "sidebar-provider-marks",
-                crate::tr!("settings.sidebar_provider_marks.title"),
-                crate::tr!("settings.sidebar_provider_marks.description"),
-                settings.sidebar_provider_marks,
-                provider_marks_reset,
-                cx,
-                WorkspaceStore::set_sidebar_provider_marks,
-            ),
         ];
+        if self.settings_hosts(cx).len() <= 1 {
+            appearance.push(self.provider_marks_row(cx));
+        }
         let device = vec![
             self.device_name_row(device_name_overridden, cx),
             self.remote_attachment_limit_row(attachment_limit_overridden, cx),
@@ -1589,6 +1672,28 @@ impl SettingsPage {
                 device,
                 cx,
             ))
+    }
+
+    /// Whether the sidebar marks this host's threads with their provider: a
+    /// setting of the host, so over several hosts it is among the threads'.
+    fn provider_marks_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let marks = self.store.read(cx).settings().sidebar_provider_marks;
+        let reset = crate::settings_rows::reset_action(
+            "reset-sidebar-provider-marks",
+            marks,
+            cx.listener(|this, _, _, cx| {
+                this.dispatch_settings(|store| store.set_sidebar_provider_marks(false), cx)
+            }),
+        );
+        self.toggle_row(
+            "sidebar-provider-marks",
+            crate::tr!("settings.sidebar_provider_marks.title"),
+            crate::tr!("settings.sidebar_provider_marks.description"),
+            marks,
+            reset,
+            cx,
+            WorkspaceStore::set_sidebar_provider_marks,
+        )
     }
 
     fn render_maintenance(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
@@ -3761,8 +3866,11 @@ mod tests {
             state.enter_workspace(cx);
             state.open_settings(cx);
             state.go(crate::window_state::Destination::SettingsSection, cx);
-            state.pending_settings_section = Some("browser".into());
-            cx.notify();
+        });
+        probe.update(cx, |probe, cx| {
+            probe
+                .page
+                .update(cx, |page, cx| page.open_section("browser", cx))
         });
         cx.run_until_parked();
         assert_eq!(

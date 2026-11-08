@@ -648,9 +648,40 @@ pub(crate) fn select_row<T: Clone + 'static>(
 ) -> AnyElement {
     let compact = row.compact();
     let trigger = dropdown_trigger(trigger_id, selected_label, cx);
+    let dropdown = select_menu(
+        trigger,
+        popover_id,
+        menu_id,
+        menu_width,
+        title.clone(),
+        options,
+        compact,
+        on_select,
+        cx,
+    );
+    let layout = row.row(
+        row_labels(title, description, reset, compact, cx),
+        dropdown,
+        cx,
+    );
+    row.render(layout)
+}
+
+/// The menu of a [`select_row`], opened from `trigger`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_menu<T: Clone + 'static>(
+    trigger: Button,
+    popover_id: &'static str,
+    menu_id: &'static str,
+    menu_width: f32,
+    menu_label: SharedString,
+    options: Vec<SelectRowOption<T>>,
+    compact: bool,
+    on_select: impl Fn(T, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> crate::widgets::Popover {
     let on_select = Rc::new(on_select);
-    let menu_label = title.clone();
-    let dropdown = crate::material::overlay_popover(popover_id, cx)
+    crate::material::overlay_popover(popover_id, cx)
         .trigger(trigger)
         .content(move |_, _, cx| {
             v_flex()
@@ -704,14 +735,7 @@ pub(crate) fn select_row<T: Clone + 'static>(
                         popover.update(cx, |state, cx| state.dismiss(window, cx));
                     })
                 }))
-        });
-
-    let layout = row.row(
-        row_labels(title, description, reset, compact, cx),
-        dropdown,
-        cx,
-    );
-    row.render(layout)
+        })
 }
 
 #[cfg(test)]

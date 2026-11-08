@@ -3637,14 +3637,14 @@ mod tests {
             store,
             _pump: pump,
         };
-        let window_state = cx.new(|_| {
-            let mut state = WindowState::default();
-            state.pending_settings_section = Some("plugins".into());
-            state
-        });
+        let window_state = cx.new(|_| WindowState::default());
         let page_store = host.store.clone();
         let (_, cx) = cx.add_window_view(|window, cx| {
-            let page = cx.new(|cx| SettingsPage::new(page_store, window_state, window, cx));
+            let page = cx.new(|cx| {
+                let mut page = SettingsPage::new(page_store, window_state, window, cx);
+                page.open_section("plugins", cx);
+                page
+            });
             gpui_base::Root::new(page, window, cx)
         });
         cx.simulate_resize(size(px(1400.), px(1600.)));

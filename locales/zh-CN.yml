@@ -471,6 +471,7 @@ settings:
   this_device: "本设备"
   machine_settings: "%{name} 设置"
   machine_settings_fallback: "主机设置"
+  choose_host: "选择要设置的主机"
   advanced: "高级"
   general: "通用"
   providers: "Harness"
