@@ -863,12 +863,12 @@ fn main() {
                 let _ = window;
 
                 if open_latest {
-                    let Some(link) = cx.update(|cx| shell.read(cx).link()) else {
+                    let Some(link) = cx.update(|cx| shell.read(cx).link(cx)) else {
                         return;
                     };
                     if let Ok(CommandResponse::SessionId(Some(id))) =
                         link.command(Command::OpenLatestSession).await
-                        && let Some(store) = cx.update(|cx| shell.read(cx).store())
+                        && let Some(store) = cx.update(|cx| shell.read(cx).store(cx))
                     {
                         store.update(cx, |store, cx| store.show_thread(id, cx));
                     }

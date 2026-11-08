@@ -3,9 +3,9 @@
 //! [`AppShell`] is the window: it owns navigation, the layout rule and the
 //! back stack, and it survives everything below it. Beneath it sit its
 //! *links* — one per host, each with the store it fills — and the *column*,
-//! the views of the host the window shows. Switching hosts replaces both; it
-//! does not replace the window's navigation root, and resizing the window
-//! never touches either.
+//! whose panes each show a thread of one of those hosts. Replacing the
+//! workspace replaces both; it does not replace the window's navigation
+//! root, and resizing the window never touches either.
 //!
 //! Layout is decided by one rule (`crate::window_seam`): a desktop build is
 //! always the wide split, and a mobile build is a navigation stack — hosts,
@@ -186,12 +186,11 @@ impl Render for DestinationView {
     }
 }
 
-/// The window's views of the threads of one host. Nothing here is touched by
-/// a resize.
+/// The window's views of its hosts' threads. Nothing here is touched by a
+/// resize.
 struct Column {
-    /// The host whose threads the panes show.
-    host: HostKey,
-    /// The wide layout's chat column, a dock of [`ThreadPanel`]s.
+    /// The wide layout's chat column, a dock of [`ThreadPanel`]s, each over
+    /// its own thread's host.
     thread_panes: Entity<DockArea>,
     /// The column's splits gliding toward the layout an edit made.
     glides: crate::panes::Glides,
@@ -256,6 +255,7 @@ struct HandedToChat {
     recedes: bool,
     close: Option<crate::motion::Shown<gpui::WeakEntity<ThreadPanel>>>,
     controls: Option<PaneControls>,
+    host: Option<SharedString>,
 }
 
 /// The window's link to one host, the store it fills and the views over
@@ -386,7 +386,7 @@ struct ThreadPage {
     page: EntityId,
     chat: Entity<ChatView>,
     frame: Entity<crate::chat::ChatFrame>,
-    session_id: String,
+    thread: ThreadKey,
 }
 
 /// Which pane commands the window offers now; none in the compact layout.
@@ -517,7 +517,7 @@ pub(crate) fn pane_layouts(window: &Window, cx: &App) -> Vec<PaneLayout> {
 pub(crate) fn shown_in_pane(thread: &ThreadKey, cx: &App) -> bool {
     current_shell(cx).is_some_and(|shell| {
         let shell = shell.read(cx);
-        !shell.compact(cx) && shell.pane_showing_thread(thread, cx).is_some()
+        !shell.compact(cx) && shell.pane_showing(thread, cx).is_some()
     })
 }
 
@@ -533,7 +533,7 @@ pub(crate) fn several_hosts(cx: &App) -> bool {
 
 /// Whether a pane of this window shows `thread`, the compact page included.
 pub(crate) fn pane_shows(thread: &ThreadKey, cx: &App) -> bool {
-    current_shell(cx).is_some_and(|shell| shell.read(cx).pane_showing_thread(thread, cx).is_some())
+    current_shell(cx).is_some_and(|shell| shell.read(cx).pane_showing(thread, cx).is_some())
 }
 
 /// The chat that shows an agent opened from `lead` beside it, for what
@@ -548,16 +548,14 @@ pub(crate) fn side_host_for(lead: &ThreadKey, cx: &App) -> Option<Entity<ChatVie
     if shell.compact(cx) {
         return None;
     }
-    let column = shell
-        .column
-        .as_ref()
-        .filter(|column| column.host == lead.host)?;
-    let lead = lead.session_id.as_str();
+    let column = shell.column.as_ref()?;
     let chats: Vec<_> = column
         .panes(cx)
         .into_iter()
+        .filter(|pane| pane.read(cx).host(cx) == lead.host)
         .map(|pane| pane.read(cx).chat())
         .collect();
+    let lead = lead.session_id.as_str();
     let showing = |shown: fn(&ChatView) -> Option<&str>| {
         chats
             .iter()
@@ -584,12 +582,17 @@ pub(crate) fn open_agent_page(
     }
 }
 
-/// Whether one of `panes` draws `session_id` beside its own thread, which
-/// keeps it open when a pane showing it as its own goes.
-fn drawn_beside(panes: &[Entity<ThreadPanel>], session_id: &str, cx: &App) -> bool {
-    panes
-        .iter()
-        .any(|pane| pane.read(cx).chat().read(cx).side_session_id() == Some(session_id))
+/// Whether one of `panes` draws `thread` beside its own, which keeps it open
+/// when a pane showing it as its own goes.
+fn drawn_beside(panes: &[Entity<ThreadPanel>], thread: &ThreadKey, cx: &App) -> bool {
+    panes.iter().any(|pane| shows_beside(pane, thread, cx))
+}
+
+/// Whether `pane` draws `thread` beside its own.
+fn shows_beside(pane: &Entity<ThreadPanel>, thread: &ThreadKey, cx: &App) -> bool {
+    let pane = pane.read(cx);
+    pane.host(cx) == thread.host
+        && pane.chat().read(cx).side_session_id() == Some(thread.session_id.as_str())
 }
 
 /// What fills one panel of a layout about to be installed.
@@ -597,7 +600,7 @@ fn drawn_beside(panes: &[Entity<ThreadPanel>], session_id: &str, cx: &App) -> bo
 enum Slot {
     Pane(Entity<ThreadPanel>),
     /// A new pane showing this thread.
-    Thread(String),
+    Thread(ThreadKey),
     Waiting,
 }
 
@@ -664,7 +667,7 @@ pub struct AppShell {
     setup: ShellSetup,
     /// The hosts this window is linked to.
     links: Vec<Link>,
-    /// The views of the host the window shows, which is one of `links`.
+    /// The panes, each over one of `links`' hosts.
     column: Option<Column>,
     /// Whether `links` is one host reached only alone, a space's, in place
     /// of this device's workspace.
@@ -948,7 +951,9 @@ impl AppShell {
         if let Some(mut snapshot) = restored {
             let pane = shell.column.as_ref().and_then(|column| {
                 let thread = snapshot.thread.as_ref()?;
-                (column.host == thread.host).then(|| column.current_pane.clone())
+                shell
+                    .link_of(&thread.host)
+                    .map(|_| column.current_pane.clone())
             });
             if pane.is_none() {
                 snapshot.without_thread();
@@ -962,7 +967,7 @@ impl AppShell {
             {
                 // Bind once, before the baseline can trigger an empty-workspace
                 // draft fallback. Validation below never binds it again.
-                shell.bind_pane(&pane, &thread.session_id, window, cx);
+                shell.bind_pane(&pane, &thread, window, cx);
                 shell.return_keyboard(window, cx);
                 shell.pending_navigation_restore = Some(PendingNavigationRestore {
                     thread,
@@ -979,9 +984,9 @@ impl AppShell {
         self.window_state.clone()
     }
 
-    /// The workspace of the host the window shows, if any.
-    pub fn store(&self) -> Option<Entity<WorkspaceStore>> {
-        Some(self.column_link()?.store.clone())
+    /// The workspace of the current pane's host, if any.
+    pub fn store(&self, cx: &App) -> Option<Entity<WorkspaceStore>> {
+        Some(self.current_link(cx)?.store.clone())
     }
 
     /// The workspace of the host in this process, while the window is
@@ -990,15 +995,15 @@ impl AppShell {
         Some(self.link_of(&HostKey::Local)?.store.clone())
     }
 
-    pub fn link(&self) -> Option<tcode_client::HostLink> {
-        self.column_link()?.link()
+    pub fn link(&self, cx: &App) -> Option<tcode_client::HostLink> {
+        self.current_link(cx)?.link()
     }
 
     /// Where this window is, for a window that opens once it has closed
     /// ([`ShellSetup::reopen`]).
     pub fn current_place(&self, cx: &App) -> ShellPlace {
         ShellPlace {
-            target: self.column_link().map(|link| link.target.clone()),
+            target: self.current_link(cx).map(|link| link.target.clone()),
             navigation: self.navigation_snapshot(cx),
         }
     }
@@ -1007,7 +1012,7 @@ impl AppShell {
     #[allow(private_interfaces)]
     #[doc(hidden)]
     pub fn preview_lifecycle(&self, cx: &App) -> Option<Entity<BrowserLifecycle>> {
-        Some(self.column_link()?.preview.read(cx).lifecycle())
+        Some(self.current_link(cx)?.preview.read(cx).lifecycle())
     }
 
     fn link_of(&self, host: &HostKey) -> Option<&Link> {
@@ -1018,9 +1023,10 @@ impl AppShell {
         self.links.iter_mut().find(|link| link.key() == *host)
     }
 
-    /// The link of the host the column shows.
-    fn column_link(&self) -> Option<&Link> {
-        self.link_of(&self.column.as_ref()?.host)
+    /// The link of the current pane's host, which what acts on the window as
+    /// a whole acts on.
+    fn current_link(&self, cx: &App) -> Option<&Link> {
+        self.link_of(&self.column.as_ref()?.current_pane.read(cx).host(cx))
     }
 }
 
@@ -1389,10 +1395,9 @@ impl AppShell {
     ) {
         // Already there: go to that host's threads instead of tearing its
         // link down and building the same one again.
-        if self.links.len() == 1
-            && self.column_link().is_some_and(|current| {
-                same_target(&current.target, &target) && !refused(&current.store, cx)
-            })
+        if let [current] = self.links.as_slice()
+            && same_target(&current.target, &target)
+            && !refused(&current.store, cx)
         {
             self.show_host_section(&target.key(), cx);
             return;
@@ -1411,10 +1416,10 @@ impl AppShell {
         self.attach(target, window, cx);
     }
 
-    /// Close the link to `host` and nothing else: every other host keeps
-    /// its link, store and views. A column on `host` moves to the
-    /// workspace's first host left; the last link closing leaves the
-    /// window with none.
+    /// Close the link to `host` and the panes showing its threads, and
+    /// nothing else: every other host keeps its link, store and panes. The
+    /// window's last pane stays, waiting on the workspace's first host left;
+    /// the last link closing leaves the window with none.
     fn close_link(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
         let Some(at) = self.links.iter().position(|link| link.key() == *host) else {
             return;
@@ -1430,19 +1435,76 @@ impl AppShell {
         }
         let mut link = self.links.remove(at);
         link.close(cx);
-        if self
-            .column
-            .as_ref()
-            .is_some_and(|column| column.host == *host)
-            && let Some(next) = self.links.first().map(Link::key)
-        {
-            self.move_column(next.clone(), window, cx);
-            if let Some(store) = self.link_of(&next).map(|link| link.store.clone()) {
-                self.fill_empty_column(&store, cx);
-            }
-        }
+        self.close_panes_of(&link.store, window, cx);
         self.sync_hosts(cx);
         cx.notify();
+    }
+
+    /// The panes showing threads of `store`'s host, whose link closed, go,
+    /// with the compact pages over them. The last pane of the window stays
+    /// in place, waiting on the workspace's first host, which offers its
+    /// draft.
+    fn close_panes_of(
+        &mut self,
+        store: &Entity<WorkspaceStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(column) = &self.column else {
+            return;
+        };
+        if self
+            .pending_navigation_restore
+            .as_ref()
+            .is_some_and(|pending| pending.thread.host == store.read(cx).host_key())
+        {
+            self.pending_navigation_restore = None;
+        }
+        let on_page = column.page().read(cx).store() == store;
+        if on_page {
+            self.drop_leads(0, cx);
+            self.release_leaving(cx);
+        }
+        let Some(column) = &self.column else {
+            return;
+        };
+        let panes = column.panes(cx);
+        let mut remaining = panes.len();
+        let gone: Vec<_> = panes
+            .into_iter()
+            .filter(|pane| pane.read(cx).store() == store)
+            .collect();
+        for pane in &gone {
+            pane.update(cx, |pane, cx| pane.release_preview(cx));
+            if remaining > 1 {
+                if let Some(column) = self.column.as_mut()
+                    && column.zoom.pane() == Some(pane)
+                {
+                    column.zoom.zoom_out();
+                }
+                self.glide_out(pane, cx);
+                remaining -= 1;
+                continue;
+            }
+            let Some(link) = self.links.first() else {
+                return;
+            };
+            let (store, preview) = (link.store.clone(), link.preview.clone());
+            self.rehost(pane, &store, &preview, window, cx);
+            self.fill_empty_column(&store, cx);
+        }
+        if let Some(column) = self.column.as_mut() {
+            let panes = column.panes(cx);
+            if !panes.contains(&column.current_pane)
+                && let Some(first) = panes.first()
+            {
+                column.current_pane = first.clone();
+            }
+        }
+        if on_page {
+            self.window_state
+                .update(cx, |state, cx| state.drop_thread_pages(cx));
+        }
     }
 
     /// The links in the workspace's order; a host opened outside it last.
@@ -1694,11 +1756,12 @@ impl AppShell {
             _tasks: Vec::new(),
             _subscriptions: subscriptions,
         });
+        self.mark_on_screen(&store, cx);
         Some(host)
     }
 
-    /// Show the threads of `host`, which the window is linked to, in a column
-    /// of one pane waiting for a thread.
+    /// A column of one pane waiting for a thread of `host`, which the window
+    /// is linked to.
     fn show_column(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
         let Some(link) = self.link_of(&host) else {
             return;
@@ -1714,7 +1777,7 @@ impl AppShell {
             || Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             |column| column.sidebar_width.clone(),
         );
-        let thread_panel = self.new_pane(&store, &preview, None, window, cx);
+        let thread_panel = self.new_pane(&store, &preview, window, cx);
         let shell = cx.entity().downgrade();
         let drop_landing = Rc::new(Cell::new(None));
         let drop_target: crate::panes::DropTarget = Rc::new({
@@ -1749,7 +1812,6 @@ impl AppShell {
             },
         )];
         self.column = Some(Column {
-            host,
             thread_panes,
             glides: Default::default(),
             window_seen: None,
@@ -1776,53 +1838,17 @@ impl AppShell {
         });
     }
 
-    /// The column shows `host`'s threads in place of the host it was on,
-    /// which keeps its link and stops showing any thread. The pages of the
-    /// threads it showed go; the rest of the window's place stays.
-    fn move_column(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(column) = &self.column {
-            for pane in column.all_panes(cx) {
-                pane.update(cx, |pane, cx| pane.release_preview(cx));
-            }
-            if let Some(store) = self.link_of(&column.host).map(|link| link.store.clone()) {
-                store.update(cx, |store, cx| {
-                    for thread in store.open_threads() {
-                        store.close_thread(&thread, cx);
-                    }
-                    store.set_conversation_on_screen(false, cx);
-                });
-            }
-        }
-        self.pending_navigation_restore = None;
-        self.show_column(host, window, cx);
-        self.window_state
-            .update(cx, |state, cx| state.drop_thread_pages(cx));
-    }
-
+    /// A pane over `store`'s host, waiting for a thread.
     fn new_pane(
         &self,
         store: &Entity<WorkspaceStore>,
         preview: &Entity<PreviewPanel>,
-        session_id: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ThreadPanel> {
-        let drawer = crate::panes::Drawer::new(
-            store.clone(),
-            self.window_state.clone(),
-            preview.clone(),
-            session_id.as_deref(),
-            cx,
-        );
-        let chat = cx.new(|cx| {
-            ChatView::new(
-                store.clone(),
-                self.window_state.clone(),
-                session_id,
-                window,
-                cx,
-            )
-        });
+        let drawer = self.drawer_over(store, preview, None, cx);
+        let chat =
+            cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), None, window, cx));
         let shell = cx.entity().downgrade();
         cx.new(|cx| {
             ThreadPanel::new(
@@ -1837,28 +1863,64 @@ impl AppShell {
         })
     }
 
-    /// A pane whose thread the store closed leaves the column, and the last
+    /// A drawer over `store`'s host, for a pane showing `session_id`.
+    fn drawer_over(
+        &self,
+        store: &Entity<WorkspaceStore>,
+        preview: &Entity<PreviewPanel>,
+        session_id: Option<&str>,
+        cx: &mut App,
+    ) -> crate::panes::Drawer {
+        crate::panes::Drawer::new(
+            store.clone(),
+            self.window_state.clone(),
+            preview.clone(),
+            session_id,
+            cx,
+        )
+    }
+
+    /// `pane` waits for a thread of `store`'s host in place of what it
+    /// showed of another's.
+    fn rehost(
+        &self,
+        pane: &Entity<ThreadPanel>,
+        store: &Entity<WorkspaceStore>,
+        preview: &Entity<PreviewPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drawer = self.drawer_over(store, preview, None, cx);
+        let chat =
+            cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), None, window, cx));
+        pane.update(cx, |pane, cx| {
+            pane.replace_chat(chat, None, cx);
+            pane.set_drawer(drawer, cx);
+        });
+    }
+
+    /// A pane whose thread `store` closed leaves the column, and the last
     /// one, on a compact window the page, takes that thread's parent, or
-    /// else the host's draft.
-    fn reconcile_panes(&mut self, cx: &mut Context<Self>) {
+    /// else the host's draft. The panes of every other host stay as they
+    /// are.
+    fn reconcile_panes(&mut self, store: &Entity<WorkspaceStore>, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
         if compact {
-            self.reconcile_leads(cx);
+            self.reconcile_leads(store, cx);
         }
         let Some(column) = &self.column else {
             return;
         };
         let panes = column.panes(cx);
-        let Some(store) = self.store() else {
-            return;
-        };
         let current_pane = column.current_pane.clone();
         let mut closed: Vec<_> = panes
             .iter()
             .filter(|pane| {
-                pane.read(cx)
-                    .session_id()
-                    .is_some_and(|session_id| !store.read(cx).is_thread_open(session_id))
+                let pane = pane.read(cx);
+                pane.store() == store
+                    && pane
+                        .session_id()
+                        .is_some_and(|session_id| !store.read(cx).is_thread_open(session_id))
             })
             .cloned()
             .collect();
@@ -1930,70 +1992,84 @@ impl AppShell {
         }
     }
 
-    /// The only rebind of a pane: it shows `session_id`, open from here on,
-    /// and the thread it showed closes unless a side card shows that too.
+    /// The only rebind of a pane: it shows `thread`, open from here on, over
+    /// its host in place of the host it showed, and the thread it showed
+    /// closes unless a side card shows that too.
     fn bind_pane(
         &mut self,
         pane: &Entity<ThreadPanel>,
-        session_id: &str,
+        thread: &ThreadKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(column) = &self.column else {
             return;
         };
-        let Some(store) = self.store() else {
+        let Some(link) = self.link_of(&thread.host) else {
             return;
         };
+        let (store, preview) = (link.store.clone(), link.preview.clone());
         let panes = column.panes(cx);
+        let session_id = thread.session_id.as_str();
         store.update(cx, |store, cx| {
             if !store.is_thread_open(session_id) {
                 store.open_thread(session_id, cx);
                 cx.notify();
             }
         });
-        let left = pane.read(cx).session_id().map(str::to_owned);
-        if left.as_deref() != Some(session_id) {
-            pane.update(cx, |pane, cx| {
-                pane.set_session(Some(session_id.to_owned()), cx)
-            });
-            // A pane that waited with the keyboard had no composer to give it
-            // to until now.
-            if left.is_none() && pane.focus_handle(cx).is_focused(window) {
-                pane.read(cx)
-                    .chat()
-                    .update(cx, |chat, cx| chat.focus_composer(window, cx));
-            }
-            if let Some(left) = left
-                && store.read(cx).is_thread_open(&left)
-                && !drawn_beside(&panes, &left, cx)
-            {
-                store.update(cx, |store, cx| store.close_thread(&left, cx));
-            }
+        let left = pane.read(cx).thread(cx);
+        if left.as_ref() == Some(thread) {
+            return;
+        }
+        let left_store = pane.read(cx).store().clone();
+        let rehosted = left_store != store;
+        let held = rehosted && pane.focus_handle(cx).contains_focused(window, cx);
+        if rehosted {
+            self.rehost(pane, &store, &preview, window, cx);
+        }
+        pane.update(cx, |pane, cx| {
+            pane.set_session(Some(session_id.to_owned()), cx)
+        });
+        // A pane that waited with the keyboard had no composer to give it to
+        // until now, nor had one whose composer went with its host.
+        if held || (left.is_none() && pane.focus_handle(cx).is_focused(window)) {
+            pane.read(cx)
+                .chat()
+                .update(cx, |chat, cx| chat.focus_composer(window, cx));
+        }
+        if let Some(left) = left
+            && left_store.read(cx).is_thread_open(&left.session_id)
+            && !drawn_beside(&panes, &left, cx)
+        {
+            left_store.update(cx, |store, cx| store.close_thread(&left.session_id, cx));
         }
     }
 
     /// Where a thread shown without naming a pane goes: the pane showing it,
-    /// or beside its lead; else `replacing`'s pane, the current pane, or the
-    /// first pane.
+    /// or beside its lead; else the pane of `replacing`, a thread of the
+    /// same host, the current pane, or the first pane.
     fn place(
         &self,
-        session_id: &str,
+        thread: &ThreadKey,
         replacing: Option<&str>,
         cx: &App,
     ) -> Option<Entity<ThreadPanel>> {
         let column = self.column.as_ref()?;
         let panes = column.panes(cx);
-        self.pane_showing(session_id, cx)
+        self.pane_showing(thread, cx)
             .or_else(|| {
                 panes
                     .iter()
-                    .find(|pane| {
-                        pane.read(cx).chat().read(cx).side_session_id() == Some(session_id)
-                    })
+                    .find(|pane| shows_beside(pane, thread, cx))
                     .cloned()
             })
-            .or_else(|| self.pane_showing(replacing?, cx))
+            .or_else(|| {
+                let replacing = ThreadKey {
+                    host: thread.host.clone(),
+                    session_id: replacing?.to_owned(),
+                };
+                self.pane_showing(&replacing, cx)
+            })
             .or_else(|| {
                 panes
                     .contains(&column.current_pane)
@@ -2002,14 +2078,14 @@ impl AppShell {
             .or_else(|| panes.first().cloned())
     }
 
-    /// A column showing nothing offers its host's draft once that host's
-    /// index is in, instead of a dead end. Only the column's host is asked:
-    /// a draft on any other host would have no pane to show it.
+    /// A column showing nothing offers the current pane's host's draft once
+    /// that host's index is in, instead of a dead end. No other host is
+    /// asked: the window would show only one of their drafts.
     fn fill_empty_column(&mut self, store: &Entity<WorkspaceStore>, cx: &mut Context<Self>) {
         let Some(column) = &self.column else {
             return;
         };
-        if column.host != store.read(cx).host_key()
+        if column.current_pane.read(cx).store() != store
             || !store.read(cx).index_hydrated()
             || column
                 .panes(cx)
@@ -2029,13 +2105,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let host = store.read(cx).host_key();
-        if self
-            .column
-            .as_ref()
-            .is_some_and(|column| column.host == host)
-        {
-            self.reconcile_panes(cx);
-        }
+        self.reconcile_panes(store, cx);
         if let Some(link) = self.links.iter_mut().find(|link| link.key() == host)
             && link.attention.update(store.read(cx), cx)
         {
@@ -2056,9 +2126,8 @@ impl AppShell {
         cx.notify();
     }
 
-    /// Put `shown`, a thread of `store`'s host, in its pane. The column
-    /// shows one host's threads: one the user asked for on another host
-    /// takes the column there, and one nobody asked for stays off screen.
+    /// Put `shown`, a thread of `store`'s host, in its pane, whichever hosts
+    /// the other panes show.
     fn show_thread(
         &mut self,
         store: &Entity<WorkspaceStore>,
@@ -2066,37 +2135,29 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let host = store.read(cx).host_key();
-        if self
-            .column
-            .as_ref()
-            .is_none_or(|column| column.host != host)
-        {
-            if !shown.asked || self.link_of(&host).is_none() {
-                return;
-            }
-            self.move_column(host, window, cx);
+        if self.column.is_none() {
+            return;
         }
         if shown.asked {
             self.moved_on(cx);
         }
-        let session_id = shown.session_id.as_str();
+        let thread = store.read(cx).thread_key(&shown.session_id);
         if self.compact(cx) {
-            self.unwind_leads(session_id, cx);
+            self.unwind_leads(&thread, cx);
         }
-        if let Some(pane) = self.place(session_id, shown.replacing.as_deref(), cx) {
-            self.show_in_pane(&pane, session_id, shown.asked, window, cx);
+        if let Some(pane) = self.place(&thread, shown.replacing.as_deref(), cx) {
+            self.show_in_pane(&pane, &thread, shown.asked, window, cx);
         }
     }
 
-    /// `pane` shows `session_id` and is the current pane. A thread the user
+    /// `pane` shows `thread` and is the current pane. A thread the user
     /// `asked` for takes the compact stack and the keyboard; one the
     /// workspace went to by itself leaves them, though a lone pane's composer
     /// takes a keyboard nothing holds.
     fn show_in_pane(
         &mut self,
         pane: &Entity<ThreadPanel>,
-        session_id: &str,
+        thread: &ThreadKey,
         asked: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2104,19 +2165,16 @@ impl AppShell {
         if self
             .pending_navigation_restore
             .as_ref()
-            .is_some_and(|pending| {
-                pending.thread.session_id != session_id
-                    || self.column.as_ref().map(|column| &column.host) != Some(&pending.thread.host)
-            })
+            .is_some_and(|pending| pending.thread != *thread)
         {
             self.pending_navigation_restore = None;
         }
         let compact = self.compact(cx);
-        let chat = pane.read(cx).chat();
-        let beside = chat.read(cx).side_session_id() == Some(session_id);
+        let beside = shows_beside(pane, thread, cx);
         if !beside {
-            self.bind_pane(pane, session_id, window, cx);
+            self.bind_pane(pane, thread, window, cx);
         }
+        let chat = pane.read(cx).chat();
         let Some(column) = self.column.as_mut() else {
             return;
         };
@@ -2259,50 +2317,37 @@ impl AppShell {
     /// The thread of the pane last in use: the compact page's, and what the
     /// window as a whole is about.
     fn page_thread(&self, cx: &App) -> Option<ThreadKey> {
-        let column = self.column.as_ref()?;
-        let session_id = column.page().read(cx).session_id()?;
-        Some(ThreadKey {
-            host: column.host.clone(),
-            session_id: session_id.to_owned(),
-        })
+        self.column.as_ref()?.page().read(cx).thread(cx)
     }
 
-    /// The pane showing `session_id`, a thread of the column's host.
-    fn pane_showing(&self, session_id: &str, cx: &App) -> Option<Entity<ThreadPanel>> {
+    /// The pane showing `thread`.
+    fn pane_showing(&self, thread: &ThreadKey, cx: &App) -> Option<Entity<ThreadPanel>> {
         self.column
             .as_ref()?
             .panes(cx)
             .into_iter()
-            .find(|pane| pane.read(cx).session_id() == Some(session_id))
+            .find(|pane| pane.read(cx).thread(cx).as_ref() == Some(thread))
     }
 
-    /// The pane showing `thread`.
-    fn pane_showing_thread(&self, thread: &ThreadKey, cx: &App) -> Option<Entity<ThreadPanel>> {
-        self.column
-            .as_ref()
-            .filter(|column| column.host == thread.host)?;
-        self.pane_showing(&thread.session_id, cx)
-    }
-
-    /// A pane on `placement`'s side of `from`, with the keyboard and waiting
-    /// for a thread.
+    /// A pane over `host` on `placement`'s side of `from`, with the keyboard
+    /// and waiting for a thread.
     fn add_pane(
         &mut self,
         from: &Entity<ThreadPanel>,
+        host: &HostKey,
         placement: gpui_base::Placement,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<(Entity<ThreadPanel>, Option<String>)> {
+    ) -> Option<Entity<ThreadPanel>> {
         if self.compact(cx) || !self.split_allowed(from, placement, window, cx) {
             return None;
         }
         let column = self.column.as_ref()?;
         let node = from.read(cx).group()?.read(cx).node();
-        let beside = from.read(cx).session_id().map(str::to_owned);
-        let link = self.column_link()?;
+        let link = self.link_of(host)?;
         let (store, preview) = (link.store.clone(), link.preview.clone());
         let area = column.thread_panes.clone();
-        let pane = self.new_pane(&store, &preview, None, window, cx);
+        let pane = self.new_pane(&store, &preview, window, cx);
         self.column.as_mut()?.zoom.zoom_out();
         let before = self.glide_before_edit(window, cx);
         area.update(cx, |area, cx| {
@@ -2325,11 +2370,11 @@ impl AppShell {
         self.set_current_pane(&pane, cx);
         window.focus(&pane.focus_handle(cx), cx);
         cx.notify();
-        Some((pane, beside))
+        Some(pane)
     }
 
-    /// Split `from`: the new pane shows a fresh draft in the same project,
-    /// and the thread split from stays open.
+    /// Split `from`: the new pane shows a fresh draft on `from`'s host, in
+    /// the same project, and the thread split from stays open.
     fn split_pane(
         &mut self,
         from: &Entity<ThreadPanel>,
@@ -2337,39 +2382,46 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let store = from.read(cx).chat().read(cx).workspace_store().clone();
-        let Some((_, beside)) = self.add_pane(from, placement, window, cx) else {
-            return;
+        let (store, beside) = {
+            let from = from.read(cx);
+            (from.store().clone(), from.session_id().map(str::to_owned))
         };
+        let host = store.read(cx).host_key();
+        if self.add_pane(from, &host, placement, window, cx).is_none() {
+            return;
+        }
         store.update(cx, |store, cx| {
             store.start_draft_beside(beside.as_deref(), cx);
         });
     }
 
-    /// Show `session_id` in a pane of its own, on the first of `placements`
+    /// Show `thread` in a pane of its own, on the first of `placements`
     /// beside `from` that the column has room for; the pane already showing
     /// it takes the keyboard instead. False when no pane shows it: there was no
     /// room, or the layout has no panes.
     fn open_in_new_pane(
         &mut self,
-        session_id: String,
+        thread: ThreadKey,
         from: &Entity<ThreadPanel>,
         placements: &[gpui_base::Placement],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(store) = self.store().filter(|_| !self.compact(cx)) else {
+        if self.compact(cx) {
+            return false;
+        }
+        let Some(store) = self.link_of(&thread.host).map(|link| link.store.clone()) else {
             return false;
         };
-        if self.pane_showing(&session_id, cx).is_some() {
-            store.update(cx, |store, cx| store.show_thread(session_id, cx));
+        if self.pane_showing(&thread, cx).is_some() {
+            store.update(cx, |store, cx| store.show_thread(thread.session_id, cx));
             return true;
         }
         let added = placements
             .iter()
-            .find_map(|placement| self.add_pane(from, *placement, window, cx));
-        if let Some((pane, _)) = &added {
-            self.show_in_pane(pane, &session_id, true, window, cx);
+            .find_map(|placement| self.add_pane(from, &thread.host, *placement, window, cx));
+        if let Some(pane) = &added {
+            self.show_in_pane(pane, &thread, true, window, cx);
         }
         added.is_some()
     }
@@ -2383,14 +2435,9 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(column) = self
-            .column
-            .as_ref()
-            .filter(|column| column.host == thread.host)
-        else {
+        let Some(column) = self.column.as_ref() else {
             return;
         };
-        let session_id = thread.session_id;
         let Some(pane) = column.panes(cx).into_iter().find(|pane| {
             pane.read(cx)
                 .group()
@@ -2403,13 +2450,13 @@ impl AppShell {
         let into = column.drop_landing.take();
         match target.placement() {
             Some(placement) => {
-                if !self.open_in_new_pane(session_id, &pane, &[placement], window, cx) {
+                if !self.open_in_new_pane(thread, &pane, &[placement], window, cx) {
                     return;
                 }
             }
             None => {
-                let pane = self.pane_showing(&session_id, cx).unwrap_or(pane);
-                self.show_in_pane(&pane, &session_id, true, window, cx);
+                let pane = self.pane_showing(&thread, cx).unwrap_or(pane);
+                self.show_in_pane(&pane, &thread, true, window, cx);
             }
         }
         if let Some(into) = into {
@@ -2447,17 +2494,12 @@ impl AppShell {
         let Some(column) = self.column.as_ref() else {
             return false;
         };
-        let Some(thread) = self
-            .sidebar
-            .read(cx)
-            .dragged_session()
-            .filter(|thread| thread.host == column.host)
-        else {
+        let Some(thread) = self.sidebar.read(cx).dragged_session() else {
             return false;
         };
         // The panes beneath a zoomed one are covered, and it is in no tab
         // group to drop on.
-        if column.zoom.pane().is_some() || self.pane_showing(&thread.session_id, cx).is_some() {
+        if column.zoom.pane().is_some() || self.pane_showing(thread, cx).is_some() {
             return false;
         }
         column
@@ -2554,19 +2596,19 @@ impl AppShell {
             return;
         };
         let area = column.thread_panes.clone();
-        let Some(store) = self.store() else {
-            return;
-        };
         let panes = column.panes(cx);
         for pane in column.closed_panes(cx) {
-            let session_id = pane.read(cx).session_id().map(str::to_owned);
+            let (store, thread) = {
+                let pane = pane.read(cx);
+                (pane.store().clone(), pane.thread(cx))
+            };
             area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
-            if let Some(session_id) = session_id
-                && store.read(cx).is_thread_open(&session_id)
-                && self.pane_showing(&session_id, cx).is_none()
-                && !drawn_beside(&panes, &session_id, cx)
+            if let Some(thread) = thread
+                && store.read(cx).is_thread_open(&thread.session_id)
+                && self.pane_showing(&thread, cx).is_none()
+                && !drawn_beside(&panes, &thread, cx)
             {
-                store.update(cx, |store, cx| store.close_thread(&session_id, cx));
+                store.update(cx, |store, cx| store.close_thread(&thread.session_id, cx));
             }
         }
     }
@@ -2894,8 +2936,8 @@ impl AppShell {
     }
 
     /// `from` and its neighbour on `side` exchange their conversations, each with its own composer, scroll and expanded rows,
-    /// so a half-written message stays with its thread; the panes and their
-    /// slots stay where they are. The keyboard stays in `from`, or with
+    /// so a half-written message stays with its thread, and, of different
+    /// hosts, their drawers; the panes and their slots stay where they are. The keyboard stays in `from`, or with
     /// `follow` goes with its thread to the neighbour.
     /// Neither conversation closes. Each conversation shown travels from
     /// where it was drawn into its new pane (see
@@ -2925,9 +2967,13 @@ impl AppShell {
             pane.session_id().is_some().then(|| pane.chat_drawn(cx))
         };
         let (ours_at, theirs_at) = (drawn(&from), drawn(&to));
+        let hosts_differ = from.read(cx).store() != to.read(cx).store();
         let chat = from.read(cx).chat();
         let theirs = to.update(cx, |to, cx| to.replace_chat(chat, ours_at, cx));
         from.update(cx, |from, cx| from.replace_chat(theirs, theirs_at, cx));
+        if hosts_differ {
+            ThreadPanel::exchange_drawers(&from, &to, cx);
+        }
         let keeper = if follow { to } else { from };
         window.focus(&keeper.focus_handle(cx), cx);
         self.pane_entered(keeper, cx);
@@ -2957,7 +3003,7 @@ impl AppShell {
     }
 
     /// The thread the pane `panel` shows.
-    fn panel_session(&self, panel: PanelId, cx: &App) -> Option<String> {
+    fn panel_thread(&self, panel: PanelId, cx: &App) -> Option<ThreadKey> {
         self.column
             .as_ref()?
             .thread_panes
@@ -2967,38 +3013,40 @@ impl AppShell {
             .downcast::<ThreadPanel>()
             .ok()?
             .read(cx)
-            .session_id()
-            .map(str::to_owned)
+            .thread(cx)
     }
 
     /// The narrowest the chat column can be laid out as `tree`, whose panels
-    /// show the threads `session_of` names: its panes' headers at their
+    /// show the threads `thread_of` names: its panes' headers at their
     /// narrowest, side by side, and never narrower than a pane alone. Only
     /// the pane in the column's top-left corner clears the traffic lights
     /// over a collapsed sidebar.
     fn column_min_width(
         &self,
         tree: &gpui_base::dock::PaneTree,
-        session_of: &dyn Fn(PanelId) -> Option<String>,
+        thread_of: &dyn Fn(PanelId) -> Option<ThreadKey>,
         collapsed: bool,
         fullscreen: bool,
         cx: &App,
     ) -> f32 {
-        let Some(link) = self.column_link() else {
+        let Some(current) = self.current_link(cx) else {
             return CHAT_MIN_WIDTH;
         };
-        let store = link.store.read(cx);
         let floor = if tree.panels().nth(1).is_some() {
             PANE_MIN_WIDTH
         } else {
             CHAT_MIN_WIDTH
         };
         let pane_min = |panel: PanelId, edges: crate::chat::WindowEdges| {
-            let session_id = session_of(panel);
+            let thread = thread_of(panel);
+            let link = thread
+                .as_ref()
+                .and_then(|thread| self.link_of(&thread.host))
+                .unwrap_or(current);
             floor
                 + crate::chat::header_extra_width_for(
-                    store,
-                    session_id.as_deref(),
+                    link.store.read(cx),
+                    thread.as_ref().map(|thread| thread.session_id.as_str()),
                     collapsed && edges.left,
                     fullscreen,
                     false,
@@ -3032,15 +3080,15 @@ impl AppShell {
             return false;
         };
         tree.split(node, PanelId::from_u64(u64::MAX), placement, None);
-        self.column_fits(&tree, &|panel| self.panel_session(panel, cx), window, cx)
+        self.column_fits(&tree, &|panel| self.panel_thread(panel, cx), window, cx)
     }
 
     /// Whether `tree`'s minimum width, its panels showing the threads
-    /// `session_of` names, fits beside the sidebar.
+    /// `thread_of` names, fits beside the sidebar.
     fn column_fits(
         &self,
         tree: &gpui_base::dock::PaneTree,
-        session_of: &dyn Fn(PanelId) -> Option<String>,
+        thread_of: &dyn Fn(PanelId) -> Option<ThreadKey>,
         window: &Window,
         cx: &App,
     ) -> bool {
@@ -3053,7 +3101,7 @@ impl AppShell {
         } else {
             column.sidebar_width.get()
         };
-        px(self.column_min_width(tree, session_of, collapsed, window.is_fullscreen(), cx))
+        px(self.column_min_width(tree, thread_of, collapsed, window.is_fullscreen(), cx))
             <= window.viewport_size().width - sidebar
     }
 
@@ -3077,10 +3125,8 @@ impl AppShell {
         let (fills, fewest): (Vec<_>, _) = match layout {
             PaneLayout::SpreadAgents => {
                 let parent = current_pane.read(cx).session_id()?;
-                let mut agents: Vec<_> = self
-                    .column_link()?
-                    .store
-                    .read(cx)
+                let store = current_pane.read(cx).store().read(cx);
+                let mut agents: Vec<_> = store
                     .sidebar_sessions()
                     .iter()
                     .filter(|meta| {
@@ -3091,8 +3137,9 @@ impl AppShell {
                     .collect();
                 agents.sort_by_key(|meta| std::cmp::Reverse(meta.created_at));
                 let agents = agents.into_iter().map(|meta| {
-                    self.pane_showing(&meta.id, cx)
-                        .map_or_else(|| Slot::Thread(meta.id.clone()), Slot::Pane)
+                    let thread = store.thread_key(&meta.id);
+                    self.pane_showing(&thread, cx)
+                        .map_or(Slot::Thread(thread), Slot::Pane)
                 });
                 (
                     first.chain(agents).take(crate::panes::MAX_PANES).collect(),
@@ -3138,12 +3185,12 @@ impl AppShell {
             // Every split opens right of or below its pane, so the last
             // input leads the tree's order.
             let slots: Vec<_> = tree.panels().zip(fills.iter().cloned()).collect();
-            let session_of = |panel: PanelId| match slots.iter().find(|(id, _)| *id == panel)? {
-                (_, Slot::Pane(pane)) => pane.read(cx).session_id().map(str::to_owned),
-                (_, Slot::Thread(session_id)) => Some(session_id.clone()),
+            let thread_of = |panel: PanelId| match slots.iter().find(|(id, _)| *id == panel)? {
+                (_, Slot::Pane(pane)) => pane.read(cx).thread(cx),
+                (_, Slot::Thread(thread)) => Some(thread.clone()),
                 (_, Slot::Waiting) => None,
             };
-            self.column_fits(&tree, &session_of, window, cx)
+            self.column_fits(&tree, &thread_of, window, cx)
                 .then_some((tree, slots))
         })
     }
@@ -3237,7 +3284,7 @@ impl AppShell {
             return;
         }
         let (tree, slots) = plan;
-        let (Some(column), Some(link)) = (self.column.as_ref(), self.column_link()) else {
+        let (Some(column), Some(link)) = (self.column.as_ref(), self.current_link(cx)) else {
             return;
         };
         let (store, preview) = (link.store.clone(), link.preview.clone());
@@ -3250,9 +3297,9 @@ impl AppShell {
             let pane = match slot {
                 Slot::Pane(pane) => pane,
                 Slot::Waiting | Slot::Thread(_) => {
-                    let pane = self.new_pane(&store, &preview, None, window, cx);
-                    if let Slot::Thread(session_id) = slot {
-                        threads.push((pane.clone(), session_id));
+                    let pane = self.new_pane(&store, &preview, window, cx);
+                    if let Slot::Thread(thread) = slot {
+                        threads.push((pane.clone(), thread));
                     }
                     pane
                 }
@@ -3269,14 +3316,17 @@ impl AppShell {
         let kept: Vec<_> = panes.values().cloned().collect();
         for pane in before {
             if !kept.contains(&pane)
-                && let Some(session_id) = pane.read(cx).session_id().map(str::to_owned)
-                && !drawn_beside(&kept, &session_id, cx)
+                && let Some(thread) = pane.read(cx).thread(cx)
+                && !drawn_beside(&kept, &thread, cx)
             {
-                store.update(cx, |store, cx| store.close_thread(&session_id, cx));
+                pane.read(cx)
+                    .store()
+                    .clone()
+                    .update(cx, |store, cx| store.close_thread(&thread.session_id, cx));
             }
         }
-        for (pane, session_id) in threads {
-            self.bind_pane(&pane, &session_id, window, cx);
+        for (pane, thread) in threads {
+            self.bind_pane(&pane, &thread, window, cx);
         }
         self.pane_entered(current_pane.clone(), cx);
         window.focus(&current_pane.focus_handle(cx), cx);
@@ -3328,6 +3378,11 @@ impl AppShell {
             })
             .collect();
         let among_others = edges.len() > 1;
+        // With panes of several hosts, each header names its own: the host
+        // a pane's commands go to is no longer the one beside it.
+        let several = edges
+            .iter()
+            .any(|(pane, _)| pane.read(cx).store() != column.current_pane.read(cx).store());
         let mut handed = Vec::with_capacity(edges.len());
         for (pane, edges) in edges {
             let recedes = among_others && !compact && pane != column.current_pane;
@@ -3340,6 +3395,7 @@ impl AppShell {
             );
             ThreadPanel::set_among_others(&pane, among_others, cx);
             let controls = self.pane_controls(&pane, window, cx);
+            let host = several.then(|| pane.read(cx).store().read(cx).host_title());
             let chat = pane.read(cx).chat();
             handed.push((
                 chat,
@@ -3348,6 +3404,7 @@ impl AppShell {
                     recedes,
                     close,
                     controls,
+                    host,
                 },
             ));
         }
@@ -3367,6 +3424,9 @@ impl AppShell {
             }
             if last.is_none_or(|last| last.close != now.close || last.controls != now.controls) {
                 ChatView::set_pane(&chat, now.close.clone(), now.controls, cx);
+            }
+            if last.is_none_or(|last| last.host != now.host) {
+                ChatView::set_named_host(&chat, now.host.clone(), cx);
             }
             column.handed.insert(chat.entity_id(), now);
         }
@@ -3399,13 +3459,10 @@ impl AppShell {
         if self.compact(cx) || self.window_state.read(cx).route() != Route::Chat {
             return Default::default();
         }
-        let Some(link) = self.column_link() else {
-            return Default::default();
-        };
-        let store = link.store.read(cx);
         let row = |pane: &Entity<ThreadPanel>| {
-            let thread = pane.read(cx).session_id()?;
-            Some(store.thread_key(&store.roster_row(thread)))
+            let pane = pane.read(cx);
+            let store = pane.store().read(cx);
+            Some(store.thread_key(&store.roster_row(pane.session_id()?)))
         };
         let panes = match column.zoom.pane().filter(|_| column.zoom.is_zoomed()) {
             Some(zoomed) => vec![zoomed.clone()],
@@ -3578,17 +3635,23 @@ impl AppShell {
         }
         self.mounted.truncate(common);
         self.mounted.extend(pushed);
+        for link in &self.links {
+            self.mark_on_screen(&link.store, cx);
+        }
+    }
+
+    /// Tell `store` whether the window shows its conversations now: each
+    /// host's threads in the panes are on screen with the column.
+    fn mark_on_screen(&self, store: &Entity<WorkspaceStore>, cx: &mut App) {
         let state = self.window_state.read(cx);
         let on_screen = if state.compact {
             state.destination() == Destination::Thread
         } else {
             state.route() == Route::Chat
         };
-        if let Some(store) = self.store() {
-            store.update(cx, |store, cx| {
-                store.set_conversation_on_screen(on_screen, cx);
-            });
-        }
+        store.update(cx, |store, cx| {
+            store.set_conversation_on_screen(on_screen, cx);
+        });
     }
 
     /// Navigating dismisses a software keyboard. Only a mobile build has one,
@@ -3632,7 +3695,7 @@ impl AppShell {
                 // A pane of the lead's own, opened beside the agent while the
                 // window was wide, would show the lead a second time once the
                 // agent's pane does.
-                let lead_pane = self.pane_showing(&lead.session_id, cx);
+                let lead_pane = self.pane_showing(&lead.thread, cx);
                 self.pop_lead(cx);
                 if let Some(pane) = lead_pane {
                     self.close_pane_into(&pane, |_, _| None, window, cx);
@@ -3694,7 +3757,7 @@ impl AppShell {
     /// palette, a dialog, another page or the right panel over the chat.
     pub(crate) fn capture_chat(&self, cx: &App) -> Option<Entity<ChatView>> {
         let column = self.column.as_ref()?;
-        let store = self.column_link()?.store.read(cx);
+        let store = column.page().read(cx).store().read(cx);
         let state = self.window_state.read(cx);
         let on_screen = if state.compact {
             state.destination() == Destination::Thread
@@ -3762,16 +3825,10 @@ pub(crate) fn init_pane_actions(cx: &mut App) {
         act_on_pane(cx, PaneCommand::Split(gpui_base::Placement::Bottom))
     });
     cx.on_action(|action: &OpenInNewPane, cx| {
-        let session_id = action.0.clone();
+        let thread = action.0.clone();
         act(cx, move |shell, window, cx| {
             if let Some(from) = shell.acting_pane() {
-                shell.open_in_new_pane(
-                    session_id,
-                    &from,
-                    &[gpui_base::Placement::Right],
-                    window,
-                    cx,
-                );
+                shell.open_in_new_pane(thread, &from, &[gpui_base::Placement::Right], window, cx);
             }
         })
     });
@@ -4016,7 +4073,7 @@ impl AppShell {
         // A pane's transcript already shows the message.
         if window.is_window_active()
             && self
-                .pane_showing_thread(&store.read(cx).thread_key(session_id), cx)
+                .pane_showing(&store.read(cx).thread_key(session_id), cx)
                 .is_some()
         {
             return;
@@ -4113,7 +4170,7 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.store() else {
+        let Some(store) = self.store(cx) else {
             return;
         };
         if store.read(cx).thread_meta(&anchor.thread_id).is_none() {
@@ -4337,36 +4394,30 @@ impl AppShell {
         if self
             .column
             .as_ref()
-            .is_none_or(|column| column.host != thread.host)
+            .is_none_or(|column| column.page().read(cx).host(cx) != thread.host)
             || !matches!(
                 self.destination(cx),
                 Destination::Thread | Destination::Panel
             )
-            || self.pane_showing(&thread.session_id, cx).is_some()
+            || self.pane_showing(&thread, cx).is_some()
         {
             return false;
         }
-        let session_id = thread.session_id;
         let window_state = self.window_state.clone();
-        let Some(store) = self.store() else {
-            return false;
-        };
         let Some(column) = &mut self.column else {
             return false;
         };
         let pane = column.page().clone();
-        let Some(lead) = pane.read(cx).session_id().map(str::to_owned) else {
+        let store = pane.read(cx).store().clone();
+        let Some(lead) = pane.read(cx).thread(cx) else {
             return false;
         };
-        if column
-            .leads
-            .iter()
-            .any(|kept| kept.session_id == session_id)
-        {
+        if column.leads.iter().any(|kept| kept.thread == thread) {
             return false;
         }
+        let session_id = thread.session_id;
         store.update(cx, |store, cx| {
-            store.lease_timeline(&lead);
+            store.lease_timeline(&lead.session_id);
             if !store.is_thread_open(&session_id) {
                 store.open_thread(&session_id, cx);
             }
@@ -4379,7 +4430,7 @@ impl AppShell {
             page,
             frame: lead_chat.read(cx).frame(),
             chat: lead_chat,
-            session_id: lead,
+            thread: lead,
         });
         store.update(cx, |store, cx| store.show_thread(session_id, cx));
         window_state.update(cx, |state, cx| state.stack_thread(cx));
@@ -4411,15 +4462,16 @@ impl AppShell {
                 store.open_thread(&lead, cx);
             }
         });
+        let thread = store.read(cx).thread_key(&lead);
         let window_state = self.window_state.clone();
         let state = window_state.clone();
-        let chat = cx.new(|cx| ChatView::new(store, state, Some(lead.clone()), window, cx));
+        let chat = cx.new(|cx| ChatView::new(store, state, Some(lead), window, cx));
         if let Some(column) = &mut self.column {
             column.leads.push(ThreadPage {
                 page,
                 frame: chat.read(cx).frame(),
                 chat,
-                session_id: lead,
+                thread,
             });
         }
         window_state.update(cx, |state, cx| state.stack_thread(cx));
@@ -4433,9 +4485,6 @@ impl AppShell {
     fn pop_lead(&mut self, cx: &mut Context<Self>) {
         let top = self.nav.read(cx).current().map(AnyView::entity_id);
         let window_state = self.window_state.clone();
-        let Some(store) = self.store() else {
-            return;
-        };
         let Some(column) = &mut self.column else {
             return;
         };
@@ -4443,26 +4492,27 @@ impl AppShell {
             return;
         };
         let pane = column.page().clone();
-        let agent = pane.read(cx).session_id().map(str::to_owned);
+        let store = pane.read(cx).store().clone();
+        let agent = pane.read(cx).thread(cx);
         if let Some(agent) = &agent {
-            store.update(cx, |store, _| store.lease_timeline(agent));
+            store.update(cx, |store, _| store.lease_timeline(&agent.session_id));
         }
         let chat = pane.update(cx, |pane, cx| pane.replace_chat(lead.chat, None, cx));
         store.update(cx, |store, cx| {
             store.selection_moved_on();
-            store.release_timeline(&lead.session_id, cx);
+            store.release_timeline(&lead.thread.session_id, cx);
             if let Some(agent) = &agent
-                && store.is_thread_open(agent)
+                && store.is_thread_open(&agent.session_id)
             {
-                store.close_thread(agent, cx);
+                store.close_thread(&agent.session_id, cx);
             }
         });
-        if let (Some(page), Some(session_id)) = (top, agent) {
+        if let (Some(page), Some(thread)) = (top, agent) {
             column.leaving.push(ThreadPage {
                 page,
                 frame: chat.read(cx).frame(),
                 chat,
-                session_id,
+                thread,
             });
         }
         window_state.update(cx, |state, cx| state.unstack_threads(1, cx));
@@ -4473,9 +4523,6 @@ impl AppShell {
     /// conversation again and the thread pages above it go, at once: the
     /// conversation is what it was, whichever page it is on.
     fn drop_leads(&mut self, at: usize, cx: &mut Context<Self>) {
-        let Some(store) = self.store() else {
-            return;
-        };
         let Some(column) = &mut self.column else {
             return;
         };
@@ -4484,52 +4531,47 @@ impl AppShell {
             return;
         }
         for lead in &dropped {
-            let shown = self.pane_showing(&lead.session_id, cx).is_some();
-            store.update(cx, |store, cx| {
-                if !shown && store.is_thread_open(&lead.session_id) {
-                    store.close_thread(&lead.session_id, cx);
-                }
-                store.release_timeline(&lead.session_id, cx);
-            });
+            let shown = self.pane_showing(&lead.thread, cx).is_some();
+            let session_id = lead.thread.session_id.as_str();
+            lead.chat
+                .read(cx)
+                .workspace_store()
+                .clone()
+                .update(cx, |store, cx| {
+                    if !shown && store.is_thread_open(session_id) {
+                        store.close_thread(session_id, cx);
+                    }
+                    store.release_timeline(session_id, cx);
+                });
         }
         self.window_state
             .update(cx, |state, cx| state.unstack_threads(dropped.len(), cx));
         self.sync_nav(NavMotion::Immediate, cx);
     }
 
-    /// A lead that closed goes, with the pages above it.
-    fn reconcile_leads(&mut self, cx: &mut Context<Self>) {
+    /// A lead of `store`'s host that closed goes, with the pages above it.
+    fn reconcile_leads(&mut self, store: &Entity<WorkspaceStore>, cx: &mut Context<Self>) {
         let Some(column) = &self.column else {
             return;
         };
-        let Some(link) = self.column_link() else {
-            return;
-        };
-        let store = link.store.read(cx);
-        if let Some(closed) = column
-            .leads
-            .iter()
-            .position(|lead| !store.is_thread_open(&lead.session_id))
-        {
+        if let Some(closed) = column.leads.iter().position(|lead| {
+            lead.chat.read(cx).workspace_store() == store
+                && !store.read(cx).is_thread_open(&lead.thread.session_id)
+        }) {
             self.drop_leads(closed, cx);
         }
     }
 
-    /// Going to `session_id` from the compact stack: a lead is Back to it,
-    /// as an agent archived falls back to its lead; anywhere else leaves
-    /// them all.
-    fn unwind_leads(&mut self, session_id: &str, cx: &mut Context<Self>) {
+    /// Going to `thread` from the compact stack: a lead is Back to it, as an
+    /// agent archived falls back to its lead; anywhere else leaves them all.
+    fn unwind_leads(&mut self, thread: &ThreadKey, cx: &mut Context<Self>) {
         let Some(column) = &self.column else {
             return;
         };
-        if column.leads.is_empty() || column.page().read(cx).session_id() == Some(session_id) {
+        if column.leads.is_empty() || column.page().read(cx).thread(cx).as_ref() == Some(thread) {
             return;
         }
-        match column
-            .leads
-            .iter()
-            .rposition(|lead| lead.session_id == session_id)
-        {
+        match column.leads.iter().rposition(|lead| lead.thread == *thread) {
             Some(at) => {
                 self.drop_leads(at + 1, cx);
                 self.pop_lead(cx);
@@ -4540,14 +4582,17 @@ impl AppShell {
 
     /// Let go of the agents that have left.
     fn release_leaving(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = self.store() else {
-            return;
-        };
         let Some(column) = &mut self.column else {
             return;
         };
         for left in column.leaving.drain(..) {
-            store.update(cx, |store, cx| store.release_timeline(&left.session_id, cx));
+            left.chat
+                .read(cx)
+                .workspace_store()
+                .clone()
+                .update(cx, |store, cx| {
+                    store.release_timeline(&left.thread.session_id, cx)
+                });
         }
     }
 
@@ -4618,8 +4663,9 @@ impl AppShell {
 
     /// The lead thread of the open agent, when one is open.
     fn agent_lead(&self, cx: &App) -> Option<(Entity<WorkspaceStore>, String)> {
-        let store = self.store()?;
-        let active = self.page_thread(cx)?.session_id;
+        let page = self.column.as_ref()?.page().read(cx);
+        let store = page.store().clone();
+        let active = page.session_id()?.to_owned();
         let parent = {
             let store = store.read(cx);
             let sessions = store.sidebar_sessions();
@@ -4724,7 +4770,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let back = self.back_control(cx);
-        let Some(settings) = self.column_link().map(|link| link.settings_page.clone()) else {
+        let Some(settings) = self.current_link(cx).map(|link| link.settings_page.clone()) else {
             return div().into_any_element();
         };
         let detail = destination != Destination::Settings;
@@ -4766,7 +4812,7 @@ impl AppShell {
     }
 
     fn render_arrange_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.column_link().is_none() {
+        if self.current_link(cx).is_none() {
             return div().into_any_element();
         }
         let sidebar = self.sidebar.clone();
@@ -4793,7 +4839,7 @@ impl AppShell {
 
     fn render_threads_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
-        let Some(link) = self.column_link() else {
+        let Some(link) = self.current_link(cx) else {
             let body = self.no_hosts(cx);
             return page_surface(window, cx)
                 .debug_selector(|| "compact-threads-page".into())
@@ -4963,7 +5009,7 @@ impl AppShell {
     /// On a phone the palette opens without the keyboard: the projects are
     /// there to tap, and the search pill still raises it on demand.
     fn start_thread(&mut self, cx: &mut Context<Self>) {
-        let Some(link) = self.column_link() else {
+        let Some(link) = self.current_link(cx) else {
             return;
         };
         let projects = link.store.read(cx).projects();
@@ -5006,12 +5052,16 @@ impl AppShell {
         let back = self.back_action(beneath.unwrap_or(Destination::Thread).back_label(), cx);
         let body =
             self.compact_thread_body(kept.as_ref().map(|kept| kept.frame.clone()), window, cx);
-        let Some(link) = self.column_link() else {
+        let link = match &kept {
+            Some(kept) => self.link_of(&kept.thread.host),
+            None => self.current_link(cx),
+        };
+        let Some(link) = link else {
             return div().into_any_element();
         };
         let store = link.store.read(cx);
         let active = match &kept {
-            Some(kept) => store.chat_active_session_for(Some(&kept.session_id), cx),
+            Some(kept) => store.chat_active_session_for(Some(&kept.thread.session_id), cx),
             None => store.chat_active_session_for(
                 self.page_thread(cx)
                     .map(|thread| thread.session_id)
@@ -5094,7 +5144,7 @@ impl AppShell {
         let Some(column) = &self.column else {
             return div().into_any_element();
         };
-        let Some(link) = self.column_link() else {
+        let Some(link) = self.current_link(cx) else {
             return div().into_any_element();
         };
         let store = link.store.read(cx);
@@ -5257,7 +5307,7 @@ impl AppShell {
         let view = column.chat(cx).read(cx).pull_request_view(cx);
         let session = self.page_thread(cx).map(|thread| thread.session_id);
         let key = session.as_deref().and_then(|session| {
-            self.column_link()?
+            self.current_link(cx)?
                 .store
                 .read(cx)
                 .open_pull_request(session)
@@ -5281,7 +5331,7 @@ impl AppShell {
 
     /// Push the panel destination with something actually on it.
     fn open_panels(&mut self, cx: &mut Context<Self>) {
-        let showing = self.column_link().is_some_and(|link| {
+        let showing = self.current_link(cx).is_some_and(|link| {
             let session = self.page_thread(cx).map(|thread| thread.session_id);
             let panel = link.store.read(cx).panel_state_for(session.as_deref());
             if self.panel_shows_terminal {
@@ -5315,7 +5365,7 @@ impl AppShell {
             };
             pending.panel_open = true;
         }
-        let Some(store) = self.store() else {
+        let Some(store) = self.store(cx) else {
             return;
         };
         let session = self.page_thread(cx).map(|thread| thread.session_id);
@@ -5659,7 +5709,7 @@ impl AppShell {
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
             .child(stack)
-            .map(|el| el.children(self.column_link().map(|link| link.palette.clone())))
+            .map(|el| el.children(self.current_link(cx).map(|link| link.palette.clone())))
             .into_any_element()
     }
 }
@@ -5980,7 +6030,9 @@ impl AppShell {
         rail: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let link = self.column_link().expect("a workspace route has a column");
+        let link = self
+            .current_link(cx)
+            .expect("a workspace route has a column");
         SettingsPage::fade_rail(&link.settings_page, rail, cx);
         // Settings is a window of its own: opening it switches the whole
         // window, so the settings rail — not the workspace sidebar — is the
@@ -6140,7 +6192,9 @@ impl AppShell {
                 self.layout_part("chat", self.render_chat_column(collapsed, window, cx)),
             ));
         let column = self.column.as_ref().expect("checked above");
-        let link = self.column_link().expect("a workspace route has a column");
+        let link = self
+            .current_link(cx)
+            .expect("a workspace route has a column");
         let remembered_sidebar = column.sidebar_width.clone();
         let sidebar = match draw_sidebar {
             Some(opacity) => div()
@@ -6340,7 +6394,7 @@ impl Render for AppShell {
         self.swap_layout(window, cx);
         self.zoom_panes(window, cx);
         self.sync_panes(window, cx);
-        if let Some(link) = self.column_link() {
+        if let Some(link) = self.current_link(cx) {
             let session_id = self.page_thread(cx).map(|thread| thread.session_id);
             let title = link
                 .store
@@ -6362,7 +6416,7 @@ impl Render for AppShell {
             )
         };
         if palette_leaving
-            && let Some(link) = self.column_link()
+            && let Some(link) = self.current_link(cx)
             && link.palette.focus_handle(cx).contains_focused(window, cx)
         {
             cx.defer_in(window, |this, window, cx| {
@@ -6371,7 +6425,7 @@ impl Render for AppShell {
         }
         if palette_open
             && !self.palette_was_open
-            && let Some(link) = self.column_link()
+            && let Some(link) = self.current_link(cx)
         {
             link.palette
                 .update(cx, |p, cx| p.open(focus_query, window, cx));
@@ -6400,7 +6454,7 @@ impl Render for AppShell {
             body
         };
         let dismissal = self
-            .column_link()
+            .current_link(cx)
             .map(|link| link.palette.read(cx).outside_dismissal.clone());
         div()
             .size_full()
@@ -6417,9 +6471,11 @@ impl Render for AppShell {
             .font_family(cx.theme().font_family.clone())
             .children(dismissal.map(|dismissal| dismissal.release_listener().into_any_element()))
             .child(body)
+            // Each host's pages, which panes of several hosts show at once.
             .children(
-                self.column_link()
-                    .and_then(|link| link.preview.read(cx).native_fade(cx)),
+                self.links
+                    .iter()
+                    .filter_map(|link| link.preview.read(cx).native_fade(cx)),
             )
     }
 }
@@ -6613,7 +6669,7 @@ pub(crate) mod tests {
         });
         let shell = window.root(cx).unwrap();
         let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
-        if let Some(store) = shell.read_with(cx, |shell, _| shell.store()) {
+        if let Some(store) = shell.read_with(cx, |shell, cx| shell.store(cx)) {
             crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         }
         draw(cx);
@@ -7233,45 +7289,268 @@ pub(crate) mod tests {
         assert_eq!(linked(&shell, cx), [HostKey::Remote("host-d".into())]);
     }
 
-    /// A thread the user asks for on a host the column is not on takes the
-    /// column there: panes show one host at a time. One nobody asked for
-    /// stays off screen.
-    #[gpui::test]
-    fn a_thread_asked_for_on_another_host_takes_the_column_there(cx: &mut TestAppContext) {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+    /// Two hosts up at `width`, each listing `thread-1` and `thread-2`, with
+    /// A's `thread-1` shown in the window's one pane.
+    fn a_thread_of_a_beside_b(
+        cx: &mut TestAppContext,
+        width: f32,
+    ) -> (
+        Entity<AppShell>,
+        HashMap<HostKey, WorkspaceHost>,
+        &mut VisualTestContext,
+    ) {
         let (shell, hosts, _client, cx) =
-            mount_workspace(cx, two_hosts(), Default::default(), 1200.);
-        let (key_a, key_b) = (
-            HostKey::Remote("host-a".into()),
-            HostKey::Remote("host-b".into()),
-        );
+            mount_workspace(cx, two_hosts(), Default::default(), width);
+        cx.update(|_, cx| crate::shortcut::init(cx));
         let (a, b) = (
             store_on(&shell, "host-a", cx),
             store_on(&shell, "host-b", cx),
         );
-        for (key, store) in [(&key_a, &a), (&key_b, &b)] {
-            hosts[key].come_up(store, Vec::new(), None, cx);
-            send_events(&hosts[key].host, vec![panes_index(&[])]);
-            serve_thread(&hosts[key].host, "thread-1");
+        for (host, store) in [("host-a", &a), ("host-b", &b)] {
+            hosts[&HostKey::Remote(host.into())].come_up(store, Vec::new(), None, cx);
         }
+        for host in ["host-a", "host-b"] {
+            send_events(
+                &hosts[&HostKey::Remote(host.into())].host,
+                vec![panes_index(&[])],
+            );
+        }
+        serve_thread(&hosts[&HostKey::Remote("host-a".into())].host, "thread-1");
         a.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
-        draw(cx);
-        assert_eq!(store_of(&shell, cx), a);
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
+        });
+        b.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        settle_panes(cx);
+        (shell, hosts, cx)
+    }
 
-        b.update(cx, |store, cx| store.show_thread("thread-1".into(), cx));
+    /// The host of each pane, in the layout's order.
+    fn pane_hosts(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<HostKey> {
+        shell.read_with(cx, |shell, cx| {
+            let column = shell.column.as_ref().expect("attached");
+            column
+                .all_panes(cx)
+                .iter()
+                .map(|pane| pane.read(cx).host(cx))
+                .collect()
+        })
+    }
+
+    /// The host each pane's header names, in the layout's order.
+    fn named_hosts(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<Option<SharedString>> {
+        shell.read_with(cx, |shell, cx| {
+            let column = shell.column.as_ref().expect("attached");
+            column
+                .all_panes(cx)
+                .iter()
+                .map(|pane| {
+                    column
+                        .handed
+                        .get(&pane.read(cx).chat().entity_id())
+                        .and_then(|handed| handed.host.clone())
+                })
+                .collect()
+        })
+    }
+
+    /// Give the keyboard to `pane`'s composer.
+    fn type_into(pane: &Entity<ThreadPanel>, cx: &mut VisualTestContext) {
+        let composer = pane.read_with(cx, |pane, cx| pane.chat().read(cx).composer());
+        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        cx.update(|window, cx| focus.focus(window, cx));
         draw(cx);
-        assert_eq!(store_of(&shell, cx), b, "the column is on B");
-        assert_eq!(pane_threads(&shell, cx), [Some("thread-1".into())]);
-        assert!(b.read_with(cx, |store, _| store.is_thread_open("thread-1")));
-        assert!(
-            !a.read_with(cx, |store, _| store.is_thread_open("thread-1")),
-            "A's thread is no longer shown"
+    }
+
+    /// The turns `host` was asked to send, by thread.
+    fn turns_sent(host: &WorkspaceHost) -> Vec<(String, String)> {
+        sent(&host.host)
+            .into_iter()
+            .filter_map(|payload| match payload {
+                ClientPayload::Command(Command::SendTurn {
+                    session_id, text, ..
+                }) => Some((session_id, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A thread of host B opened beside a pane of host A's: both show, each
+    /// over its own host, each header naming its host once the panes span
+    /// two, and a message sent from each pane goes to that pane's host
+    /// alone. The thread of the same id on the other host stays closed.
+    #[gpui::test]
+    fn a_thread_of_another_host_opens_beside_and_each_pane_sends_to_its_own(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1600.);
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
         );
-        assert_eq!(linked(&shell, cx), [key_a, key_b], "both links stay");
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        assert_eq!(named_hosts(&shell, cx), [None], "one host, no name");
+        let on_b = b.read_with(cx, |store, _| store.thread_key("thread-1"));
+        cx.update(|window, cx| window.dispatch_action(Box::new(OpenInNewPane(on_b)), cx));
+        serve_thread(&hosts[&key_b].host, "thread-1");
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-1"), cx)
+        });
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-1".into())]
+        );
+        assert_eq!(pane_hosts(&shell, cx), [key_a.clone(), key_b.clone()]);
+        assert_eq!(store_of(&shell, cx), b, "B's pane is the current one");
+        let named = named_hosts(&shell, cx);
+        assert!(
+            named.iter().all(Option::is_some) && named[0] != named[1],
+            "each header names its own host: {named:?}"
+        );
+        for store in [&a, &b] {
+            assert!(store.read_with(cx, |store, _| store.is_thread_open("thread-1")));
+            assert!(!store.read_with(cx, |store, _| store.is_thread_open("thread-2")));
+        }
+        let _ = sent(&hosts[&key_a].host);
+        let _ = sent(&hosts[&key_b].host);
 
-        a.update(cx, |store, cx| store.put_back_thread("thread-1".into(), cx));
+        let panes = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().panes(cx));
+        for (pane, text) in panes.iter().zip(["to a", "to b"]) {
+            type_into(pane, cx);
+            cx.simulate_input(text);
+            cx.simulate_keystrokes("enter");
+            draw(cx);
+        }
+        assert_eq!(
+            turns_sent(&hosts[&key_a]),
+            [("thread-1".to_owned(), "to a".to_owned())]
+        );
+        assert_eq!(
+            turns_sent(&hosts[&key_b]),
+            [("thread-1".to_owned(), "to b".to_owned())]
+        );
+    }
+
+    /// A row of host B's dropped on the edge of host A's pane opens beside
+    /// it, over B, and A's thread stays in its pane.
+    #[gpui::test]
+    fn a_row_of_another_host_dropped_on_a_panes_edge_opens_beside_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        let pane = only_pane(&shell, cx);
+        let to = gpui::point(pane.right() - px(40.), pane.center().y);
+        drag_row("sidebar-thread-host-b/thread-2", to, cx);
+        assert!(
+            cx.debug_bounds("pane-drop-indicator").is_some(),
+            "the drop would land"
+        );
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+        settle_panes(cx);
+        assert_eq!(
+            pane_threads(&shell, cx),
+            [Some("thread-1".into()), Some("thread-2".into())]
+        );
+        assert_eq!(
+            pane_hosts(&shell, cx),
+            [
+                HostKey::Remote("host-a".into()),
+                HostKey::Remote("host-b".into())
+            ]
+        );
+        assert!(b.read_with(cx, |store, _| store.is_thread_open("thread-2")));
+        assert!(a.read_with(cx, |store, _| store.is_thread_open("thread-1")));
+        assert!(!a.read_with(cx, |store, _| store.is_thread_open("thread-2")));
+    }
+
+    /// Host B refusing the device leaves A's pane as it was — its thread,
+    /// its conversation with its scroll, its half-written message — and B's
+    /// pane showing what B's store holds. B leaving the workspace takes its
+    /// pane out and nothing else.
+    #[gpui::test]
+    fn another_host_refused_or_gone_leaves_a_panes_conversation(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1600.);
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let on_b = b.read_with(cx, |store, _| store.thread_key("thread-2"));
+        cx.update(|window, cx| window.dispatch_action(Box::new(OpenInNewPane(on_b)), cx));
+        serve_thread(&hosts[&key_b].host, "thread-2");
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
+        });
+        settle_panes(cx);
+        let [pane_a, pane_b]: [Entity<ThreadPanel>; 2] = shell
+            .read_with(cx, |shell, cx| shell.column.as_ref().unwrap().panes(cx))
+            .try_into()
+            .expect("two panes");
+        let chat_a = pane_a.read_with(cx, |pane, _| pane.chat());
+        type_into(&pane_a, cx);
+        cx.simulate_input("half a thought");
         draw(cx);
-        assert_eq!(store_of(&shell, cx), b, "unasked, A's thread stays off");
+        let composer = chat_a.read_with(cx, |chat, _| chat.composer());
+        let _ = sent(&hosts[&key_a].host);
+        let a_unchanged = |cx: &mut VisualTestContext| {
+            assert_eq!(
+                pane_a.read_with(cx, |pane, cx| pane.thread(cx)),
+                Some(a.read_with(cx, |store, _| store.thread_key("thread-1")))
+            );
+            assert_eq!(
+                pane_a.read_with(cx, |pane, _| pane.chat()),
+                chat_a,
+                "the same conversation, scrolled where it was"
+            );
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                "half a thought"
+            );
+            assert!(a.read_with(cx, |store, cx| store.is_thread_open("thread-1")
+                && !store.chat_loading_for(Some("thread-1"), cx)));
+            assert_eq!(sent(&hosts[&key_a].host), Vec::new(), "A hears nothing");
+        };
+
+        hosts[&key_b]
+            .host
+            .states
+            .try_send(tcode_client::ConnectionState::Offline {
+                reason: tcode_client::ConnectionFailure::AuthenticationRejected,
+            })
+            .unwrap();
+        crate::test_frames::draw_settled(cx);
+        a_unchanged(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().panes(cx)),
+            [pane_a.clone(), pane_b.clone()],
+            "B's pane stays"
+        );
+        assert_eq!(
+            pane_b.read_with(cx, |pane, cx| pane.thread(cx)),
+            Some(b.read_with(cx, |store, _| store.thread_key("thread-2")))
+        );
+
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.leave_host(&key_b, window, cx)));
+        settle_panes(cx);
+        a_unchanged(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().all_panes(cx)),
+            std::slice::from_ref(&pane_a),
+            "B's pane has gone"
+        );
+        assert_eq!(store_of(&shell, cx), a);
     }
 
     /// `store` takes in what `host` sent it, and what it sent `host` so far
@@ -8023,7 +8302,7 @@ pub(crate) mod tests {
         );
         restore_index(&reopened, &reopened_host, true, &mut reopened_cx);
         reopened.read_with(&reopened_cx, |shell, cx| {
-            assert!(!shell.store().unwrap().read(cx).is_remote());
+            assert!(!shell.store(cx).unwrap().read(cx).is_remote());
             assert_eq!(
                 shell
                     .page_thread(cx)
@@ -8283,7 +8562,7 @@ pub(crate) mod tests {
                 );
                 assert_eq!(
                     shell
-                        .store()
+                        .store(cx)
                         .unwrap()
                         .read(cx)
                         .panel_state_for(Some("thread-a"))
@@ -8367,7 +8646,7 @@ pub(crate) mod tests {
                 shell.window_state.read(cx).history(),
                 [Destination::Threads]
             );
-            assert!(shell.store().is_none());
+            assert!(shell.store(cx).is_none());
         });
         assert!(cx.debug_bounds("no-hosts").is_some());
         assert!(sent(&host).is_empty());
@@ -8404,7 +8683,7 @@ pub(crate) mod tests {
         };
         shell.read_with(cx, |shell, cx| {
             assert!(!shell.compact(cx), "1024px on a mobile build is wide");
-            assert!(shell.store().is_none());
+            assert!(shell.store(cx).is_none());
             assert_eq!(
                 shell.window_state.read(cx).history(),
                 [Destination::Threads]
@@ -8447,7 +8726,7 @@ pub(crate) mod tests {
         });
         crate::test_frames::draw_settled(cx);
         shell.read_with(cx, |shell, cx| {
-            assert!(shell.store().is_some());
+            assert!(shell.store(cx).is_some());
             assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
         });
         assert!(cx.debug_bounds("no-hosts").is_none());
@@ -8463,7 +8742,7 @@ pub(crate) mod tests {
             });
         });
         shell.read_with(cx, |shell, cx| {
-            assert!(shell.store().is_none());
+            assert!(shell.store(cx).is_none());
             assert_eq!(
                 shell.window_state.read(cx).history(),
                 [Destination::Threads]
@@ -13483,7 +13762,8 @@ pub(crate) mod tests {
             (topic, ServerEvent::IndexSnapshot(index))
         };
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(OpenInNewPane("agent-1".into())), cx)
+            let agent = store.read(cx).thread_key("agent-1");
+            window.dispatch_action(Box::new(OpenInNewPane(agent)), cx)
         });
         draw(cx);
         serve_thread(&host, "agent-1");
@@ -14645,7 +14925,7 @@ pub(crate) mod tests {
         state.update(cx, |state, cx| state.open_palette(cx));
         settle_panes(cx);
         let query = shell.read_with(cx, |shell, cx| {
-            let palette = shell.column_link().unwrap().palette.read(cx);
+            let palette = shell.current_link(cx).unwrap().palette.read(cx);
             palette.query_focus_handle(cx)
         });
         cx.update(|window, _| assert!(query.is_focused(window)));
@@ -15066,7 +15346,7 @@ pub(crate) mod tests {
             crate::test_frames::draw_settled(cx);
             if project_count > 1 {
                 cx.update(|window, cx| {
-                    let palette = &shell.read(cx).column_link().unwrap().palette;
+                    let palette = &shell.read(cx).current_link(cx).unwrap().palette;
                     assert_eq!(
                         palette.read(cx).query_focus_handle(cx).is_focused(window),
                         !(compact && mobile),
@@ -15657,7 +15937,7 @@ pub(crate) mod tests {
             gpui_base::Root::new(shell, window, cx)
         });
         let shell = mounted.borrow_mut().take().unwrap();
-        if let Some(store) = shell.read_with(cx, |shell, _| shell.store()) {
+        if let Some(store) = shell.read_with(cx, |shell, cx| shell.store(cx)) {
             crate::store::tests::seed_full_scope(&store, &incoming, Vec::new(), cx);
         }
         (
@@ -15707,7 +15987,7 @@ pub(crate) mod tests {
         });
         draw(cx);
         shell.read_with(cx, |shell, cx| {
-            assert!(shell.store().is_some());
+            assert!(shell.store(cx).is_some());
             assert_eq!(
                 shell.window_state.read(cx).history(),
                 [Destination::Threads]
@@ -15834,7 +16114,7 @@ pub(crate) mod tests {
         let attached = |cx: &mut VisualTestContext| {
             shell.read_with(cx, |shell, cx| {
                 shell
-                    .store()
+                    .store(cx)
                     .map(|store| store.read(cx).remote_host_id().map(str::to_owned))
             })
         };
@@ -15928,7 +16208,7 @@ pub(crate) mod tests {
             draw(cx);
             assert!(state.read_with(cx, |state, _| state.palette_open));
             cx.update(|window, cx| {
-                let palette = &shell.read(cx).column_link().unwrap().palette;
+                let palette = &shell.read(cx).current_link(cx).unwrap().palette;
                 assert!(
                     palette
                         .read(cx)
@@ -16609,7 +16889,7 @@ pub(crate) mod tests {
     }
 
     fn store_of(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Entity<WorkspaceStore> {
-        shell.read_with(cx, |shell, _| shell.store().expect("attached"))
+        shell.read_with(cx, |shell, cx| shell.store(cx).expect("attached"))
     }
 
     /// A long title takes the header's free width; it is cut only once the
@@ -17143,9 +17423,9 @@ pub(crate) mod tests {
         });
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
-        let (preview, state) = shell.read_with(cx, |shell, _| {
+        let (preview, state) = shell.read_with(cx, |shell, cx| {
             (
-                shell.column_link().unwrap().preview.clone(),
+                shell.current_link(cx).unwrap().preview.clone(),
                 shell.window_state(),
             )
         });
@@ -18982,7 +19262,9 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_thread_with(cx, Vec::new());
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
-        let preview = shell.read_with(cx, |shell, _| shell.column_link().unwrap().preview.clone());
+        let preview = shell.read_with(cx, |shell, cx| {
+            shell.current_link(cx).unwrap().preview.clone()
+        });
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
         let key = store.read_with(cx, |store, cx| {
             store.preview_key_for("thread-1", cx).unwrap()

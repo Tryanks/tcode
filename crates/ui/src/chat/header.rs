@@ -1067,6 +1067,19 @@ impl ChatView {
                         window_caption::drag_region(title_el.flex_initial())
                             .context_menu(title_menu),
                     )
+                    // Inside the title's stretch, so naming the host changes
+                    // none of the header's widths.
+                    .when_some(self.named_host.clone(), |header, host| {
+                        header.child(
+                            div()
+                                .debug_selector(|| "chat-host".into())
+                                .flex_shrink(1.)
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_secondary(false, cx)
+                                .child(crate::widgets::fade_text(host)),
+                        )
+                    })
                     .when_some(
                         badge.and_then(|badge| {
                             let numbers = crate::pull_requests::numbers(&badge.value, cx)?;

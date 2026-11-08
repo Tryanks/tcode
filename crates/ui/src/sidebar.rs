@@ -4029,10 +4029,9 @@ impl SessionsSidebar {
                 .cursor_pointer()
                 .on_click(
                     cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                        let session_id = thread.session_id.clone();
                         if event.modifiers().alt && !this.compact(cx) {
                             window.dispatch_action(
-                                Box::new(crate::panes::OpenInNewPane(session_id)),
+                                Box::new(crate::panes::OpenInNewPane(thread.clone())),
                                 cx,
                             );
                             return;
@@ -4042,7 +4041,7 @@ impl SessionsSidebar {
                         };
                         this.compact_model_dirty = true;
                         store.update(cx, |store, cx| {
-                            store.show_thread(session_id, cx);
+                            store.show_thread(thread.session_id.clone(), cx);
                         });
                         cx.notify();
                     }),
@@ -4384,7 +4383,7 @@ impl SessionsSidebar {
                 menu.when_some(open_beside, |menu, enabled| {
                     menu.menu_with_enable(
                         crate::tr!("panes.open_beside").into_owned(),
-                        Box::new(crate::panes::OpenInNewPane(id.session_id.clone())),
+                        Box::new(crate::panes::OpenInNewPane(id.clone())),
                         enabled,
                     )
                     .separator()

@@ -205,6 +205,9 @@ pub struct ChatView {
     /// Whether the last frame drew the thread, and with it the composer.
     composer_drawn: bool,
     title_recedes: bool,
+    /// The host the header names beside the title: the window's panes show
+    /// threads of several hosts.
+    named_host: Option<gpui::SharedString>,
     pull_requests: Entity<crate::pull_requests::PullRequestsPanel>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
@@ -475,6 +478,7 @@ impl ChatView {
             held: false,
             composer_drawn: false,
             title_recedes: false,
+            named_host: None,
             scene_at: cx.background_executor().now(),
             window_state,
             composer_layout: (compact, px(0.)),
@@ -601,6 +605,18 @@ impl ChatView {
     pub(crate) fn set_title_recedes(this: &Entity<Self>, recedes: bool, cx: &mut App) {
         this.update(cx, |chat, cx| {
             chat.title_recedes = recedes;
+            cx.notify();
+        });
+    }
+
+    /// The host the header names, or none.
+    pub(crate) fn set_named_host(
+        this: &Entity<Self>,
+        host: Option<gpui::SharedString>,
+        cx: &mut App,
+    ) {
+        this.update(cx, |chat, cx| {
+            chat.named_host = host;
             cx.notify();
         });
     }
