@@ -238,6 +238,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             let _ = ready_tx.send(Ok(()));
             let mut state =
                 smol::block_on(host_loop(state, cx, attachment_rx, mailbox_rx, original_rx));
+            // The host owns every harness this process started; their actors
+            // were asked to stop, but the process may exit before they run.
+            agent::stop_every_tree();
             if let Err(error) = state.close_store() {
                 log::error!("could not close the session store cleanly: {error}");
             }

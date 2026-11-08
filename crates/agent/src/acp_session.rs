@@ -572,8 +572,8 @@ fn spawn_agent(
     provider: ProviderKind,
     launch: &Launch,
     opts: &SessionOptions,
-) -> Result<smol::process::Child, AgentError> {
-    let mut cmd = crate::process::async_command(&launch.program);
+) -> Result<crate::process::ProcessTree<smol::process::Child>, AgentError> {
+    let mut cmd = crate::process::async_harness_command(&launch.program);
     cmd.args(&launch.args)
         .current_dir(&opts.cwd)
         .stdin(std::process::Stdio::piped())
@@ -592,12 +592,14 @@ fn spawn_agent(
         launch.args
     );
     crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
-    cmd.spawn().map_err(|err| {
-        AgentError::Spawn(format!(
-            "could not launch ACP agent `{name}` ({}): {err}",
-            launch.program.display()
-        ))
-    })
+    cmd.spawn()
+        .map(crate::process::ProcessTree::new)
+        .map_err(|err| {
+            AgentError::Spawn(format!(
+                "could not launch ACP agent `{name}` ({}): {err}",
+                launch.program.display()
+            ))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2790,7 +2792,7 @@ impl Client {
 /// folded into the owning tool card (`ToolCallContent::Terminal`). Wiring these
 /// into the terminal drawer needs a canonical event the contract does not have.
 struct Terminal {
-    child: Mutex<smol::process::Child>,
+    child: Mutex<crate::process::ProcessTree<smol::process::Child>>,
     output: Mutex<String>,
     truncated: Mutex<bool>,
     exit: Mutex<Option<acp::TerminalExitStatus>>,
@@ -2809,7 +2811,7 @@ impl Terminal {
     ) -> Result<Arc<Self>, acp::Error> {
         let program = crate::resolve_binary(None, command)
             .map_err(|err| acp::Error::new(-32603, err.to_string()))?;
-        let mut cmd = crate::process::async_command(&program);
+        let mut cmd = crate::process::async_harness_command(&program);
         cmd.args(args)
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
@@ -2818,9 +2820,10 @@ impl Terminal {
         for var in env {
             cmd.env(&var.name, &var.value);
         }
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| acp::Error::new(-32603, format!("could not run `{command}`: {err}")))?;
+        let mut child =
+            crate::process::ProcessTree::new(cmd.spawn().map_err(|err| {
+                acp::Error::new(-32603, format!("could not run `{command}`: {err}"))
+            })?);
         let stdout = child.stdout.take().ok_or_else(|| {
             acp::Error::new(-32603, format!("`{command}` started without piped stdout"))
         })?;

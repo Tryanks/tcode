@@ -18,7 +18,7 @@ use super::{
     describe_rpc_error, enrich_startup_error, initialize, send_json, settle_child_exit,
     spawn_server, stop_child,
 };
-use crate::process::{ChildOutput, StderrTail};
+use crate::process::{ChildOutput, ProcessTree, StderrTail};
 use crate::{
     AgentError, DeclaredComponents, MarketplaceAction, PluginAction, PluginContext,
     PluginInstallation, PluginListing, PluginOp, PluginOpOutcome, PluginScope, PluginSource,
@@ -93,7 +93,7 @@ async fn with_server<T>(
 }
 
 struct Server {
-    child: Child,
+    child: ProcessTree<Child>,
     stdin: Option<BufWriter<ChildStdin>>,
     lines: Receiver<ChildOutput>,
     stderr_tail: StderrTail,

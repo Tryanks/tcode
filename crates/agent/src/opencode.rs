@@ -2372,7 +2372,7 @@ fn error_message(error: &Value) -> String {
 /// One `opencode serve --stdio` child. Its stdin is held open: the server
 /// exits when it closes, so it cannot outlive Tcode.
 struct Server {
-    child: Child,
+    child: crate::process::ProcessTree<Child>,
     _stdin: ChildStdin,
     http: Http,
     tail: crate::process::StderrTail,
@@ -2388,7 +2388,7 @@ impl Server {
     ) -> Result<Self, AgentError> {
         let binary = crate::resolve_binary(binary_path, "opencode")?;
         let password = uuid::Uuid::new_v4().simple().to_string();
-        let mut command = crate::process::command(&binary);
+        let mut command = crate::process::harness_command(&binary);
         command
             .arg("serve")
             .args(extra_args)
@@ -2406,9 +2406,10 @@ impl Server {
             command.env("OPENCODE_CONFIG_CONTENT", config);
         }
         crate::process::refuse_batch_line_breaks(command.get_program(), command.get_args())?;
-        let mut child = command
-            .spawn()
-            .map_err(|err| AgentError::Spawn(format!("spawning `{}`: {err}", binary.display())))?;
+        let mut child =
+            crate::process::ProcessTree::new(command.spawn().map_err(|err| {
+                AgentError::Spawn(format!("spawning `{}`: {err}", binary.display()))
+            })?);
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {

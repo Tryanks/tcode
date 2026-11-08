@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
+use crate::process::{
+    ChildOutput, ProcessTree, StderrTail, send_json as write_json, spawn_line_reader,
+};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalOption, ApprovalOptionKind,
     ApprovalRequest, Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, Goal,
@@ -670,7 +672,7 @@ enum ElicitFieldKind {
 }
 
 struct Actor {
-    child: Child,
+    child: ProcessTree<Child>,
     stderr_tail: StderrTail,
     stdin: BufWriter<ChildStdin>,
     lines: Receiver<ChildOutput>,
@@ -1343,22 +1345,21 @@ fn enrich_startup_error(
     }
 }
 
+type Spawned = (
+    ProcessTree<Child>,
+    BufWriter<ChildStdin>,
+    Receiver<ChildOutput>,
+    StderrTail,
+);
+
 fn spawn_server(
     binary_path: Option<&Path>,
     extra_args: &[String],
     launch_env: &LaunchEnv,
-) -> Result<
-    (
-        Child,
-        BufWriter<ChildStdin>,
-        Receiver<ChildOutput>,
-        StderrTail,
-    ),
-    AgentError,
-> {
+) -> Result<Spawned, AgentError> {
     // Absolute path: bare names break once a child sets its own cwd.
     let binary = crate::resolve_binary(binary_path, "codex")?;
-    let mut cmd = crate::process::command(&binary);
+    let mut cmd = crate::process::harness_command(&binary);
     cmd.arg("app-server")
         .args(extra_args)
         .stdin(Stdio::piped())
@@ -1376,9 +1377,10 @@ fn spawn_server(
         }
     }
     crate::process::refuse_batch_line_breaks(cmd.get_program(), cmd.get_args())?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|err| AgentError::Spawn(err.to_string()))?;
+    let mut child = ProcessTree::new(
+        cmd.spawn()
+            .map_err(|err| AgentError::Spawn(err.to_string()))?,
+    );
     let stdin = BufWriter::new(
         child
             .stdin
@@ -1747,7 +1749,7 @@ async fn wait_for_response(lines: &Receiver<ChildOutput>, id: i64) -> Result<Val
     }
 }
 
-fn stop_child(child: &mut Child, stdin: BufWriter<ChildStdin>) {
+fn stop_child(child: &mut ProcessTree<Child>, stdin: BufWriter<ChildStdin>) {
     drop(stdin);
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
@@ -1762,7 +1764,7 @@ fn send_json(stdin: &mut BufWriter<ChildStdin>, value: &Value) -> Result<(), Age
 /// Wait briefly for a child that has already closed stdout to become waitable.
 /// Startup failures are rare, and preserving the real exit code is worth this
 /// bounded delay. A child that remains alive is still killed by `stop_child`.
-fn settle_child_exit(child: &mut Child) -> Option<std::process::ExitStatus> {
+fn settle_child_exit(child: &mut ProcessTree<Child>) -> Option<std::process::ExitStatus> {
     for _ in 0..50 {
         match child.try_wait() {
             Ok(Some(status)) => return Some(status),
@@ -4994,7 +4996,7 @@ mod tests {
         let (event_tx, event_rx) = smol::channel::unbounded();
         (
             Actor {
-                child,
+                child: ProcessTree::new(child),
                 stderr_tail: StderrTail::default(),
                 stdin,
                 lines: line_rx,
