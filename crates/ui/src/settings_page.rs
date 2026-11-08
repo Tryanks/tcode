@@ -1206,7 +1206,8 @@ impl SettingsPage {
     /// chevron that opens it.
     fn advanced_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let spacing = &cx.theme().tokens.spacing;
-        div()
+        // A row, so the button is as wide as its label, not the rail.
+        gpui_base::h_flex()
             .pl(px(crate::material::CARD_INSET))
             .pt(spacing.sm)
             .pb(spacing.sm)
