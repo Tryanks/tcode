@@ -797,6 +797,10 @@ const CHAT_MIN_WIDTH: f32 = crate::chat::HEADER_COMPACT_MIN_WIDTH;
 pub(crate) const PANE_MIN_WIDTH: f32 =
     crate::chat::HEADER_OVERFLOW_MIN_WIDTH + crate::chat::PANE_CLOSE_WIDTH;
 const SIDEBAR_WIDTH: f32 = 255.;
+/// The narrowest the sidebar is dragged to while it shows.
+pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 220.;
+/// A new desktop window's width.
+pub const DEFAULT_WINDOW_WIDTH: f32 = 1200.;
 /// Collapsed only: width of the window's left-edge activation region.
 const SIDEBAR_HOVER_EDGE: f32 = 12.;
 /// Compact push/pop duration.
@@ -6363,7 +6367,7 @@ impl AppShell {
                         resizable_panel()
                             .fixed()
                             .size(overlay_width)
-                            .size_range(glide.range(0, px(220.)..px(380.)))
+                            .size_range(glide.range(0, px(SIDEBAR_MIN_WIDTH)..px(380.)))
                             .when_some(docked_sidebar, |panel, sidebar| {
                                 panel.child(glide.hold(0, sidebar))
                             }),
@@ -11869,6 +11873,33 @@ pub(crate) mod tests {
             "the row is under the surface before it thins: {shrinking:?}"
         );
         shrinking
+    }
+
+    /// A new window with the sidebar dragged to its narrowest shows the
+    /// rail's cards: the column narrows a little to make room for them.
+    #[gpui::test]
+    fn a_new_window_shows_the_rail_beside_the_narrowest_sidebar(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, _host, cx) = mount_lead_with_agent(cx);
+        resize(cx, DEFAULT_WINDOW_WIDTH);
+        settle_frames(cx);
+        let from = gpui::point(px(SIDEBAR_WIDTH), px(400.));
+        let to = from - gpui::point(px(80.), px(0.));
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        for step in [from - gpui::point(px(5.), px(0.)), to] {
+            cx.simulate_mouse_move(step, Some(MouseButton::Left), gpui::Modifiers::default());
+            draw(cx);
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+        settle_frames(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, _| {
+                shell.column.as_ref().expect("attached").sidebar_width.get()
+            }),
+            px(SIDEBAR_MIN_WIDTH),
+            "the sidebar is at its narrowest"
+        );
+        assert!(cx.debug_bounds("chat-rail").is_some(), "the rail shows");
     }
 
     /// An agent opened from its row in the lead's rail grows out of the row

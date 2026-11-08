@@ -96,19 +96,30 @@ impl BodyLayout {
         });
         let side = !compact
             && side_share.is_some()
-            && fits(body, PANEL_CONTENT_MIN_WIDTH + CHAT_SIDE_GRIP);
+            && fits(
+                body,
+                PANEL_CONTENT_MIN_WIDTH + CHAT_SIDE_GRIP,
+                CHAT_CONTENT_MAX_WIDTH,
+            );
         Self {
             body: width,
-            rail: !compact && fits(body, CHAT_RAIL_NARROWEST) && has_cards && !side,
+            rail: !compact
+                && fits(body, CHAT_RAIL_NARROWEST, RAIL_COLUMN_MIN)
+                && has_cards
+                && !side,
             width: px(rail_width),
-            reach: px(if compact { 0. } else { reach(body, rail_width) }),
+            reach: px(if compact {
+                0.
+            } else {
+                reach(body, rail_width, RAIL_COLUMN_MIN)
+            }),
             presence: 0.,
             side,
             side_width: px(side_width),
             side_reach: px(if compact {
                 0.
             } else {
-                reach(body, side_width + CHAT_SIDE_GRIP)
+                reach(body, side_width + CHAT_SIDE_GRIP, CHAT_CONTENT_MAX_WIDTH)
             }),
             side_presence: 0.,
         }
@@ -191,23 +202,32 @@ impl BodyLayout {
 
 /// What the slot takes from the body for something `width` wide in it: its
 /// gap from the column and its edge.
-fn span(width: f32) -> f32 {
+const fn span(width: f32) -> f32 {
     width + CHAT_RAIL_GAP + CHAT_RAIL_EDGE
 }
 
+/// The narrowest the column gets for the rail beside it: what a new window
+/// leaves it with the sidebar at its narrowest, so the cards show there. A
+/// wider window keeps the widest column.
+const RAIL_COLUMN_MIN: f32 = crate::shell::DEFAULT_WINDOW_WIDTH
+    - crate::shell::SIDEBAR_MIN_WIDTH
+    - CHAT_CONTENT_MIN_PADDING
+    - span(CHAT_RAIL_NARROWEST);
+
 /// Whether something `width` wide fits in the slot of a body `body` wide,
-/// beside the widest column moved left as far as the page inset.
-fn fits(body: f32, width: f32) -> bool {
-    body >= CHAT_CONTENT_MAX_WIDTH + CHAT_CONTENT_MIN_PADDING + span(width)
+/// beside a column `column` wide moved left as far as the page inset.
+fn fits(body: f32, width: f32, column: f32) -> bool {
+    body >= column + CHAT_CONTENT_MIN_PADDING + span(width)
 }
 
 /// How far the column moves left in a body `body` wide for something
 /// `width` wide in the slot: nothing while it fits in the gutter right of
-/// the centred column, and never so far that the column narrows.
-fn reach(body: f32, width: f32) -> f32 {
+/// the centred column, and never so far that the column narrows below
+/// `column`.
+fn reach(body: f32, width: f32, column: f32) -> f32 {
     (CHAT_CONTENT_MAX_WIDTH + 2. * span(width) - body)
         .clamp(0., span(width) - CHAT_CONTENT_MIN_PADDING)
-        .min((body - CHAT_CONTENT_MAX_WIDTH - 2. * CHAT_CONTENT_MIN_PADDING).max(0.))
+        .min((body - column - 2. * CHAT_CONTENT_MIN_PADDING).max(0.))
 }
 
 /// The widest an agent's card in the slot of a body `body` wide is: as wide
