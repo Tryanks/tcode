@@ -511,7 +511,7 @@ fn a_rewind_answered_without_the_prompt_refills_the_one_tcode_stored() {
     state.update(cx, |state, cx| {
         install(state, ProviderKind::Codex, cwd, Runtime::Live(sender));
         for (index, prompt) in [(1, "the first prompt"), (2, "the second prompt")] {
-            state.record_user_message("rewound-thread", prompt, &[], None, cx);
+            state.record_user_message("rewound-thread", prompt, &[], None, &[], cx);
             for event in [
                 AgentEvent::TurnStarted {
                     turn_id: format!("turn-{index}"),

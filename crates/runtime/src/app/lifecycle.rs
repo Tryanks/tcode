@@ -342,6 +342,18 @@ impl AppState {
     }
 
     pub(super) fn persist_meta(&mut self, meta: &SessionMeta, cx: &mut HostCx) {
+        self.enqueue_store_write(
+            StoreWrite::UpsertMeta {
+                meta: Box::new(meta.clone()),
+                initial: false,
+            },
+            cx,
+        );
+        self.adopt_meta(meta.clone(), cx);
+    }
+
+    /// Take `meta` as the thread's, its store write made by the caller.
+    pub(super) fn adopt_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
         let old_parent = self
             .sessions
             .iter()
@@ -356,17 +368,10 @@ impl AppState {
             self.thread_activity.remove(&meta.id);
         }
         self.advance_decision_revision(&meta.id);
-        self.enqueue_store_write(
-            StoreWrite::UpsertMeta {
-                meta: Box::new(meta.clone()),
-                initial: false,
-            },
-            cx,
-        );
-        self.upsert_session_in_memory(meta.clone());
         let id = meta.id.clone();
         let former_parent =
             old_parent.filter(|parent| Some(parent) != meta.parent_session_id.as_ref());
+        self.upsert_session_in_memory(meta);
         cx.enqueue(move |state, cx| {
             state.evaluate_thread_settlement(&id, cx);
             if let Some(parent) = former_parent {

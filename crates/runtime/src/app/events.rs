@@ -4,6 +4,7 @@ use tcode_core::control::WatchEvent;
 impl AppState {
     /// Handle one canonical event from the live provider.
     pub(super) fn on_event(&mut self, session_id: &str, event: AgentEvent, cx: &mut HostCx) {
+        let mut handed_over = Vec::new();
         if matches!(
             &event,
             AgentEvent::TurnCompleted { .. }
@@ -376,7 +377,7 @@ impl AppState {
                 }
             }
             AgentEvent::SteerAccepted { request_id } => {
-                let reports = self
+                handed_over = self
                     .resident_mut(session_id)
                     .and_then(|resident| {
                         let position = resident
@@ -386,7 +387,6 @@ impl AppState {
                         Some(resident.pending_steers.remove(position).reports)
                     })
                     .unwrap_or_default();
-                self.reports_handed_over(&reports, cx);
             }
             AgentEvent::SteerRejected { request_id } => {
                 // The turn ended before the provider could fold the steer in,
@@ -468,7 +468,7 @@ impl AppState {
         }
 
         self.record_approval_event(session_id, &event);
-        self.record_event(session_id, &event, cx);
+        self.record_handover(session_id, &event, &handed_over, cx);
 
         let retry_pending = self.resident(session_id).is_some_and(|resident| {
             resident
@@ -565,10 +565,38 @@ impl AppState {
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
     pub(super) fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut HostCx) {
-        self.record_event_at(session_id, now_millis(), event, cx);
+        self.record_event_at(session_id, now_millis(), event, Vec::new(), cx);
     }
 
-    fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
+    /// Record `event`, which says the lead's provider took `reports`, in one
+    /// store write with the metas of the children that no longer owe them:
+    /// a host that stops after the provider took a report never finds it
+    /// still owed and sends it again.
+    pub(super) fn record_handover(
+        &mut self,
+        session_id: &str,
+        event: &AgentEvent,
+        reports: &[ReportHandover],
+        cx: &mut HostCx,
+    ) {
+        let metas = self.settle_reports(reports);
+        self.record_event_at(session_id, now_millis(), event, metas.clone(), cx);
+        for meta in metas {
+            if let Some(child) = self.resident_mut(&meta.id) {
+                child.meta = meta.clone();
+            }
+            self.adopt_meta(meta, cx);
+        }
+    }
+
+    fn record_event_at(
+        &mut self,
+        session_id: &str,
+        ts: u64,
+        event: &AgentEvent,
+        metas: Vec<SessionMeta>,
+        cx: &mut HostCx,
+    ) {
         let author = match event {
             AgentEvent::ItemCompleted(ThreadItem {
                 content: ItemContent::UserMessage { .. },
@@ -663,6 +691,7 @@ impl AppState {
                 origin,
                 event: Box::new(event.clone()),
                 streams,
+                metas,
             },
             cx,
         );
@@ -699,7 +728,7 @@ impl AppState {
         event: &AgentEvent,
         cx: &mut HostCx,
     ) {
-        self.record_event_at(session_id, ts, event, cx);
+        self.record_event_at(session_id, ts, event, Vec::new(), cx);
     }
 
     /// Deliver an event as a session's provider would.

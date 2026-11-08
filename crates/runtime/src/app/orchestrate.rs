@@ -781,19 +781,37 @@ impl AppState {
         self.deliver_callback(parent_id, text, Some(child_id), cx);
     }
 
-    /// The lead's provider took these reports: the next start owes them nothing.
-    pub(super) fn reports_handed_over(&mut self, reports: &[ReportHandover], cx: &mut HostCx) {
+    /// A report the user dropped from the lead's queue: the next start owes
+    /// it nothing.
+    pub(super) fn reports_dropped(&mut self, reports: &[ReportHandover], cx: &mut HostCx) {
+        for meta in self.settle_reports(reports) {
+            self.persist_meta(&meta, cx);
+        }
+    }
+
+    /// The metas of the children that owe `reports` no more, for the caller
+    /// to save.
+    pub(super) fn settle_reports(&self, reports: &[ReportHandover]) -> Vec<SessionMeta> {
+        let mut settled: Vec<SessionMeta> = Vec::new();
         for report in reports {
-            let Some(mut expectation) = self
-                .find_meta(&report.child)
-                .and_then(|meta| meta.expectation)
+            if settled.iter().any(|meta| meta.id == report.child) {
+                continue;
+            }
+            let Some(mut meta) = self.find_meta(&report.child) else {
+                continue;
+            };
+            let Some(expectation) = meta
+                .expectation
+                .as_mut()
                 .filter(|expectation| expectation.undelivered.as_ref() == Some(&report.text))
             else {
                 continue;
             };
             expectation.undelivered = None;
-            self.set_child_expectation(&report.child, Some(expectation), cx);
+            meta.updated_at = now_secs();
+            settled.push(meta);
         }
+        settled
     }
 
     /// After a restart: the reports a lead's queue held when the host stopped.
