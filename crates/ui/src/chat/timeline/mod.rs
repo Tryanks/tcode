@@ -153,7 +153,8 @@ pub(crate) struct TimelineView {
     /// window's turn indices under it. Marked until the thread changes, the
     /// keyboard is put to use elsewhere, or a press lands inside it.
     pub(in crate::chat) highlighted_turn: Option<usize>,
-    /// The call the background list last pointed out, marked a while.
+    /// The call a row of the background work last pointed out, marked a
+    /// while.
     pub(in crate::chat) located: Option<String>,
     located_unmark: Option<gpui::Task<()>>,
     /// Keyed `plan`, `user:<id>`, `assistant:<id>` or `error:<id>`.
@@ -1178,7 +1179,7 @@ impl TimelineView {
     }
 
     /// Brings the call `item_id` into view and marks it a while: the row of
-    /// the background list that names it was pressed.
+    /// the background work that names it was pressed.
     pub(in crate::chat) fn locate(&mut self, item_id: &str, cx: &mut Context<Self>) {
         let turn = self
             .workspace_store

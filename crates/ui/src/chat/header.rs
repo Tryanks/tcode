@@ -252,9 +252,11 @@ impl ChatView {
         // only what the rail would have shown, and what is managed in the
         // panel beside the thread opens there.
         let shows = |card: RailCard| compact || (!self.body.rail() && rail_cards.contains(&card));
+        // Background work is in the rail's Commands and Agents cards where
+        // the rail shows; elsewhere the pill lists it all.
         let background = self
             .background(cx)
-            .filter(|_| shows(RailCard::Background))
+            .filter(|_| compact || !self.body.rail())
             .map(|background| background.rows.len());
         let links = self
             .active_pull_requests(cx)
@@ -367,9 +369,9 @@ impl ChatView {
         ))
     }
 
-    /// The entry to the thread's background list, where the rail does not
-    /// show it: a pill counting its pieces, which opens the list anchored
-    /// over it, or in a sheet on a phone.
+    /// The entry to the thread's background work, where the rail does not
+    /// show it: a pill counting its pieces, which opens them as one list
+    /// anchored over it, or in a sheet on a phone.
     fn render_background_pill(
         &self,
         count: usize,
