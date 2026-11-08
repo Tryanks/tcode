@@ -69,6 +69,82 @@ pub(crate) fn page_viewport<H: ScrollbarHandle + Clone>(
     ScrollBounce::new(id, handle, element)
 }
 
+/// How far a reader rising from the end of a list following its tail goes
+/// before the list stops following.
+///
+/// gpui-base's `ScrollBounce` hands each wheel and pan packet to
+/// `ListState::set_offset_from_scrollbar`, which takes an offset within 1px
+/// of the end for a drag to the end and goes on following, and gpui-fast's
+/// list layout resumes following within that pixel too. A following list is
+/// laid out at its end again every frame, so each packet starts from the
+/// end, and a slow trackpad scroll, whose packets are under a pixel, never
+/// leaves it. Twice that pixel clears it with room for rounding.
+const TAIL_ESCAPE: Pixels = px(2.);
+
+/// A list following its tail, as the handle its [`page_viewport`] scrolls:
+/// the packets that rise from the end add up until they reach
+/// [`TAIL_ESCAPE`], then move the list by all of them, so a scroll up leaves
+/// the tail however slowly it comes. Remove it once a wheel packet that
+/// rises from the end of a gpui-fast list pauses its following.
+#[derive(Clone)]
+pub(crate) struct FollowedList {
+    list: ListState,
+    /// What rose from the end while the list followed, not yet applied.
+    rise: Rc<std::cell::Cell<Pixels>>,
+}
+
+impl FollowedList {
+    pub(crate) fn new(list: &ListState) -> Self {
+        Self {
+            list: list.clone(),
+            rise: Rc::default(),
+        }
+    }
+}
+
+impl ScrollbarHandle for FollowedList {
+    fn viewport_bounds(&self) -> gpui::Bounds<Pixels> {
+        ScrollbarHandle::viewport_bounds(&self.list)
+    }
+
+    fn offset(&self) -> gpui::Point<Pixels> {
+        ScrollbarHandle::offset(&self.list)
+    }
+
+    fn set_offset(&self, mut offset: gpui::Point<Pixels>) {
+        if !self.list.is_following_tail() {
+            self.rise.set(px(0.));
+            self.list.set_offset_from_scrollbar(offset);
+            return;
+        }
+        // Anchored past its last row, the list reports more than it shows.
+        let end = -self.list.max_offset_for_scrollbar().y;
+        let rise = offset.y - self.list.scroll_px_offset_for_scrollbar().y.max(end);
+        if rise > px(0.) {
+            let rise = self.rise.get() + rise;
+            if rise < TAIL_ESCAPE {
+                self.rise.set(rise);
+                return;
+            }
+            offset.y = end + rise;
+        }
+        self.rise.set(px(0.));
+        self.list.set_offset_from_scrollbar(offset);
+    }
+
+    fn content_size(&self) -> gpui::Size<Pixels> {
+        ScrollbarHandle::content_size(&self.list)
+    }
+
+    fn start_drag(&self) {
+        ScrollbarHandle::start_drag(&self.list);
+    }
+
+    fn end_drag(&self) {
+        ScrollbarHandle::end_drag(&self.list);
+    }
+}
+
 #[derive(IntoElement)]
 pub(crate) struct Scrollable<E: InteractiveElement + Styled + ParentElement + Element> {
     id: ElementId,
