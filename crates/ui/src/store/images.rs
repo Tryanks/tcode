@@ -1524,14 +1524,7 @@ mod tests {
         let (replies, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         crate::store::tests::seed_full_scope(&store, &replies, Vec::new(), cx);
         // Keep navigation out of this test when its Index baseline arrives.

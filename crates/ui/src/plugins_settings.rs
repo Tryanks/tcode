@@ -3627,7 +3627,6 @@ mod tests {
                 },
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -3639,7 +3638,7 @@ mod tests {
             _pump: pump,
         };
         let window_state = cx.new(|_| {
-            let mut state = WindowState::new(false);
+            let mut state = WindowState::default();
             state.pending_settings_section = Some("plugins".into());
             state
         });

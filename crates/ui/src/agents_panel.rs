@@ -1635,14 +1635,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         let thread = |id: &str, parent: Option<&str>| {
             let mut meta = SessionMeta::new(ProviderKind::Codex, "/project".into(), None);
@@ -1695,14 +1688,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         let thread = |id: &str, parent: Option<&str>| {
             let mut meta = SessionMeta::new(ProviderKind::Codex, "/project".into(), None);
@@ -1794,14 +1780,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         let thread = |id: &str, parent: Option<&str>| {
             let mut meta = SessionMeta::new(ProviderKind::Codex, "/project".into(), None);
@@ -2039,14 +2018,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                link.clone(),
-                WorkspaceAttachment::Local,
-                None,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, None, cx)
         });
         let thread = |id: &str, parent: Option<&str>| {
             let mut meta = SessionMeta::new(ProviderKind::Codex, "/project".into(), None);
@@ -2187,7 +2159,6 @@ mod tests {
                 WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -2201,7 +2172,7 @@ mod tests {
             store.read_with(cx, |store, cx| !store.chat_loading_for(Some("lead"), cx))
         });
 
-        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let window_state = cx.new(|_| crate::window_state::WindowState::default());
         let chat = {
             let (_, chat) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store.clone(), window_state, Some("lead".into()), window, cx)

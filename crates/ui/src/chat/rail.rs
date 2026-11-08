@@ -912,7 +912,7 @@ mod tests {
     ) -> (TwoThreads, &mut VisualTestContext) {
         let mut threads = seed_two_threads(cx, timeline());
         let store = threads.store.clone();
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let (chat, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(store, window_state, Some(threads.first.clone()), window, cx)
         });

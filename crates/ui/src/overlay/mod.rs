@@ -583,7 +583,6 @@ mod tests {
                     crate::store::WorkspaceAttachment::Local,
                     None,
                     None,
-                    false,
                     cx,
                 )
             });

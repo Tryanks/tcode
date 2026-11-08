@@ -74,7 +74,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
                         client_host: Some(host),
                         local: None,
                         local_failure: None,
-                        seed_blocking: false,
+                        local_settings: None,
                         restore_navigation: true,
                         reopen: None,
                     },

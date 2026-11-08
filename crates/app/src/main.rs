@@ -541,9 +541,6 @@ impl MainWindow {
                 setup: ShellSetup {
                     client_host: Some(state.native_client.clone()),
                     local: Some(state.local.clone()),
-                    // Only here: bootstrap applies locale and theme from the
-                    // host's own settings before the first frame.
-                    seed_blocking: true,
                     ..setup
                 },
                 ..ShellOptions::default()
@@ -829,6 +826,7 @@ fn main() {
                 ShellSetup {
                     local_failure: failure,
                     initial: Some(initial_target),
+                    local_settings: kernel.is_some().then_some(local_settings),
                     ..ShellSetup::default()
                 },
                 None,

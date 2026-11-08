@@ -753,8 +753,7 @@ fn map_content(
     let muted = theme.muted_foreground;
     let mono = theme.mono_font_family.clone();
     let selected_number = offer.key.number;
-    let store = view.read(cx).store().clone();
-    let collapsed = store.read(cx).stack_note_collapsed();
+    let collapsed = crate::device::DevicePreferences::stack_note_collapsed(cx);
     let head = h_flex()
         .px_2()
         .py_1()
@@ -784,14 +783,8 @@ fn map_content(
                 .icon(IconName::CircleQuestionMark)
                 .aria_label(tr("about"))
                 .tooltip(tr("about"))
-                .on_click({
-                    let store = store.clone();
-                    move |_, _, cx| {
-                        store.update(cx, |store, cx| {
-                            let collapsed = store.stack_note_collapsed();
-                            store.set_stack_note_collapsed(!collapsed, cx)
-                        })
-                    }
+                .on_click(move |_, _, cx| {
+                    crate::device::DevicePreferences::set_stack_note_collapsed(!collapsed, cx)
                 }),
         );
     let note = crate::widgets::Collapsible::new("pr-stack-note", !collapsed).content(

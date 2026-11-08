@@ -7,7 +7,7 @@ use tcode_core::{
     control::{ControlGrant, FollowUp, SettlementAutomation},
     git::GitAction,
     session::ReviewComment,
-    settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch, SidebarLayout},
+    settings::{ChildApprovalMode, ImageMode, ProfileSettingsPatch},
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 use tcode_protocol::{
@@ -46,7 +46,6 @@ impl WorkspaceStore {
                 | Command::ApplyPendingRelaunch
                 | Command::PatchSettings { .. }
                 | Command::ResetSettings
-                | Command::SetSidebarCollapsed { .. }
                 | Command::CycleProjectSort
                 | Command::ToggleFavoriteModel { .. }
                 | Command::ToggleProjectCollapsed { .. }
@@ -88,9 +87,6 @@ impl WorkspaceStore {
     pub(super) fn dispatch(&mut self, command: Command) {
         if !self.scope.is_full() {
             match &command {
-                Command::SetSidebarCollapsed { collapsed } => {
-                    self.settings_replica.sidebar_collapsed = *collapsed
-                }
                 Command::ToggleProjectCollapsed { project_id } => {
                     if self
                         .settings_replica
@@ -177,9 +173,6 @@ impl WorkspaceStore {
         if !self.scope.is_full() {
             match patch {
                 SettingsPatch::LastProject(id) => self.settings_replica.last_project_id = id,
-                SettingsPatch::SidebarLayout(layout) => {
-                    self.settings_replica.sidebar_layout = layout
-                }
                 SettingsPatch::WordWrapDiffs(value) => {
                     self.settings_replica.word_wrap_diffs = value
                 }
@@ -288,9 +281,6 @@ impl WorkspaceStore {
     pub fn set_title_generation_profile_id(&mut self, value: Option<String>) {
         self.patch_settings(SettingsPatch::TitleGenerationProfileId(value));
     }
-    pub fn set_sidebar_layout(&mut self, value: SidebarLayout) {
-        self.patch_settings(SettingsPatch::SidebarLayout(value));
-    }
     pub fn reset_settings(&mut self) {
         self.dispatch(Command::ResetSettings);
     }
@@ -302,10 +292,6 @@ impl WorkspaceStore {
     }
     pub fn clear_relaunch_marker(&mut self) {
         self.dispatch(Command::ClearRelaunchMarker);
-    }
-    pub fn set_sidebar_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
-        self.dispatch(Command::SetSidebarCollapsed { collapsed });
-        self.local_settings_changed(cx);
     }
 }
 

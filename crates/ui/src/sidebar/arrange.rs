@@ -280,7 +280,7 @@ impl SessionsSidebar {
     /// Whether rows are listed by project, where they are neither dragged
     /// nor moved: the project view orders them by activity alone.
     fn in_project_view(&self, cx: &App) -> bool {
-        self.store.read(cx).sidebar_layout() == SidebarLayout::Grouped
+        crate::device::DevicePreferences::sidebar_layout(cx) == SidebarLayout::Grouped
             && self.window_state.read(cx).destination() != Destination::ArrangeThreads
     }
 
@@ -853,7 +853,7 @@ impl SessionsSidebar {
             .filter(|meta| thread_section(meta) == ThreadSection::Pinned)
             .filter_map(|meta| meta.pin_order)
             .min();
-        if self.store.read(cx).sidebar_layout() == SidebarLayout::Flat {
+        if crate::device::DevicePreferences::sidebar_layout(cx) == SidebarLayout::Flat {
             self.reveal_pinned = Some(action.0.clone());
         }
         self.perform_lifecycle(
@@ -904,7 +904,8 @@ impl SessionsSidebar {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.arrange_scope = (self.store.read(cx).sidebar_layout() == SidebarLayout::Grouped)
+        self.arrange_scope = (crate::device::DevicePreferences::sidebar_layout(cx)
+            == SidebarLayout::Grouped)
             .then(|| self.store.read(cx).thread_meta(&action.0).cloned())
             .flatten()
             .and_then(|meta| meta.project_id);

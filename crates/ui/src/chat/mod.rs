@@ -1330,7 +1330,6 @@ pub(crate) mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1353,7 +1352,7 @@ pub(crate) mod tests {
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
             ChatView::new(
                 store.clone(),
@@ -1952,7 +1951,6 @@ pub(crate) mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -2079,7 +2077,6 @@ pub(crate) mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -2117,7 +2114,7 @@ pub(crate) mod tests {
                     .is_some()
             })
         });
-        let window_state = cx.new(|_| WindowState::new(false));
+        let window_state = cx.new(|_| WindowState::default());
         let link = driver.link.clone();
         cx.on_quit(move || {
             let events = link.events();
@@ -2240,7 +2237,6 @@ pub(crate) mod tests {
                     crate::store::WorkspaceAttachment::Local,
                     None,
                     None,
-                    false,
                     cx,
                 )
             });
@@ -2392,7 +2388,7 @@ pub(crate) mod tests {
             cx: &'a mut TestAppContext,
         ) -> (Entity<ChatView>, &'a mut VisualTestContext) {
             let store = self.store.clone();
-            let window_state = cx.new(|_| WindowState::new(false));
+            let window_state = cx.new(|_| WindowState::default());
             let (view, cx) = crate::chat::tests::add_chat_window(cx, |window, cx| {
                 ChatView::new(store, window_state, Some(THREAD.to_owned()), window, cx)
             });

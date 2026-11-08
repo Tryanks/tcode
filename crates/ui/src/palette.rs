@@ -31,7 +31,6 @@ use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
 use crate::provider_card::profile_glyph;
 use crate::settings::ThemeMode;
-use crate::settings_page::apply_theme;
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_state::WindowState;
@@ -666,10 +665,7 @@ impl CommandPalette {
                 } else {
                     ThemeMode::Dark
                 };
-                self.store.update(cx, |store, _cx| {
-                    store.set_client_theme(Some(next));
-                });
-                apply_theme(next, window, cx);
+                crate::device::DevicePreferences::set_theme(next, window, cx);
                 self.close(cx);
             }
             Action::ToggleDiff => {
@@ -1217,7 +1213,7 @@ mod tests {
             // A wide window draws the palette only on an attached
             // workspace's Chat route.
             let window_state = cx.new(|cx| {
-                let mut state = WindowState::new(false);
+                let mut state = WindowState::default();
                 state.enter_workspace(cx);
                 state
             });
@@ -1311,7 +1307,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1393,7 +1388,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1428,7 +1422,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
@@ -1581,13 +1574,12 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });
         crate::store::tests::seed_full_scope(&store, &incoming, deferred, cx);
         store.update(cx, |store, cx| store.show_alone("thread-0".into(), cx));
-        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let window_state = cx.new(|_| WindowState::default().with_compact(true));
         window_state.update(cx, |state, cx| state.open_palette(cx));
         let (sheet, cx) = cx.add_window_view(|window, cx| Sheet {
             palette: cx.new(|cx| CommandPalette::new(store.clone(), window_state, window, cx)),
@@ -1652,7 +1644,6 @@ mod tests {
                 crate::store::WorkspaceAttachment::Local,
                 None,
                 None,
-                false,
                 cx,
             )
         });

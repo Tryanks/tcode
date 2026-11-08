@@ -817,7 +817,7 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let collapsed = self.window_state.read(cx).sidebar_collapsed;
+        let collapsed = crate::device::DevicePreferences::sidebar_collapsed(cx);
         // Windows: with no right panel open this header is the window's
         // top-right corner, so it hosts the caption buttons — flush to the
         // right edge, past the header's usual inset.
@@ -931,12 +931,7 @@ impl ChatView {
             } else {
                 crate::tr!("sidebar.collapse")
             })
-            .on_click(cx.listener(|this, _, _, cx| {
-                let workspace_store = this.workspace_store.clone();
-                this.window_state.update(cx, |state, cx| {
-                    state.toggle_sidebar_collapsed(&workspace_store, cx)
-                });
-            }));
+            .on_click(|_, _, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
 
         // An agent's header leads back to the thread it was reached from.
         let parent_link = self.labelled_swap(
@@ -1941,7 +1936,7 @@ mod tests {
         let cx: &mut VisualTestContext = cx;
         let view = root.read_with(cx, |root, _| root.chat.clone());
         cx.simulate_resize(size(px(1_024.), px(700.)));
-        window_state.update(cx, |state, cx| state.toggle_sidebar_collapsed(&store, cx));
+        cx.update(|_, cx| crate::device::DevicePreferences::toggle_sidebar_collapsed(cx));
         draw_settled(cx);
         let toggle = |cx: &mut VisualTestContext| {
             cx.debug_bounds("toggle-sidebar")

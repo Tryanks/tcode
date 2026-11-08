@@ -136,7 +136,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                         // A browser tab runs no host of its own.
                         local: None,
                         local_failure: None,
-                        seed_blocking: false,
+                        local_settings: None,
                         restore_navigation: false,
                         reopen: None,
                     },

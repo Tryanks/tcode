@@ -198,7 +198,7 @@ impl Composer {
         let session_id = self.session_id.clone();
         let attachments_dir = self.composer_state(cx).attachments_dir.clone();
         let link = store.attachment_link();
-        let remote_limit = store.client_remote_attachment_limit_bytes();
+        let remote_limit = crate::device::DevicePreferences::remote_attachment_limit_bytes(cx);
         self.pending_image_loads += 1;
         cx.notify();
         let generation = self.image_load_generation;
