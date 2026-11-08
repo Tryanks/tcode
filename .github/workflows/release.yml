@@ -373,7 +373,7 @@ jobs:
             `xattr -dr com.apple.quarantine /Applications/Tcode.app`
 
           - **Windows 11+**: the embedded preview uses the WebView2 runtime that ships with Windows.
-          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, a working Vulkan ICD/graphics driver, GTK 3 and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`). The embedded preview runs when Tcode runs on X11; on a Wayland session start it with `WAYLAND_DISPLAY` unset to use XWayland.
+          - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, a working Vulkan ICD/graphics driver, GTK 3 and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0`; `webkit2gtk-4.1` on Arch). On a Wayland session the embedded preview runs WebKitGTK on a nested compositor of its own (experimental); start Tcode with `WAYLAND_DISPLAY` unset to embed it through XWayland instead.
           - **Android**: the arm64 APK is signed with the project's release key and installs over previous releases signed with it. A build signed with a different key (a local build, or a release from before the key existed) must be uninstalled first.
           - **iOS / iPadOS 27+**: the arm64 IPA is unsigned. Re-sign it with your own Apple ID, or install it with a sideloading tool such as AltStore or Sideloadly, before it runs on a device.
 
