@@ -1038,12 +1038,12 @@ fn pausing_an_idle_watch_and_resume_catches_up_once_after_restart() {
         harness.watch_thread("thread", START);
         harness.pass();
         let baseline = harness.watch("thread").unwrap();
-        assert!(harness.activity().waiting);
+        assert_eq!(harness.activity().wakes.pull_requests, [key().number]);
         harness.pause(1);
         assert_eq!(harness.watch("thread"), Some(baseline.clone()));
         let activity = harness.activity();
         assert!(
-            !activity.waiting && !activity.working,
+            activity.wakes.is_empty() && !activity.working,
             "paused monitoring is idle"
         );
         {
@@ -1076,7 +1076,7 @@ fn pausing_an_idle_watch_and_resume_catches_up_once_after_restart() {
             "a restart cannot wake a paused thread"
         );
         assert_eq!(harness.watch("thread"), Some(baseline));
-        assert!(!harness.activity().waiting);
+        assert!(harness.activity().wakes.is_empty());
 
         harness.resume();
         if change == "unchanged" {
@@ -1210,7 +1210,7 @@ fn a_late_turn_acceptance_cannot_resume_watches_after_interrupt() {
     harness.host().checks = vec![check("build", "FAILURE")];
     harness.accept(delivery);
     harness.pass();
-    assert!(!harness.activity().waiting);
+    assert!(harness.activity().wakes.is_empty());
     assert!(
         next_command(&harness.commands).is_err(),
         "accepting a pre-Stop turn cannot resume monitoring"

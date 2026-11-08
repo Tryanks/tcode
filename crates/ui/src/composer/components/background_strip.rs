@@ -49,9 +49,12 @@ impl Composer {
                     .on_click(cx.listener(|this, _, _, cx| this.stop_background_task(None, cx))),
             );
         let this = &*self;
-        let rows = tasks
-            .into_iter()
-            .map(|task| (SharedString::from(format!("background-{}", task.id)), task));
+        let rows = tasks.into_iter().map(|task| {
+            (
+                SharedString::from(format!("background-{}", task.task.id)),
+                task.task,
+            )
+        });
         let rows = crate::motion::keyed::keyed_owned(
             &this.motion,
             this.motion_key("background-rows"),

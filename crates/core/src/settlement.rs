@@ -118,8 +118,10 @@ impl ThreadActivity {
 #[serde(rename_all = "snake_case")]
 pub enum AgentExecution {
     Working,
-    /// Waiting on a request, or on work of its own, inside the child.
+    /// Waiting on a request inside the child.
     Waiting,
+    /// No turn runs, while its background work or its own agents do.
+    Background,
     Finished,
     Failed,
     Cancelled,
@@ -128,7 +130,7 @@ pub enum AgentExecution {
 
 impl AgentExecution {
     pub fn running(self) -> bool {
-        matches!(self, Self::Working | Self::Waiting)
+        matches!(self, Self::Working | Self::Waiting | Self::Background)
     }
 }
 

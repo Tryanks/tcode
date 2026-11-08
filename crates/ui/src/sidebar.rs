@@ -5761,7 +5761,12 @@ mod tests {
                 SessionActivity {
                     working: !waiting,
                     turn_running: !waiting,
-                    waiting,
+                    background: tcode_protocol::BackgroundActivity {
+                        tasks: waiting.into(),
+                        agents: 0,
+                    },
+                    unsettled: 0,
+                    wakes: Default::default(),
                     waiting_for_approval: false,
                     waiting_for_input: false,
                     failed: false,

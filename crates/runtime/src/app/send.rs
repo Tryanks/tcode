@@ -953,7 +953,7 @@ impl AppState {
         task_id: Option<String>,
     ) -> Result<(), tcode_protocol::ProtocolError> {
         let active = self
-            .resident(target_id)
+            .resident_mut(target_id)
             .ok_or_else(|| provider_command_error("The thread is not open."))?;
         if !active
             .meta
@@ -970,8 +970,12 @@ impl AppState {
             return Err(provider_command_error("The provider is no longer running."));
         };
         commands
-            .try_send(SessionCommand::StopBackgroundTask { task_id })
-            .map_err(provider_command_error)
+            .try_send(SessionCommand::StopBackgroundTask {
+                task_id: task_id.clone(),
+            })
+            .map_err(provider_command_error)?;
+        active.background.stopping(task_id.as_deref(), now_millis());
+        Ok(())
     }
 
     /// Compaction is the provider's own turn: it is not started over one that

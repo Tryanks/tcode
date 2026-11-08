@@ -3611,13 +3611,18 @@ mod replica_tests {
     fn background_tasks_stop_from_the_composer(cx: &mut TestAppContext) {
         let (store, incoming, outgoing, mut status) = attach(cx);
         let session_id = Some(status.session_id.clone());
-        status.background_tasks = vec![agent::BackgroundTask {
-            id: "bl5ti808a".into(),
-            name: "npm run dev".into(),
-            kind: agent::BackgroundKind::Command,
-            item_id: None,
-            started_at: 1,
-            started_reported: false,
+        status.background_tasks = vec![tcode_protocol::BackgroundTaskStatus {
+            task: agent::BackgroundTask {
+                id: "bl5ti808a".into(),
+                name: "npm run dev".into(),
+                kind: agent::BackgroundKind::Command,
+                item_id: None,
+                started_at: 1,
+                started_reported: false,
+            },
+            listed: true,
+            stopping_since: None,
+            ended: false,
         }];
         replace(
             &incoming,

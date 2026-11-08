@@ -217,7 +217,7 @@ pub struct ActiveSession {
     /// Claude currently supplies this transient liveness signal.
     pub(super) background_task_count: usize,
     /// The work behind that count, for a harness that lists it.
-    pub(super) background_tasks: Vec<agent::BackgroundTask>,
+    pub(super) background: super::background::BackgroundWork,
     /// Cleared when the live provider took none of Tcode's MCP servers.
     pub(super) mcp_servers_attached: bool,
     /// When this resident last went fully idle: the end of its live provider's
@@ -309,7 +309,7 @@ impl ActiveSession {
             interrupt_requested_at: None,
             requested_command: None,
             background_task_count: 0,
-            background_tasks: Vec::new(),
+            background: Default::default(),
             mcp_servers_attached: true,
             idle_since: None,
             provider_commands,
@@ -562,7 +562,7 @@ impl ActiveSession {
         self.interrupt_requested_at = None;
         self.requested_command = None;
         self.background_task_count = 0;
-        self.background_tasks.clear();
+        self.background.clear();
         self.idle_since = None;
         self._pump = None;
     }
@@ -577,7 +577,7 @@ impl ActiveSession {
         self.interrupt_requested_at = None;
         self.requested_command = None;
         self.background_task_count = 0;
-        self.background_tasks.clear();
+        self.background.clear();
         self._pump = None;
     }
 

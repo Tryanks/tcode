@@ -5,7 +5,7 @@ use super::{active_session::*, events::*, orchestrate::*, providers::*};
 use tcode_core::notice::CHILD_REPORT_REMINDER;
 use tcode_core::project::ChildExpectation;
 use tcode_core::settings::{SettingsPatch, ThemeMode};
-use tcode_protocol::{Command, CommandResponse, HostMessage, Subscription};
+use tcode_protocol::{BackgroundTaskStatus, Command, CommandResponse, HostMessage, Subscription};
 #[test]
 fn permission_relaunch_marker_requires_screen_access_only_for_computer_use() {
     for screen_recording in [false, true] {
@@ -3132,7 +3132,8 @@ fn only_a_loaded_conversation_marks_a_thread_read() {
         assert!(
             !activity.working
                 && !activity.turn_running
-                && !activity.waiting
+                && activity.background.is_idle()
+                && activity.unsettled == 0
                 && !activity.waiting_for_approval
                 && !activity.waiting_for_input,
             "a thread with no live provider has no work"
@@ -7290,8 +7291,17 @@ fn a_refused_settings_change_falls_back_to_the_restart() {
     }
 }
 
+/// Whether a lead's agents hold it: one still runs, or a dispatched one
+/// finished and awaits its settle.
+fn children_hold(activity: &tcode_protocol::SessionActivity) -> bool {
+    activity.background.agents > 0 || activity.unsettled > 0
+}
+
 /// The list a harness publishes reaches the client's status and a stop reaches
-/// the harness; one that lists nothing is refused, not asked.
+/// the harness, which the status shows until the harness drops it; one that
+/// lists nothing is refused, not asked. A call whose work the harness has
+/// dropped from its list but not yet ended reads as ended, and one going on
+/// in the background that the harness never lists is listed after its own.
 #[test]
 fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
     let cx = &mut TestAppContext::default();
@@ -7306,26 +7316,115 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
         started_at: 1,
         started_reported: false,
     };
+    let listed = |state: &TestEntity| {
+        state.read(|state| {
+            state
+                .session_status_snapshot("lists")
+                .unwrap()
+                .background_tasks
+        })
+    };
     state.update(cx, |state, cx| {
         let mut session = live_session(ProviderKind::ClaudeCode, commands.clone());
         session.meta.id = "lists".into();
         state.sessions.push(session.meta.clone());
         state.install_selected(session);
-        state.on_event(
-            "lists",
+        let started = |id: &str, content| {
+            AgentEvent::ItemStarted(ThreadItem {
+                id: id.into(),
+                parent_item_id: None,
+                content,
+            })
+        };
+        let backgrounded = |id: &str| AgentEvent::ItemBackgrounded {
+            item_id: id.into(),
+            parent_item_id: None,
+        };
+        for event in [
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+            },
+            started(
+                "toolu-sleep",
+                ItemContent::CommandExecution {
+                    command: "sleep 300".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::InProgress,
+                },
+            ),
+            backgrounded("toolu-sleep"),
+            started(
+                "toolu-review",
+                ItemContent::Subagent {
+                    agent_type: "general".into(),
+                    description: "Review the migration".into(),
+                    status: ItemStatus::InProgress,
+                    summary: None,
+                    model: None,
+                    effort: None,
+                },
+            ),
+            backgrounded("toolu-review"),
+            // The subagent's own work opens its mirror's turn.
+            AgentEvent::ItemStarted(ThreadItem {
+                id: "toolu-review-read".into(),
+                parent_item_id: Some("toolu-review".into()),
+                content: ItemContent::CommandExecution {
+                    command: "cat migration.sql".into(),
+                    output: String::new(),
+                    exit_code: None,
+                    status: ItemStatus::InProgress,
+                },
+            }),
             AgentEvent::BackgroundTaskList {
                 tasks: vec![task.clone()],
             },
-            cx,
-        );
-        assert_eq!(
-            state
-                .session_status_snapshot("lists")
-                .unwrap()
-                .background_tasks,
-            std::slice::from_ref(&task)
-        );
-
+        ] {
+            state.on_event("lists", event, cx);
+        }
+    });
+    // The subagent runs in the background, and counts there alone.
+    assert_eq!(
+        state.read(|state| state.index_snapshot().summary.activity["lists"].background),
+        tcode_protocol::BackgroundActivity {
+            tasks: 2,
+            agents: 0
+        }
+    );
+    let unlisted = |listed: &[BackgroundTaskStatus]| {
+        listed
+            .iter()
+            .find(|status| status.task.id == "toolu-review")
+            .map(|status| {
+                (
+                    status.listed,
+                    status.ended,
+                    status.task.kind,
+                    status.task.name.clone(),
+                )
+            })
+    };
+    let now = listed(&state);
+    assert_eq!(
+        (
+            now.len(),
+            &now[0].task,
+            now[0].listed,
+            now[0].stopping_since
+        ),
+        (2, &task, true, None)
+    );
+    assert_eq!(
+        unlisted(&now),
+        Some((
+            false,
+            false,
+            agent::BackgroundKind::Agent,
+            "Review the migration".into()
+        ))
+    );
+    state.update(cx, |state, _| {
         let mut session = live_session(ProviderKind::Pi, commands);
         session.meta.id = "cannot".into();
         state.sessions.push(session.meta.clone());
@@ -7358,6 +7457,28 @@ fn background_tasks_are_listed_and_stopped_where_the_harness_can() {
         Ok(SessionCommand::StopBackgroundTask { task_id: None })
     ));
     assert!(next_command(&actor).is_err());
+    assert!(
+        listed(&state)[0].stopping_since.is_some(),
+        "the stop shows until the harness drops the task"
+    );
+
+    state.update(cx, |state, cx| {
+        state.on_event(
+            "lists",
+            AgentEvent::BackgroundTaskList { tasks: Vec::new() },
+            cx,
+        )
+    });
+    let now = listed(&state);
+    let sleep = now
+        .iter()
+        .find(|status| status.task.id == "toolu-sleep")
+        .expect("the call is still open");
+    assert!(
+        sleep.ended && !sleep.listed && sleep.stopping_since.is_none(),
+        "{sleep:?}"
+    );
+    assert_eq!(unlisted(&now).map(|(_, ended, ..)| ended), Some(false));
 }
 
 /// A harness that no longer answers a stop can be killed: its turn ends as
@@ -8989,16 +9110,17 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
             ("stale timeline", stale_timeline, false),
         ] {
             let id = session.meta.id.clone();
-            let expected_waiting = matches!(label, "delivery" | "background");
+            let expected_background = matches!(label, "delivery" | "background");
             state.sessions.push(session.meta.clone());
             state.install_selected(session);
             let index = state.index_snapshot();
             assert_eq!(
-                index.summary.activity[&id].waiting, expected_waiting,
+                index.summary.activity[&id].background.tasks > 0,
+                expected_background,
                 "{label}"
             );
             let active_answer = state.turn_running_for(&id);
-            // Background work keeps the provider resident and shows Waiting;
+            // Background work keeps the provider resident and shows as such;
             // Working describes this thread's own turn or queued human input.
             let expected_working = expected && label != "background";
             assert_eq!(
@@ -9026,10 +9148,10 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
     });
 }
 
-/// A running grandchild keeps every thread above it waiting, not only its
-/// own lead, though none of them has work of its own.
+/// A running grandchild keeps every thread above it running an agent, not
+/// only its own lead, though none of them has work of its own.
 #[test]
-fn a_running_grandchild_keeps_every_ancestor_waiting() {
+fn a_running_grandchild_keeps_every_ancestor_running_an_agent() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-waiting-child-test");
     let store = (*test_store).clone();
@@ -9058,9 +9180,9 @@ fn a_running_grandchild_keeps_every_ancestor_waiting() {
             .insert("grandchild".into(), grandchild);
 
         let activity = state.index_snapshot().summary.activity;
-        assert!(activity["parent"].waiting && !activity["parent"].working);
-        assert!(activity["child"].waiting && !activity["child"].working);
-        assert!(!activity["grandchild"].waiting && activity["grandchild"].working);
+        assert!(activity["parent"].background.agents == 1 && !activity["parent"].working);
+        assert!(activity["child"].background.agents == 1 && !activity["child"].working);
+        assert!(activity["grandchild"].background.is_idle() && activity["grandchild"].working);
     });
 }
 
@@ -12929,7 +13051,7 @@ fn first_index_snapshot_includes_persisted_child_runs_and_human_resume_status() 
                     .unwrap()
                     .is_settled()
             );
-            assert!(snapshot.summary.activity["lead"].waiting);
+            assert!(children_hold(&snapshot.summary.activity["lead"]));
             let worker = snapshot.summary.activity["worker"].agent.unwrap();
             assert_eq!(
                 (worker.run_started_at, worker.run_completed_at),
@@ -13393,7 +13515,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
             assert!(!state.find_meta(id).unwrap().is_settled(), "{id}");
         }
     });
-    assert!(activity(&state, "lead").waiting);
+    assert!(children_hold(&activity(&state, "lead")));
     assert_eq!(
         activity(&state, "worker").agent,
         agent(AgentExecution::Finished, AgentDelivery::AwaitingSettle)
@@ -13417,7 +13539,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
         agent(AgentExecution::Cancelled, AgentDelivery::NotDelivered)
     );
     assert!(
-        activity(&state, "lead").waiting,
+        children_hold(&activity(&state, "lead")),
         "the unsettled worker still holds its lead"
     );
     let mut delivery = |id: &str| {
@@ -13451,7 +13573,7 @@ fn a_finished_child_holds_its_lead_until_settled_and_cancel_never_delivers() {
         activity(&state, "worker").agent,
         agent(AgentExecution::Finished, AgentDelivery::Settled)
     );
-    assert!(!activity(&state, "lead").waiting);
+    assert!(!children_hold(&activity(&state, "lead")));
     state.dispatch_command(
         cx,
         2,
@@ -13516,7 +13638,7 @@ fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
     let state = cx.new_entity(TestClientState::new((*store).clone()));
     let activity = |state: &TestEntity| state.read(|state| state.index_snapshot().summary.activity);
     assert!(
-        activity(&state)["lead"].waiting,
+        children_hold(&activity(&state)["lead"]),
         "the finished worker awaits settle"
     );
 
@@ -13528,7 +13650,7 @@ fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
         },
     );
     cx.run_until_parked();
-    assert!(!activity(&state)["lead"].waiting);
+    assert!(!children_hold(&activity(&state)["lead"]));
 
     state.dispatch_command(
         cx,
@@ -13545,7 +13667,7 @@ fn an_agent_archived_before_settle_stays_not_delivered_when_restored() {
         (AgentExecution::Cancelled, AgentDelivery::NotDelivered)
     );
     assert!(
-        !activity["lead"].waiting,
+        !children_hold(&activity["lead"]),
         "the restored worker does not hold its lead"
     );
 }
@@ -14329,7 +14451,7 @@ fn deleting_the_last_child_releases_its_leads_automatic_settlement() {
     .unwrap();
     loop {
         if let ServerEvent::IndexSnapshot(snapshot) = next_host_event(&events).event {
-            assert!(snapshot.summary.activity["lead"].waiting);
+            assert!(children_hold(&snapshot.summary.activity["lead"]));
             assert!(
                 !snapshot
                     .sessions

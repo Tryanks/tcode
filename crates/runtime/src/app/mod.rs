@@ -242,6 +242,7 @@ mod acp;
 mod active_session;
 mod approvals;
 mod authorization;
+mod background;
 mod command_output;
 mod command_validation;
 mod control;
