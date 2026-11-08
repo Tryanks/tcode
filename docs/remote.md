@@ -14,7 +14,7 @@ The plan behind this model is [#376](https://github.com/Tryanks/tcode/issues/376
 | Term | Meaning |
 | --- | --- |
 | Machine | The computer where Tcode runs providers and terminals and stores projects and threads. It is the desktop app with **Let other devices connect to this machine** on, or `tcode-headless serve`. A machine is identified by a key it generates once and keeps in `traverse.json` in its data directory; the public half is its **machine id** (64 hex characters). |
-| Device | A desktop, phone or tablet running the Tcode app that opens a machine. A device also has its own key, kept in `device.json` in its data directory. The machine keeps an allow list of device ids; every connection is authenticated by that key, so a device that is not on the list is refused before any application data flows. |
+| Device | A desktop, phone or tablet running the Tcode app that opens one or more machines. A device also has its own key, kept in `device.json` in its data directory. The machine keeps an allow list of device ids; every connection is authenticated by that key, so a device that is not on the list is refused before any application data flows. |
 | Invitation | A `tcode://pair?…` link, shown as a QR code and copyable as text. It carries the machine id, a random 16-byte secret, the Traverse instances the machine publishes to, its current relay and its UDP port — never an IP address or the machine's name; the format is [The invitation link](pair-link.md). Scanning or pasting the link is the whole pairing: an invitation lasts five minutes, admits one device, is replaced by the next one and is invalidated after five wrong secrets. The machine enforces all of this; Traverse never sees an invitation. |
 | Space | A named set of projects on one machine, with a reusable pairing link. A device paired through that link becomes a member and sees only the space's projects and threads. The owner manages the projects and members. |
 | Group | Machines that admit the devices any of them admits, so a device paired with one member reaches every member. Off until a machine creates one; see [Machine groups](#machine-groups). |
@@ -54,11 +54,13 @@ a removed member has to pair again.
 ### Member
 
 Pair with the space link by scanning or pasting it like any invitation. The
-connection banner shows **Space «X» · machine name**. The sidebar contains only
-the space's projects and threads, with no **Add project** action. Members can
-create threads, send turns, and use terminals and git in those projects. They
-can archive threads, but cannot delete threads or projects, change host
-settings, providers, plugins or hosting, or use the preview tunnel. Settings
+connection banner shows **Space «X» · machine name**, and the window shows the
+space's machine alone, in place of the device's other machines. The sidebar
+contains only the space's projects and threads, with no **Add project**
+action. Members can create threads, send turns, and use terminals and git in
+those projects. They can archive threads, but cannot delete threads or
+projects, change host settings, providers, plugins or hosting, or use the
+preview tunnel. Settings
 contains device-local pages and **Archived Threads**. Sidebar preferences and
 read state stay on the device.
 
@@ -120,8 +122,9 @@ members stay with their own machine.
    browser). The join spends that invitation, as a device's pairing would,
    and lists the devices this machine brings first. If the join finds no
    path to that machine, type its IP address, as when pairing a device.
-3. A desktop joins together with its own window, so the window reaches every
-   member from **Machines**.
+3. A desktop joins together with its own window: the window saves every
+   member under **Your machines**, and as group members they are among the
+   machines it keeps open (see [Machines side by side](#machines-side-by-side)).
 
 While a machine is in a group, its invitation says so and names the group;
 the link carries the group's id.
@@ -130,7 +133,10 @@ the link carries the group's id.
 
 Scan or paste any member's invitation: the device is paired with that
 machine, and the machine tells the others. The device saves every member
-under **Your machines**. A space link never brings a device into the group.
+under **Your machines** and keeps each one open beside its other machines,
+except one it disconnected (see
+[Machines side by side](#machines-side-by-side)). A space link never brings a
+device into the group.
 
 **Accept new devices** governs the group too. While it is off on a machine,
 a device another member admits is not admitted there; it is listed in that
@@ -188,9 +194,9 @@ publishes to. They exchange the group when it changes and every five minutes.
    **Offline**; the list refreshes every two seconds. Use **Remove** to
    withdraw a device's access.
 
-Hosting keeps running while this window is connected to another machine:
-devices that opened this machine continue working, and **Let other devices
-connect to this machine** stays available. The desktop app accepts native
+Hosting keeps running whatever machines this window shows, a space's machine
+alone included: devices that opened this machine continue working, and **Let
+other devices connect to this machine** stays available. The desktop app accepts native
 devices only; it does not serve the browser app.
 
 ## Run Tcode without the desktop app
@@ -407,22 +413,32 @@ tab gets the desktop split and a narrow one gets the compact stack.
 
 ## Open a machine
 
+A device's window shows every machine it keeps open side by side, each
+machine's projects and threads its own, never merged; see
+[Machines side by side](#machines-side-by-side). Opening a machine adds it to
+the window; it does not replace the ones already there, except for a space's
+machine, which is shown alone.
+
 ### From another desktop
 
-1. Open **Machines** on this device — the sidebar entry under the search field,
-   or the opening screen when no machine has been added yet.
+1. Open **Machines** on this device — the sidebar entry under the search field.
 2. Under **Add a machine**, choose **Paste an invitation link** and paste the
    machine's invitation link (`tcode://pair?…`). A link that parses is sent at
    once: the page shows **Connecting to the machine…**, and when the machine
-   admits this device the window opens that machine's projects and threads.
+   admits this device it joins the window, which returns to the threads with
+   that machine's section open.
    A failure is shown under the field, and **Connect** retries. When nothing
    found the machine, the page also asks for its IP address (see
    [When nothing finds the machine](#when-nothing-finds-the-machine)).
-3. Choose another machine under **Your machines** to switch again;
-   **This machine** restores the local workspace, and a machine row's
-   **⋯ → Disconnect** leaves without removing it. Switching closes only this
-   device's link, not Tcode on either machine. Opening **Machines** by itself
-   does not change the connection.
+3. Choose a machine under **Your machines** to add it to the window. Choosing
+   one the window already shows, or **This machine**, returns to the threads
+   with its section open. A machine row's **⋯ → Disconnect** takes that
+   machine out of the window without removing it: it closes only this
+   device's link to that machine, the window's other machines stay open, and
+   Tcode keeps running on every machine. **This machine** cannot be
+   disconnected. Opening **Machines** by itself opens or closes nothing.
+4. A space's machine is shown alone: choosing it replaces the window's
+   machines with that one, and its **⋯ → Disconnect** brings the others back.
 
 You can also pair from the desktop executable. Replace the link with the
 machine's current invitation:
@@ -444,19 +460,25 @@ data directory for `--pair` and `--connect`.
 ### From a phone or tablet
 
 1. Install the Android debug APK or re-sign and install the unsigned iOS IPA.
-2. The app opens on **Machines** — the same screen every device has. Choose
-   **Scan a QR code** and point the camera at the invitation on the machine, or
-   **Paste an invitation link**. Allow camera access when the system asks.
+2. With no machine yet, the app opens on an empty threads list, **No machines
+   in this window**, with **Add a machine** and **Machines**; later, the
+   **Machines** button in the threads list's top bar opens the same page.
+   Choose **Scan a QR code** and point the camera at the invitation on the
+   machine, or paste the invitation link (**Paste an invitation link** on
+   **Machines**). Allow camera access when the system asks.
    Native QR scanning uses AVFoundation on iOS and CameraX/ML Kit on Android;
    a simulator's permission and cancel flows do not prove that real camera
    recognition works.
 3. A scanned or pasted invitation pairs and connects in one step: the page
-   shows **Connecting to the machine…** and then opens the machine's threads.
+   shows **Connecting to the machine…** and then returns to the threads with
+   the machine added beside any others.
    A failure is shown under the rows that started the attempt; when nothing
    found the machine it asks for the machine's IP address there.
-4. Open a thread from the list, or use **+** to start one. Read replies, send or
-   queue a message, steer a running turn, stop it, and answer approvals — the
-   same views the desktop shows, laid out for the width.
+4. Open a thread from the list, or use **+** to start one; with several
+   machines, **+** lists each machine's quick thread and projects under its
+   name. Read replies, send or queue a message, steer a running turn, stop it,
+   and answer approvals — the same views the desktop shows, laid out for the
+   width.
    The **+** at the left of the message field opens **Photo library**, the
    system picker (PHPicker on iOS, the photo picker on Android 13 and later,
    the document picker below that). Images are fitted on the device before
@@ -467,9 +489,10 @@ data directory for `--pair` and `--connect`.
    (2 MB unless changed): a larger image asks before going over a direct
    path, and is refused over a relay, because a relay is shared with everyone
    on the service and the connection's other messages would wait behind it.
-5. **Settings** is the full settings page, not a reduced copy. **Back** returns
-   list → machines, which disconnects; leaving a thread keeps the connection.
-   You connect to one machine at a time.
+5. **Settings** is the full settings page, not a reduced copy. **Back** from a
+   thread returns to the threads list; neither it nor opening **Machines**
+   closes a connection. The app reopens on the thread it last showed, on that
+   thread's machine, while the device still has the machine saved.
 
 A tablet wide enough for the split gets the split, and rotating it back to
 portrait returns to the stack with the same thread and draft. A desktop window
@@ -503,9 +526,9 @@ relay; to reach a machine from elsewhere, use the native app.
    browser invalidates its token and closes its socket; that tab returns to
    the login form.
 5. The address is fixed to the page's origin: **Machines** lists the machine
-   that served the page and offers no way to add another. Open another
-   machine's URL to use that machine. Resizing the page switches between the
-   shared wide and compact layouts.
+   that served the page and offers no way to add another, and the sidebar
+   shows that machine alone. Open another machine's URL to use that machine.
+   Resizing the page switches between the shared wide and compact layouts.
 
 The browser stores machines and tokens in this origin's `localStorage` under
 `tcode.hosts`, the last machine under `tcode.last_host`, its device id under
@@ -519,12 +542,56 @@ traffic can read the password, the token and the work. If you put a TLS
 proxy or tunnel in front of it, that is your own setup: the WebSocket follows
 the page's scheme, so `https://` pages use `wss://`.
 
+### Machines side by side
+
+The machines a native device keeps open are, in this order
+([`members`](../crates/ui/src/workspace.rs)):
+
+- **This machine**, on a desktop. It is always there, and listed once even
+  when the device also saved it as a member of a group.
+- Each full-access machine you added from **Machines**, in the order its
+  row's **⋯ → Move up** and **Move down** give it.
+- Every member of a group the device is paired with, unless you chose
+  **Disconnect** for it on this device; choosing it on **Machines** brings it
+  back.
+
+A space's machine is never one of them; it is shown alone, as in
+[From another desktop](#from-another-desktop). A device that has never kept
+a list of machines, such as one upgraded from an earlier version, starts with
+**This machine**, the machine it was last on, if it had full access there,
+and its group members.
+
+With one machine the sidebar has no machine headings. With more, the **Group
+by project** layout gives each machine its own section under a heading with its
+name and connection state; a click on the heading folds the section, and the
+device remembers it. The flat list keeps one list in time order across every
+machine. A heading's **⋯** menu starts a quick thread or a thread in one of
+that machine's projects, adds a project, sorts the projects, disconnects the
+machine (not **This machine**), and opens **Machines** with **Manage
+machines**.
+
+A machine that is offline, or reconnecting after a failure, empties only its
+own section: its heading shows the state (in the flat list, above the
+threads), and the other machines keep their rows. A machine that refuses this
+device shows **Pair again** in its heading and on its **Machines** row; it
+opens **Add a machine** for a new invitation from that machine.
+
+A new thread starts on the machine of the project it is started from: a
+project row's **+**, a project in a heading's menu, or a split beside the
+current thread. Where nothing names a project — the flat list's **+**, a
+phone's **+** — a window with several machines lists each machine's quick
+thread and projects under the machine's name, and the command palette names
+the machine in its new-thread entries.
+
 ### Device preferences
 
-Appearance, language, device name and the internet attachment limit belong to
-this device, not the machine:
-an explicit choice on this device overrides the connected machine's replicated
-setting, and restoring that row reveals the machine's setting again. Native apps
+Theme, language, whether the sidebar is collapsed, its layout, the device name
+and the internet attachment limit belong to this device, not to a machine, and
+stay the same whichever machines the window shows. A device that kept theme,
+language or the sidebar settings on a machine before they were the device's
+takes each one it has not set yet, once, from the first full-access machine
+it opens (on a desktop, from **This machine**). The machines the window keeps,
+their order and folded sections are kept with these preferences. Native apps
 keep these preferences in `mobile.json` next to `hosts.json` in their own data
 directory; the browser keeps them in `localStorage`. iOS seeds the device name
 from the device name, Android from the device model; the name and operating
@@ -627,7 +694,7 @@ Nothing is configured on devices; they take the URL from the invitation.
 
 ## Remote Preview routing
 
-Windows, Linux and Android embedded previews use the connected machine's network for
+Windows, Linux and Android embedded previews use their machine's network for
 all HTTP and HTTPS traffic. `http://localhost:5173/app` opens the dev server on
 the machine, even when it listens only on loopback. The URL stays unchanged in
 the address bar, redirects, scripts and `preview_status`. No dev-server port
@@ -834,7 +901,7 @@ list in memory and writes it back.
 
 **Syncing… / 同步中** means the workspace is waiting for its baseline: applied
 Index and Settings snapshots, plus SessionStatus and SessionEvents for the
-selected thread. A newly attached workspace shows neutral loading rows until
+selected thread. A newly opened machine shows neutral loading rows until
 these arrive; it never labels an unknown list as empty. Cached lists and thread
 content remain visible during reconnect, with Syncing until replay completes.
 **Reconnecting · attempt N** appears immediately when a connection is lost,

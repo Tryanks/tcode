@@ -1,8 +1,8 @@
 # Project configuration
 
 A project can keep a `tcode.json` file directly in the project root registered
-with Tcode. It belongs to the project on the attached host, including when the
-client is on another device. Tcode does not search parent directories or use a
+with Tcode. It belongs to the project on the machine that holds it, including
+when the client is on another device. Tcode does not search parent directories or use a
 thread's worktree directory instead of that root. This file is separate from
 Tcode's application settings and session index.
 
@@ -57,9 +57,9 @@ folder glyph.
 ## Manual icons and refresh
 
 **Change project icon** in the project menu, or **Change icon for ‹project›** in
-the command palette, opens a picker for the attached host's files. Selecting an
-image creates a static PNG copy of at most 128 × 128 pixels in the host's
-Tcode data directory (`project-icons/`). The session index records that copy;
+the command palette, opens a picker for the files of the project's machine.
+Selecting an image creates a static PNG copy of at most 128 × 128 pixels in
+the host's Tcode data directory (`project-icons/`). The session index records that copy;
 Tcode does not modify the original image or either project config file.
 Removing the original therefore does not break the manual icon. Replacing,
 resetting or removing the project cleans up the previous managed copy after

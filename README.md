@@ -111,7 +111,7 @@ uses n0's public iroh relays and lookup service, which n0 describes as
 rate-limited with no uptime guarantee.
 
 Every device shows the *same* app. There is no reduced phone build: a phone, or
-a tablet narrower than 900px, shows a machines → threads → thread stack; a
+a tablet narrower than 900px, shows a threads → thread stack; a
 wider tablet and every desktop window use the split layout. Some actions depend
 on the device in your hands, such as opening a native file dialog or driving the
 embedded preview browser.
@@ -141,10 +141,11 @@ Traverse mode. Headless release builds also serve the browser app, on
 address. Set a password on first open, or preset it with `TCODE_PASSWORD`.
 
 **Connect another device.** Open the sidebar's **Machines** row on a desktop,
-or the opening screen on a phone. Scan the machine's QR code or paste its
-invitation link; pairing connects at once. In a browser, open the printed HTTP
-link and log in with the password; the browser is for direct access on the
-machine or its LAN and does not use Traverse. Its **Settings → Remote** shows
+or **Machines** from a phone's threads list. Scan the machine's QR code or
+paste its invitation link; pairing connects at once and adds the machine to
+the window beside the others. In a browser, open the printed HTTP link and log
+in with the password; the browser is for direct access on the machine or its
+LAN and does not use Traverse. Its **Settings → Remote** shows
 the machine's invitation for native clients and controls pairing and
 revocation.
 See [Use Tcode from other devices](docs/remote.md) for the full guide.
