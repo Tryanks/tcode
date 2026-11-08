@@ -2,16 +2,17 @@
 //! never leave.
 //!
 //! Each card is its header and its body. When the bodies fit, every
-//! card is as tall as its content; when they do not, each body that can
-//! scroll gives up height in proportion to its own, down to a few rows,
-//! and scrolls inside, while a body that cannot ([`StackCard::rigid`])
-//! keeps its whole content, and a body of rows that never scrolls
-//! ([`StackCard::fit`]) gives up rows down to its first, shows those that
-//! fit and counts the rest; when not even that fits, a part that scales
-//! gives up its height ([`Scale`]), and then the headers keep their height
-//! and the bodies share what is left in proportion to those heights. A card
-//! coming or going takes its share as it moves, so the others give way to
-//! it as it goes rather than at the end.
+//! card is as tall as its content; when they do not, the bodies share the
+//! rail alike rather than by how much each holds: one that holds less than
+//! the others are given keeps all of it, and those that hold more are each
+//! given the same height, down to a few rows, and scroll inside it, while a
+//! body that cannot ([`StackCard::rigid`]) keeps its whole content, and a
+//! body of rows that never scrolls ([`StackCard::fit`]) gives up rows down
+//! to its first, shows those that fit and counts the rest; when not even
+//! that fits, a part that scales gives up its height ([`Scale`]), and then
+//! the headers keep their height and the bodies share what is left in
+//! proportion to those heights. A card coming or going takes its share as
+//! it moves, so the others give way to it as it goes rather than at the end.
 //!
 //! Taffy cannot lay this out: a flex item's minimum height never gives way
 //! when the minimums overflow the column, and a fold (`motion::Reveal`)
@@ -142,6 +143,13 @@ struct Demand {
     min: f32,
 }
 
+impl Demand {
+    /// How tall the body is with every body at most `level` tall.
+    fn at(&self, level: f32) -> f32 {
+        level.min(self.natural).max(self.min)
+    }
+}
+
 /// The least a body `natural` tall is given while the rail has room for
 /// every body's least: all of it when it is rigid, else a few rows of it.
 fn least(natural: f32, rigid: bool) -> f32 {
@@ -152,61 +160,54 @@ fn least(natural: f32, rigid: bool) -> f32 {
     }
 }
 
-/// The height each body gets out of `room`: each its natural height when
-/// they all fit; else each shrunk in proportion to its natural height but
-/// no lower than its minimum; else the minimums scaled down to fit.
-fn allot(demands: &[Demand], room: f32) -> Vec<f32> {
+/// The height each body gets out of `room`, each `presence` of the way
+/// in: each its natural height when they all fit; else one height for
+/// every body, which a body of less content than that keeps all of and a
+/// body whose minimum is more than that is held at, as tall as the room
+/// lets it be; else the minimums scaled down to fit. A body on its way in
+/// or out takes as much of its height as it is in.
+fn allot(demands: &[Demand], presences: &[f32], room: f32) -> Vec<f32> {
     let room = room.max(0.);
-    let natural: f32 = demands.iter().map(|demand| demand.natural).sum();
+    let taken = |height: &dyn Fn(&Demand) -> f32| -> f32 {
+        demands
+            .iter()
+            .zip(presences)
+            .map(|(demand, presence)| height(demand) * presence)
+            .sum()
+    };
+    let natural = taken(&|demand| demand.natural);
     if natural <= room {
         return demands.iter().map(|demand| demand.natural).collect();
     }
-    let floor: f32 = demands.iter().map(|demand| demand.min).sum();
+    let floor = taken(&|demand| demand.min);
     if floor >= room {
         let scale = if floor > 0. { room / floor } else { 0. };
         return demands.iter().map(|demand| demand.min * scale).collect();
     }
-    // Shrink the bodies that stay above their minimum; one that would go
-    // below it holds there, and the rest share what remains.
-    let mut held = vec![false; demands.len()];
-    loop {
-        let (free, held_room) =
-            demands
-                .iter()
-                .zip(&held)
-                .fold((0f32, 0f32), |(free, held_room), (demand, held)| {
-                    if *held {
-                        (free, held_room + demand.min)
-                    } else {
-                        (free + demand.natural, held_room)
-                    }
-                });
-        let scale = if free > 0. {
-            (room - held_room) / free
-        } else {
-            0.
-        };
-        let mut changed = false;
-        for (demand, held) in demands.iter().zip(held.iter_mut()) {
-            if !*held && demand.natural * scale < demand.min {
-                *held = true;
-                changed = true;
-            }
+    // What the bodies take with every one at most `level` tall grows with
+    // `level` in a line between the heights a body stops at, so the level
+    // that fills the room lies on the line between two of them.
+    let at = |level: f32| taken(&|demand| demand.at(level));
+    let mut stops: Vec<f32> = demands
+        .iter()
+        .flat_map(|demand| [demand.min, demand.natural])
+        .collect();
+    stops.sort_by(f32::total_cmp);
+    let mut below = (0., at(0.));
+    let mut level = stops.last().copied().unwrap_or(0.);
+    for stop in stops {
+        let taken = at(stop);
+        if taken >= room {
+            level = if taken > below.1 {
+                below.0 + (room - below.1) * (stop - below.0) / (taken - below.1)
+            } else {
+                stop
+            };
+            break;
         }
-        if !changed {
-            return demands
-                .iter()
-                .zip(&held)
-                .map(|(demand, held)| {
-                    if *held {
-                        demand.min
-                    } else {
-                        demand.natural * scale
-                    }
-                })
-                .collect();
-        }
+        below = (stop, taken);
     }
+    demands.iter().map(|demand| demand.at(level)).collect()
 }
 
 /// Where each card's parts were laid out, for painting.
@@ -333,18 +334,9 @@ impl gpui::Element for RailStack {
                 window.request_animation_frame();
             }
         }
-        // What each body takes of the rail, as far in as its card is.
-        let shares = allot(
-            &demands
-                .iter()
-                .zip(&presences)
-                .map(|(demand, presence)| Demand {
-                    natural: demand.natural * presence,
-                    min: demand.min * presence,
-                })
-                .collect::<Vec<_>>(),
-            room,
-        );
+        // How tall each body is drawn; its card takes of the rail as much
+        // of that as it is in.
+        let shares = allot(&demands, &presences, room);
 
         let mut placed = Vec::with_capacity(self.cards.len());
         let mut top = bounds.origin.y;
@@ -353,11 +345,7 @@ impl gpui::Element for RailStack {
             let header = headers[index];
             // A card on its way in or out is drawn at its height in, clipped
             // to the part of it that is in.
-            let shown = if presence > 0. {
-                shares[index] / presence
-            } else {
-                0.
-            };
+            let shown = if presence > 0. { shares[index] } else { 0. };
             let full = header + shown;
             let height = px(full * presence);
             let origin = point(bounds.origin.x, top);
