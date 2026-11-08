@@ -407,6 +407,14 @@ impl OverlayExt for Window {
     }
 }
 
+/// What each notification of `window` says, in the order shown.
+#[cfg(test)]
+pub(crate) fn notifications_said(window: &mut Window, cx: &mut App) -> Vec<gpui::SharedString> {
+    Overlays::update(window, cx, |host, _, cx| {
+        host.notifications.read(cx).said(cx)
+    })
+}
+
 type SheetClose = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// A sheet's binding to the window's edge-back gesture, scoped by its base focus trap.

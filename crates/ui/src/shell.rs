@@ -269,7 +269,6 @@ struct Link {
     /// pages each pane's drawer shows.
     preview: Entity<PreviewPanel>,
     settings_page: Entity<SettingsPage>,
-    palette: Entity<CommandPalette>,
     /// Whether this host's saved record has been stamped with the time this
     /// window reached it.
     stamped: bool,
@@ -526,6 +525,11 @@ pub(crate) fn current_thread(cx: &App) -> Option<ThreadKey> {
     current_shell(cx)?.read(cx).page_thread(cx)
 }
 
+/// The store of the current pane's host, for a command about that pane.
+pub(crate) fn current_store(cx: &App) -> Option<Entity<WorkspaceStore>> {
+    current_shell(cx)?.read(cx).store(cx)
+}
+
 /// Whether the window is over several hosts, so what acts on one names it.
 pub(crate) fn several_hosts(cx: &App) -> bool {
     current_shell(cx).is_some_and(|shell| shell.read(cx).links.len() > 1)
@@ -675,6 +679,8 @@ pub struct AppShell {
     /// The threads of every host in `links`, wide beside the chat and as
     /// the compact threads page.
     sidebar: Entity<SessionsSidebar>,
+    /// The command palette over every host in `links`.
+    palette: Entity<CommandPalette>,
     /// Saved hosts, pairing by invitation and authentication repair: the hosts
     /// destination, and the same panel Settings → Remote shows.
     hosts: Entity<RemotePanel>,
@@ -694,7 +700,8 @@ pub struct AppShell {
     panel_shows_terminal: bool,
     navigation: Option<NavigationPersistence>,
     pending_navigation_restore: Option<PendingNavigationRestore>,
-    operation_toasts: HashMap<RuntimeOperationId, ToastId>,
+    /// A host numbers its own operations.
+    operation_toasts: HashMap<(HostKey, RuntimeOperationId), ToastId>,
     next_toast_id: ToastId,
     /// Tracks the palette's open state across frames so it can be focused on the
     /// open transition.
@@ -903,12 +910,14 @@ impl AppShell {
             panel
         });
         let sidebar = cx.new(|cx| SessionsSidebar::new(Vec::new(), window_state.clone(), cx));
+        let palette = cx.new(|cx| CommandPalette::new(window_state.clone(), window, cx));
         let mut shell = Self {
             window_state,
             links: Vec::new(),
             column: None,
             alone: false,
             sidebar,
+            palette,
             hosts,
             nav: cx.new(|_| NavStackState::new()),
             back_swipe: None,
@@ -1560,12 +1569,14 @@ impl AppShell {
         self.scene_key += 1;
     }
 
-    /// Hosts and the sidebar follow the window onto the hosts it is linked
-    /// to now.
+    /// Hosts, the sidebar and the palette follow the window onto the hosts
+    /// it is linked to now.
     fn sync_hosts(&self, cx: &mut Context<Self>) {
         let stores: Vec<_> = self.links.iter().map(|link| link.store.clone()).collect();
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_hosts(stores.clone(), cx));
+        self.palette
+            .update(cx, |palette, cx| palette.set_stores(stores.clone(), cx));
         self.hosts
             .update(cx, |hosts, cx| hosts.set_stores(stores, cx));
     }
@@ -1744,9 +1755,6 @@ impl AppShell {
             preview,
             settings_page: cx
                 .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
-            palette: cx.new(|cx| {
-                CommandPalette::new(store.clone(), self.window_state.clone(), window, cx)
-            }),
             stamped: false,
             connected: false,
             attention: Default::default(),
@@ -3976,10 +3984,11 @@ impl AppShell {
             }
             RuntimeEvent::Error(_) | RuntimeEvent::Notice(_) => {
                 let presented = present_runtime_event(event);
+                let message = self.said_by(store, presented.message, cx);
                 let notification = match presented.severity {
-                    RuntimeEventSeverity::Error => Notification::error(presented.message),
-                    RuntimeEventSeverity::Warning => Notification::warning(presented.message),
-                    RuntimeEventSeverity::Success => Notification::success(presented.message),
+                    RuntimeEventSeverity::Error => Notification::error(message),
+                    RuntimeEventSeverity::Warning => Notification::warning(message),
+                    RuntimeEventSeverity::Success => Notification::success(message),
                 };
                 window.push_notification(notification, cx);
                 return;
@@ -4010,22 +4019,23 @@ impl AppShell {
         };
 
         let presented = present_runtime_toast(toast);
+        let host = store.read(cx).host_key();
         let toast_id = match presented.disposition {
             RuntimeToastDisposition::Push => self.take_toast_id(),
             RuntimeToastDisposition::Start(operation) => {
                 let toast_id = self.take_toast_id();
-                self.operation_toasts.insert(operation, toast_id);
+                self.operation_toasts.insert((host, operation), toast_id);
                 toast_id
             }
             RuntimeToastDisposition::Update(operation) => {
-                let Some(id) = self.operation_toasts.get(&operation) else {
+                let Some(id) = self.operation_toasts.get(&(host, operation)) else {
                     return;
                 };
                 *id
             }
             RuntimeToastDisposition::Finish(operation) => self
                 .operation_toasts
-                .remove(&operation)
+                .remove(&(host, operation))
                 .unwrap_or_else(|| self.take_toast_id()),
         };
 
@@ -4050,14 +4060,30 @@ impl AppShell {
                 }),
             }
         });
+        let title = self.said_by(store, presented.title, cx);
         self.show_toast(
             toast_id,
             presented.kind,
-            (presented.title, presented.detail, presented.progress),
+            (title, presented.detail, presented.progress),
             action,
             window,
             cx,
         );
+    }
+
+    /// `text` from `store`'s host, after the host's name once the window is
+    /// over several.
+    fn said_by(&self, store: &Entity<WorkspaceStore>, text: String, cx: &App) -> String {
+        if self.links.len() > 1 {
+            crate::tr!(
+                "toast.on_host",
+                host = store.read(cx).host_title(),
+                message = text
+            )
+            .into_owned()
+        } else {
+            text
+        }
     }
 
     /// One slot per thread: a newer wake or end of its watch replaces the older notice.
@@ -4084,11 +4110,14 @@ impl AppShell {
             .thread_meta(session_id)
             .map(|meta| meta.title.clone())
             .unwrap_or_default();
+        let title = self.said_by(&store, title, cx);
         let (kind, message) = crate::pull_requests::watch_notice_toast(number, notice);
         let id = session_id.to_owned();
+        // A session id is unique only on its host.
+        let slot = SharedString::from(format!("{}/{id}", store.read(cx).host_key().name()));
         window.push_notification(
             Notification::new()
-                .id1::<PullRequestWatchNotice>(SharedString::from(id.clone()))
+                .id1::<PullRequestWatchNotice>(slot.clone())
                 .title(title)
                 .message(message)
                 .with_type(kind)
@@ -4096,15 +4125,13 @@ impl AppShell {
                     use crate::sizing::Sizable as _;
                     let store = store.clone();
                     let id = id.clone();
+                    let slot = slot.clone();
                     crate::widgets::button::Button::new("pull-request-watch-open-thread")
                         .small()
                         .outline()
                         .label(crate::tr!("pull_requests.open_thread"))
                         .on_click(move |_, window, cx| {
-                            window.remove_notification1::<PullRequestWatchNotice>(
-                                SharedString::from(id.clone()),
-                                cx,
-                            );
+                            window.remove_notification1::<PullRequestWatchNotice>(slot.clone(), cx);
                             store.update(cx, |store, cx| store.show_thread(id.clone(), cx));
                         })
                 })
@@ -5709,7 +5736,9 @@ impl AppShell {
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
             .child(stack)
-            .map(|el| el.children(self.current_link(cx).map(|link| link.palette.clone())))
+            .when(self.current_link(cx).is_some(), |el| {
+                el.child(self.palette.clone())
+            })
             .into_any_element()
     }
 }
@@ -6192,9 +6221,6 @@ impl AppShell {
                 self.layout_part("chat", self.render_chat_column(collapsed, window, cx)),
             ));
         let column = self.column.as_ref().expect("checked above");
-        let link = self
-            .current_link(cx)
-            .expect("a workspace route has a column");
         let remembered_sidebar = column.sidebar_width.clone();
         let sidebar = match draw_sidebar {
             Some(opacity) => div()
@@ -6206,7 +6232,7 @@ impl AppShell {
         };
         let overlay_width = column.sidebar_width.get();
         let overlay_visible = column.sidebar_overlay_visible;
-        let palette = link.palette.clone();
+        let palette = self.palette.clone();
         let group = h_resizable("workspace-panels")
             .with_state(&split)
             .on_resize(move |state, _, cx| {
@@ -6415,19 +6441,13 @@ impl Render for AppShell {
                 state.palette_leaving(),
             )
         };
-        if palette_leaving
-            && let Some(link) = self.current_link(cx)
-            && link.palette.focus_handle(cx).contains_focused(window, cx)
-        {
+        if palette_leaving && self.palette.focus_handle(cx).contains_focused(window, cx) {
             cx.defer_in(window, |this, window, cx| {
                 this.return_keyboard(window, cx);
             });
         }
-        if palette_open
-            && !self.palette_was_open
-            && let Some(link) = self.current_link(cx)
-        {
-            link.palette
+        if palette_open && !self.palette_was_open && self.current_link(cx).is_some() {
+            self.palette
                 .update(cx, |p, cx| p.open(focus_query, window, cx));
         }
         self.palette_was_open = palette_open;
@@ -6455,7 +6475,7 @@ impl Render for AppShell {
         };
         let dismissal = self
             .current_link(cx)
-            .map(|link| link.palette.read(cx).outside_dismissal.clone());
+            .map(|_| self.palette.read(cx).outside_dismissal.clone());
         div()
             .size_full()
             // gpui-base transfers focus between controls, but leaves it
@@ -7551,6 +7571,253 @@ pub(crate) mod tests {
             "B's pane has gone"
         );
         assert_eq!(store_of(&shell, cx), a);
+    }
+
+    /// Both hosts of [`a_thread_of_a_beside_b`] keep its two threads in a
+    /// project, as the palette lists a host's threads by project.
+    fn threads_in_a_project(
+        shell: &Entity<AppShell>,
+        hosts: &HashMap<HostKey, WorkspaceHost>,
+        cx: &mut VisualTestContext,
+    ) {
+        let project = tcode_core::project::Project::from_root(PANES_CWD.into());
+        let (topic, ServerEvent::IndexSnapshot(mut index)) = panes_index(&[]) else {
+            unreachable!("an index");
+        };
+        for meta in &mut index.sessions {
+            meta.project_id = Some(project.id.clone());
+        }
+        index.projects = vec![project];
+        for (key, host) in hosts {
+            send_events(
+                &host.host,
+                vec![(topic.clone(), ServerEvent::IndexSnapshot(index.clone()))],
+            );
+            draw(cx);
+            heard(host, &store_on(shell, key.name(), cx), cx);
+        }
+    }
+
+    /// Open the palette and type `query` into it.
+    fn search_palette(shell: &Entity<AppShell>, query: &str, cx: &mut VisualTestContext) {
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_palette(cx));
+        crate::test_frames::draw_settled(cx);
+        cx.simulate_input(query);
+        draw(cx);
+    }
+
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let at = cx.debug_bounds(selector).expect(selector).center();
+        cx.simulate_click(at, gpui::Modifiers::default());
+        draw(cx);
+    }
+
+    /// Over two hosts the palette lists each host's threads under that
+    /// host's name, ranked within it. B's thread chosen there shows from B,
+    /// and B's command goes to B alone.
+    #[gpui::test]
+    fn the_palette_lists_each_hosts_threads_under_its_name_and_acts_on_that_host(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        // The device took up the system's language.
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let (a, b) = (
+            store_on(&shell, "host-a", cx),
+            store_on(&shell, "host-b", cx),
+        );
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        threads_in_a_project(&shell, &hosts, cx);
+        search_palette(&shell, "thread-2", cx);
+        for caption in ["Threads on host-a", "Threads on host-b"] {
+            assert!(
+                cx.debug_bounds(format!("palette-caption-{caption}").leak())
+                    .is_some(),
+                "{caption}"
+            );
+        }
+        assert!(cx.debug_bounds("palette-caption-Threads").is_none());
+        // A's `thread-2`, then B's.
+        click("palette-row-1", cx);
+        serve_thread(&hosts[&key_b].host, "thread-2");
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
+        });
+        settle_panes(cx);
+        assert_eq!(pane_hosts(&shell, cx), std::slice::from_ref(&key_b));
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+        assert!(!a.read_with(cx, |store, _| store.is_thread_open("thread-2")));
+
+        heard(&hosts[&key_a], &a, cx);
+        heard(&hosts[&key_b], &b, cx);
+        search_palette(&shell, "quick", cx);
+        // A's quick thread, then B's.
+        click("palette-row-1", cx);
+        assert_eq!(drafts_asked(&hosts[&key_b]), [None]);
+        assert_eq!(drafts_asked(&hosts[&key_a]), []);
+    }
+
+    /// A search of the messages asks every host, lists each host's hits
+    /// under its name, and a hit of B's opens on B.
+    #[gpui::test]
+    fn a_message_search_asks_every_host_and_opens_a_hit_on_its_own(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        // The device took up the system's language.
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let key_b = HostKey::Remote("host-b".into());
+        search_palette(&shell, "zebra", cx);
+        cx.executor().advance_clock(Duration::from_millis(200));
+        draw(cx);
+        for (host, session) in [("host-a", "thread-1"), ("host-b", "thread-2")] {
+            let host = &hosts[&HostKey::Remote(host.into())].host;
+            let asked = std::iter::from_fn(|| host.outgoing.try_recv().ok())
+                .map(|line| decode_client_line(&line).expect("client line"))
+                .filter(|line| {
+                    matches!(
+                        &line.payload,
+                        ClientPayload::Query(tcode_protocol::Query::SearchSessionContent {
+                            query,
+                            ..
+                        }) if query == "zebra"
+                    )
+                })
+                .map(|line| line.id)
+                .collect::<Vec<_>>();
+            let [id] = asked[..] else {
+                panic!("one search asked of each host: {asked:?}");
+            };
+            answer_query(
+                host,
+                id,
+                Ok(tcode_protocol::QueryResponse::SessionContentHits(vec![
+                    tcode_protocol::SessionSearchHit {
+                        session_id: session.into(),
+                        session_title: session.into(),
+                        entry_id: "entry-1".into(),
+                        turn: 0,
+                        snippet: "a zebra".into(),
+                    },
+                ])),
+            );
+        }
+        settle_panes(cx);
+        for caption in ["Messages on host-a", "Messages on host-b"] {
+            assert!(
+                cx.debug_bounds(format!("palette-caption-{caption}").leak())
+                    .is_some(),
+                "{caption}"
+            );
+        }
+        // A's hit, then B's.
+        click("palette-row-1", cx);
+        serve_thread(&hosts[&key_b].host, "thread-2");
+        await_restore_update(&shell, cx, |store, cx| {
+            !store.chat_loading_for(Some("thread-2"), cx)
+        });
+        settle_panes(cx);
+        assert_eq!(pane_hosts(&shell, cx), [key_b]);
+        assert_eq!(pane_threads(&shell, cx), [Some("thread-2".into())]);
+    }
+
+    /// Over two hosts a host's toast names it and its action goes to it
+    /// alone, and an operation of one host is not taken for the other's
+    /// of the same number.
+    #[gpui::test]
+    fn a_hosts_toast_names_it_and_its_operations_stay_its_own(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            ProviderUpdateAvailable, ProviderUpdateRun, RuntimeNotification, RuntimeOperationId,
+            RuntimeToast,
+        };
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        let (shell, hosts, cx) = a_thread_of_a_beside_b(cx, 1200.);
+        // The device took up the system's language.
+        crate::set_locale(crate::LANGUAGE_ENGLISH);
+        let (key_a, key_b) = (
+            HostKey::Remote("host-a".into()),
+            HostKey::Remote("host-b".into()),
+        );
+        let toast = |host: &HostKey, toast: RuntimeToast, cx: &mut VisualTestContext| {
+            send_events(
+                &hosts[host].host,
+                vec![(
+                    Topic::RuntimeEvents,
+                    ServerEvent::Runtime(RuntimeNotification::Toast(toast)),
+                )],
+            );
+            draw(cx);
+            let store = store_on(&shell, host.name(), cx);
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+        };
+        let said = |cx: &mut VisualTestContext| cx.update(crate::overlay::notifications_said);
+        toast(
+            &key_b,
+            RuntimeToast::ProviderUpdatesAvailable {
+                updates: vec![ProviderUpdateAvailable {
+                    provider: agent::ProviderKind::Codex,
+                    version: "2.0.0".into(),
+                    automatic: true,
+                }],
+            },
+            cx,
+        );
+        assert_eq!(said(cx), ["host-b: Update available: Codex v2.0.0"]);
+        let _ = sent(&hosts[&key_a].host);
+        let _ = sent(&hosts[&key_b].host);
+        click("toast-action", cx);
+        let updates = |host: &HostKey| {
+            sent(&hosts[host].host)
+                .into_iter()
+                .filter(|payload| {
+                    matches!(
+                        payload,
+                        ClientPayload::Command(Command::UpdateProviders { .. })
+                    )
+                })
+                .count()
+        };
+        assert_eq!((updates(&key_a), updates(&key_b)), (0, 1));
+
+        let run = |completed| ProviderUpdateRun {
+            total: 1,
+            completed,
+            current: Some(agent::ProviderKind::Codex),
+            failed: Vec::new(),
+        };
+        for host in [&key_a, &key_b] {
+            toast(
+                host,
+                RuntimeToast::ProviderUpdateStarted {
+                    operation: RuntimeOperationId(1),
+                    run: run(0),
+                },
+                cx,
+            );
+        }
+        toast(
+            &key_a,
+            RuntimeToast::ProviderUpdateFinished {
+                operation: RuntimeOperationId(1),
+                run: run(1),
+            },
+            cx,
+        );
+        let said = said(cx);
+        assert!(
+            said.iter()
+                .any(|toast| toast.starts_with("host-b: Updating"))
+                && !said
+                    .iter()
+                    .any(|toast| toast.starts_with("host-a: Updating")),
+            "A's update finished and B's goes on: {said:?}"
+        );
     }
 
     /// `store` takes in what `host` sent it, and what it sent `host` so far
@@ -14925,7 +15192,7 @@ pub(crate) mod tests {
         state.update(cx, |state, cx| state.open_palette(cx));
         settle_panes(cx);
         let query = shell.read_with(cx, |shell, cx| {
-            let palette = shell.current_link(cx).unwrap().palette.read(cx);
+            let palette = shell.palette.read(cx);
             palette.query_focus_handle(cx)
         });
         cx.update(|window, _| assert!(query.is_focused(window)));
@@ -15346,7 +15613,7 @@ pub(crate) mod tests {
             crate::test_frames::draw_settled(cx);
             if project_count > 1 {
                 cx.update(|window, cx| {
-                    let palette = &shell.read(cx).current_link(cx).unwrap().palette;
+                    let palette = &shell.read(cx).palette;
                     assert_eq!(
                         palette.read(cx).query_focus_handle(cx).is_focused(window),
                         !(compact && mobile),
@@ -16208,7 +16475,7 @@ pub(crate) mod tests {
             draw(cx);
             assert!(state.read_with(cx, |state, _| state.palette_open));
             cx.update(|window, cx| {
-                let palette = &shell.read(cx).current_link(cx).unwrap().palette;
+                let palette = &shell.read(cx).palette;
                 assert!(
                     palette
                         .read(cx)

@@ -152,6 +152,7 @@ pub fn notification(
         notification = notification.action(move |_, _, _| {
             let handler = handler.clone();
             Button::new(("toast-action", id as usize))
+                .debug_selector(|| "toast-action".into())
                 .outline()
                 .label(label.clone())
                 .on_click(move |_, window, cx| handler(window, cx))
