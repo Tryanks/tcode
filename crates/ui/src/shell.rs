@@ -7726,6 +7726,35 @@ pub(crate) mod tests {
         click("palette-row-1", cx);
         assert_eq!(drafts_asked(&hosts[&key_b]), [None]);
         assert_eq!(drafts_asked(&hosts[&key_a]), []);
+
+        // A host that refuses the device offers nothing there: neither its
+        // threads nor a thread started on it.
+        hosts[&key_b]
+            .host
+            .states
+            .try_send(tcode_client::ConnectionState::Offline {
+                reason: tcode_client::ConnectionFailure::AuthenticationRejected,
+            })
+            .unwrap();
+        crate::test_frames::draw_settled(cx);
+        search_palette(&shell, "thread-2", cx);
+        assert!(
+            cx.debug_bounds("palette-caption-Threads on host-a")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("palette-caption-Threads on host-b")
+                .is_none()
+        );
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.close_palette(cx));
+        crate::test_frames::draw_settled(cx);
+        search_palette(&shell, "quick", cx);
+        assert!(cx.debug_bounds("palette-row-1").is_none(), "A's alone");
+        click("palette-row-0", cx);
+        assert_eq!(drafts_asked(&hosts[&key_a]), [None]);
+        assert_eq!(drafts_asked(&hosts[&key_b]), []);
     }
 
     /// A search of the messages asks every host, lists each host's hits
