@@ -134,6 +134,40 @@ impl StoredThread {
         click(cx, &format!("worklog-header-0-{first}"));
     }
 
+    /// The thread's provider reports `events` while the window shows it, as
+    /// a running harness does; returns once the window has `last`.
+    pub(in crate::chat) fn provider(
+        &mut self,
+        events: Vec<agent::AgentEvent>,
+        last: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        let thread = self
+            .store
+            .read_with(cx, |store, _| store.sole_thread())
+            .expect("the thread is shown");
+        smol::block_on(self.host.update_state_for_test(move |state, cx| {
+            for event in events {
+                state.provider_event_for_test(&thread, event, cx);
+            }
+        }))
+        .unwrap();
+        let store = self.store.clone();
+        self.driver
+            .wait_until(cx, &store, "the provider's events", |cx| {
+                store.read_with(cx, |store, cx| {
+                    store
+                        .with_timeline_for(
+                            store.sole_thread().as_deref(),
+                            |timeline| timeline.entries.iter().any(|entry| entry.id == last),
+                            cx,
+                        )
+                        .unwrap_or(false)
+                })
+            });
+        draw_settled(cx);
+    }
+
     pub(in crate::chat) fn shutdown(mut self, cx: &mut VisualTestContext) {
         self.driver.shutdown(cx, &self.store, &self.host);
     }
@@ -884,6 +918,15 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
         serde_json::json!({ "type": "turn_started", "turn_id": "t" }),
         serde_json::json!({ "type": "item_completed", "id": "user",
             "content": { "kind": "user_message", "text": "Start them." } }),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, event)| serde_json::json!({ "ts": 1_000 + index, "event": event }).to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    // The work goes on in the background of a running harness: a log reopened
+    // with no process to finish it closes it as interrupted.
+    let live = [
         subagent(waited, "in_progress"),
         subagent(agent, "in_progress"),
         backgrounded(agent),
@@ -896,12 +939,11 @@ fn a_call_whose_work_goes_on_in_the_background_says_so_until_it_ends(cx: &mut Te
         backgrounded(ended),
         subagent(ended, "completed"),
     ]
-    .iter()
-    .enumerate()
-    .map(|(index, event)| serde_json::json!({ "ts": 1_000 + index, "event": event }).to_string())
-    .collect::<Vec<_>>()
-    .join("\n");
-    let (thread, cx) = StoredThread::open(cx, &log, 1_024.);
+    .into_iter()
+    .map(|event| serde_json::from_value(event).unwrap())
+    .collect();
+    let (mut thread, cx) = StoredThread::open(cx, &log, 1_024.);
+    thread.provider(live, ended, cx);
     let verb = |id: &str, cx: &mut VisualTestContext| thread.header(id, cx).verb;
     assert_eq!(verb(waited, cx).as_deref(), Some("Running subagent"));
     for id in [agent, command] {
