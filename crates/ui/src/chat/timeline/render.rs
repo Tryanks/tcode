@@ -1632,13 +1632,33 @@ impl TimelineView {
         let error = activity.failure();
         let elapsed_ms = tools::window::elapsed(&activity.header, entry);
         let tools::Activity {
-            header,
-            status,
+            mut header,
+            mut status,
             mut copy,
             expandable,
             path,
             ..
         } = activity;
+        // A call whose work its harness lists as running in the background
+        // goes on there, whatever the call itself returned; its window leads
+        // to that list.
+        let thread = self
+            .workspace_store
+            .read(cx)
+            .session_status_for(self.session_id.as_deref(), cx);
+        let listed = thread.is_some_and(|status| {
+            status
+                .background_tasks
+                .iter()
+                .any(|task| task.task.item_id.as_deref() == Some(entry.id.as_str()))
+        });
+        if entry.background && listed {
+            status = agent::ItemStatus::InProgress;
+            header.background = true;
+        }
+        if header.background {
+            header.actions.push(self.background_link(&entry.id, cx));
+        }
         // Of an output the record holds a preview of, Copy takes the whole.
         let elided = self
             .workspace_store
@@ -1721,6 +1741,33 @@ impl TimelineView {
             on_click,
             cx,
         );
+        // Pointed out from the background list, the window is ringed a while.
+        let located = self
+            .motion
+            .shown(
+                format!("located-{}", entry.id),
+                (self.located.as_deref() == Some(entry.id.as_str())).then_some(()),
+                CHANGE,
+                window,
+                cx,
+            )
+            .map(|shown| shown.progress());
+        let tool = match located {
+            Some(progress) => div()
+                .relative()
+                .w_full()
+                .child(tool)
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .rounded(crate::material::radius_chip(cx))
+                        .border_2()
+                        .border_color(cx.theme().primary.opacity(progress)),
+                )
+                .into_any_element(),
+            None => tool,
+        };
         match origin {
             Some(origin) => self
                 .side_origins
@@ -1728,6 +1775,32 @@ impl TimelineView {
                 .into_any_element(),
             None => tool,
         }
+    }
+
+    /// The way from a call's window to its work in the background list.
+    fn background_link(&self, item_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let item = item_id.to_owned();
+        let selector = item.clone();
+        let chat = self.chat.clone();
+        h_flex()
+            .id(SharedString::from(format!("background-link-{item_id}")))
+            .debug_selector(move || format!("background-link-{selector}"))
+            .flex_none()
+            .gap_0p5()
+            .items_center()
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .text_secondary(false, cx)
+            .text_color(cx.theme().muted_foreground)
+            .hover(|link| link.text_color(cx.theme().foreground))
+            .child(crate::tr!("background.in_list"))
+            .child(Icon::new(IconName::ChevronRight).xsmall())
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let item = item.clone();
+                let _ = chat.update(cx, |chat, cx| chat.reveal_background(item, cx));
+            })
+            .into_any_element()
     }
 
     /// What an open activity window's body shows, as far as its height goes:

@@ -120,6 +120,8 @@ pub(in crate::chat) struct Header {
     /// The call returned while the work it started goes on, which the
     /// header says in the verb's place.
     pub(in crate::chat) background: bool,
+    /// What the header offers at its end, before its chevron.
+    pub(in crate::chat) actions: Vec<AnyElement>,
 }
 
 impl Header {
@@ -139,6 +141,7 @@ impl Header {
             error: None,
             elapsed_ms: None,
             background: false,
+            actions: Vec::new(),
         }
     }
 
@@ -486,6 +489,7 @@ fn header_row(
         argument,
         chips,
         background,
+        actions,
         ..
     } = header;
     let mono = theme.mono_font_family.clone();
@@ -603,6 +607,11 @@ fn header_row(
                 )
             },
         )
+        // What the header offers stands at its end, clear of what a press
+        // on the header itself opens.
+        .when(!actions.is_empty(), |row| {
+            row.child(div().flex_1().min_w_0()).children(actions)
+        })
         .when(folds, |row| {
             row.child(
                 crate::widgets::Chevron::new(

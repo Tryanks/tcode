@@ -230,28 +230,41 @@ pub(super) fn stop_press(_: &gpui::MouseDownEvent, _: &mut Window, cx: &mut App)
 }
 
 impl ChatView {
-    /// The phone's row over the foot of the timeline: the Agents pill first,
-    /// then the linked pull requests, scrolling sideways when they overflow.
-    /// It floats over the chat instead of taking height from it, so each chip
-    /// carries its own backing; the last row's padding clears it at the tail.
-    /// It rises in with the first of them and sinks out, as it last stood,
-    /// with the last; the second element is how far in it is.
+    /// The row over the foot of the timeline where the rail does not show
+    /// (a phone, or a desktop window too narrow for it): the background
+    /// work's pill first, then the Agents pill, then the linked pull
+    /// requests, scrolling sideways when they overflow. On a desktop it
+    /// carries only what the rail would have shown. It floats over the chat
+    /// instead of taking height from it, so each chip carries its own
+    /// backing; the last row's padding clears it at the tail. It rises in
+    /// with the first of them and sinks out, as it last stood, with the
+    /// last; the second element is how far in it is.
     pub(super) fn render_phone_strip(
         &self,
         agents: Option<&crate::agents_panel::Agents>,
+        rail_cards: &[super::rail::RailCard],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<(AnyElement, f32)> {
+        use super::rail::RailCard;
         let compact = self.window_state.read(cx).compact;
+        // A desktop window shows the row while the rail cannot show; then
+        // only what the rail would have shown, and what is managed in the
+        // panel beside the thread opens there.
+        let shows = |card: RailCard| compact || (!self.body.rail() && rail_cards.contains(&card));
+        let background = self
+            .background(cx)
+            .filter(|_| shows(RailCard::Background))
+            .map(|background| background.rows.len());
         let links = self
             .active_pull_requests(cx)
-            .filter(|links| compact && !links.is_empty());
+            .filter(|links| shows(RailCard::PullRequests) && !links.is_empty());
         let agents = agents
-            .filter(|_| compact)
+            .filter(|_| shows(RailCard::Agents))
             .map(|agents| (agents.count(), agents.cue(cx)));
         let strip = self.motion.shown(
             "phone-strip",
-            (agents.is_some() || links.is_some()).then_some(()),
+            (background.is_some() || agents.is_some() || links.is_some()).then_some(()),
             SHOW,
             window,
             cx,
@@ -262,25 +275,44 @@ impl ChatView {
         let whole = strip.progress() < 1.;
         let gap = cx.theme().tokens.spacing.xs;
         let radius = crate::material::radius_chip(cx);
+        let background = self
+            .motion
+            .shown("phone-background-pill-fold", background, SHOW, window, cx)
+            .and_then(|pill| {
+                let chip = floating_backing(radius, cx)
+                    .child(self.render_background_pill(pill.value, compact, cx)?);
+                Some(if whole {
+                    chip.into_any_element()
+                } else {
+                    pill.fold_across(chip)
+                })
+            });
         let agents = self
             .motion
             .shown("phone-agents-pill-fold", agents, SHOW, window, cx)
             .map(|pill| {
                 let (count, cue) = pill.value;
-                let chip = floating_backing(radius, cx)
-                    .child(self.render_agents_pill(count, cue, window, cx));
+                let pill_element = if compact {
+                    self.render_agents_pill(count, cue, window, cx)
+                } else {
+                    self.render_panel_pill(RightTab::Agents, count, cue, window, cx)
+                };
+                let chip = floating_backing(radius, cx).child(pill_element);
                 if whole {
                     chip.into_any_element()
                 } else {
-                    pill.fold_across(chip)
+                    pill.fold_across_gap(gap, chip)
                 }
             });
         let pull_requests = self
             .motion
             .shown("phone-pr-pill-fold", links, SHOW, window, cx)
             .and_then(|pill| {
-                let chip = floating_backing(radius, cx)
-                    .child(self.render_pull_request_pill(&pill.value, cx)?);
+                let chip = floating_backing(radius, cx).child(self.render_pull_request_pill(
+                    &pill.value,
+                    compact,
+                    cx,
+                )?);
                 Some(if whole {
                     chip.into_any_element()
                 } else {
@@ -296,23 +328,163 @@ impl ChatView {
                 .left_0()
                 .px_0()
                 .opacity(progress)
-                .child(
-                    h_flex()
+                .child({
+                    let pills = h_flex()
                         .id("phone-strip-scroll")
                         .size_full()
                         .items_center()
-                        .px(px(crate::material::COMPACT_PAGE_INSET))
                         .gap(gap)
+                        .children(background)
                         .children(agents)
                         .children(pull_requests)
-                        .overflow_x_scroll_area(),
-                )
+                        .overflow_x_scroll_area();
+                    if compact {
+                        pills
+                            .px(px(crate::material::COMPACT_PAGE_INSET))
+                            .into_any_element()
+                    } else {
+                        // In line with the content column, wherever it sits.
+                        let inset = px(crate::material::CHAT_CONTENT_MIN_PADDING);
+                        h_flex()
+                            .size_full()
+                            .justify_center()
+                            .pl(inset)
+                            .pr(inset + self.body.shift())
+                            .child(
+                                div()
+                                    .size_full()
+                                    .max_w(px(crate::material::CHAT_CONTENT_MAX_WIDTH))
+                                    .child(pills),
+                            )
+                            .into_any_element()
+                    }
+                })
                 .when(strip.leaving(), |strip| {
                     strip.child(crate::motion::shield())
                 })
                 .into_any_element(),
             progress,
         ))
+    }
+
+    /// The entry to the thread's background list, where the rail does not
+    /// show it: a pill counting its pieces, which opens the list anchored
+    /// over it, or in a sheet on a phone.
+    fn render_background_pill(
+        &self,
+        count: usize,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let label: SharedString = crate::tr!("background.pill", count = count)
+            .into_owned()
+            .into();
+        let place = self.background_place("popover", cx)?;
+        let view = cx.entity().downgrade();
+        let pill = Button::new("background-pill")
+            .motion(&self.motion)
+            .debug_selector(|| "background-pill".into())
+            .ghost()
+            .outline()
+            .chip()
+            .text_body(false, cx)
+            .child(crate::widgets::breathing::BreathingDot::new(
+                cx.theme().muted_foreground,
+            ))
+            .label(label);
+        let popover = crate::widgets::Popover::new("background-sheet")
+            .anchor(gpui::Anchor::BottomLeft)
+            .open(self.background_open)
+            .on_open_change(move |open, _, cx| {
+                let (view, open) = (view.clone(), *open);
+                cx.defer(move |cx| {
+                    let _ = view.update(cx, |chat, cx| chat.set_background_open(open, cx));
+                });
+            })
+            .trigger_with(move |_, _, _, _| pill.into_any_element())
+            .content(move |_, window, cx| {
+                let Some(background) = place
+                    .chat
+                    .upgrade()
+                    .and_then(|chat| chat.read(cx).background(cx))
+                else {
+                    return div().into_any_element();
+                };
+                let header = h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .when(!place.touch, |header| {
+                        header.child(
+                            div()
+                                .flex_none()
+                                .text_body(false, cx)
+                                .font_medium()
+                                .child(crate::tr!("background.title")),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_secondary(place.touch, cx)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::widgets::fade_text(background.summary())),
+                    )
+                    .children(super::background::stop_all(&background, &place, cx));
+                v_flex()
+                    .w_full()
+                    .when(!place.touch, |list| list.w(px(340.)))
+                    .gap_1()
+                    .child(header)
+                    .child(super::background::body(&background, &place, window, cx))
+                    .into_any_element()
+            });
+        let popover = if compact {
+            popover.bottom_sheet(crate::tr!("background.title"))
+        } else {
+            popover
+        };
+        Some(popover.into_any_element())
+    }
+
+    /// A desktop pill for what the panel beside the thread manages, which
+    /// shows that panel's tab, or closes the panel while it shows it.
+    fn render_panel_pill(
+        &self,
+        tab: RightTab,
+        count: usize,
+        cue: Option<gpui::Hsla>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label: SharedString = match count {
+            0 => crate::tr!("agents.title").into_owned(),
+            1 => crate::tr!("agents.pill_one").into_owned(),
+            count => crate::tr!("agents.pill", count = count).into_owned(),
+        }
+        .into();
+        let store = self.workspace_store.clone();
+        let session_id = self.session_id.clone();
+        Button::new("agents-pill")
+            .motion(&self.motion)
+            .debug_selector(|| "agents-pill".into())
+            .ghost()
+            .outline()
+            .chip()
+            .text_body(false, cx)
+            .icon(IconName::Bot)
+            .label(label)
+            .children(cue_in_pill(cue, &self.motion, window, cx))
+            .on_click(move |_, _, cx| {
+                if let Some(session_id) = session_id.clone() {
+                    store.update(cx, |store, cx| {
+                        store.toggle_tab_panel_for(&session_id, tab, cx)
+                    });
+                }
+            })
+            .into_any_element()
     }
 
     /// The phone entry to the Agents view: a pill that opens the sheet, shown
@@ -344,14 +516,22 @@ impl ChatView {
             .label(label)
             // The cue widens the pill as it comes, and its label moves aside.
             .children(cue_in_pill(cue, &self.motion, window, cx));
+        let view = cx.entity().downgrade();
         crate::widgets::Popover::new("agents-sheet")
             .bottom_sheet(crate::tr!("agents.title"))
+            .open(self.agents_sheet_open)
             .on_open_change(move |open, _, cx| {
                 // Opening an agent dismisses the sheet from inside
                 // the panel's own update.
-                let (shown, open) = (shown.clone(), *open);
+                let (shown, view, open) = (shown.clone(), view.clone(), *open);
                 cx.defer(move |cx| {
                     let _ = shown.update(cx, |panel, cx| panel.set_shown(open, cx));
+                    let _ = view.update(cx, |chat, cx| {
+                        if chat.agents_sheet_open != open {
+                            chat.agents_sheet_open = open;
+                            cx.notify();
+                        }
+                    });
                 });
             })
             .trigger_with(move |_, _, _, _| pill.into_any_element())
@@ -469,10 +649,33 @@ impl ChatView {
     fn render_pull_request_pill(
         &self,
         links: &[tcode_core::pull_request::ThreadPullRequestLink],
+        compact: bool,
         cx: &App,
     ) -> Option<AnyElement> {
         let numbers = crate::pull_requests::numbers(links, cx)?;
         let label = crate::pull_requests::badge_label(links, cx)?;
+        if !compact {
+            let store = self.workspace_store.clone();
+            let session_id = self.session_id.clone();
+            return Some(
+                Button::new("phone-pr-pill")
+                    .motion(&self.motion)
+                    .debug_selector(|| "phone-pr-pill".into())
+                    .ghost()
+                    .outline()
+                    .chip()
+                    .aria_label(label)
+                    .child(numbers)
+                    .on_click(move |_, _, cx| {
+                        if let Some(session_id) = session_id.clone() {
+                            store.update(cx, |store, cx| {
+                                store.toggle_tab_panel_for(&session_id, RightTab::PullRequests, cx)
+                            });
+                        }
+                    })
+                    .into_any_element(),
+            );
+        }
         let panel = self.pull_requests.clone();
         Some(
             crate::widgets::Popover::new("phone-pull-requests")

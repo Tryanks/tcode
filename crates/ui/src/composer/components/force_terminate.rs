@@ -7,7 +7,7 @@ use crate::widgets::button::ButtonVariant;
 
 /// How long a stop goes unanswered before the force terminate is offered. A
 /// harness that answers at all answers within seconds.
-const UNANSWERED: std::time::Duration = std::time::Duration::from_secs(15);
+pub(crate) const UNANSWERED: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// How long what is drawn here only some of the time takes to come in or go.
 const SHOW: std::time::Duration = std::time::Duration::from_millis(200);
@@ -73,43 +73,52 @@ impl Composer {
                     .label(crate::tr!("composer.force_terminate").into_owned())
                     .disabled(!self.interactive(cx))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.confirm_force_terminate(harness.clone(), window, cx)
+                        let session_id = this.session_id.clone().unwrap_or_default();
+                        confirm_force_terminate(
+                            &this.workspace_store,
+                            session_id,
+                            harness.clone(),
+                            window,
+                            cx,
+                        )
                     })),
             );
         Some(super::super::column_fold(&shown, row))
     }
+}
 
-    fn confirm_force_terminate(
-        &mut self,
-        harness: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let store = self.workspace_store.clone();
-        let session_id = self.session_id.clone().unwrap_or_default();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let store = store.clone();
-            let session_id = session_id.clone();
-            alert
-                .title(crate::tr!(
-                    "composer.force_terminate_title",
-                    harness = harness.as_str()
-                ))
-                .description(crate::tr!(
-                    "composer.force_terminate_description",
-                    harness = harness.as_str()
-                ))
-                .button_props(
-                    DialogButtons::default()
-                        .ok_variant(ButtonVariant::Danger)
-                        .ok_text(crate::tr!("composer.force_terminate"))
-                        .cancel_text(crate::tr!("composer.force_terminate_cancel"))
-                        .show_cancel(true),
-                )
-                .on_ok(move |_, _, cx| {
-                    store.update(cx, |store, _cx| store.force_terminate(session_id.clone()));
-                    true
-                })
-        });
-    }
+/// Ask before killing `harness`, the process of `session_id`'s thread, saying
+/// what that loses, and kill it on the user's word.
+pub(crate) fn confirm_force_terminate(
+    store: &Entity<WorkspaceStore>,
+    session_id: String,
+    harness: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let store = store.clone();
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let store = store.clone();
+        let session_id = session_id.clone();
+        alert
+            .title(crate::tr!(
+                "composer.force_terminate_title",
+                harness = harness.as_str()
+            ))
+            .description(crate::tr!(
+                "composer.force_terminate_description",
+                harness = harness.as_str()
+            ))
+            .button_props(
+                DialogButtons::default()
+                    .ok_variant(ButtonVariant::Danger)
+                    .ok_text(crate::tr!("composer.force_terminate"))
+                    .cancel_text(crate::tr!("composer.force_terminate_cancel"))
+                    .show_cancel(true),
+            )
+            .on_ok(move |_, _, cx| {
+                store.update(cx, |store, _cx| store.force_terminate(session_id.clone()));
+                true
+            })
+    });
 }

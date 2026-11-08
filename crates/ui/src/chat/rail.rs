@@ -335,6 +335,7 @@ impl gpui::Element for Slots {
 pub(super) enum RailCard {
     Goal,
     Plan,
+    Background,
     Agents,
     Commands,
     Screen,
@@ -343,9 +344,10 @@ pub(super) enum RailCard {
 }
 
 impl RailCard {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Goal,
         Self::Plan,
+        Self::Background,
         Self::Agents,
         Self::Commands,
         Self::Screen,
@@ -358,6 +360,7 @@ impl RailCard {
         match self {
             Self::Goal => "goal",
             Self::Plan => "plan",
+            Self::Background => "background",
             Self::Agents => "agents",
             Self::Commands => "commands",
             Self::Screen => "screen",
@@ -370,6 +373,7 @@ impl RailCard {
         match self {
             Self::Goal => crate::tr!("chat.rail_goal"),
             Self::Plan => crate::tr!("chat.rail_plan"),
+            Self::Background => crate::tr!("background.title"),
             Self::Agents => crate::tr!("chat.rail_agents"),
             Self::Commands => crate::tr!("chat.rail_commands"),
             Self::Screen => crate::tr!("chat.rail_screen"),
@@ -382,6 +386,7 @@ impl RailCard {
         match self {
             Self::Goal => IconName::CircleDot,
             Self::Plan => IconName::Map,
+            Self::Background => IconName::Layers,
             Self::Agents => IconName::Bot,
             Self::Commands => IconName::SquareTerminal,
             Self::Screen => IconName::Monitor,
@@ -394,7 +399,7 @@ impl RailCard {
     /// gives way to while it is open.
     fn tab(self) -> Option<RightTab> {
         match self {
-            Self::Goal | Self::Commands | Self::Screen => None,
+            Self::Goal | Self::Background | Self::Commands | Self::Screen => None,
             Self::Plan => Some(RightTab::Plan),
             Self::Agents => Some(RightTab::Agents),
             Self::Changes => Some(RightTab::Diff),
@@ -406,6 +411,7 @@ impl RailCard {
         match self {
             Self::Goal => goal::present(rail, cx),
             Self::Plan => plan::present(rail, cx),
+            Self::Background => rail.background(cx).is_some(),
             Self::Agents => agents::present(rail, cx),
             Self::Commands => commands::present(rail, cx),
             Self::Screen => screen::present(rail, cx),
@@ -420,6 +426,7 @@ impl RailCard {
         match self {
             Self::Goal => goal::summary(rail, cx),
             Self::Plan => plan::summary(rail, cx),
+            Self::Background => rail.background(cx).map(|background| background.summary()),
             Self::Agents => agents::summary(rail, cx),
             Self::Commands => commands::summary(rail, cx),
             Self::Changes => changes::summary(rail, cx),
@@ -449,10 +456,24 @@ impl RailCard {
             Self::Commands => Some(commands::fit(rail, cx)),
             Self::Goal
             | Self::Plan
+            | Self::Background
             | Self::Agents
             | Self::Screen
             | Self::Changes
             | Self::PullRequests => None,
+        }
+    }
+
+    /// What its header offers at its end: the stop for all of the
+    /// background work.
+    fn action(self, rail: &RailView, cx: &mut Context<RailView>) -> Option<AnyElement> {
+        match self {
+            Self::Background => {
+                let background = rail.background(cx)?;
+                let place = rail.background_place(cx)?;
+                super::background::stop_all(&background, &place, cx)
+            }
+            _ => None,
         }
     }
 
@@ -465,6 +486,11 @@ impl RailCard {
         match self {
             Self::Goal => goal::body(rail, window, cx),
             Self::Plan => plan::body(rail, window, cx),
+            Self::Background => {
+                let background = rail.background(cx)?;
+                let place = rail.background_place(cx)?;
+                Some(super::background::body(&background, &place, window, cx))
+            }
             Self::Agents => agents::body(rail, window, cx),
             Self::Commands => commands::body(rail, window, cx),
             Self::Screen => screen::body(rail, window, cx),
@@ -507,6 +533,8 @@ pub(super) struct RailView {
     screen: screen::Screenshots,
     /// The commands the Commands card lists.
     commands: commands::Commands,
+    /// The piece of background work the timeline pointed out, by its call.
+    background_highlight: Option<String>,
 }
 
 /// How the chat's body sits this frame ([`BodyLayout`]), and the cards
@@ -541,6 +569,7 @@ impl RailView {
             expanded: HashSet::new(),
             screen: Default::default(),
             commands: Default::default(),
+            background_highlight: None,
         }
     }
 
@@ -549,6 +578,40 @@ impl RailView {
         self.session_id = session_id;
         self.expanded.clear();
         cx.notify();
+    }
+
+    /// Mark the piece of background work the call `item_id` started.
+    pub(super) fn highlight_background(&mut self, item_id: Option<String>, cx: &mut Context<Self>) {
+        if self.background_highlight != item_id {
+            self.background_highlight = item_id;
+            cx.notify();
+        }
+    }
+
+    /// The thread's background work, while its harness runs any.
+    fn background(&self, cx: &App) -> Option<super::background::Background> {
+        super::background::Background::of(
+            self.workspace_store.read(cx),
+            self.session_id.as_deref()?,
+            cx,
+        )
+    }
+
+    /// Where the rail draws the background list.
+    fn background_place(&self, cx: &mut Context<Self>) -> Option<super::background::Place> {
+        let rail = cx.entity().downgrade();
+        Some(super::background::Place {
+            store: self.workspace_store.clone(),
+            session_id: self.session_id.clone()?,
+            chat: self.chat.clone(),
+            key: "rail",
+            highlight: self.background_highlight.clone(),
+            touch: false,
+            leave: None,
+            redraw: Rc::new(move |cx| {
+                let _ = rail.update(cx, |_, cx| cx.notify());
+            }),
+        })
     }
 
     /// The rail is an agent's shown beside `lead`.
@@ -709,6 +772,10 @@ impl RailView {
                             crate::widgets::fade_text(summary.clone()).into_any_element()
                         },
                     )),
+            )
+            .children(
+                card.action(self, cx)
+                    .map(|action| div().flex_none().child(action)),
             )
             .into_any_element();
         let fit = card.fit(self, cx);

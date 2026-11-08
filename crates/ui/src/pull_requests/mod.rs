@@ -808,7 +808,7 @@ fn row_menu(
 
 /// Opens a pull request of `session`'s thread here: inside the tab in a wide window, as a page
 /// over the thread on a phone.
-fn open_pull_request(
+pub(crate) fn open_pull_request(
     store: &Entity<WorkspaceStore>,
     window_state: &Entity<WindowState>,
     session: String,
