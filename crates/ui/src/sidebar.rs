@@ -413,8 +413,8 @@ struct ThreadFlags {
     failed: bool,
     /// Pieces of background work and agents still running.
     background: (u32, u32),
-    /// Dispatched agents that finished and await the thread's settle.
-    unsettled: u32,
+    /// Dispatched agents finished and await the thread's settle.
+    unsettled: bool,
 }
 
 #[derive(Clone)]
@@ -427,7 +427,7 @@ struct ThreadRowState {
     waiting_for_input: bool,
     /// Pieces of background work and agents still running.
     background: (u32, u32),
-    unsettled: u32,
+    unsettled: bool,
     failed: bool,
     auto_settle_enabled: bool,
     is_worktree: bool,
@@ -435,10 +435,6 @@ struct ThreadRowState {
     renaming: Option<Entity<InputState>>,
     menu_can_fork: bool,
     title_generating: bool,
-    /// Numbers of the pull requests a watch follows for the thread.
-    watching: Vec<u64>,
-    /// When its next scheduled message is due (unix seconds).
-    scheduled_at: Option<u64>,
 }
 
 impl ThreadRowState {
@@ -459,34 +455,6 @@ fn keeps_going(state: &ThreadRowState) -> Option<String> {
         parts.push(crate::tr!("sidebar.keeps_agents", count = agents).into_owned());
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
-/// What wakes a thread later though nothing of it runs: an eye and the
-/// number of each pull request a watch follows, and an hourglass and the
-/// time its next scheduled message is due.
-fn wake_marks(state: &ThreadRowState, cx: &App) -> Vec<gpui::AnyElement> {
-    let muted = cx.theme().muted_foreground;
-    let mark = |icon: IconName, text: String| {
-        h_flex()
-            .flex_none()
-            .gap_0p5()
-            .items_center()
-            .text_color(muted)
-            .child(Icon::new(icon).xsmall())
-            .child(div().whitespace_nowrap().child(text))
-            .into_any_element()
-    };
-    state
-        .watching
-        .iter()
-        .map(|number| mark(IconName::Eye, format!("#{number}")))
-        .chain(state.scheduled_at.map(|at| {
-            mark(
-                IconName::Hourglass,
-                crate::chat::model::format_local_time(at.saturating_mul(1000)),
-            )
-        }))
-        .collect()
 }
 
 /// The rows a list shows by section, narrowed to one project when a filter is set.
@@ -1082,7 +1050,7 @@ fn session_flags(sessions: &[SessionMeta], store: &WorkspaceStore) -> HashMap<St
                     }),
                     unsettled: store
                         .activity(&meta.id)
-                        .map_or(0, |activity| activity.unsettled),
+                        .is_some_and(|activity| activity.unsettled > 0),
                 },
             )
         })
@@ -3833,13 +3801,6 @@ impl SessionsSidebar {
             show_unread: own_flags.unread && !own_flags.working,
             menu_can_fork: meta.provider.caps().supports_fork,
             title_generating: store.title_generating(&meta.id),
-            watching: store
-                .activity(&meta.id)
-                .map(|activity| activity.wakes.pull_requests.clone())
-                .unwrap_or_default(),
-            scheduled_at: store
-                .activity(&meta.id)
-                .and_then(|activity| activity.wakes.scheduled_at),
         }
     }
 
@@ -4265,19 +4226,12 @@ impl SessionsSidebar {
             Some((cx.theme().danger, crate::tr!("sidebar.failed"), false))
         } else if working {
             Some((cx.theme().primary, crate::tr!("sidebar.working"), false))
-        } else if state.unsettled > 0 {
-            Some((
-                cx.theme().warning,
-                crate::tr!("sidebar.unsettled", count = state.unsettled),
-                false,
-            ))
+        } else if state.unsettled {
+            Some((cx.theme().warning, crate::tr!("sidebar.unsettled"), false))
         } else if state.background != (0, 0) {
             Some((
                 cx.theme().muted_foreground,
-                crate::tr!(
-                    "sidebar.background",
-                    count = state.background.0 + state.background.1
-                ),
+                crate::tr!("sidebar.background"),
                 true,
             ))
         } else {
@@ -4294,8 +4248,6 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let status = Self::thread_status_label(state, working, cx);
-        // A one-line row has no second line to say what keeps the thread
-        // going; its status says it on hover.
         let keeps = keeps_going(state);
         let badge = faded_status(
             format!("thread-status-{}", state.name),
@@ -4591,8 +4543,7 @@ impl SessionsSidebar {
             .when_some(
                 Self::thread_status_badge(&state, working, window, cx),
                 |row, badge| row.child(badge),
-            )
-            .children(wake_marks(&state, cx));
+            );
 
         // Row body: rename input, or the (unread dot + worktree glyph + title).
         let row = if state.renaming.is_some() {
@@ -4771,7 +4722,6 @@ impl SessionsSidebar {
         let renaming = state.renaming.is_some();
         let status = Self::thread_status_label(&state, working, cx);
         let keeps = keeps_going(&state);
-        let wakes = wake_marks(&state, cx);
 
         let row = self
             .thread_clickable_row(
@@ -4876,14 +4826,12 @@ impl SessionsSidebar {
                         div()
                             .id(SharedString::from(format!("thread-status-{name}")))
                             .flex_none()
+                            .when_some(keeps, |status, keeps| {
+                                status.with_tooltip(move |_, _| Tooltip::new(keeps.clone()))
+                            })
                             .child(status),
                     )
                 })
-                .when_some(keeps, |line, keeps| {
-                    line.child(div().flex_none().child("·"))
-                        .child(div().flex_none().whitespace_nowrap().child(keeps))
-                })
-                .children(wakes)
                 .when(has_status && has_project, |line| {
                     line.child(div().flex_none().child("·"))
                 })
@@ -6210,11 +6158,6 @@ impl SessionsSidebar {
                                 .child(div().flex_none().child("·"))
                             })
                             .children(status)
-                            .when_some(keeps_going(state), |line, keeps| {
-                                line.child(div().flex_none().whitespace_nowrap().child(keeps))
-                                    .child("·")
-                            })
-                            .children(wake_marks(state, cx))
                             .when_some(
                                 crate::pull_requests::badge(&meta.pull_requests, 14., cx),
                                 |line, badge| line.child(badge).child("·"),
@@ -6251,7 +6194,7 @@ impl CompactGlyph {
             Self::Failed
         } else if working {
             Self::Spinner(cx.theme().primary)
-        } else if state.unsettled > 0 {
+        } else if state.unsettled {
             Self::Unsettled
         } else if state.background != (0, 0) {
             Self::Background
@@ -6356,17 +6299,11 @@ fn compact_status_line(
         Some((crate::tr!("sidebar.failed"), cx.theme().danger))
     } else if working {
         Some(busy_status(state, cx))
-    } else if state.unsettled > 0 {
-        Some((
-            crate::tr!("sidebar.unsettled", count = state.unsettled),
-            cx.theme().warning,
-        ))
+    } else if state.unsettled {
+        Some((crate::tr!("sidebar.unsettled"), cx.theme().warning))
     } else if state.background != (0, 0) {
         Some((
-            crate::tr!(
-                "sidebar.background",
-                count = state.background.0 + state.background.1
-            ),
+            crate::tr!("sidebar.background"),
             cx.theme().muted_foreground,
         ))
     } else if state.show_unread {
@@ -7112,7 +7049,7 @@ mod tests {
             SessionsSidebar::new(vec![store.clone()], window_state.clone(), cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
-        for (waiting, expected) in [(true, "Background 1"), (false, "Working")] {
+        for (waiting, expected) in [(true, "Background"), (false, "Working")] {
             send(
                 Topic::Index,
                 ServerEvent::IndexSummaryReplaced(summary(waiting)),
