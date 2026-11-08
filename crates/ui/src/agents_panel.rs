@@ -2237,4 +2237,239 @@ mod tests {
         driver.shutdown(cx, &store, &host);
         std::fs::remove_dir_all(root).ok();
     }
+
+    /// A subagent Claude Code runs in the background opens its transcript
+    /// wherever the lead lists it: from the thread's background list while
+    /// it runs, and from the rail's agents once it has finished. One it
+    /// starts in turn opens from the subagent's rail while it runs, before
+    /// any of its own transcript reaches the host.
+    #[gpui::test]
+    fn a_subagent_opens_from_wherever_its_thread_lists_it(cx: &mut TestAppContext) {
+        use agent::{AgentEvent, ItemContent, ItemStatus, ThreadItem};
+        use gpui::{Entity, Modifiers, VisualTestContext, px, size};
+        use tcode_core::project::Project;
+        use tcode_runtime::pipe::{HostServices, spawn_host};
+        use tcode_services::store::SessionStore;
+
+        use crate::chat::ChatView;
+        use crate::test_frames::draw_settled;
+
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let root = crate::store::tests::scratch_root("background-subagent-opens");
+        let project = Project::from_root(root.clone());
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project).unwrap();
+        let mut lead = SessionMeta::new(ProviderKind::ClaudeCode, root.clone(), None);
+        lead.id = "lead".into();
+        lead.project_id = Some(project.id.clone());
+        disk.upsert_meta(&lead).unwrap();
+        let host = spawn_host(disk, HostServices::default()).unwrap();
+        let scripted = tcode_runtime::app::scripted_provider(ProviderKind::ClaudeCode);
+        let (events, commands) = (scripted.events.clone(), scripted.commands.clone());
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.set_provider_launcher_for_test(scripted.launcher)
+        }))
+        .unwrap();
+        let mut driver = crate::store::tests::LocalHostDriver::new(&host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                driver.link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                cx,
+            )
+        });
+        driver.wait_until(cx, &store, "the workspace", |cx| {
+            store.read_with(cx, |store, _| store.baseline_ready())
+        });
+        store.update(cx, |store, cx| store.show_alone("lead".into(), cx));
+        store.update(cx, |store, _| {
+            store.send_turn_for("lead".into(), "Check it visually".into(), Vec::new())
+        });
+        driver.wait_until(cx, &store, "the turn reaches Claude Code", |_| {
+            matches!(
+                commands.try_recv(),
+                Ok(agent::SessionCommand::SendTurn { .. })
+            )
+        });
+        let window_state = cx.new(|_| crate::window_state::WindowState::default());
+        let (chat, window) = crate::chat::tests::add_chat_window(cx, |window, cx| {
+            ChatView::new(store.clone(), window_state, Some("lead".into()), window, cx)
+        });
+        window.simulate_resize(size(px(1800.), px(1000.)));
+        window.update(|_, cx| cx.set_reduce_motion(true));
+        let window = gpui::VisualContext::window_handle(window);
+
+        // As Claude Code reports an Agent call with run_in_background: the
+        // spawn, its task, the launch acknowledgement, and the turn ending
+        // while the subagent's transcript goes on.
+        let spawn = |status| ThreadItem {
+            id: "toolu_visual".into(),
+            parent_item_id: None,
+            content: ItemContent::Subagent {
+                agent_type: "general-purpose".into(),
+                description: "Visual check: headless screenshots".into(),
+                status,
+                summary: None,
+                model: None,
+                effort: None,
+            },
+        };
+        for event in [
+            AgentEvent::ItemStarted(spawn(ItemStatus::InProgress)),
+            AgentEvent::BackgroundTaskList {
+                tasks: vec![agent::BackgroundTask {
+                    id: "a73e1f3b".into(),
+                    name: "Visual check: headless screenshots".into(),
+                    kind: agent::BackgroundKind::Agent,
+                    item_id: Some("toolu_visual".into()),
+                    started_at: 1,
+                    started_reported: false,
+                }],
+            },
+            AgentEvent::BackgroundTasksChanged { count: 1 },
+            AgentEvent::ItemBackgrounded {
+                item_id: "toolu_visual".into(),
+                parent_item_id: None,
+            },
+            AgentEvent::TurnCompleted {
+                turn_id: "turn-1".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "toolu_visual:user-1".into(),
+                parent_item_id: Some("toolu_visual".into()),
+                content: ItemContent::UserMessage {
+                    text: "Take the screenshots.".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+        ] {
+            events.try_send(event).unwrap();
+        }
+        let mirror = |cx: &TestAppContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .sidebar_sessions()
+                    .iter()
+                    .find(|meta| meta.native_subagent.as_deref() == Some("toolu_visual"))
+                    .map(|meta| meta.id.clone())
+            })
+        };
+        driver.wait_until(cx, &store, "the subagent in the background list", |cx| {
+            mirror(cx).is_some()
+                && store.read_with(cx, |store, cx| {
+                    store
+                        .session_status_for(Some("lead"), cx)
+                        .is_some_and(|status| !status.background_tasks.is_empty())
+                })
+        });
+        let mirror = mirror(cx).unwrap();
+        let opened_from = |cx: &mut TestAppContext,
+                           driver: &mut crate::store::tests::LocalHostDriver,
+                           (chat, window): &(Entity<ChatView>, gpui::AnyWindowHandle),
+                           selector| {
+            let lead = chat.read_with(cx, |chat, _| chat.session_id().unwrap().to_owned());
+            store.update(cx, |store, cx| store.set_side_thread(&lead, None, cx));
+            let window = VisualTestContext::from_window(*window, cx).into_mut();
+            draw_settled(window);
+            let row = window
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is drawn"));
+            window.simulate_click(row.center(), Modifiers::default());
+            driver.wait_until(cx, &store, selector, |cx| {
+                chat.read_with(cx, |chat, _| chat.side_session_id().is_some())
+            });
+            chat.read_with(cx, |chat, _| chat.side_session_id().map(str::to_owned))
+        };
+        let lead_view = (chat, window);
+
+        assert_eq!(
+            opened_from(cx, &mut driver, &lead_view, "background-row-a73e1f3b"),
+            Some(mirror.clone()),
+            "the background list opens the running subagent's transcript"
+        );
+
+        // The subagent starts one of its own, whose transcript has not
+        // reached the host: its row in the subagent's rail opens it all
+        // the same.
+        events
+            .try_send(AgentEvent::ItemStarted(ThreadItem {
+                id: "toolu_nested".into(),
+                parent_item_id: Some("toolu_visual".into()),
+                content: ItemContent::Subagent {
+                    agent_type: "Explore".into(),
+                    description: "Find the screenshot script".into(),
+                    status: ItemStatus::InProgress,
+                    summary: None,
+                    model: None,
+                    effort: None,
+                },
+            }))
+            .unwrap();
+        store.update(cx, |store, cx| store.open_thread(&mirror, cx));
+        driver.wait_until(
+            cx,
+            &store,
+            "the nested spawn in the subagent's thread",
+            |cx| {
+                store.read_with(cx, |store, cx| {
+                    !Agents::of(store, &mirror, cx).lines().is_empty()
+                })
+            },
+        );
+        let window_state = cx.new(|_| crate::window_state::WindowState::default());
+        let (subagent_chat, subagent_window) =
+            crate::chat::tests::add_chat_window(cx, |window, cx| {
+                ChatView::new(
+                    store.clone(),
+                    window_state,
+                    Some(mirror.clone()),
+                    window,
+                    cx,
+                )
+            });
+        subagent_window.simulate_resize(size(px(1800.), px(1000.)));
+        subagent_window.update(|_, cx| cx.set_reduce_motion(true));
+        let subagent_view = (
+            subagent_chat,
+            gpui::VisualContext::window_handle(subagent_window),
+        );
+        let nested = opened_from(cx, &mut driver, &subagent_view, "rail-agent-toolu_nested");
+        assert!(
+            store.read_with(cx, |store, _| {
+                store
+                    .thread_meta(nested.as_deref().unwrap())
+                    .is_some_and(|meta| {
+                        meta.native_subagent.as_deref() == Some("toolu_nested")
+                            && meta.parent_session_id.as_deref() == Some(mirror.as_str())
+                    })
+            }),
+            "the nested subagent's row opens its own thread"
+        );
+
+        events
+            .try_send(AgentEvent::ItemCompleted(spawn(ItemStatus::Completed)))
+            .unwrap();
+        driver.wait_until(cx, &store, "the subagent finished", |cx| {
+            store.read_with(cx, |store, cx| {
+                Agents::of(store, "lead", cx)
+                    .lines()
+                    .iter()
+                    .any(|line| line.execution == Some(super::AgentExecution::Finished))
+            })
+        });
+        assert_eq!(
+            opened_from(cx, &mut driver, &lead_view, "rail-agent-toolu_visual"),
+            Some(mirror),
+            "the rail opens the finished subagent's transcript"
+        );
+        driver.shutdown(cx, &store, &host);
+        std::fs::remove_dir_all(root).ok();
+    }
 }
