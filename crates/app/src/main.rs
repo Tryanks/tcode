@@ -62,15 +62,32 @@ fn finish_quit_prompt(window_state: &Entity<WindowState>, epoch: u64, cx: &mut A
 }
 
 fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
-    let count = shell
+    // Background work outlives the app only on another machine's host.
+    let local = shell.read(cx).attached_locally();
+    let (working, background) = shell
         .read(cx)
         .store()
-        .map(|store| store.read(cx).working_sessions_count())
-        .unwrap_or(0);
-    if count == 0 {
+        .map(|store| {
+            let store = store.read(cx);
+            (
+                store.working_sessions_count(),
+                if local {
+                    store.background_sessions_count()
+                } else {
+                    0
+                },
+            )
+        })
+        .unwrap_or((0, 0));
+    if working == 0 && background == 0 {
         cx.quit();
         return;
     }
+    let description = if working > 0 {
+        tcode_ui::tr!("quit.description", count = working)
+    } else {
+        tcode_ui::tr!("quit.description_background", count = background)
+    };
 
     let Some(window_handle) = cx
         .active_window()
@@ -108,7 +125,7 @@ fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
                 let escape_state = escape_state.clone();
                 alert
                     .title(tcode_ui::tr!("quit.title"))
-                    .description(tcode_ui::tr!("quit.description", count = count))
+                    .description(description.clone())
                     // The stock alert maps Enter to OK. A custom footer keeps
                     // both Enter and Escape safe while retaining the alert's
                     // normal visual style and explicit danger action.

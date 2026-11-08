@@ -423,6 +423,7 @@ quit:
   menu_item: "Quit Tcode"
   title: "Quit Tcode?"
   description: "%{count} thread(s) are still working. Quitting will stop them."
+  description_background: "%{count} thread(s) still have background work. Quitting will stop it."
   confirm: "Quit"
   startup_failed: "Tcode could not start"
 migration:

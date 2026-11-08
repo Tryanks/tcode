@@ -423,6 +423,7 @@ quit:
   menu_item: "Tcode を終了"
   title: "Tcode を終了しますか？"
   description: "%{count} 件のスレッドがまだ作業中です。終了するとそれらは停止します。"
+  description_background: "%{count} 件のスレッドにバックグラウンド作業が残っています。終了すると停止します。"
   confirm: "終了"
   startup_failed: "Tcode を起動できませんでした"
 migration:
