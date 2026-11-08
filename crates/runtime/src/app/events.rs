@@ -589,7 +589,7 @@ impl AppState {
         }
     }
 
-    fn record_event_at(
+    pub(super) fn record_event_at(
         &mut self,
         session_id: &str,
         ts: u64,

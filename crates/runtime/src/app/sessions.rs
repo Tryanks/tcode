@@ -2231,10 +2231,58 @@ impl AppState {
                 if let Some(session) = state.resident_mut(&session_id) {
                     session.timeline = timeline;
                 }
-                state.repair_orphaned_mirror_turn(&session_id, cx);
+                state.repair_orphaned_turn(&session_id, cx);
                 state.interrupt_unowned_background_work(&session_id, cx);
             });
         });
+    }
+
+    /// A thread loaded with its last turn still open while nothing runs it
+    /// lost what ran it: a host restart took its process, or a native
+    /// subagent's parent left without a close. The turn ends as interrupted
+    /// when its last record was made, so it stops reporting work nothing can
+    /// finish and the next message opens a turn of its own instead of joining
+    /// it. A turn no provider started, as the one a rewind opens for what
+    /// comes next, stays open.
+    pub(super) fn repair_orphaned_turn(&mut self, id: &str, cx: &mut HostCx) {
+        let Some(session) = self.resident(id) else {
+            return;
+        };
+        let mirror_of = session.meta.native_subagent.clone();
+        let running = match mirror_of {
+            Some(_) => self.native_subagent_turns.get(id) == Some(&true),
+            None => session.turn_in_flight,
+        };
+        let Some(turn) = session
+            .timeline
+            .turns
+            .last()
+            .filter(|turn| !running && turn.status.is_none())
+        else {
+            return;
+        };
+        let Some(turn_id) = turn.provider_turn_id.clone().or(mirror_of.clone()) else {
+            return;
+        };
+        let ended = self
+            .event_records
+            .get(id)
+            .and_then(|log| log.records().last()?.ts)
+            .unwrap_or_else(now_millis);
+        if mirror_of.is_some() {
+            self.native_subagent_turns.insert(id.to_string(), false);
+        }
+        self.record_event_at(
+            id,
+            ended,
+            &AgentEvent::TurnCompleted {
+                turn_id,
+                status: TurnStatus::Interrupted,
+                usage: None,
+            },
+            Vec::new(),
+            cx,
+        );
     }
 
     /// Background work still open in a log no process can finish any more
