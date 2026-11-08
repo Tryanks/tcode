@@ -1158,8 +1158,8 @@ impl SettingsPage {
         );
         let trigger = Button::new("settings-host-selector")
             .debug_selector(|| "settings-host-selector".into())
-            .ghost()
-            .compact()
+            .text()
+            .xsmall()
             .aria_label(crate::tr!("settings.choose_host"))
             .child(
                 gpui_base::h_flex()
@@ -1170,7 +1170,8 @@ impl SettingsPage {
                         Icon::new(IconName::ChevronDown).text_color(cx.theme().muted_foreground),
                     ),
             );
-        div()
+        gpui_base::h_flex()
+            .pl(px(crate::material::CARD_INSET))
             .pb(cx.theme().tokens.spacing.sm)
             .child(crate::settings_rows::select_menu(
                 trigger,
