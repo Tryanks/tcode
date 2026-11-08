@@ -1,0 +1,20 @@
+[package]
+name = "wayland-nest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Hosts a Wayland client's toplevels inside another client's subsurfaces."
+
+[target.'cfg(target_os = "linux")'.dependencies]
+async-channel = "2"
+calloop = "0.14"
+log = "0.4"
+memmap2 = "0.9"
+rustix = { version = "1", features = ["fs", "pipe"] }
+smithay = { version = "0.7", default-features = false, features = ["wayland_frontend"] }
+# The same connection features GPUI's Wayland client uses, so the presenter
+# shares GPUI's libwayland connection instead of opening its own.
+wayland-backend = { version = "0.3.15", features = ["client_system", "dlopen"] }
+wayland-client = "0.31.11"
+wayland-sys = { version = "0.31", features = ["client", "dlopen"] }

@@ -1240,6 +1240,15 @@ mod platform {
                 return Availability::Unavailable;
             }
         };
+        #[cfg(target_os = "linux")]
+        let wayland = super::super::wayland::active(window);
+        #[cfg(target_os = "linux")]
+        let built = if wayland {
+            super::super::wayland::build(builder, window, cx)
+        } else {
+            WebView::build(builder, window, cx)
+        };
+        #[cfg(not(target_os = "linux"))]
         let built = WebView::build(builder, window, cx);
         let webview = match built {
             Ok(webview) => cx.new(|_| webview),
@@ -1251,7 +1260,9 @@ mod platform {
         page_agent::install(webview.read(cx).raw(), events, &nonce);
         lifecycle.watch_page(page.id, receiver, cx);
         #[cfg(target_os = "linux")]
-        trap_gdk_x_errors();
+        if !wayland {
+            trap_gdk_x_errors();
+        }
         #[cfg(target_os = "ios")]
         super::super::ios::adopt(webview.read(cx).raw());
         webview.update(cx, |view, _| set_webview_visible(view, false));
