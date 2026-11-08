@@ -654,6 +654,29 @@ impl ChatView {
     ) -> Option<AnyElement> {
         let numbers = crate::pull_requests::numbers(links, cx)?;
         let label = crate::pull_requests::badge_label(links, cx)?;
+        // A watch on one of them wakes the thread: the pill ends in an eye.
+        let watched = self
+            .session_id
+            .as_deref()
+            .and_then(|id| self.workspace_store.read(cx).activity(id))
+            .is_some_and(|activity| {
+                links
+                    .iter()
+                    .any(|link| activity.wakes.pull_requests.contains(&link.key.number))
+            });
+        let numbers = h_flex()
+            .gap_1()
+            .items_center()
+            .child(numbers)
+            .when(watched, |numbers| {
+                numbers.child(
+                    div().debug_selector(|| "pr-pill-watch".into()).child(
+                        Icon::new(IconName::Eye)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    ),
+                )
+            });
         if !compact {
             let store = self.workspace_store.clone();
             let session_id = self.session_id.clone();
