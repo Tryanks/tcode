@@ -372,18 +372,15 @@ impl LocalKernel {
         // Process ownership, not the window's current attachment, grants
         // authority to stop the local kernel on application quit.
         let link = self.control_link.clone();
-        let to_host = self.host.to_host.clone();
-        let stopped = self.host.stopped.clone();
+        let host = self.host.clone();
         cx.on_app_quit(move |_cx| {
             let link = link.clone();
-            let to_host = to_host.clone();
-            let stopped = stopped.clone();
+            let stop = host.stop();
             async move {
-                let _ = link.shutdown().await;
                 // `shutdown` only closes this client's mux connection;
                 // the host loop ends when its own inbox closes.
-                to_host.close();
-                let _ = stopped.recv().await;
+                let _ = link.shutdown().await;
+                stop.await;
             }
         })
         .detach();
