@@ -2596,6 +2596,7 @@ mod tests {
         }
         let ready = std::rc::Rc::new(std::cell::Cell::new(false));
         let image_sources = vec![crate::store::image_preview(
+            store.read_with(cx, |store, _| store.image_host()),
             path.clone(),
             crate::store::MAX_PREVIEW_PIXELS as f32,
             false,

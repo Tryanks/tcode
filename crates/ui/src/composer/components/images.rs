@@ -594,7 +594,12 @@ impl Composer {
     ) -> AnyElement {
         let path = image.path.clone();
         // The picture fades in once it decodes.
-        let preview: gpui::ImageSource = crate::store::image_preview(path.clone(), 18., false);
+        let preview: gpui::ImageSource = crate::store::image_preview(
+            self.workspace_store.read(cx).image_host(),
+            path.clone(),
+            18.,
+            false,
+        );
         let arrival = crate::motion::image_arrival(
             crate::motion::Clock::from(&self.motion),
             self.motion_key(format_args!("thumb-arrival-{key}")),
@@ -674,12 +679,14 @@ impl Composer {
         let Some(image) = self.pending_images.get(index) else {
             return;
         };
+        let host = self.workspace_store.read(cx).image_host();
         crate::image_viewer::open(
             crate::image_viewer::ViewerSource::original(
+                host,
                 tcode_protocol::OriginalTarget::File {
                     path: image.path.clone(),
                 },
-                crate::store::image_preview(image.path.clone(), 18., false),
+                crate::store::image_preview(host, image.path.clone(), 18., false),
             ),
             image.name.clone(),
             window,

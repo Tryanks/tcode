@@ -565,10 +565,12 @@ impl PullRequestView {
     fn resolver(&self) -> Option<ImageResolver> {
         let (session, key) = self.current.clone()?;
         let account = self.page()?.conversation.data.as_ref()?.account.clone();
+        let host = self.image_host;
         let source = {
             let (session, key, account) = (session.clone(), key.clone(), account.clone());
             Rc::new(move |url: &str| {
                 Some(pull_request_media(
+                    host,
                     session.clone(),
                     key.clone(),
                     account.clone(),
@@ -583,7 +585,8 @@ impl PullRequestView {
                   window: &mut Window,
                   cx: &mut App|
                   -> Option<AnyElement> {
-                let state = pull_request_media_state(&session, &key, &account, url, window, cx);
+                let state =
+                    pull_request_media_state(host, &session, &key, &account, url, window, cx);
                 let host_name = super::host_name(store.read(cx), &key.host);
                 settle_media(url, media_stand_in(state, url, title, &host_name, cx))
             },
@@ -642,6 +645,7 @@ impl PullRequestView {
         let ((session, key), url) = self.current.as_ref().zip(url)?;
         let account = self.page()?.conversation.data.as_ref()?.account.clone();
         Some(pull_request_media(
+            self.image_host,
             session.clone(),
             key.clone(),
             account,

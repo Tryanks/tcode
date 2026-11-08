@@ -31,6 +31,7 @@ pub(crate) struct PlanDecision<'a> {
 }
 
 pub(crate) struct PlanData<'a> {
+    pub(crate) image_host: crate::store::ImageHost,
     pub(crate) id: &'a str,
     pub(crate) text: &'a str,
     /// What Copy puts on the clipboard: the text, shared rather than copied
@@ -55,6 +56,7 @@ pub(crate) fn plan_block(
     cx: &App,
 ) -> AnyElement {
     let PlanData {
+        image_host,
         id,
         text,
         copy_text,
@@ -74,6 +76,7 @@ pub(crate) fn plan_block(
             MarkdownView::new(&markdown)
                 .compact_headings(true)
                 .selectable(true)
+                .image_host(image_host)
                 .base_dir(cwd)
                 .menu_extension(menu_items.clone())
                 .into_any_element()

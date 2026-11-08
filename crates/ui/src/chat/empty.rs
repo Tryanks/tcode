@@ -126,7 +126,11 @@ impl ChatView {
                         store.start_draft(project_id.clone(), cwd.clone(), cx);
                     });
                 }))
-                .child(crate::project_icon::artwork(project, 16.))
+                .child(crate::project_icon::artwork(
+                    self.workspace_store.read(cx).image_host(),
+                    project,
+                    16.,
+                ))
                 .child(
                     div()
                         .flex_1()

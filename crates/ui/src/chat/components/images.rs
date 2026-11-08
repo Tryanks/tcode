@@ -9,6 +9,7 @@ use gpui::{
 use gpui_base::h_flex;
 use tcode_core::session::{EntryContent, TimelineEntry};
 
+use crate::store::ImageHost;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::menu::{ContextMenuExt as _, CopyText};
 
@@ -22,6 +23,7 @@ const ARRIVE: std::time::Duration = std::time::Duration::from_millis(200);
 /// that arrives widens in, a tile it pushes onto another line glides there,
 /// and the row's height glides to a line it starts.
 pub(crate) fn image_tiles(
+    host: ImageHost,
     entries: &[&TimelineEntry],
     cwd: &Path,
     session_id: &str,
@@ -69,6 +71,7 @@ pub(crate) fn image_tiles(
         })
         .collect();
     tile_row(
+        host,
         SharedString::from(format!(
             "image-tiles-{}",
             entries.first().map_or("", |entry| entry.id.as_str())
@@ -110,6 +113,7 @@ impl Tile {
 /// `tiles` in a row that wraps, keyed by image, its motion kept by
 /// `motion`.
 pub(crate) fn tile_row(
+    host: ImageHost,
     id: SharedString,
     tiles: Vec<(SharedString, Tile)>,
     session_id: &str,
@@ -128,7 +132,7 @@ pub(crate) fn tile_row(
         ROWS,
         window,
         cx,
-        |_, tile, _, cx| item_tile(tile.clone(), &session_id, motion, cx),
+        |_, tile, _, cx| item_tile(host, tile.clone(), &session_id, motion, cx),
     )
     .render(h_flex().w_full().gap_2().flex_wrap());
     crate::motion::SizeGlide::new(&glide, row)
@@ -138,6 +142,7 @@ pub(crate) fn tile_row(
 
 /// [`tile_row`] for a caller that holds only `&App`.
 pub(crate) fn sampled_tile_row(
+    host: ImageHost,
     id: SharedString,
     tiles: Vec<(SharedString, Tile)>,
     session_id: String,
@@ -145,13 +150,14 @@ pub(crate) fn sampled_tile_row(
 ) -> AnyElement {
     let motion = motion.clone();
     crate::motion::Sampled::new(move |window, cx| {
-        tile_row(id, tiles, &session_id, &motion, window, cx)
+        tile_row(host, id, tiles, &session_id, &motion, window, cx)
     })
     .into_any_element()
 }
 
 /// One image an item read, as a thumbnail that opens the image viewer.
 pub(crate) fn item_tile(
+    host: ImageHost,
     tile: Tile,
     session_id: &str,
     motion: &crate::motion::owned::Owned,
@@ -164,8 +170,16 @@ pub(crate) fn item_tile(
         title,
         path,
     } = tile;
-    let preview =
-        || crate::store::item_image_preview(session_id.into(), entry_id.clone(), index, 120., 80.);
+    let preview = || {
+        crate::store::item_image_preview(
+            host,
+            session_id.into(),
+            entry_id.clone(),
+            index,
+            120.,
+            80.,
+        )
+    };
     let viewer_preview = preview();
     // The image is the control; a `Button` would add chrome around a picture.
     crate::material::accessible_clickable(
@@ -214,11 +228,8 @@ pub(crate) fn item_tile(
         let session_id = session_id.to_owned();
         let entry_id = entry_id.clone();
         move |_, window, cx| {
-            open_item_image(
-                &session_id,
-                &entry_id,
-                index,
-                viewer_preview.clone(),
+            crate::image_viewer::open(
+                item_original(host, &session_id, &entry_id, index, viewer_preview.clone()),
                 title.clone(),
                 window,
                 cx,
@@ -239,26 +250,22 @@ pub(crate) fn item_tile(
     .into_any_element()
 }
 
-/// Opens the image viewer on the original of the `index`th image item
-/// `entry_id` read, read from the host, showing `preview` until it arrives.
-pub(crate) fn open_item_image(
+/// What the image viewer opens on for the `index`th image item `entry_id`
+/// read: its original, read from `host`, with `preview` until it arrives.
+pub(crate) fn item_original(
+    host: ImageHost,
     session_id: &str,
     entry_id: &str,
     index: usize,
     preview: ImageSource,
-    title: impl Into<SharedString>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let source = tcode_protocol::OriginalTarget::Item {
-        session_id: session_id.into(),
-        item_id: entry_id.into(),
-        image_index: index,
-    };
-    crate::image_viewer::open(
-        crate::image_viewer::ViewerSource::original(source, preview),
-        title,
-        window,
-        cx,
-    );
+) -> crate::image_viewer::ViewerSource {
+    crate::image_viewer::ViewerSource::original(
+        host,
+        tcode_protocol::OriginalTarget::Item {
+            session_id: session_id.into(),
+            item_id: entry_id.into(),
+            image_index: index,
+        },
+        preview,
+    )
 }

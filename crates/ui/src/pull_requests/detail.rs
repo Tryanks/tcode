@@ -213,6 +213,8 @@ pub(super) struct PullRequestPage {
 
 pub struct PullRequestView {
     pub(super) store: Entity<WorkspaceStore>,
+    /// The host the conversation's media is read through.
+    pub(super) image_host: crate::store::ImageHost,
     pub(super) window_state: Entity<WindowState>,
     /// The thread the pull request is read through, and the pull request.
     pub(super) current: Option<(String, PullRequestKey)>,
@@ -309,6 +311,7 @@ impl PullRequestView {
             cx.observe(&window_state, |_, _, cx| cx.notify()),
         ];
         Self {
+            image_host: store.read(cx).image_host(),
             store,
             window_state,
             current: None,

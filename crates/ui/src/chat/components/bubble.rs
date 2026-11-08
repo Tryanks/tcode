@@ -40,6 +40,7 @@ pub(crate) type UserMessageArgs<'a> = (
 );
 
 pub(crate) struct BubbleData<'a> {
+    pub(crate) image_host: crate::store::ImageHost,
     pub(crate) entry_id: &'a str,
     /// A steer the agent just took, on its way from the turn's trailer: how
     /// far it has come. Its chip and border change from pending as it goes.
@@ -151,6 +152,7 @@ pub(crate) fn user_bubble(
     cx: &App,
 ) -> AnyElement {
     let BubbleData {
+        image_host,
         entry_id,
         taken,
         visible,
@@ -246,7 +248,7 @@ pub(crate) fn user_bubble(
                     .bg(cx.theme().muted)
                     .cursor_pointer()
                     .child(crate::motion::Sampled::new({
-                        let source = crate::store::image_preview(path, 120., true);
+                        let source = crate::store::image_preview(image_host, path, 120., true);
                         let id = SharedString::from(format!("user-image-{entry_id}-{image_index}"));
                         let motion = motion.clone();
                         // The picture fades in over the tile's fill once it
@@ -283,6 +285,7 @@ pub(crate) fn user_bubble(
             MarkdownView::new(&markdown)
                 .selectable(true)
                 .compact_headings(true)
+                .image_host(image_host)
                 .base_dir(cwd)
                 .menu_extension(menu_items.clone())
                 .into_any_element()
