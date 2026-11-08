@@ -616,7 +616,8 @@ impl ChatView {
     }
 
     /// Point out the piece of background work the call `item_id` started:
-    /// in the rail where it shows, else in the list opened over the thread.
+    /// in the rail's Commands or Agents card where the rail shows, else in
+    /// the list opened over the thread.
     pub(in crate::chat) fn reveal_background(
         &mut self,
         item_id: String,
@@ -722,45 +723,56 @@ mod tests {
         draw_settled(cx);
     }
 
-    /// A thread's background work is one list: the rail's card where the
-    /// rail fits, else a pill's list over the timeline, which the window of
-    /// the call that started a piece opens too. A row's stop reaches the
-    /// host at once; the stop for all of it asks first.
-    #[gpui::test]
-    fn background_work_is_one_list_whichever_way_it_is_reached(cx: &mut TestAppContext) {
-        let started = AgentEvent::ItemStarted(ThreadItem {
-            id: "call_1".into(),
+    /// A thread whose first turn moved `npm run dev` to the background and
+    /// whose latest turn ran `cargo test` in the foreground, its harness
+    /// listing `tasks` as running in the background; in a window `width`
+    /// wide, under the root that hosts dialogs, settled.
+    fn backgrounded(
+        cx: &mut TestAppContext,
+        tasks: Vec<BackgroundTaskStatus>,
+        width: f32,
+    ) -> (ScriptedThread, Entity<ChatView>, &mut VisualTestContext) {
+        let command = |id: &str, command: &str, status| ThreadItem {
+            id: id.into(),
             parent_item_id: None,
             content: ItemContent::CommandExecution {
-                command: "npm run dev".into(),
+                command: command.into(),
                 output: String::new(),
-                exit_code: None,
-                status: ItemStatus::InProgress,
+                exit_code: (status == ItemStatus::Completed).then_some(0),
+                status,
             },
-        });
+        };
+        let completed = |turn: &str| AgentEvent::TurnCompleted {
+            turn_id: turn.into(),
+            status: agent::TurnStatus::Completed,
+            usage: None,
+        };
         let events = vec![
             AgentEvent::TurnStarted {
                 turn_id: "t1".into(),
             },
             user_event("u1", "Start the dev server and the tests."),
-            started,
+            AgentEvent::ItemStarted(command("call_1", "npm run dev", ItemStatus::InProgress)),
             AgentEvent::ItemBackgrounded {
                 item_id: "call_1".into(),
                 parent_item_id: None,
             },
+            completed("t1"),
+            AgentEvent::TurnStarted {
+                turn_id: "t2".into(),
+            },
+            user_event("u2", "Run the tests once more."),
+            AgentEvent::ItemCompleted(command("call_3", "cargo test", ItemStatus::Completed)),
+            completed("t2"),
         ];
-        let mut thread = ScriptedThread::new(cx, events, 0, true);
-        thread.status.background_tasks = vec![
-            task("98412", Some("call_1"), "npm run dev"),
-            task("98413", None, "cargo watch -x test"),
-        ];
+        let mut thread = ScriptedThread::new(cx, events, 0, false);
+        thread.status.background_tasks = tasks;
         thread.event(
             Topic::SessionStatus {
                 session_id: THREAD.into(),
             },
             ServerEvent::SessionStatusReplaced(Box::new(thread.status.clone())),
         );
-        // Under the window's root, which hosts the dialogs.
         let store = thread.store.clone();
         let window_state = cx.new(|_| crate::window_state::WindowState::default());
         let mut chat = None;
@@ -771,17 +783,62 @@ mod tests {
             chat = Some(view);
             gpui_base::Root::new(frame, window, cx)
         });
-        let _chat = chat;
-        cx.simulate_resize(size(px(1_400.), px(900.)));
+        cx.simulate_resize(size(px(width), px(900.)));
         // The background glyphs breathe for as long as the work runs.
         cx.update(|_, cx| cx.set_reduce_motion(true));
         thread.deliver(cx);
         draw_settled(cx);
         while thread.outgoing.try_recv().is_ok() {}
+        (thread, chat.expect("the chat is built"), cx)
+    }
 
+    /// Whether the row `selector` is drawn marked, as a piece the timeline
+    /// pointed out is.
+    fn marked(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+        let row = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.update(|window, cx| {
+            let accent = cx.theme().accent;
+            let scale = window.scale_factor();
+            let near = |a: gpui::ScaledPixels, b: gpui::ScaledPixels| (a - b).0.abs() <= 1.;
+            crate::test_frames::painted_quads(window)
+                .iter()
+                .any(|quad| {
+                    quad.background.as_solid() == Some(accent)
+                        && near(quad.bounds.top(), row.top().scale(scale))
+                        && near(quad.bounds.left(), row.left().scale(scale))
+                })
+        })
+    }
+
+    /// A thread's background work stays where the rail lists commands,
+    /// whichever turn started it, ahead of the latest turn's: a command
+    /// moved there in an earlier turn, and a piece its harness names no
+    /// call for. Its stop reaches the host at once, and the stop for all of
+    /// it asks first. A row leads to the window of the call that started its
+    /// piece, which leads back, marking the row. Without the rail, a pill
+    /// holds the same work as one list, which that window opens.
+    #[gpui::test]
+    fn background_work_is_one_list_whichever_way_it_is_reached(cx: &mut TestAppContext) {
+        let (thread, _chat, cx) = backgrounded(
+            cx,
+            vec![
+                task("98412", Some("call_1"), "npm run dev"),
+                task("98413", None, "cargo watch -x test"),
+            ],
+            1_400.,
+        );
+        let row = |cx: &mut VisualTestContext, selector: &'static str| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("the Commands card lists {selector}"))
+        };
+        let earlier = row(cx, "rail-command-call_1");
+        let unnamed = row(cx, "rail-command-98413");
+        let latest = row(cx, "rail-command-call_3");
         assert!(
-            cx.debug_bounds("rail-card-background").is_some(),
-            "the rail lists the work"
+            earlier.top() < latest.top() && unnamed.top() < latest.top(),
+            "the work in the background comes before the latest turn's commands"
         );
         assert!(
             cx.debug_bounds("background-pill").is_none(),
@@ -797,11 +854,21 @@ mod tests {
         );
         cx.update(|window, cx| window.close_all_dialogs(cx));
         draw_settled(cx);
+        // The earlier turn's calls are folded into its work log, which the
+        // row opens to show its call.
+        assert!(cx.debug_bounds("background-link-call_1").is_none());
+        click(cx, "rail-command-call_1");
+        assert!(!marked(cx, "rail-command-call_1"));
+        click(cx, "background-link-call_1");
+        assert!(
+            marked(cx, "rail-command-call_1"),
+            "the call's window marks its row in the Commands card"
+        );
 
         cx.simulate_resize(size(px(900.), px(900.)));
         draw_settled(cx);
         assert!(
-            cx.debug_bounds("rail-card-background").is_none(),
+            cx.debug_bounds("rail-command-call_1").is_none(),
             "no rail at this width"
         );
         assert!(
@@ -815,6 +882,20 @@ mod tests {
         );
         click(cx, "background-stop-98413");
         assert_eq!(stops(&thread), [Some("98413".to_owned())]);
+    }
+
+    /// The stop for all of the background work stands while a single piece
+    /// can be stopped, and stops it without asking.
+    #[gpui::test]
+    fn stop_all_stands_for_a_single_piece(cx: &mut TestAppContext) {
+        let (thread, _chat, cx) = backgrounded(
+            cx,
+            vec![task("98412", Some("call_1"), "npm run dev")],
+            1_400.,
+        );
+        click(cx, "background-stop-all");
+        assert!(!cx.update(|window, cx| crate::overlay::dialog_open(window, cx)));
+        assert_eq!(stops(&thread), [None]);
     }
 
     /// A running command can be moved into the background where the

@@ -1,27 +1,31 @@
-//! The commands the thread's agent ran in its latest turn, in the
-//! foreground: one that went on in the background is the Background card's.
+//! The commands of the thread's agent: those running in the background,
+//! whichever turn started them, then those its latest turn ran.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use agent::ItemStatus;
+use agent::{BackgroundKind, ItemContent, ItemStatus};
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Role,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
-use tcode_core::session::Timeline;
+use tcode_core::session::{EntryContent, Timeline};
+use tcode_protocol::BackgroundTaskStatus;
 
 use super::RailView;
 use super::stack::{Fit, Fitted};
-use crate::chat::model::one_line_with_break_markers;
+use crate::chat::background::{Background, Place, Standing};
+use crate::chat::model::{one_line, one_line_with_break_markers};
 use crate::chat::tools::shell;
 use crate::icon::IconName;
 use crate::material::CARD_INSET;
 use crate::theme::ActiveTheme as _;
 use crate::typography::TextRole as _;
 use crate::widgets::spinner::Spinner;
+use crate::widgets::tooltip::{Tooltip, TooltipTrigger as _};
 
 /// How long a row takes to fold in or out, or to move to a new place.
 const ROWS: Duration = Duration::from_millis(200);
@@ -38,6 +42,9 @@ enum Mark {
     Failed(Option<i32>),
     Interrupted,
     Declined,
+    /// Running in the background, as the piece of its harness's background
+    /// work its row shows.
+    Background,
 }
 
 impl Mark {
@@ -55,57 +62,97 @@ impl Mark {
 /// One command as its row shows it.
 #[derive(Clone, Debug, PartialEq)]
 struct Line {
-    entry_id: String,
-    turn: usize,
-    /// The command line on one line.
+    /// Its call's id, or the piece's when the harness names no call.
+    key: String,
+    /// Where its call is in the timeline, by turn.
+    call: Option<(usize, String)>,
+    /// The command line on one line, or what the harness names the piece.
     command: String,
+    /// Whether that is a command line, set in the monospace face.
+    mono: bool,
     mark: Mark,
     /// When it started (unix ms), when that was seen.
     started_ms: Option<u64>,
+    /// The piece of background work it is.
+    background: Option<BackgroundTaskStatus>,
 }
 
-/// The commands the card lists, worked out once each time the timeline
+/// The commands the card lists, worked out once each time the thread
 /// changes rather than every frame the rail is drawn.
 #[derive(Default)]
 pub(in crate::chat) struct Commands {
-    /// Running first, newest first within each group.
+    /// Those in the background first, then the running ones, newest first
+    /// within each group.
     lines: Rc<[Line]>,
+    /// The latest turn's commands that ran in the foreground.
     total: usize,
     running: usize,
     failed: usize,
-    /// The latest turn's commands that went on in the background.
-    backgrounded: usize,
+    /// The pieces still running in the background.
+    background: usize,
 }
 
 impl Commands {
-    /// Lists again the commands of `timeline`'s latest turn that ran in the
-    /// foreground, and counts those that went on in the background.
-    pub(in crate::chat) fn sync(&mut self, timeline: &Timeline) {
+    /// Lists again the thread's background work but its subagents (the
+    /// Agents card's), from `tasks`, and the commands of `timeline`'s latest
+    /// turn that are not part of it.
+    pub(in crate::chat) fn sync(&mut self, timeline: &Timeline, tasks: &[BackgroundTaskStatus]) {
+        let mut background = Vec::new();
+        for row in tasks.iter().rev() {
+            let task = &row.task;
+            let entry = task
+                .item_id
+                .as_deref()
+                .and_then(|item| timeline.entries.iter().find(|entry| entry.id == item));
+            if entry.is_some_and(|entry| {
+                matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::Subagent { .. })
+                )
+            }) {
+                continue;
+            }
+            let ran = entry.and_then(|entry| shell::ran(entry));
+            background.push(Line {
+                key: task.item_id.clone().unwrap_or_else(|| task.id.clone()),
+                call: entry.map(|entry| (entry.turn, entry.id.clone())),
+                mono: ran.is_some() || task.kind == BackgroundKind::Command,
+                command: match ran {
+                    Some(ran) => one_line_with_break_markers(&ran.command).0,
+                    None => one_line(&task.name),
+                },
+                mark: Mark::Background,
+                started_ms: Some(task.started_at),
+                background: Some(row.clone()),
+            });
+        }
         let mut running = Vec::new();
         let mut settled = Vec::new();
-        let mut backgrounded = 0;
-        let Some(latest) = timeline.turns.len().checked_sub(1) else {
-            *self = Self::default();
-            return;
-        };
         // Entries are in turn order, so the latest turn's are the last.
         let start = timeline
-            .entries
-            .partition_point(|entry| entry.turn < latest);
+            .turns
+            .len()
+            .checked_sub(1)
+            .map_or(timeline.entries.len(), |latest| {
+                timeline
+                    .entries
+                    .partition_point(|entry| entry.turn < latest)
+            });
         for entry in &timeline.entries[start..] {
             let Some(ran) = shell::ran(entry) else {
                 continue;
             };
-            if entry.background {
-                backgrounded += 1;
+            if background.iter().any(|line| line.key == entry.id) {
                 continue;
             }
             let line = Line {
-                entry_id: entry.id.clone(),
-                turn: entry.turn,
+                key: entry.id.clone(),
+                call: Some((entry.turn, entry.id.clone())),
                 command: one_line_with_break_markers(&ran.command).0,
+                mono: true,
                 mark: Mark::of(ran.status, ran.exit_code),
                 started_ms: entry.ts,
+                background: None,
             };
             if line.mark == Mark::Running {
                 running.push(line);
@@ -114,15 +161,18 @@ impl Commands {
             }
         }
         self.total = running.len() + settled.len();
-        self.backgrounded = backgrounded;
         self.running = running.len();
         self.failed = settled
             .iter()
             .filter(|line| matches!(line.mark, Mark::Failed(_)))
             .count();
-        self.lines = running
+        self.background = background
+            .iter()
+            .filter(|line| line.background.as_ref().is_some_and(|row| !row.ended))
+            .count();
+        self.lines = background
             .into_iter()
-            .rev()
+            .chain(running.into_iter().rev())
             .chain(settled.into_iter().rev())
             .collect();
     }
@@ -130,34 +180,31 @@ impl Commands {
 
 /// Whether the card has something to show for `rail`'s thread now.
 pub(super) fn present(rail: &RailView, _cx: &App) -> bool {
-    rail.commands.total > 0
+    !rail.commands.lines.is_empty()
 }
 
-/// The line the card's header shows beside its title: how
-/// many commands run, or how many ran, and how many of those failed.
+/// The line the card's header shows beside its title: how many commands
+/// run, or else how many ran; how many run in the background; and how many
+/// failed.
 pub(super) fn summary(rail: &RailView, _cx: &App) -> Option<SharedString> {
     let commands = &rail.commands;
-    let mut parts = vec![
-        match (commands.running, commands.total, commands.backgrounded) {
-            (0, 0, _) => return None,
-            // With some gone to the background, the count is the turn's.
-            (0, total, backgrounded @ 1..) => {
-                crate::tr!("rail.commands_turn", count = total + backgrounded).into_owned()
-            }
-            (0, 1, _) => crate::tr!("rail.commands_one").into_owned(),
-            (0, total, _) => crate::tr!("rail.commands", count = total).into_owned(),
-            (running, ..) => crate::tr!("rail.commands_running", count = running).into_owned(),
-        },
-    ];
+    let mut parts = Vec::new();
+    match (commands.running, commands.total) {
+        (0, 0) => {}
+        (0, 1) => parts.push(crate::tr!("rail.commands_one").into_owned()),
+        (0, total) => parts.push(crate::tr!("rail.commands", count = total).into_owned()),
+        (running, _) => {
+            parts.push(crate::tr!("rail.commands_running", count = running).into_owned())
+        }
+    }
+    if commands.background > 0 {
+        parts
+            .push(crate::tr!("rail.commands_background", count = commands.background).into_owned());
+    }
     if commands.failed > 0 {
         parts.push(crate::tr!("rail.commands_failed", count = commands.failed).into_owned());
     }
-    if commands.backgrounded > 0 {
-        parts.push(
-            crate::tr!("rail.commands_backgrounded", count = commands.backgrounded).into_owned(),
-        );
-    }
-    Some(parts.join(" · ").into())
+    (!parts.is_empty()).then(|| parts.join(" · ").into())
 }
 
 /// The commands the card lists: the thread's, or while the card leaves,
@@ -166,7 +213,7 @@ fn listed(rail: &RailView) -> Rc<[Line]> {
     let last = rail
         .motion
         .keep::<Rc<RefCell<Rc<[Line]>>>>("rail-commands-lines");
-    if rail.commands.total > 0 {
+    if !rail.commands.lines.is_empty() {
         last.replace(rail.commands.lines.clone());
     }
     last.borrow().clone()
@@ -176,34 +223,22 @@ fn fitted(rail: &RailView) -> Rc<Cell<Fitted>> {
     rail.motion.keep("rail-commands-fitted")
 }
 
-/// How tall the note under the rows was laid out, which the rows leave room
-/// for.
-fn note_height(rail: &RailView) -> Rc<Cell<f32>> {
-    rail.motion.keep("rail-commands-note")
-}
-
 /// The card's rows never scroll: in a rail too short for them all it
 /// shows as many as fit and counts the rest.
 pub(super) fn fit(rail: &RailView, cx: &App) -> Fit {
-    let note = if rail.commands.backgrounded > 0 {
-        note_height(rail).get()
-    } else {
-        0.
-    };
     Fit {
         rows: listed(rail).len(),
-        edge: f32::from(cx.theme().tokens.spacing.sm) + note,
+        edge: f32::from(cx.theme().tokens.spacing.sm),
         fitted: fitted(rail),
     }
 }
 
 /// What the card shows below its header, laid out at the rail's width: a
-/// row for each command that fits the card's height, running ones first,
-/// each with how it stands at its right, bringing its place in the timeline
-/// into view on a click; then how many more; then, where some of the turn's
-/// commands went on in the background, that the Background card lists
-/// them. Commands that leave the list, or no longer fit, fold away as they
-/// stood.
+/// row for each command that fits the card's height, those in the
+/// background first, then the running ones, each with how it stands at its
+/// right, bringing its place in the timeline into view on a click; then how
+/// many more. Commands that leave the list, or no longer fit, fold away as
+/// they stood.
 pub(super) fn body(
     rail: &RailView,
     window: &mut Window,
@@ -218,9 +253,11 @@ pub(super) fn body(
     let more = lines.len() - shown;
     // The tallest row laid out this frame, noted once they all are.
     let tallest = Rc::new(Cell::new(0f32));
+    let background = rail.background(cx).zip(rail.background_place(cx));
+    let highlight = rail.background_highlight.clone();
     let rows = lines[..shown]
         .iter()
-        .map(|line| (SharedString::from(line.entry_id.clone()), line.clone()));
+        .map(|line| (SharedString::from(line.key.clone()), line.clone()));
     let rows = crate::motion::keyed(
         "rail-commands",
         rows,
@@ -238,7 +275,16 @@ pub(super) fn body(
                         tallest.set(tallest.get().max(f32::from(row.size.height)));
                     }
                 })
-                .child(row(key, line, window, cx))
+                .child(row(
+                    key,
+                    line,
+                    background
+                        .as_ref()
+                        .map(|(background, place)| (background, place)),
+                    highlight.as_deref() == Some(line.key.as_str()),
+                    window,
+                    cx,
+                ))
                 .into_any_element()
         },
     )
@@ -286,26 +332,6 @@ pub(super) fn body(
                 ),
         )
     });
-    let note = (rail.commands.backgrounded > 0).then(|| {
-        let height = note_height(rail);
-        div()
-            .w_full()
-            .on_children_prepainted(move |bounds, _, _| {
-                if let Some(note) = bounds.first() {
-                    height.set(f32::from(note.size.height));
-                }
-            })
-            .child(
-                div()
-                    .debug_selector(|| "rail-commands-note".into())
-                    .w_full()
-                    .px_1()
-                    .pt_1()
-                    .text_secondary(false, cx)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("rail.commands_backgrounded_note")),
-            )
-    });
     Some(
         v_flex()
             .w_full()
@@ -314,7 +340,6 @@ pub(super) fn body(
             .pb(cx.theme().tokens.spacing.sm)
             .child(rows)
             .children(more)
-            .children(note)
             .into_any_element(),
     )
 }
@@ -322,13 +347,37 @@ pub(super) fn body(
 fn row(
     key: &SharedString,
     line: &Line,
+    background: Option<(&Background, &Place)>,
+    highlighted: bool,
     window: &mut Window,
     cx: &mut Context<RailView>,
 ) -> AnyElement {
     let theme = cx.theme();
     let (muted, danger, warning) = (theme.muted_foreground, theme.danger, theme.warning);
-    let mark = mark(key, line.mark, window, cx);
+    let standing = line
+        .background
+        .as_ref()
+        .map(|row| Standing::of(row, crate::time::now_millis()));
+    let ended = standing == Some(Standing::Ended);
+    let mark = mark(key, line.mark, ended, window, cx);
     let trailing = match line.mark {
+        // A piece of background work says how it stands, with its stop.
+        Mark::Background => {
+            line.background
+                .as_ref()
+                .zip(background)
+                .map(|(row, (background, place))| {
+                    crate::chat::background::controls(
+                        background,
+                        row,
+                        place,
+                        &format!("rail-command-bg-{key}"),
+                        true,
+                        window,
+                        cx,
+                    )
+                })
+        }
         Mark::Running => line.started_ms.map(|since| {
             crate::widgets::clock::Clock::since(
                 SharedString::from(format!("rail-command-elapsed-{key}")),
@@ -358,13 +407,24 @@ fn row(
         Mark::Passed | Mark::Failed(None) => None,
     };
     let radius = crate::material::radius_card(cx);
-    let (turn, entry_id) = (line.turn, line.entry_id.clone());
+    let wash =
+        crate::chat::background::wash(&format!("rail-command-{key}"), highlighted, window, cx);
+    let label = if line.mark == Mark::Background {
+        format!(
+            "{} · {}",
+            line.command,
+            crate::tr!("tools.status.background")
+        )
+    } else {
+        line.command.clone()
+    };
+    let call = line.call.clone();
     let selector = key.clone();
     crate::material::accessible_clickable(
         h_flex(),
         SharedString::from(format!("rail-command-{key}")),
         Role::Button,
-        line.command.clone(),
+        label,
         cx,
     )
     .debug_selector(move || format!("rail-command-{selector}"))
@@ -376,14 +436,22 @@ fn row(
     .gap_2()
     .items_center()
     .rounded(radius)
-    .cursor_pointer()
+    .when_some(wash, |row, wash| row.bg(wash))
+    .when(ended, |row| row.opacity(0.6))
     .child(crate::material::row_hover(radius, cx))
     .child(
         div()
             .flex_1()
             .min_w_0()
             .overflow_hidden()
-            .text_meta_mono(false, cx)
+            .map(|command| {
+                if line.mono {
+                    command.text_meta_mono(false, cx)
+                } else {
+                    command.text_body(false, cx)
+                }
+            })
+            .when(ended, |command| command.text_color(muted))
             .child(crate::widgets::fade_text(line.command.clone())),
     )
     .child(
@@ -396,34 +464,74 @@ fn row(
             .children(trailing)
             .child(mark),
     )
-    .on_click(cx.listener(move |rail, _, _, cx| {
-        rail.timeline.update(cx, |timeline, cx| {
-            timeline.scroll_to_activity(turn, &entry_id, cx)
-        });
-    }))
+    .when_some(call, |row, (turn, entry_id)| {
+        let background = line.mark == Mark::Background;
+        row.cursor_pointer()
+            .on_click(cx.listener(move |rail, _, _, cx| {
+                rail.timeline.update(cx, |timeline, cx| {
+                    // One in the background may be an earlier turn's, folded
+                    // into its work log: that opens to show it.
+                    if background {
+                        timeline.locate(&entry_id, cx)
+                    } else {
+                        timeline.scroll_to_activity(turn, &entry_id, cx)
+                    }
+                });
+            }))
+    })
     .into_any_element()
 }
 
-/// A spinner while the command runs, then a check, or a cross when it
+/// What the mark shows.
+#[derive(Clone, Copy, PartialEq)]
+enum Glyph {
+    Spinner,
+    Breathing,
+    Settled,
+}
+
+/// A spinner while the command runs, a breathing dot while it runs in the
+/// background, as its call's window has, then a check, or a cross when it
 /// failed; one cross-fades into the next.
-fn mark(key: &SharedString, mark: Mark, window: &mut Window, cx: &mut App) -> AnyElement {
+fn mark(
+    key: &SharedString,
+    mark: Mark,
+    ended: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let id = SharedString::from(format!("rail-command-mark-{key}"));
+    let glyph = match mark {
+        Mark::Running => Glyph::Spinner,
+        Mark::Background if !ended => Glyph::Breathing,
+        _ => Glyph::Settled,
+    };
     crate::motion::cross_fade_part(
         id.clone(),
-        mark == Mark::Running,
+        glyph,
         CHANGE,
         window,
         cx,
-        move |running, window, cx| {
-            if *running {
-                return Spinner::new().color(cx.theme().primary).into_any_element();
-            }
+        move |glyph, window, cx| {
             let theme = cx.theme();
+            match glyph {
+                Glyph::Spinner => return Spinner::new().color(theme.primary).into_any_element(),
+                Glyph::Breathing => {
+                    return div()
+                        .id(SharedString::from(format!("{id}-background")))
+                        .flex_none()
+                        .child(crate::widgets::breathing::BreathingDot::new(theme.primary))
+                        .with_tooltip(|_, _| Tooltip::new(crate::tr!("tools.status.background")))
+                        .into_any_element();
+                }
+                Glyph::Settled => {}
+            }
             let (icon, color) = match mark {
                 Mark::Running | Mark::Passed => (IconName::CircleCheck, theme.success),
                 Mark::Failed(_) => (IconName::CircleX, theme.danger),
                 Mark::Interrupted => (IconName::CircleAlert, theme.warning),
                 Mark::Declined => (IconName::Ban, theme.muted_foreground),
+                Mark::Background => (IconName::CircleCheck, theme.muted_foreground),
             };
             crate::motion::status_icon(
                 SharedString::from(format!("{id}-icon")),

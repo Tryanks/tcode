@@ -1761,7 +1761,8 @@ impl TimelineView {
             on_click,
             cx,
         );
-        // Pointed out from the background list, the window is ringed a while.
+        // Pointed out from a row of the background work, the window is ringed
+        // a while.
         let located = self
             .motion
             .shown(
@@ -1797,7 +1798,7 @@ impl TimelineView {
         }
     }
 
-    /// The way from a call's window to its work in the background list.
+    /// The way from a call's window to its row among the background work.
     fn background_link(&self, item_id: &str, cx: &mut Context<Self>) -> AnyElement {
         let item = item_id.to_owned();
         let selector = item.clone();
@@ -1813,8 +1814,8 @@ impl TimelineView {
             .text_secondary(false, cx)
             .text_color(cx.theme().muted_foreground)
             .hover(|link| link.text_color(cx.theme().foreground))
-            // The background card's glyph: a chevron would read as the
-            // window's own, which opens its body.
+            // Not a chevron, which would read as the window's own that
+            // opens its body.
             .child(Icon::new(IconName::Layers).xsmall())
             .child(crate::tr!("background.in_list"))
             .on_click(move |_, _, cx| {
@@ -1837,7 +1838,7 @@ impl TimelineView {
             .ghost()
             .xsmall()
             // The window's header is the one stop the keyboard makes on it,
-            // as for the way to the background list beside it.
+            // as for the way to its background row beside it.
             .focusable(false)
             .label(crate::tr!("background.move").into_owned())
             .on_click(move |_, _, cx| {

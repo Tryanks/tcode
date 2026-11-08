@@ -355,7 +355,6 @@ impl gpui::Element for Slots {
 pub(super) enum RailCard {
     Goal,
     Plan,
-    Background,
     Agents,
     Commands,
     Screen,
@@ -364,10 +363,9 @@ pub(super) enum RailCard {
 }
 
 impl RailCard {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 7] = [
         Self::Goal,
         Self::Plan,
-        Self::Background,
         Self::Agents,
         Self::Commands,
         Self::Screen,
@@ -380,7 +378,6 @@ impl RailCard {
         match self {
             Self::Goal => "goal",
             Self::Plan => "plan",
-            Self::Background => "background",
             Self::Agents => "agents",
             Self::Commands => "commands",
             Self::Screen => "screen",
@@ -393,7 +390,6 @@ impl RailCard {
         match self {
             Self::Goal => crate::tr!("chat.rail_goal"),
             Self::Plan => crate::tr!("chat.rail_plan"),
-            Self::Background => crate::tr!("background.title"),
             Self::Agents => crate::tr!("chat.rail_agents"),
             Self::Commands => crate::tr!("chat.rail_commands"),
             Self::Screen => crate::tr!("chat.rail_screen"),
@@ -406,7 +402,6 @@ impl RailCard {
         match self {
             Self::Goal => IconName::CircleDot,
             Self::Plan => IconName::Map,
-            Self::Background => IconName::Layers,
             Self::Agents => IconName::Bot,
             Self::Commands => IconName::SquareTerminal,
             Self::Screen => IconName::Monitor,
@@ -419,7 +414,7 @@ impl RailCard {
     /// gives way to while it is open.
     fn tab(self) -> Option<RightTab> {
         match self {
-            Self::Goal | Self::Background | Self::Commands | Self::Screen => None,
+            Self::Goal | Self::Commands | Self::Screen => None,
             Self::Plan => Some(RightTab::Plan),
             Self::Agents => Some(RightTab::Agents),
             Self::Changes => Some(RightTab::Diff),
@@ -431,7 +426,6 @@ impl RailCard {
         match self {
             Self::Goal => goal::present(rail, cx),
             Self::Plan => plan::present(rail, cx),
-            Self::Background => rail.background(cx).is_some(),
             Self::Agents => agents::present(rail, cx),
             Self::Commands => commands::present(rail, cx),
             Self::Screen => screen::present(rail, cx),
@@ -446,7 +440,6 @@ impl RailCard {
         match self {
             Self::Goal => goal::summary(rail, cx),
             Self::Plan => plan::summary(rail, cx),
-            Self::Background => rail.background(cx).map(|background| background.summary()),
             Self::Agents => agents::summary(rail, cx),
             Self::Commands => commands::summary(rail, cx),
             Self::Changes => changes::summary(rail, cx),
@@ -476,7 +469,6 @@ impl RailCard {
             Self::Commands => Some(commands::fit(rail, cx)),
             Self::Goal
             | Self::Plan
-            | Self::Background
             | Self::Agents
             | Self::Screen
             | Self::Changes
@@ -484,17 +476,21 @@ impl RailCard {
         }
     }
 
-    /// What its header offers at its end: the stop for all of the
-    /// background work.
+    /// What its header offers at its end: the stop for all of the thread's
+    /// background work, on the Commands card, or on the Agents card while
+    /// the thread has no commands to list.
     fn action(self, rail: &RailView, cx: &mut Context<RailView>) -> Option<AnyElement> {
-        match self {
-            Self::Background => {
-                let background = rail.background(cx)?;
-                let place = rail.background_place(cx)?;
-                super::background::stop_all(&background, &place, cx)
-            }
-            _ => None,
+        let stops_all = match self {
+            Self::Commands => true,
+            Self::Agents => !commands::present(rail, cx),
+            _ => false,
+        };
+        if !stops_all {
+            return None;
         }
+        let background = rail.background(cx)?;
+        let place = rail.background_place(cx)?;
+        super::background::stop_all(&background, &place, cx)
     }
 
     fn body(
@@ -506,11 +502,6 @@ impl RailCard {
         match self {
             Self::Goal => goal::body(rail, window, cx),
             Self::Plan => plan::body(rail, window, cx),
-            Self::Background => {
-                let background = rail.background(cx)?;
-                let place = rail.background_place(cx)?;
-                Some(super::background::body(&background, &place, window, cx))
-            }
             Self::Agents => agents::body(rail, window, cx),
             Self::Commands => commands::body(rail, window, cx),
             Self::Screen => screen::body(rail, window, cx),
@@ -553,7 +544,8 @@ pub(super) struct RailView {
     screen: screen::Screenshots,
     /// The commands the Commands card lists.
     commands: commands::Commands,
-    /// The piece of background work the timeline pointed out, by its call.
+    /// The piece of background work the timeline pointed out, by its call,
+    /// which the Commands or Agents card marks.
     background_highlight: Option<String>,
 }
 
@@ -617,7 +609,7 @@ impl RailView {
         )
     }
 
-    /// Where the rail draws the background list.
+    /// Where the rail draws pieces of the background work.
     fn background_place(&self, cx: &mut Context<Self>) -> Option<super::background::Place> {
         let rail = cx.entity().downgrade();
         Some(super::background::Place {
@@ -645,14 +637,19 @@ impl RailView {
     }
 
     /// List again what the Screen and Commands cards show, from the
-    /// thread's items as they are now.
+    /// thread's items and background work as they are now.
     pub(super) fn sync(&mut self, cx: &App) {
         let (screen, commands) = (&mut self.screen, &mut self.commands);
-        let listed = self.workspace_store.read(cx).with_entries_for(
+        let store = self.workspace_store.read(cx);
+        let tasks = store
+            .session_status_for(self.session_id.as_deref(), cx)
+            .map(|status| status.background_tasks.as_slice())
+            .unwrap_or_default();
+        let listed = store.with_entries_for(
             self.session_id.as_deref(),
             |timeline| {
                 screen.sync(&timeline.entries);
-                commands.sync(timeline);
+                commands.sync(timeline, tasks);
             },
             cx,
         );
