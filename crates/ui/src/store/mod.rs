@@ -145,6 +145,42 @@ pub enum WorkspaceAttachment {
     Remote { host_id: String, host_name: String },
 }
 
+/// Which host a client names: the one in this process, or a remote one by
+/// its id. Written as `"local"` or the id, the names the client's outboxes
+/// are stored under.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum HostKey {
+    Local,
+    Remote(String),
+}
+
+impl From<String> for HostKey {
+    fn from(name: String) -> Self {
+        if name == "local" {
+            Self::Local
+        } else {
+            Self::Remote(name)
+        }
+    }
+}
+
+impl From<HostKey> for String {
+    fn from(host: HostKey) -> Self {
+        match host {
+            HostKey::Local => "local".into(),
+            HostKey::Remote(host_id) => host_id,
+        }
+    }
+}
+
+/// A thread as a client names it: a session id is unique only on its host.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ThreadKey {
+    pub host: HostKey,
+    pub session_id: String,
+}
+
 /// Where a remote attachment's Preview goes: the paired machine and the
 /// tunnels the attachment's transport opens to it.
 #[cfg(preview_backend)]
@@ -561,31 +597,6 @@ impl WorkspaceStore {
         store
     }
 
-    /// Compatibility path for the mobile coordinator until it adopts the
-    /// attachment identity constructor.
-    pub fn attach_remote(&mut self, host_name: String, cx: &mut Context<Self>) {
-        self.attachment = WorkspaceAttachment::Remote {
-            host_id: String::new(),
-            host_name,
-        };
-        self.connection_state = self.host.connection_state();
-        let changes = self.host.connection_state_changes();
-        self.attachment_tasks.push(cx.spawn(async move |this, cx| {
-            while let Ok(state) = changes.recv().await {
-                if this
-                    .update(cx, |store, cx| {
-                        cx.emit(state.clone());
-                        store.apply_connection_state(state);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }));
-    }
-
     #[cfg(preview_backend)]
     pub(crate) fn preview_reply(
         &mut self,
@@ -804,6 +815,26 @@ impl WorkspaceStore {
 
     pub fn is_remote(&self) -> bool {
         matches!(self.attachment, WorkspaceAttachment::Remote { .. })
+    }
+
+    pub fn host_key(&self) -> HostKey {
+        match &self.attachment {
+            WorkspaceAttachment::Local => HostKey::Local,
+            WorkspaceAttachment::Remote { host_id, .. } => HostKey::Remote(host_id.clone()),
+        }
+    }
+
+    /// This host's thread `session_id`.
+    pub(crate) fn thread_key(&self, session_id: &str) -> ThreadKey {
+        ThreadKey {
+            host: self.host_key(),
+            session_id: session_id.to_owned(),
+        }
+    }
+
+    /// `thread`'s session id, when it is one of this host's threads.
+    pub(crate) fn session_of(&self, thread: ThreadKey) -> Option<String> {
+        (thread.host == self.host_key()).then_some(thread.session_id)
     }
 
     pub fn remote_host_name(&self) -> Option<&str> {

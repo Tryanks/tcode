@@ -62,20 +62,15 @@ fn finish_quit_prompt(window_state: &Entity<WindowState>, epoch: u64, cx: &mut A
 }
 
 fn handle_quit(_: &Quit, shell: &Entity<AppShell>, cx: &mut App) {
-    // Background work outlives the app only on another machine's host.
-    let local = shell.read(cx).attached_locally();
+    // Quitting stops only this machine's host; other machines' work goes on.
     let (working, background) = shell
         .read(cx)
-        .store()
+        .local_store()
         .map(|store| {
             let store = store.read(cx);
             (
                 store.working_sessions_count(),
-                if local {
-                    store.background_sessions_count()
-                } else {
-                    0
-                },
+                store.background_sessions_count(),
             )
         })
         .unwrap_or((0, 0));
@@ -844,10 +839,7 @@ fn main() {
             // meaningful for a host in this process: the marker lives in this
             // machine's data dir, and a remote host's marker is its own.
             if let Some(kernel) = kernel
-                && shell
-                    .read(cx)
-                    .store()
-                    .is_some_and(|store| !store.read(cx).is_remote())
+                && let Some(store) = shell.read(cx).local_store()
                 && let Ok(CommandResponse::PendingRelaunchSection {
                     section: Some(section),
                     session_id,
@@ -855,9 +847,7 @@ fn main() {
                     .control_link
                     .command_blocking(Command::ApplyPendingRelaunch)
             {
-                if let Some(id) = session_id
-                    && let Some(store) = shell.read(cx).store()
-                {
+                if let Some(id) = session_id {
                     store.update(cx, |store, cx| store.show_thread(id, cx));
                 }
                 let window_state = shell.read(cx).window_state();

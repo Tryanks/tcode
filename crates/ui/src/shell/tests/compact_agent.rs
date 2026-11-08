@@ -123,7 +123,7 @@ fn mount_lead_scrolled(
     });
     cx.simulate_resize(size(px(WIDTH), px(852.)));
     settle_panes(cx);
-    let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
+    let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
     let viewport = chat
         .read_with(cx, |chat, _| chat.timeline())
         .read_with(cx, |chat, _| chat.capture_viewport().unwrap());
@@ -179,7 +179,9 @@ fn open_agent_served(
 }
 
 fn focused(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> Option<String> {
-    shell.read_with(cx, |shell, cx| shell.page_thread(cx))
+    shell.read_with(cx, |shell, cx| {
+        shell.page_thread(cx).map(|thread| thread.session_id)
+    })
 }
 
 /// The edge swipe from an agent to its lead: the agent's page is at the

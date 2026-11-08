@@ -1,10 +1,11 @@
 //! One responsive shell, on every client.
 //!
 //! [`AppShell`] is the window: it owns navigation, the layout rule and the
-//! back stack, and it survives everything below it. Beneath it sits at most one
-//! *attachment* — a link to a host and the views over that host's workspace.
-//! Switching hosts replaces the attachment; it does not replace the window's
-//! navigation root, and resizing the window never touches the attachment at all.
+//! back stack, and it survives everything below it. Beneath it sit its
+//! *links* — one per host, each with the store it fills — and the *column*,
+//! the views of the host the window shows. Switching hosts replaces both; it
+//! does not replace the window's navigation root, and resizing the window
+//! never touches either.
 //!
 //! Layout is decided by one rule (`crate::window_seam`): a desktop build is
 //! always the wide split, and a mobile build is a navigation stack — hosts,
@@ -62,7 +63,7 @@ use crate::runtime_event::{
 };
 use crate::settings_page::SettingsPage;
 use crate::sidebar::SessionsSidebar;
-use crate::store::{ShowThread, StoreChange, TopicKind, WorkspaceStore};
+use crate::store::{HostKey, ShowThread, StoreChange, ThreadKey, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
 use crate::window_state::{Destination, OpenPanel, Route, WindowState};
@@ -184,11 +185,11 @@ impl Render for DestinationView {
     }
 }
 
-/// The views and transport for one host. Everything here is replaced when the
-/// window attaches somewhere else, and nothing here is touched by a resize.
-struct ShellAttachment {
-    link: Link,
-    sidebar: Entity<SessionsSidebar>,
+/// The window's views of the threads of one host. Nothing here is touched by
+/// a resize.
+struct Column {
+    /// The host whose threads the panes show.
+    host: HostKey,
     /// The wide layout's chat column, a dock of [`ThreadPanel`]s.
     thread_panes: Entity<DockArea>,
     /// The column's splits gliding toward the layout an edit made.
@@ -232,11 +233,6 @@ struct ShellAttachment {
     /// read back from the chat, whose every render would otherwise draw
     /// the shell again.
     handed: HashMap<gpui::EntityId, HandedToChat>,
-    /// The attachment's preview panel: it answers the preview tools and owns
-    /// the pages each pane's drawer shows.
-    preview: Entity<PreviewPanel>,
-    settings_page: Entity<SettingsPage>,
-    palette: Entity<CommandPalette>,
     /// The workspace split's state (sidebar · chat), owned here so the glide
     /// can give the sidebar the size it lands at: gpui-base's group latches
     /// the first size it measures for a panel, which for one that grew out
@@ -249,13 +245,6 @@ struct ShellAttachment {
     /// Collapsed-only overlay visibility. Purely transient and never persisted;
     /// expanded/non-workspace renders clear it synchronously.
     sidebar_overlay_visible: bool,
-    /// Whether this attachment's host settings have been adopted once.
-    adopted: bool,
-    /// Whether this attachment's saved record has been stamped with the time
-    /// this window reached it.
-    stamped: bool,
-    attention: crate::attention::ApprovalAttention,
-    _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -268,31 +257,48 @@ struct HandedToChat {
     controls: Option<PaneControls>,
 }
 
-/// An attachment's link and the store it fills. The link closes when the
-/// window leaves the attachment; the store stays for the views still drawing
-/// it.
+/// The window's link to one host, the store it fills and the views over
+/// that store alone. Once the link closes it listens to nothing, and the
+/// store stays for the views still drawing it.
 struct Link {
     target: AttachmentTarget,
     store: Entity<WorkspaceStore>,
     open: Option<Attachment>,
+    /// The host's preview panel: it answers the preview tools and owns the
+    /// pages each pane's drawer shows.
+    preview: Entity<PreviewPanel>,
+    sidebar: Entity<SessionsSidebar>,
+    settings_page: Entity<SettingsPage>,
+    palette: Entity<CommandPalette>,
+    /// Whether this host's settings have been adopted once.
+    adopted: bool,
+    /// Whether this host's saved record has been stamped with the time this
+    /// window reached it.
+    stamped: bool,
+    attention: crate::attention::ApprovalAttention,
+    _tasks: Vec<Task<()>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Link {
-    fn link(&self) -> tcode_client::HostLink {
-        self.open
-            .as_ref()
-            .expect("the window's attachment is open")
-            .link()
+    fn key(&self) -> HostKey {
+        self.target.key()
+    }
+
+    fn link(&self) -> Option<tcode_client::HostLink> {
+        self.open.as_ref().map(Attachment::link)
     }
 
     fn close(&mut self, cx: &mut App) {
         if let Some(open) = self.open.take() {
             open.close(cx).close();
         }
+        self._subscriptions.clear();
+        self._tasks.clear();
     }
 }
 
-impl ShellAttachment {
+impl Column {
     /// The chat column's panes, in the layout's order. A closing pane is no
     /// longer one of them: nothing acts on it, focuses it or counts it.
     fn panes(&self, cx: &App) -> Vec<Entity<ThreadPanel>> {
@@ -428,9 +434,9 @@ pub(crate) fn select_current_pane(window: &mut Window, cx: &mut App) {
         return;
     }
     let Some(handle) = shell
-        .attachment
+        .column
         .as_ref()
-        .map(|attachment| attachment.current_pane.focus_handle(cx))
+        .map(|column| column.current_pane.focus_handle(cx))
     else {
         return;
     };
@@ -481,8 +487,8 @@ pub(crate) fn focus_pane_composer(window: &mut Window, cx: &mut App) {
     if shell.compact(cx) {
         return;
     }
-    let Some(chat) = shell.attachment.as_ref().and_then(|attachment| {
-        let pane = attachment
+    let Some(chat) = shell.column.as_ref().and_then(|column| {
+        let pane = column
             .panes(cx)
             .into_iter()
             .find(|pane| pane.focus_handle(cx).contains_focused(window, cx))?;
@@ -506,24 +512,23 @@ pub(crate) fn pane_layouts(window: &Window, cx: &App) -> Vec<PaneLayout> {
         .collect()
 }
 
-/// Whether a pane of this window shows `session_id`. The compact layout has
-/// no panes.
-pub(crate) fn shown_in_pane(session_id: &str, cx: &App) -> bool {
+/// Whether a pane of this window shows `thread`. The compact layout has no
+/// panes.
+pub(crate) fn shown_in_pane(thread: &ThreadKey, cx: &App) -> bool {
     current_shell(cx).is_some_and(|shell| {
         let shell = shell.read(cx);
-        !shell.compact(cx) && shell.pane_showing(session_id, cx).is_some()
+        !shell.compact(cx) && shell.pane_showing_thread(thread, cx).is_some()
     })
 }
 
 /// The thread of the current pane, for what acts on the whole window.
-pub(crate) fn current_thread(cx: &App) -> Option<String> {
+pub(crate) fn current_thread(cx: &App) -> Option<ThreadKey> {
     current_shell(cx)?.read(cx).page_thread(cx)
 }
 
-/// Whether a pane of this window shows `session_id`, the compact page
-/// included.
-pub(crate) fn pane_shows(session_id: &str, cx: &App) -> bool {
-    current_shell(cx).is_some_and(|shell| shell.read(cx).pane_showing(session_id, cx).is_some())
+/// Whether a pane of this window shows `thread`, the compact page included.
+pub(crate) fn pane_shows(thread: &ThreadKey, cx: &App) -> bool {
+    current_shell(cx).is_some_and(|shell| shell.read(cx).pane_showing_thread(thread, cx).is_some())
 }
 
 /// The chat that shows an agent opened from `lead` beside it, for what
@@ -532,15 +537,18 @@ pub(crate) fn pane_shows(session_id: &str, cx: &App) -> bool {
 /// `lead` beside its own lead, which has room for one agent beside it. A
 /// thread shown in a pane and beside its lead in another is the pane's.
 /// None in the compact layout, which shows one thread at a time.
-pub(crate) fn side_host_for(lead: &str, cx: &App) -> Option<Entity<ChatView>> {
+pub(crate) fn side_host_for(lead: &ThreadKey, cx: &App) -> Option<Entity<ChatView>> {
     let shell = current_shell(cx)?;
     let shell = shell.read(cx);
     if shell.compact(cx) {
         return None;
     }
-    let chats: Vec<_> = shell
-        .attachment
-        .as_ref()?
+    let column = shell
+        .column
+        .as_ref()
+        .filter(|column| column.host == lead.host)?;
+    let lead = lead.session_id.as_str();
+    let chats: Vec<_> = column
         .panes(cx)
         .into_iter()
         .map(|pane| pane.read(cx).chat())
@@ -562,12 +570,12 @@ pub(crate) fn open_agent_page(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let selected = session_id.clone();
+    let thread = store.read(cx).thread_key(&session_id);
     let opened = current_shell(cx).is_some_and(|shell| {
-        shell.update(cx, |shell, cx| shell.open_over_lead(session_id, window, cx))
+        shell.update(cx, |shell, cx| shell.open_over_lead(thread, window, cx))
     });
     if !opened {
-        store.update(cx, |store, cx| store.show_thread(selected, cx));
+        store.update(cx, |store, cx| store.show_thread(session_id, cx));
     }
 }
 
@@ -639,7 +647,10 @@ struct PendingNavigationRestore {
 pub struct AppShell {
     window_state: Entity<WindowState>,
     setup: ShellSetup,
-    attachment: Option<ShellAttachment>,
+    /// The hosts this window is linked to.
+    links: Vec<Link>,
+    /// The views of the host the window shows, which is one of `links`.
+    column: Option<Column>,
     /// Saved hosts, pairing by invitation and authentication repair: the hosts
     /// destination, and the same panel Settings → Remote shows.
     hosts: Entity<RemotePanel>,
@@ -667,8 +678,8 @@ pub struct AppShell {
     /// The title last given to the OS window. The title is in the current
     /// language, and a language switch reaches the shell only as a redraw.
     window_title: String,
-    /// Names what the window is attached to: a new one each time the
-    /// attachment is replaced or dropped.
+    /// Names what the window shows: a new one each time the column is
+    /// replaced or dropped.
     scene_key: u64,
     /// The wide window's workspaces on screen: the current one, and while
     /// it rises, the ones it replaced.
@@ -693,7 +704,8 @@ pub struct AppShell {
 /// A workspace the window left, as it was when it left.
 struct Departed {
     key: u64,
-    attachment: Option<ShellAttachment>,
+    column: Option<Column>,
+    links: Vec<Link>,
     route: Route,
     destination: Destination,
 }
@@ -848,13 +860,14 @@ impl AppShell {
             }),
         ];
         let hosts = cx.new(|cx| {
-            let mut panel = RemotePanel::new(None, window_state.clone(), window, cx);
+            let mut panel = RemotePanel::new(window_state.clone(), window, cx);
             panel.set_pairing_error(setup.initial_pairing_error.clone());
             panel
         });
         let mut shell = Self {
             window_state,
-            attachment: None,
+            links: Vec::new(),
+            column: None,
             hosts,
             nav: cx.new(|_| NavStackState::new()),
             back_swipe: None,
@@ -898,9 +911,9 @@ impl AppShell {
             shell.panel_shows_terminal = snapshot.panel == NavigationPanel::Terminal;
             if let Some(session_id) = snapshot.session_id
                 && let Some(pane) = shell
-                    .attachment
+                    .column
                     .as_ref()
-                    .map(|attachment| attachment.current_pane.clone())
+                    .map(|column| column.current_pane.clone())
             {
                 // Bind once, before the baseline can trigger an empty-workspace
                 // draft fallback. Validation below never binds it again.
@@ -921,38 +934,26 @@ impl AppShell {
         self.window_state.clone()
     }
 
-    /// The workspace this window is attached to, if any.
+    /// The workspace of the host the window shows, if any.
     pub fn store(&self) -> Option<Entity<WorkspaceStore>> {
-        self.attachment
-            .as_ref()
-            .map(|attachment| attachment.link.store.clone())
+        Some(self.column_link()?.store.clone())
+    }
+
+    /// The workspace of the host in this process, while the window is
+    /// linked to it.
+    pub fn local_store(&self) -> Option<Entity<WorkspaceStore>> {
+        Some(self.link_of(&HostKey::Local)?.store.clone())
     }
 
     pub fn link(&self) -> Option<tcode_client::HostLink> {
-        self.attachment
-            .as_ref()
-            .map(|attachment| attachment.link.link())
-    }
-
-    /// Whether the window shows this machine's own host, which ends with
-    /// the app.
-    pub fn attached_locally(&self) -> bool {
-        self.attachment.as_ref().is_some_and(|attachment| {
-            matches!(
-                attachment.link.target,
-                crate::remote::AttachmentTarget::Local
-            )
-        })
+        self.column_link()?.link()
     }
 
     /// Where this window is, for a window that opens once it has closed
     /// ([`ShellSetup::reopen`]).
     pub fn current_place(&self, cx: &App) -> ShellPlace {
         ShellPlace {
-            target: self
-                .attachment
-                .as_ref()
-                .map(|attachment| attachment.link.target.clone()),
+            target: self.column_link().map(|link| link.target.clone()),
             navigation: self.navigation_snapshot(cx),
             sidebar_collapsed: self.window_state.read(cx).sidebar_collapsed,
         }
@@ -962,7 +963,20 @@ impl AppShell {
     #[allow(private_interfaces)]
     #[doc(hidden)]
     pub fn preview_lifecycle(&self, cx: &App) -> Option<Entity<BrowserLifecycle>> {
-        Some(self.attachment.as_ref()?.preview.read(cx).lifecycle())
+        Some(self.column_link()?.preview.read(cx).lifecycle())
+    }
+
+    fn link_of(&self, host: &HostKey) -> Option<&Link> {
+        self.links.iter().find(|link| link.key() == *host)
+    }
+
+    fn link_of_mut(&mut self, host: &HostKey) -> Option<&mut Link> {
+        self.links.iter_mut().find(|link| link.key() == *host)
+    }
+
+    /// The link of the host the column shows.
+    fn column_link(&self) -> Option<&Link> {
+        self.link_of(&self.column.as_ref()?.host)
     }
 }
 
@@ -976,7 +990,7 @@ impl AppShell {
         let host_id = store
             .as_ref()
             .and_then(|store| store.read(cx).remote_host_id().map(str::to_owned));
-        let session_id = self.page_thread(cx);
+        let session_id = self.page_thread(cx).map(|thread| thread.session_id);
         let panel = self
             .pending_navigation_restore
             .as_ref()
@@ -1046,7 +1060,7 @@ impl AppShell {
             self.pending_navigation_restore = None;
             return;
         };
-        let shown = self.page_thread(cx);
+        let shown = self.page_thread(cx).map(|thread| thread.session_id);
         if !store.read(cx).index_hydrated() {
             if shown.as_deref() != Some(&pending.session_id) {
                 self.pending_navigation_restore = None;
@@ -1098,7 +1112,7 @@ impl AppShell {
         }
     }
 
-    /// Point this window at `target`, replacing the attachment beneath the
+    /// Point this window at `target`, replacing its links and column beneath the
     /// navigation root. The window, its stack and its overlays stay put.
     pub fn switch_to(
         &mut self,
@@ -1110,17 +1124,17 @@ impl AppShell {
         // link down and building the same one again. A link the machine
         // refused is not reused: it stopped reconnecting, and re-pairing
         // lands here with the same machine.
-        if self.attachment.as_ref().is_some_and(|current| {
-            same_target(&current.link.target, &target)
+        if self.column_link().is_some_and(|current| {
+            same_target(&current.target, &target)
                 && !matches!(
-                    current.link.store.read(cx).connection_state(),
+                    current.store.read(cx).connection_state(),
                     tcode_client::ConnectionState::Offline { reason } if reason.is_terminal()
                 )
         }) {
             self.go(Destination::Threads, cx);
             return;
         }
-        // Never drop a working attachment for one this client cannot open.
+        // Never drop a working link for one this client cannot open.
         let reachable = match &target {
             AttachmentTarget::Local => self.setup.local.is_some(),
             AttachmentTarget::Remote(_) => self.setup.client_host.is_some(),
@@ -1136,34 +1150,37 @@ impl AppShell {
     /// Leave the current host without opening another one. The host keeps
     /// running; only this window's link to it closes.
     pub fn detach(&mut self, cx: &mut Context<Self>) {
-        let Some(attachment) = self.attachment.take() else {
+        if self.links.is_empty() {
             return;
-        };
-        self.retire(Some(attachment), cx);
-        self.hosts.update(cx, |hosts, cx| hosts.set_store(None, cx));
+        }
+        let links = std::mem::take(&mut self.links);
+        self.retire(links, cx);
+        self.sync_hosts_panel(cx);
         self.window_state
             .update(cx, |state, cx| state.leave_workspace(cx));
         cx.notify();
     }
 
-    /// Close what the window was attached to, if anything, and, in the wide
-    /// layout, keep its views on screen, inert, for the next one to rise
-    /// over. Its preview's page goes at once: a native view draws over
+    /// Close `links` and the column, if any, and, in the wide layout, keep
+    /// their views on screen, inert, for the next workspace to rise over.
+    /// The column's preview pages go at once: a native view draws over
     /// everything, the workspace rising over it included.
-    fn retire(&mut self, old: Option<ShellAttachment>, cx: &mut Context<Self>) {
-        let old = old.map(|mut old| {
-            old.link.close(cx);
-            old._subscriptions.clear();
-            old._tasks.clear();
-            for pane in old.all_panes(cx) {
+    fn retire(&mut self, mut links: Vec<Link>, cx: &mut Context<Self>) {
+        for link in &mut links {
+            link.close(cx);
+        }
+        let column = self.column.take().map(|mut column| {
+            column._subscriptions.clear();
+            for pane in column.all_panes(cx) {
                 pane.update(cx, |pane, cx| pane.release_preview(cx));
             }
-            old
+            column
         });
         if !self.compact(cx) {
             self.departed.push(Departed {
                 key: self.scene_key,
-                attachment: old,
+                column,
+                links,
                 route: self.window_state.read(cx).route(),
                 destination: self.destination(cx),
             });
@@ -1171,8 +1188,15 @@ impl AppShell {
         self.scene_key += 1;
     }
 
+    /// Hosts follows the window onto the hosts it is linked to now.
+    fn sync_hosts_panel(&self, cx: &mut Context<Self>) {
+        let stores = self.links.iter().map(|link| link.store.clone()).collect();
+        self.hosts
+            .update(cx, |hosts, cx| hosts.set_stores(stores, cx));
+    }
+
     fn attach(&mut self, target: AttachmentTarget, window: &mut Window, cx: &mut Context<Self>) {
-        // A local host that does not start is an attachment failure like any
+        // A local host that does not start is a failure to link like any
         // other: Hosts shows why, and whatever this window was on stays.
         let local = match (&target, &self.setup.local) {
             (AttachmentTarget::Local, Some(start)) => match start(cx) {
@@ -1192,67 +1216,82 @@ impl AppShell {
                 .update(cx, |hosts, cx| hosts.set_local_failure(None, cx));
         }
         self.pending_navigation_restore = None;
-        let old = self.attachment.take();
-        self.retire(old, cx);
-        let Some(link) = Attachment::open(
-            target,
-            local,
-            self.setup.client_host.clone(),
-            self.setup.seed_blocking,
-            cx,
-        ) else {
+        let links = std::mem::take(&mut self.links);
+        self.retire(links, cx);
+        let host = self.open_link(target, local, window, cx);
+        self.sync_hosts_panel(cx);
+        let Some(host) = host else {
             log::error!("this client cannot reach the requested host");
             self.window_state
                 .update(cx, |state, cx| state.leave_workspace(cx));
             cx.notify();
             return;
         };
-        if let Some(host) = &self.setup.client_host {
-            host.set_last_host_id(match &link.target {
-                AttachmentTarget::Local => None,
-                AttachmentTarget::Remote(host) => Some(host.host_id.as_str()),
-            });
-        }
-
-        let store = link.store.clone();
+        let store = self.link_of(&host).expect("just opened").store.clone();
         let pending_session = store
             .read(cx)
             .pending_sessions()
             .first()
             .map(|(id, _)| id.clone());
+        self.show_column(host, window, cx);
+        if let Some(id) = pending_session {
+            store.update(cx, |store, cx| store.show_thread(id, cx));
+        }
+        cx.notify();
+    }
+
+    /// Link this window to `target`, over `local` when it is the host in
+    /// this process. `None` where this client cannot reach it.
+    fn open_link(
+        &mut self,
+        target: AttachmentTarget,
+        local: Option<tcode_client::host::Transport>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<HostKey> {
+        let open = Attachment::open(
+            target,
+            local,
+            self.setup.client_host.clone(),
+            self.setup.seed_blocking,
+            cx,
+        )?;
+        if let Some(host) = &self.setup.client_host {
+            host.set_last_host_id(match &open.target {
+                AttachmentTarget::Local => None,
+                AttachmentTarget::Remote(host) => Some(host.host_id.as_str()),
+            });
+        }
+        let host = open.target.key();
+        let store = open.store.clone();
         let preview =
             cx.new(|cx| PreviewPanel::new(store.clone(), self.window_state.clone(), window, cx));
-        let sidebar =
-            cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
         let mut subscriptions = vec![
             cx.observe_in(&store, window, |this, store, window, cx| {
-                this.reconcile_panes(cx);
-                if let Some(attachment) = &mut this.attachment
-                    && attachment.attention.update(store.read(cx), cx)
-                {
-                    crate::attention::request(window);
-                }
-                this.stamp_connected(cx);
-                this.reconcile_navigation_restore(cx);
-                this.schedule_navigation_save(cx);
-                cx.notify();
-            }),
-            cx.subscribe_in(&store, window, |this, _, event: &RuntimeEvent, w, cx| {
-                this.present_app_event(event, w, cx);
-            }),
-            cx.subscribe_in(&store, window, |this, _, shown: &ShowThread, w, cx| {
-                this.show_thread(shown, w, cx);
+                this.host_changed(&store, window, cx)
             }),
             cx.subscribe_in(
                 &store,
                 window,
-                |this, _, change: &StoreChange, window, cx| {
+                |this, store, event: &RuntimeEvent, w, cx| {
+                    this.present_app_event(store, event, w, cx);
+                },
+            ),
+            cx.subscribe_in(&store, window, |this, store, shown: &ShowThread, w, cx| {
+                this.show_thread(store, shown, w, cx);
+            }),
+            cx.subscribe_in(
+                &store,
+                window,
+                |this, store, change: &StoreChange, window, cx| {
                     if change.topic == TopicKind::Settings {
-                        this.adopt_host_settings(window, cx);
+                        let host = store.read(cx).host_key();
+                        this.adopt_host_settings(&host, window, cx);
                     }
                 },
             ),
         ];
+        subscriptions.extend(PreviewPanel::observe_native_fade(&preview, cx));
         // The host sends a client only the requests of threads it renders,
         // so only a client that can render pages has any to answer.
         #[cfg(preview_backend)]
@@ -1303,7 +1342,38 @@ impl AppShell {
                 }
             })
         };
+        self.links.push(Link {
+            target: open.target.clone(),
+            store: store.clone(),
+            open: Some(open),
+            preview,
+            sidebar: cx
+                .new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx)),
+            settings_page: cx
+                .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
+            palette: cx.new(|cx| {
+                CommandPalette::new(store.clone(), self.window_state.clone(), window, cx)
+            }),
+            adopted: false,
+            stamped: false,
+            attention: Default::default(),
+            #[cfg(preview_backend)]
+            _tasks: vec![preview_pump],
+            #[cfg(not(preview_backend))]
+            _tasks: Vec::new(),
+            _subscriptions: subscriptions,
+        });
+        self.adopt_host_settings(&host, window, cx);
+        Some(host)
+    }
 
+    /// Show the threads of `host`, which the window is linked to, in a column
+    /// of one pane waiting for a thread.
+    fn show_column(&mut self, host: HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(link) = self.link_of(&host) else {
+            return;
+        };
+        let (store, preview) = (link.store.clone(), link.preview.clone());
         let thread_panel = self.new_pane(&store, &preview, None, window, cx);
         let shell = cx.entity().downgrade();
         let drop_landing = Rc::new(Cell::new(None));
@@ -1323,8 +1393,7 @@ impl AppShell {
             area.set_center(DockLayout::tabs().panel(thread_panel.clone()), window, cx);
             area
         });
-        subscriptions.extend(PreviewPanel::observe_native_fade(&preview, cx));
-        subscriptions.push(cx.subscribe_in(
+        let subscriptions = vec![cx.subscribe_in(
             &thread_panes,
             window,
             |this, _, event: &DockEvent, window, cx| {
@@ -1338,8 +1407,9 @@ impl AppShell {
                     cx.notify();
                 }
             },
-        ));
-        self.attachment = Some(ShellAttachment {
+        )];
+        self.column = Some(Column {
+            host,
             thread_panes,
             glides: Default::default(),
             window_seen: None,
@@ -1355,13 +1425,6 @@ impl AppShell {
             held_split: None,
             current_pane: thread_panel,
             handed: HashMap::new(),
-            settings_page: cx
-                .new(|cx| SettingsPage::new(store.clone(), self.window_state.clone(), window, cx)),
-            palette: cx.new(|cx| {
-                CommandPalette::new(store.clone(), self.window_state.clone(), window, cx)
-            }),
-            preview,
-            sidebar,
             split: cx.new(|_| ResizableState::default()),
             panel_glide: crate::motion::resize_glide::ResizeGlide::new(
                 "workspace-panels",
@@ -1369,30 +1432,11 @@ impl AppShell {
             ),
             sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             sidebar_overlay_visible: false,
-            adopted: false,
-            stamped: false,
-            attention: Default::default(),
-            link: Link {
-                target: link.target.clone(),
-                store: link.store.clone(),
-                open: Some(link),
-            },
-            #[cfg(preview_backend)]
-            _tasks: vec![preview_pump],
-            #[cfg(not(preview_backend))]
-            _tasks: Vec::new(),
             _subscriptions: subscriptions,
         });
-        self.hosts
-            .update(cx, |hosts, cx| hosts.set_store(Some(store.clone()), cx));
-        self.adopt_host_settings(window, cx);
         // The previous host's pages are not this host's: land on its threads.
         self.window_state
             .update(cx, |state, cx| state.enter_workspace(cx));
-        if let Some(id) = pending_session {
-            store.update(cx, |store, cx| store.show_thread(id, cx));
-        }
-        cx.notify();
     }
 
     fn new_pane(
@@ -1441,12 +1485,14 @@ impl AppShell {
         if compact {
             self.reconcile_leads(cx);
         }
-        let Some(attachment) = &self.attachment else {
+        let Some(column) = &self.column else {
             return;
         };
-        let panes = attachment.panes(cx);
-        let store = attachment.link.store.clone();
-        let current_pane = attachment.current_pane.clone();
+        let panes = column.panes(cx);
+        let Some(store) = self.store() else {
+            return;
+        };
+        let current_pane = column.current_pane.clone();
         let mut closed: Vec<_> = panes
             .iter()
             .filter(|pane| {
@@ -1470,21 +1516,21 @@ impl AppShell {
                     pane.update(cx, |pane, cx| pane.set_session(None, cx));
                 }
             } else {
-                if let Some(attachment) = self.attachment.as_mut()
-                    && attachment.zoom.pane() == Some(&pane)
+                if let Some(column) = self.column.as_mut()
+                    && column.zoom.pane() == Some(&pane)
                 {
-                    attachment.zoom.zoom_out();
+                    column.zoom.zoom_out();
                 }
                 self.glide_out(&pane, cx);
                 remaining -= 1;
             }
         }
-        if let Some(attachment) = self.attachment.as_mut() {
-            let panes = attachment.panes(cx);
-            if !panes.contains(&attachment.current_pane)
+        if let Some(column) = self.column.as_mut() {
+            let panes = column.panes(cx);
+            if !panes.contains(&column.current_pane)
                 && let Some(first) = panes.first()
             {
-                attachment.current_pane = first.clone();
+                column.current_pane = first.clone();
             }
         }
     }
@@ -1493,9 +1539,9 @@ impl AppShell {
     /// included: it is the current pane.
     fn pane_entered(&mut self, pane: Entity<ThreadPanel>, cx: &mut Context<Self>) {
         if self
-            .attachment
+            .column
             .as_ref()
-            .is_none_or(|attachment| !attachment.panes(cx).contains(&pane))
+            .is_none_or(|column| !column.panes(cx).contains(&pane))
         {
             return;
         }
@@ -1506,15 +1552,14 @@ impl AppShell {
     /// `pane` is the current pane. Coming from another pane, the user has
     /// moved on: a draft still in flight for that one lands nowhere.
     fn set_current_pane(&mut self, pane: &Entity<ThreadPanel>, cx: &mut Context<Self>) {
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        if attachment.current_pane != *pane {
-            attachment.current_pane = pane.clone();
-            attachment
-                .link
-                .store
-                .update(cx, |store, _| store.selection_moved_on());
+        if column.current_pane != *pane {
+            column.current_pane = pane.clone();
+            if let Some(store) = self.store() {
+                store.update(cx, |store, _| store.selection_moved_on());
+            }
         }
     }
 
@@ -1527,11 +1572,13 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(attachment) = &self.attachment else {
+        let Some(column) = &self.column else {
             return;
         };
-        let store = attachment.link.store.clone();
-        let panes = attachment.panes(cx);
+        let Some(store) = self.store() else {
+            return;
+        };
+        let panes = column.panes(cx);
         store.update(cx, |store, cx| {
             if !store.is_thread_open(session_id) {
                 store.open_thread(session_id, cx);
@@ -1568,8 +1615,8 @@ impl AppShell {
         replacing: Option<&str>,
         cx: &App,
     ) -> Option<Entity<ThreadPanel>> {
-        let attachment = self.attachment.as_ref()?;
-        let panes = attachment.panes(cx);
+        let column = self.column.as_ref()?;
+        let panes = column.panes(cx);
         self.pane_showing(session_id, cx)
             .or_else(|| {
                 panes
@@ -1582,14 +1629,55 @@ impl AppShell {
             .or_else(|| self.pane_showing(replacing?, cx))
             .or_else(|| {
                 panes
-                    .contains(&attachment.current_pane)
-                    .then(|| attachment.current_pane.clone())
+                    .contains(&column.current_pane)
+                    .then(|| column.current_pane.clone())
             })
             .or_else(|| panes.first().cloned())
     }
 
-    /// Put `shown` in its pane.
-    fn show_thread(&mut self, shown: &ShowThread, window: &mut Window, cx: &mut Context<Self>) {
+    /// What a change of `store` changes for the window.
+    fn host_changed(
+        &mut self,
+        store: &Entity<WorkspaceStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host = store.read(cx).host_key();
+        if self
+            .column
+            .as_ref()
+            .is_some_and(|column| column.host == host)
+        {
+            self.reconcile_panes(cx);
+        }
+        if let Some(link) = self.links.iter_mut().find(|link| link.key() == host)
+            && link.attention.update(store.read(cx), cx)
+        {
+            crate::attention::request(window);
+        }
+        self.stamp_connected(&host, cx);
+        self.reconcile_navigation_restore(cx);
+        self.schedule_navigation_save(cx);
+        cx.notify();
+    }
+
+    /// Put `shown`, a thread of `store`'s host, in its pane. The column
+    /// shows one host's threads.
+    fn show_thread(
+        &mut self,
+        store: &Entity<WorkspaceStore>,
+        shown: &ShowThread,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let host = store.read(cx).host_key();
+        if self
+            .column
+            .as_ref()
+            .is_none_or(|column| column.host != host)
+        {
+            return;
+        }
         let session_id = shown.session_id.as_str();
         if self.compact(cx) {
             self.unwind_leads(session_id, cx);
@@ -1624,11 +1712,11 @@ impl AppShell {
         if !beside {
             self.bind_pane(pane, session_id, window, cx);
         }
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        if attachment.zoom.pane().is_some_and(|zoomed| zoomed != pane) {
-            attachment.zoom.zoom_out();
+        if column.zoom.pane().is_some_and(|zoomed| zoomed != pane) {
+            column.zoom.zoom_out();
         }
         self.set_current_pane(pane, cx);
         self.blur_navigation(window, cx);
@@ -1639,9 +1727,9 @@ impl AppShell {
         }
         let unheld = window.focused(cx).is_none()
             && self
-                .attachment
+                .column
                 .as_ref()
-                .is_some_and(|attachment| attachment.panes(cx).len() == 1);
+                .is_some_and(|column| column.panes(cx).len() == 1);
         if asked || unheld {
             chat.update(cx, |chat, cx| {
                 if beside {
@@ -1660,24 +1748,17 @@ impl AppShell {
     /// Record on the saved record when this window actually reached the host,
     /// so its row in Hosts can say how recently it worked. Only a live
     /// connection counts; an attempt that never came up is not one.
-    fn stamp_connected(&mut self, cx: &mut Context<Self>) {
-        let Some(attachment) = &mut self.attachment else {
+    fn stamp_connected(&mut self, host: &HostKey, cx: &mut Context<Self>) {
+        let Some(link) = self.link_of_mut(host) else {
             return;
         };
-        let AttachmentTarget::Remote(host) = &attachment.link.target else {
+        let AttachmentTarget::Remote(host) = &link.target else {
             return;
         };
-        if attachment.stamped
-            || !attachment
-                .link
-                .store
-                .read(cx)
-                .connection_state()
-                .is_connected()
-        {
+        if link.stamped || !link.store.read(cx).connection_state().is_connected() {
             return;
         }
-        attachment.stamped = true;
+        link.stamped = true;
         if let Some(client) = cx.try_global::<crate::remote::ClientAttachment>() {
             // The timestamp mutation must share the transport's persistence
             // transaction so it cannot restore a pre-migration address.
@@ -1687,18 +1768,18 @@ impl AppShell {
         }
     }
 
-    /// Take the attached host's language, theme and sidebar state once its
-    /// settings exist. Client preferences already override them inside the
-    /// store, so this is the same value the settings page shows.
-    fn adopt_host_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(attachment) = &mut self.attachment else {
+    /// Take `host`'s language, theme and sidebar state once its settings
+    /// exist. Client preferences already override them inside the store, so
+    /// this is the same value the settings page shows.
+    fn adopt_host_settings(&mut self, host: &HostKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(link) = self.link_of_mut(host) else {
             return;
         };
-        let store = attachment.link.store.read(cx);
-        if (attachment.adopted && store.scope().is_full()) || !store.settings_hydrated() {
+        let store = link.store.read(cx);
+        if (link.adopted && store.scope().is_full()) || !store.settings_hydrated() {
             return;
         }
-        attachment.adopted = true;
+        link.adopted = true;
         let settings = store.settings();
         crate::settings::apply_locale(settings.language.as_deref());
         crate::settings_page::apply_theme(settings.theme_mode, window, cx);
@@ -1724,10 +1805,10 @@ impl AppShell {
         if state.route() != Route::Chat || !page || crate::window_seam::is_mobile(cx) {
             return;
         }
-        let Some(attachment) = &self.attachment else {
+        let Some(column) = &self.column else {
             return;
         };
-        let pane = attachment.current_pane.clone();
+        let pane = column.current_pane.clone();
         if pane.read(cx).session_id().is_some() {
             let chat = pane.read(cx).chat();
             chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
@@ -1747,17 +1828,17 @@ impl AppShell {
         if self.compact(cx) {
             return None;
         }
-        let attachment = self.attachment.as_ref()?;
-        let panes = attachment.panes(cx);
+        let column = self.column.as_ref()?;
+        let panes = column.panes(cx);
         let closable = pane
             .read(cx)
             .group()
             .is_some_and(|group| group.read(cx).is_closable(cx));
-        let zoomed = attachment.zoom.is_zoomed();
+        let zoomed = column.zoom.is_zoomed();
         let split = |placement| self.split_allowed(pane, placement, window, cx);
         // The panes beneath a zoomed one, or one on its way back to its slot,
         // are covered, so it has no neighbours.
-        let covered = attachment.zoom.pane().is_some();
+        let covered = column.zoom.pane().is_some();
         let neighbours =
             Side::ALL.map(|side| !covered && self.neighbour_of(pane, side, cx).is_some());
         Some(PaneControls {
@@ -1773,23 +1854,35 @@ impl AppShell {
     }
 
     fn acting_pane(&self) -> Option<Entity<ThreadPanel>> {
-        Some(self.attachment.as_ref()?.current_pane.clone())
+        Some(self.column.as_ref()?.current_pane.clone())
     }
 
     /// The thread of the pane last in use: the compact page's, and what the
     /// window as a whole is about.
-    fn page_thread(&self, cx: &App) -> Option<String> {
-        let page = self.attachment.as_ref()?.page();
-        page.read(cx).session_id().map(str::to_owned)
+    fn page_thread(&self, cx: &App) -> Option<ThreadKey> {
+        let column = self.column.as_ref()?;
+        let session_id = column.page().read(cx).session_id()?;
+        Some(ThreadKey {
+            host: column.host.clone(),
+            session_id: session_id.to_owned(),
+        })
     }
 
-    /// The pane showing `session_id`.
+    /// The pane showing `session_id`, a thread of the column's host.
     fn pane_showing(&self, session_id: &str, cx: &App) -> Option<Entity<ThreadPanel>> {
-        self.attachment
+        self.column
             .as_ref()?
             .panes(cx)
             .into_iter()
             .find(|pane| pane.read(cx).session_id() == Some(session_id))
+    }
+
+    /// The pane showing `thread`.
+    fn pane_showing_thread(&self, thread: &ThreadKey, cx: &App) -> Option<Entity<ThreadPanel>> {
+        self.column
+            .as_ref()
+            .filter(|column| column.host == thread.host)?;
+        self.pane_showing(&thread.session_id, cx)
     }
 
     /// A pane on `placement`'s side of `from`, with the keyboard and waiting
@@ -1804,14 +1897,14 @@ impl AppShell {
         if self.compact(cx) || !self.split_allowed(from, placement, window, cx) {
             return None;
         }
-        let attachment = self.attachment.as_ref()?;
+        let column = self.column.as_ref()?;
         let node = from.read(cx).group()?.read(cx).node();
         let beside = from.read(cx).session_id().map(str::to_owned);
-        let store = attachment.link.store.clone();
-        let preview = attachment.preview.clone();
-        let area = attachment.thread_panes.clone();
+        let link = self.column_link()?;
+        let (store, preview) = (link.store.clone(), link.preview.clone());
+        let area = column.thread_panes.clone();
         let pane = self.new_pane(&store, &preview, None, window, cx);
-        self.attachment.as_mut()?.zoom.zoom_out();
+        self.column.as_mut()?.zoom.zoom_out();
         let before = self.glide_before_edit(window, cx);
         area.update(cx, |area, cx| {
             // `DockArea::split_at` splits only a panel the area already
@@ -1892,10 +1985,10 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return;
         };
-        let Some(pane) = attachment.panes(cx).into_iter().find(|pane| {
+        let Some(pane) = column.panes(cx).into_iter().find(|pane| {
             pane.read(cx)
                 .group()
                 .is_some_and(|group| group.read(cx).node() == target.node())
@@ -1904,7 +1997,7 @@ impl AppShell {
         };
         // The thread's ghost goes into the drop's placeholder, which shows
         // where the thread opens.
-        let into = attachment.drop_landing.take();
+        let into = column.drop_landing.take();
         match target.placement() {
             Some(placement) => {
                 if !self.open_in_new_pane(session_id, &pane, &[placement], window, cx) {
@@ -1925,7 +2018,7 @@ impl AppShell {
     /// coordinates: the part of the hovered pane the dock's drop names, if it
     /// lands.
     fn drop_target(&self, window: &Window, cx: &App) -> Option<gpui::Bounds<Pixels>> {
-        self.attachment.as_ref()?.panes(cx).iter().find_map(|pane| {
+        self.column.as_ref()?.panes(cx).iter().find_map(|pane| {
             let indicator = pane
                 .read(cx)
                 .group()?
@@ -1948,18 +2041,18 @@ impl AppShell {
         window: &Window,
         cx: &App,
     ) -> bool {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let (Some(column), Some(link)) = (self.column.as_ref(), self.column_link()) else {
             return false;
         };
-        let Some(session_id) = attachment.sidebar.read(cx).dragged_session() else {
+        let Some(session_id) = link.sidebar.read(cx).dragged_session() else {
             return false;
         };
         // The panes beneath a zoomed one are covered, and it is in no tab
         // group to drop on.
-        if attachment.zoom.pane().is_some() || self.pane_showing(session_id, cx).is_some() {
+        if column.zoom.pane().is_some() || self.pane_showing(session_id, cx).is_some() {
             return false;
         }
-        attachment
+        column
             .panes(cx)
             .into_iter()
             .find(|pane| pane.read(cx).bounds().contains(&bounds.center()))
@@ -2008,14 +2101,14 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return false;
         };
         let Some(group) = pane.read(cx).group() else {
             return false;
         };
-        attachment.zoom.zoom_out();
-        let panes = attachment.panes(cx);
+        column.zoom.zoom_out();
+        let panes = column.panes(cx);
         if panes.len() < 2 || !group.read(cx).is_closable(cx) {
             return false;
         }
@@ -2033,13 +2126,13 @@ impl AppShell {
     /// shut, after which [`Self::remove_closed`] takes it out.
     fn glide_out(&mut self, pane: &Entity<ThreadPanel>, cx: &mut Context<Self>) {
         pane.update(cx, |pane, cx| pane.set_closing(cx));
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        let area = attachment.thread_panes.read(cx);
+        let area = column.thread_panes.read(cx);
         let size = area.bounds().size;
         if let Some(tree) = area.layout(DockPlacement::Center).cloned() {
-            attachment
+            column
                 .glides
                 .close(&tree, size, PanelId::from(pane.entity_id()));
         }
@@ -2049,13 +2142,15 @@ impl AppShell {
     /// Take out the closing panes whose split has stopped gliding, closing
     /// the threads they showed unless a pane shows them again by now.
     fn remove_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return;
         };
-        let area = attachment.thread_panes.clone();
-        let store = attachment.link.store.clone();
-        let panes = attachment.panes(cx);
-        for pane in attachment.closed_panes(cx) {
+        let area = column.thread_panes.clone();
+        let Some(store) = self.store() else {
+            return;
+        };
+        let panes = column.panes(cx);
+        for pane in column.closed_panes(cx) {
             let session_id = pane.read(cx).session_id().map(str::to_owned);
             area.update(cx, |area, cx| area.remove_panel(pane, window, cx));
             if let Some(session_id) = session_id
@@ -2076,15 +2171,15 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<crate::panes::Before> {
-        let attachment = self.attachment.as_ref()?;
-        let area = attachment.thread_panes.clone();
+        let column = self.column.as_ref()?;
+        let area = column.thread_panes.clone();
         let (targets, before) = {
             let area = area.read(cx);
             let tree = area.layout(DockPlacement::Center)?;
             let size = area.bounds().size;
             (
-                attachment.glides.targets(tree, size),
-                attachment.glides.before(tree, size),
+                column.glides.targets(tree, size),
+                column.glides.before(tree, size),
             )
         };
         area.update(cx, |area, cx| {
@@ -2100,13 +2195,13 @@ impl AppShell {
         let Some(before) = before else {
             return;
         };
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        let area = attachment.thread_panes.read(cx);
+        let area = column.thread_panes.read(cx);
         let size = area.bounds().size;
         if let Some(tree) = area.layout(DockPlacement::Center).cloned() {
-            attachment.glides.begin(&before, &tree, size);
+            column.glides.begin(&before, &tree, size);
         }
         cx.notify();
     }
@@ -2122,27 +2217,27 @@ impl AppShell {
     fn glide_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
         let column_shown = !compact && self.window_state.read(cx).route() == Route::Chat;
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        let handle_held = attachment.split_handle_held.take();
+        let handle_held = column.split_handle_held.take();
         if handle_held.is_none() {
-            attachment.held_split = None;
+            column.held_split = None;
         }
         let seen = (
             window.viewport_size(),
             (window.is_maximized(), window.is_fullscreen()),
         );
-        let jumped = std::mem::replace(&mut attachment.window_seen, column_shown.then_some(seen))
+        let jumped = std::mem::replace(&mut column.window_seen, column_shown.then_some(seen))
             .filter(|_| column_shown)
             .filter(|(size, state)| crate::panes::window_jumped(*size, seen.0, *state != seen.1))
             .map(|(size, _)| (seen.0.width - size.width, seen.0.height - size.height));
-        let panes = attachment.all_panes(cx);
+        let panes = column.all_panes(cx);
         let closing = panes.iter().any(|pane| pane.read(cx).is_closing());
-        if attachment.glides.is_idle() && !closing && jumped.is_none() {
+        if column.glides.is_idle() && !closing && jumped.is_none() {
             return;
         }
-        let area = attachment.thread_panes.clone();
+        let area = column.thread_panes.clone();
         let (tree, size) = {
             let area = area.read(cx);
             (
@@ -2159,10 +2254,10 @@ impl AppShell {
             && size.width > px(0.)
         {
             let now = gpui::size(size.width + wider, size.height + taller);
-            attachment.glides.resize(&tree, size, now);
+            column.glides.resize(&tree, size, now);
         }
         if let Some((axis, at)) = handle_held
-            && attachment.held_split.is_none()
+            && column.held_split.is_none()
         {
             let painted = |panel| {
                 panes
@@ -2170,15 +2265,15 @@ impl AppShell {
                     .find(|pane| PanelId::from(pane.entity_id()) == panel)
                     .map(|pane| pane.read(cx).bounds())
             };
-            attachment.held_split = crate::panes::held_split(tree.root(), axis, at, &painted);
+            column.held_split = crate::panes::held_split(tree.root(), axis, at, &painted);
         }
-        if let Some(split) = attachment.held_split {
-            attachment.glides.stop(split);
+        if let Some(split) = column.held_split {
+            column.glides.stop(split);
         }
         let frame = if compact {
-            attachment.glides.land(&tree, size)
+            column.glides.land(&tree, size)
         } else {
-            attachment.glides.sample(&tree, size, window, cx)
+            column.glides.sample(&tree, size, window, cx)
         };
         area.update(cx, |area, cx| {
             for (node, sizes) in frame.sizes {
@@ -2201,10 +2296,10 @@ impl AppShell {
     /// Land every glide at once and take out the panes closing, for an edit
     /// that does not divide what they leave: a zoom, a layout put in.
     fn land_glides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        let area = attachment.thread_panes.clone();
+        let area = column.thread_panes.clone();
         let (tree, size) = {
             let area = area.read(cx);
             (
@@ -2215,8 +2310,8 @@ impl AppShell {
         let Some(tree) = tree else {
             return;
         };
-        let frame = attachment.glides.land(&tree, size);
-        let panes = attachment.all_panes(cx);
+        let frame = column.glides.land(&tree, size);
+        let panes = column.all_panes(cx);
         area.update(cx, |area, cx| {
             for (node, sizes) in frame.sizes {
                 area.set_split_sizes(node, sizes, window, cx);
@@ -2240,21 +2335,21 @@ impl AppShell {
         if self.compact(cx) {
             return;
         }
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return;
         };
-        let zoomed = attachment.zoom.pane() == Some(&pane);
-        if !zoomed && attachment.panes(cx).len() < 2 {
+        let zoomed = column.zoom.pane() == Some(&pane);
+        if !zoomed && column.panes(cx).len() < 2 {
             return;
         }
         self.land_glides(window, cx);
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
         if zoomed {
-            attachment.zoom.toggle();
+            column.zoom.toggle();
         } else {
-            attachment.zoom.zoom_in(pane.clone(), cx);
+            column.zoom.zoom_in(pane.clone(), cx);
             self.set_current_pane(&pane, cx);
         }
         cx.notify();
@@ -2265,17 +2360,17 @@ impl AppShell {
     /// layout, which draws no panes, zooms none.
     fn zoom_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        let gone = attachment.zoom.pane().is_some_and(|pane| {
-            let panes = attachment.all_panes(cx);
+        let gone = column.zoom.pane().is_some_and(|pane| {
+            let panes = column.all_panes(cx);
             panes.len() < 2 || !panes.contains(pane)
         });
         if compact || gone {
-            attachment.zoom.land();
+            column.zoom.land();
         }
-        attachment.zoom.sample(window, cx);
+        column.zoom.sample(window, cx);
     }
 
     /// The chat column: the dock of panes on the reading surface, faded
@@ -2284,16 +2379,16 @@ impl AppShell {
     /// window's top, bottom and right, and its left once the sidebar is
     /// collapsed; the zoomed pane covers the dock, not the seam around it.
     fn render_chat_column(&self, collapsed: bool, window: &mut Window, cx: &mut App) -> AnyElement {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return gpui::Empty.into_any_element();
         };
-        let area = attachment.thread_panes.read(cx).bounds();
-        let column = div()
+        let area = column.thread_panes.read(cx).bounds();
+        let surface = div()
             .size_full()
             .bg(crate::material::content_surface(cx))
             .shadow_sm();
         crate::window_seam::inset_from_seam(
-            column,
+            surface,
             "chat-column-seam",
             gpui::Edges {
                 left: collapsed,
@@ -2302,17 +2397,17 @@ impl AppShell {
             window,
             cx,
         )
-        .when_some(attachment.layout_swap.opacity(), |column, opacity| {
-            column.opacity(opacity)
+        .when_some(column.layout_swap.opacity(), |surface, opacity| {
+            surface.opacity(opacity)
         })
         .child(
             div()
                 .relative()
                 .size_full()
-                .child(attachment.thread_panes.clone())
-                .children(attachment.zoom.render(area, cx))
-                .when(attachment.layout_swap.leaving(), |column| {
-                    column.child(crate::motion::shield())
+                .child(column.thread_panes.clone())
+                .children(column.zoom.render(area, cx))
+                .when(column.layout_swap.leaving(), |panes| {
+                    panes.child(crate::motion::shield())
                 }),
         )
         .into_any_element()
@@ -2328,16 +2423,16 @@ impl AppShell {
         if self.compact(cx) {
             return;
         }
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return;
         };
-        if attachment.zoom.pane().is_some() {
+        if column.zoom.pane().is_some() {
             return;
         }
         let Some(from) = self.acting_pane() else {
             return;
         };
-        let panes = attachment.panes(cx);
+        let panes = column.panes(cx);
         let Some(at) = panes.iter().position(|pane| *pane == from) else {
             return;
         };
@@ -2360,7 +2455,7 @@ impl AppShell {
         side: Side,
         cx: &App,
     ) -> Option<Entity<ThreadPanel>> {
-        let panes = self.attachment.as_ref()?.panes(cx);
+        let panes = self.column.as_ref()?.panes(cx);
         let bounds: Vec<_> = panes.iter().map(|pane| pane.read(cx).bounds()).collect();
         let at = panes.iter().position(|held| held == pane)?;
         crate::panes::neighbour(bounds[at], &bounds, side).map(|ix| panes[ix].clone())
@@ -2377,11 +2472,11 @@ impl AppShell {
         if self.compact(cx) {
             return;
         }
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        attachment.zoom.zoom_out();
-        for other in attachment.panes(cx) {
+        column.zoom.zoom_out();
+        for other in column.panes(cx) {
             if other != pane {
                 self.glide_out(&other, cx);
             }
@@ -2408,9 +2503,9 @@ impl AppShell {
     ) {
         if self.compact(cx)
             || self
-                .attachment
+                .column
                 .as_ref()
-                .is_none_or(|attachment| attachment.zoom.pane().is_some())
+                .is_none_or(|column| column.zoom.pane().is_some())
         {
             return;
         }
@@ -2455,7 +2550,7 @@ impl AppShell {
 
     /// The thread the pane `panel` shows.
     fn panel_session(&self, panel: PanelId, cx: &App) -> Option<String> {
-        self.attachment
+        self.column
             .as_ref()?
             .thread_panes
             .read(cx)
@@ -2481,10 +2576,10 @@ impl AppShell {
         fullscreen: bool,
         cx: &App,
     ) -> f32 {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(link) = self.column_link() else {
             return CHAT_MIN_WIDTH;
         };
-        let store = attachment.link.store.read(cx);
+        let store = link.store.read(cx);
         let floor = if tree.panels().nth(1).is_some() {
             PANE_MIN_WIDTH
         } else {
@@ -2514,13 +2609,13 @@ impl AppShell {
         window: &Window,
         cx: &App,
     ) -> bool {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return false;
         };
-        if self.compact(cx) || attachment.panes(cx).len() >= crate::panes::MAX_PANES {
+        if self.compact(cx) || column.panes(cx).len() >= crate::panes::MAX_PANES {
             return false;
         }
-        let Some(mut tree) = attachment.final_layout(cx) else {
+        let Some(mut tree) = column.final_layout(cx) else {
             return false;
         };
         // From the tree rather than the pane's group: the drop indicator asks
@@ -2541,14 +2636,14 @@ impl AppShell {
         window: &Window,
         cx: &App,
     ) -> bool {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return false;
         };
         let collapsed = self.window_state.read(cx).sidebar_collapsed;
         let sidebar = if collapsed {
             px(0.)
         } else {
-            attachment.sidebar_width.get()
+            column.sidebar_width.get()
         };
         px(self.column_min_width(tree, session_of, collapsed, window.is_fullscreen(), cx))
             <= window.viewport_size().width - sidebar
@@ -2567,15 +2662,15 @@ impl AppShell {
         if self.compact(cx) {
             return None;
         }
-        let attachment = self.attachment.as_ref()?;
-        let current_pane = attachment.current_pane.clone();
-        let panes = attachment.panes(cx);
+        let column = self.column.as_ref()?;
+        let current_pane = column.current_pane.clone();
+        let panes = column.panes(cx);
         let first = std::iter::once(Slot::Pane(current_pane.clone()));
         let (fills, fewest): (Vec<_>, _) = match layout {
             PaneLayout::SpreadAgents => {
                 let parent = current_pane.read(cx).session_id()?;
-                let mut agents: Vec<_> = attachment
-                    .link
+                let mut agents: Vec<_> = self
+                    .column_link()?
                     .store
                     .read(cx)
                     .sidebar_sessions()
@@ -2612,7 +2707,7 @@ impl AppShell {
                 (fills, count)
             }
         };
-        let mut tree = attachment
+        let mut tree = column
             .thread_panes
             .read(cx)
             .layout(DockPlacement::Center)?
@@ -2655,13 +2750,13 @@ impl AppShell {
             return;
         };
         let unchanged = self.layout_unchanged(&plan, cx);
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        if !(unchanged && attachment.zoom.pane().is_none() && attachment.layout_swap.is_idle()) {
-            attachment.layout_swap.choose(layout);
+        if !(unchanged && column.zoom.pane().is_none() && column.layout_swap.is_idle()) {
+            column.layout_swap.choose(layout);
         }
-        let current_pane = attachment.current_pane.clone();
+        let current_pane = column.current_pane.clone();
         self.pane_entered(current_pane.clone(), cx);
         window.focus(&current_pane.focus_handle(cx), cx);
         cx.notify();
@@ -2671,14 +2766,14 @@ impl AppShell {
     /// fade. The compact layout draws no panes, so a swap stops there.
     fn swap_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let compact = self.compact(cx);
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
         if compact {
-            attachment.layout_swap.land();
+            column.layout_swap.land();
             return;
         }
-        if let Some(layout) = attachment.layout_swap.sample(window, cx) {
+        if let Some(layout) = column.layout_swap.sample(window, cx) {
             self.install_layout(layout, window, cx);
         }
     }
@@ -2691,15 +2786,15 @@ impl AppShell {
         (tree, slots): &(gpui_base::dock::PaneTree, Vec<(PanelId, Slot)>),
         cx: &App,
     ) -> bool {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return false;
         };
-        let area = attachment.thread_panes.read(cx);
+        let area = column.thread_panes.read(cx);
         let Some(now) = area.layout(DockPlacement::Center) else {
             return false;
         };
-        if !attachment.glides.is_idle()
-            || attachment
+        if !column.glides.is_idle()
+            || column
                 .all_panes(cx)
                 .iter()
                 .any(|pane| pane.read(cx).is_closing())
@@ -2726,22 +2821,21 @@ impl AppShell {
         let Some(plan) = self.plan_layout(layout, window, cx) else {
             return;
         };
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        attachment.zoom.land();
+        column.zoom.land();
         if self.layout_unchanged(&plan, cx) {
             return;
         }
         let (tree, slots) = plan;
-        let Some(attachment) = self.attachment.as_mut() else {
+        let (Some(column), Some(link)) = (self.column.as_ref(), self.column_link()) else {
             return;
         };
-        let store = attachment.link.store.clone();
-        let preview = attachment.preview.clone();
-        let area = attachment.thread_panes.clone();
-        let current_pane = attachment.current_pane.clone();
-        let before = attachment.panes(cx);
+        let (store, preview) = (link.store.clone(), link.preview.clone());
+        let area = column.thread_panes.clone();
+        let current_pane = column.current_pane.clone();
+        let before = column.panes(cx);
         let mut panes = HashMap::new();
         let mut threads = Vec::new();
         for (panel, slot) in slots {
@@ -2797,20 +2891,20 @@ impl AppShell {
     /// to every view that read the entity, so handing a view what it already
     /// holds would draw all of them again next frame.
     fn sync_panes(&mut self, window: &mut Window, cx: &mut App) {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return;
         };
         let compact = self.compact(cx);
-        for pane in attachment.all_panes(cx) {
-            let zoom = attachment.zoom.of(&pane);
+        for pane in column.all_panes(cx) {
+            let zoom = column.zoom.of(&pane);
             ThreadPanel::set_zoom(&pane, zoom, cx);
         }
-        let tree = attachment.final_layout(cx);
-        let edges: Vec<_> = attachment
+        let tree = column.final_layout(cx);
+        let edges: Vec<_> = column
             .panes(cx)
             .into_iter()
             .map(|pane| {
-                let overlaid = attachment.zoom.pane() == Some(&pane);
+                let overlaid = column.zoom.pane() == Some(&pane);
                 let edges = tree
                     .as_ref()
                     .filter(|_| !compact && !overlaid)
@@ -2828,7 +2922,7 @@ impl AppShell {
         let among_others = edges.len() > 1;
         let mut handed = Vec::with_capacity(edges.len());
         for (pane, edges) in edges {
-            let recedes = among_others && !compact && pane != attachment.current_pane;
+            let recedes = among_others && !compact && pane != column.current_pane;
             let close = crate::motion::shown(
                 gpui::ElementId::NamedInteger("pane-close".into(), pane.entity_id().as_u64()),
                 (among_others && !compact).then(|| pane.downgrade()),
@@ -2849,14 +2943,14 @@ impl AppShell {
                 },
             ));
         }
-        let Some(attachment) = self.attachment.as_mut() else {
+        let Some(column) = self.column.as_mut() else {
             return;
         };
-        attachment
+        column
             .handed
             .retain(|chat, _| handed.iter().any(|(handed, _)| handed.entity_id() == *chat));
         for (chat, now) in handed {
-            let last = attachment.handed.get(&chat.entity_id());
+            let last = column.handed.get(&chat.entity_id());
             if last.is_none_or(|last| last.edges != now.edges) {
                 ChatView::set_edges(&chat, now.edges, cx);
             }
@@ -2866,14 +2960,14 @@ impl AppShell {
             if last.is_none_or(|last| last.close != now.close || last.controls != now.controls) {
                 ChatView::set_pane(&chat, now.close.clone(), now.controls, cx);
             }
-            attachment.handed.insert(chat.entity_id(), now);
+            column.handed.insert(chat.entity_id(), now);
         }
-        let Some(attachment) = self.attachment.as_ref() else {
+        let (Some(column), Some(link)) = (self.column.as_ref(), self.column_link()) else {
             return;
         };
         let shown = self.shown_threads(tree.as_ref(), cx);
-        let hovered = attachment.sidebar.read(cx).hovered_thread();
-        for pane in attachment.panes(cx) {
+        let hovered = link.sidebar.read(cx).hovered_thread();
+        for pane in column.panes(cx) {
             let hovered = shown.map.iter().any(|cell| {
                 cell.pane == pane.entity_id()
                     && hovered.is_some()
@@ -2881,7 +2975,7 @@ impl AppShell {
             });
             ThreadPanel::set_row_hovered(&pane, hovered, cx);
         }
-        SessionsSidebar::set_shown(&attachment.sidebar, shown, cx);
+        SessionsSidebar::set_shown(&link.sidebar, shown, cx);
     }
 
     /// What the threads list marks: nothing on a phone, nor on a route
@@ -2893,32 +2987,31 @@ impl AppShell {
         tree: Option<&gpui_base::dock::PaneTree>,
         cx: &App,
     ) -> crate::sidebar::ShownThreads {
-        let Some(attachment) = self.attachment.as_ref() else {
+        let Some(column) = self.column.as_ref() else {
             return Default::default();
         };
         if self.compact(cx) || self.window_state.read(cx).route() != Route::Chat {
             return Default::default();
         }
-        let store = attachment.link.store.read(cx);
+        let Some(link) = self.column_link() else {
+            return Default::default();
+        };
+        let store = link.store.read(cx);
         let row = |pane: &Entity<ThreadPanel>| {
             let thread = pane.read(cx).session_id()?;
             Some(store.roster_row(thread))
         };
-        let panes = match attachment
-            .zoom
-            .pane()
-            .filter(|_| attachment.zoom.is_zoomed())
-        {
+        let panes = match column.zoom.pane().filter(|_| column.zoom.is_zoomed()) {
             Some(zoomed) => vec![zoomed.clone()],
-            None => attachment.panes(cx),
+            None => column.panes(cx),
         };
         let rows: Vec<_> = panes.iter().map(|pane| (pane, row(pane))).collect();
-        let column = gpui::Bounds::new(gpui::Point::default(), {
-            attachment.thread_panes.read(cx).bounds().size
+        let bounds = gpui::Bounds::new(gpui::Point::default(), {
+            column.thread_panes.read(cx).bounds().size
         });
         let mut rects = Vec::new();
         if let Some(tree) = tree.filter(|_| panes.len() > 1) {
-            crate::panes::pane_rects(tree.root(), column, &mut rects);
+            crate::panes::pane_rects(tree.root(), bounds, &mut rects);
         }
         let share = |of: Pixels, whole: Pixels| of / whole.max(px(1.));
         let map = rects
@@ -2932,23 +3025,20 @@ impl AppShell {
                     row: row.clone(),
                     rect: gpui::bounds(
                         gpui::point(
-                            share(rect.left(), column.size.width),
-                            share(rect.top(), column.size.height),
+                            share(rect.left(), bounds.size.width),
+                            share(rect.top(), bounds.size.height),
                         ),
                         gpui::size(
-                            share(rect.size.width, column.size.width),
-                            share(rect.size.height, column.size.height),
+                            share(rect.size.width, bounds.size.width),
+                            share(rect.size.height, bounds.size.height),
                         ),
                     ),
                 })
             })
             .collect();
-        let current = match rows
-            .iter()
-            .find(|(pane, _)| **pane == attachment.current_pane)
-        {
+        let current = match rows.iter().find(|(pane, _)| **pane == column.current_pane) {
             Some((_, row)) => row.clone(),
-            None => row(&attachment.current_pane),
+            None => row(&column.current_pane),
         };
         crate::sidebar::ShownThreads {
             current,
@@ -2968,8 +3058,8 @@ impl AppShell {
     }
 
     pub(crate) fn wake_connection(&self, wake: tcode_client::recovery::Wake) {
-        if let Some(attachment) = &self.attachment {
-            attachment.link.link().wake(wake);
+        for link in self.links.iter().filter_map(Link::link) {
+            link.wake(wake.clone());
         }
     }
 
@@ -3074,9 +3164,9 @@ impl AppShell {
         if motion == NavMotion::Animated
             && self.window_state.read(cx).compact
             && pushed.contains(&Destination::Thread)
-            && let Some(attachment) = &self.attachment
+            && let Some(column) = &self.column
         {
-            attachment
+            column
                 .chat(cx)
                 .update(cx, |chat, cx| chat.restart_scene(cx));
         }
@@ -3088,8 +3178,8 @@ impl AppShell {
         } else {
             state.route() == Route::Chat
         };
-        if let Some(attachment) = &self.attachment {
-            attachment.link.store.update(cx, |store, cx| {
+        if let Some(store) = self.store() {
+            store.update(cx, |store, cx| {
                 store.set_conversation_on_screen(on_screen, cx);
             });
         }
@@ -3131,10 +3221,7 @@ impl AppShell {
         // An agent is reached from its lead, so Back returns there first.
         if self.window_state.read(cx).compact && self.destination(cx) == Destination::Thread {
             self.keep_lead_beneath(window, cx);
-            let lead = self
-                .attachment
-                .as_ref()
-                .and_then(|attachment| attachment.leads.last());
+            let lead = self.column.as_ref().and_then(|column| column.leads.last());
             if let Some(lead) = lead {
                 // A pane of the lead's own, opened beside the agent while the
                 // window was wide, would show the lead a second time once the
@@ -3149,16 +3236,16 @@ impl AppShell {
         }
         // Everything below is one history: settings detail, settings root, a
         // Hosts visit, Pair, and the workspace pages all pop the same way.
-        // Leaving a page never touches the attachment.
+        // Leaving a page never touches the links.
         let leaving_thread =
             self.window_state.read(cx).compact && self.destination(cx) == Destination::Thread;
         let consumed = self.window_state.update(cx, |state, cx| state.back(cx));
         if consumed
             && leaving_thread
             && self.destination(cx) == Destination::Threads
-            && let Some(attachment) = &self.attachment
+            && let Some(column) = &self.column
         {
-            attachment
+            column
                 .page()
                 .update(cx, |pane, cx| pane.release_preview(cx));
         }
@@ -3200,24 +3287,23 @@ impl AppShell {
     /// over it: a scrolling screenshot of anything else would read back the
     /// palette, a dialog, another page or the right panel over the chat.
     pub(crate) fn capture_chat(&self, cx: &App) -> Option<Entity<ChatView>> {
-        let attachment = self.attachment.as_ref()?;
+        let column = self.column.as_ref()?;
+        let store = self.column_link()?.store.read(cx);
         let state = self.window_state.read(cx);
         let on_screen = if state.compact {
             state.destination() == Destination::Thread
         } else {
+            let session_id = self.page_thread(cx).map(|thread| thread.session_id);
             state.route() == Route::Chat
-                && !attachment
-                    .link
-                    .store
-                    .read(cx)
-                    .panel_state_for(self.page_thread(cx).as_deref())
+                && !store
+                    .panel_state_for(session_id.as_deref())
                     .right_panel_open
         };
         (on_screen
             && !state.palette_mounted()
             && self.pending_navigation_restore.is_none()
             && !gpui_base::GlobalState::is_in_deferred_context(cx))
-        .then(|| attachment.chat(cx))
+        .then(|| column.chat(cx))
     }
 }
 
@@ -3228,11 +3314,14 @@ pub(crate) fn navigate_thread(action: &crate::shortcut::NavigateThread, cx: &mut
     };
     let current = current_thread(cx);
     shell.update(cx, |shell, cx| {
-        if let Some(attachment) = &shell.attachment
-            && attachment.sidebar.update(cx, |sidebar, cx| {
-                sidebar.navigate_thread(action, current.as_deref(), cx)
-            })
-        {
+        let Some(link) = shell.column_link() else {
+            return;
+        };
+        let current = current.and_then(|thread| link.store.read(cx).session_of(thread));
+        let sidebar = link.sidebar.clone();
+        if sidebar.update(cx, |sidebar, cx| {
+            sidebar.navigate_thread(action, current.as_deref(), cx)
+        }) {
             shell.window_state.update(cx, |state, cx| {
                 state.close_palette(cx);
                 state.go(Destination::Thread, cx);
@@ -3403,18 +3492,17 @@ struct PullRequestWatchNotice;
 // ---------------------------------------------------------------------------
 
 impl AppShell {
+    /// Present what `store`'s host tells the window.
     fn present_app_event(
         &mut self,
+        store: &Entity<WorkspaceStore>,
         event: &RuntimeEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let toast = match event {
             RuntimeEvent::Effect(RuntimeEffect::ApplyLocale { .. }) => {
-                let Some(attachment) = &self.attachment else {
-                    return;
-                };
-                let language = attachment.link.store.read(cx).settings().language;
+                let language = store.read(cx).settings().language;
                 apply_runtime_effect(&RuntimeEffect::ApplyLocale { language });
                 cx.notify();
                 return;
@@ -3427,10 +3515,9 @@ impl AppShell {
                 project_id: Some(project_id),
                 cwd,
                 ..
-            }) if self.store().is_some() => {
-                let store = self.store().expect("checked above");
+            }) => {
                 crate::change_project_root_dialog::open_missing_directory(
-                    store,
+                    store.clone(),
                     project_id.clone(),
                     cwd.clone(),
                     window,
@@ -3453,7 +3540,7 @@ impl AppShell {
                 number,
                 notice,
             }) => {
-                self.present_pull_request_watch(session_id, *number, notice, window, cx);
+                self.present_pull_request_watch(store, session_id, *number, notice, window, cx);
                 return;
             }
             RuntimeEvent::Toast(RuntimeToast::PullRequestStack {
@@ -3465,11 +3552,9 @@ impl AppShell {
                 result,
                 late,
             }) => {
-                if let Some(store) = self.store() {
-                    crate::pull_requests::present_stack_result(
-                        &store, session_id, target, *stack, layers, base, result, *late, window, cx,
-                    );
-                }
+                crate::pull_requests::present_stack_result(
+                    store, session_id, target, *stack, layers, base, result, *late, window, cx,
+                );
                 return;
             }
             RuntimeEvent::Toast(toast) => toast,
@@ -3495,15 +3580,15 @@ impl AppShell {
                 .unwrap_or_else(|| self.take_toast_id()),
         };
 
-        let action = presented.action.and_then(|action| {
-            let store = self.store()?;
+        let action = presented.action.map(|action| {
+            let store = store.clone();
             let label = match &action {
                 RuntimeToastAction::RetryGit(_) => crate::tr!("git.toast.retry"),
                 RuntimeToastAction::UpdateProviders(_) => crate::tr!("providers.update_all"),
             }
             .into_owned()
             .into();
-            Some(ToastAction {
+            ToastAction {
                 label,
                 handler: Rc::new(move |window, cx| {
                     window.remove_notification1::<RuntimeToastNotification>(toast_id as usize, cx);
@@ -3514,7 +3599,7 @@ impl AppShell {
                         }
                     });
                 }),
-            })
+            }
         });
         self.show_toast(
             toast_id,
@@ -3529,19 +3614,22 @@ impl AppShell {
     /// One slot per thread: a newer wake or end of its watch replaces the older notice.
     fn present_pull_request_watch(
         &mut self,
+        store: &Entity<WorkspaceStore>,
         session_id: &str,
         number: u64,
         notice: &tcode_core::pull_request_watch::WatchNotice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(store) = self.store() else {
-            return;
-        };
         // A pane's transcript already shows the message.
-        if window.is_window_active() && self.pane_showing(session_id, cx).is_some() {
+        if window.is_window_active()
+            && self
+                .pane_showing_thread(&store.read(cx).thread_key(session_id), cx)
+                .is_some()
+        {
             return;
         }
+        let store = store.clone();
         let title = store
             .read(cx)
             .thread_meta(session_id)
@@ -3658,9 +3746,8 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(attachment) = &self.attachment {
-            attachment
-                .sidebar
+        if let Some(link) = self.column_link() {
+            link.sidebar
                 .update(cx, |sidebar, cx| sidebar.undo_lifecycle(window, cx));
         }
     }
@@ -3844,36 +3931,44 @@ impl AppShell {
         Some(page)
     }
 
-    /// Open the agent `session_id` over the thread on the compact stack's
+    /// Open the agent `thread` over the thread on the compact stack's
     /// thread page, or the panels page standing on it, which goes: the thread
     /// stays as it is on its page, open and held. False where no thread
     /// page can take it, for the caller to show it.
     fn open_over_lead(
         &mut self,
-        session_id: String,
+        thread: ThreadKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(page) = self.top_thread_page(cx) else {
             return false;
         };
-        if !matches!(
-            self.destination(cx),
-            Destination::Thread | Destination::Panel
-        ) || self.pane_showing(&session_id, cx).is_some()
+        if self
+            .column
+            .as_ref()
+            .is_none_or(|column| column.host != thread.host)
+            || !matches!(
+                self.destination(cx),
+                Destination::Thread | Destination::Panel
+            )
+            || self.pane_showing(&thread.session_id, cx).is_some()
         {
             return false;
         }
+        let session_id = thread.session_id;
         let window_state = self.window_state.clone();
-        let Some(attachment) = &mut self.attachment else {
+        let Some(store) = self.store() else {
             return false;
         };
-        let store = attachment.link.store.clone();
-        let pane = attachment.page().clone();
+        let Some(column) = &mut self.column else {
+            return false;
+        };
+        let pane = column.page().clone();
         let Some(lead) = pane.read(cx).session_id().map(str::to_owned) else {
             return false;
         };
-        if attachment
+        if column
             .leads
             .iter()
             .any(|kept| kept.session_id == session_id)
@@ -3890,7 +3985,7 @@ impl AppShell {
         let chat =
             cx.new(|cx| ChatView::new(store.clone(), state, Some(session_id.clone()), window, cx));
         let lead_chat = pane.update(cx, |pane, cx| pane.replace_chat(chat, None, cx));
-        attachment.leads.push(ThreadPage {
+        column.leads.push(ThreadPage {
             page,
             frame: lead_chat.read(cx).frame(),
             chat: lead_chat,
@@ -3911,9 +4006,9 @@ impl AppShell {
         if self.destination(cx) != Destination::Thread
             || self.mounted.last() != Some(&Destination::Thread)
             || self
-                .attachment
+                .column
                 .as_ref()
-                .is_none_or(|attachment| !attachment.leads.is_empty())
+                .is_none_or(|column| !column.leads.is_empty())
         {
             return;
         }
@@ -3929,8 +4024,8 @@ impl AppShell {
         let window_state = self.window_state.clone();
         let state = window_state.clone();
         let chat = cx.new(|cx| ChatView::new(store, state, Some(lead.clone()), window, cx));
-        if let Some(attachment) = &mut self.attachment {
-            attachment.leads.push(ThreadPage {
+        if let Some(column) = &mut self.column {
+            column.leads.push(ThreadPage {
                 page,
                 frame: chat.read(cx).frame(),
                 chat,
@@ -3948,14 +4043,16 @@ impl AppShell {
     fn pop_lead(&mut self, cx: &mut Context<Self>) {
         let top = self.nav.read(cx).current().map(AnyView::entity_id);
         let window_state = self.window_state.clone();
-        let Some(attachment) = &mut self.attachment else {
+        let Some(store) = self.store() else {
             return;
         };
-        let Some(lead) = attachment.leads.pop() else {
+        let Some(column) = &mut self.column else {
             return;
         };
-        let store = attachment.link.store.clone();
-        let pane = attachment.page().clone();
+        let Some(lead) = column.leads.pop() else {
+            return;
+        };
+        let pane = column.page().clone();
         let agent = pane.read(cx).session_id().map(str::to_owned);
         if let Some(agent) = &agent {
             store.update(cx, |store, _| store.lease_timeline(agent));
@@ -3971,7 +4068,7 @@ impl AppShell {
             }
         });
         if let (Some(page), Some(session_id)) = (top, agent) {
-            attachment.leaving.push(ThreadPage {
+            column.leaving.push(ThreadPage {
                 page,
                 frame: chat.read(cx).frame(),
                 chat,
@@ -3986,11 +4083,13 @@ impl AppShell {
     /// conversation again and the thread pages above it go, at once: the
     /// conversation is what it was, whichever page it is on.
     fn drop_leads(&mut self, at: usize, cx: &mut Context<Self>) {
-        let Some(attachment) = &mut self.attachment else {
+        let Some(store) = self.store() else {
             return;
         };
-        let store = attachment.link.store.clone();
-        let dropped = attachment.leads.split_off(at.min(attachment.leads.len()));
+        let Some(column) = &mut self.column else {
+            return;
+        };
+        let dropped = column.leads.split_off(at.min(column.leads.len()));
         if dropped.is_empty() {
             return;
         }
@@ -4010,11 +4109,14 @@ impl AppShell {
 
     /// A lead that closed goes, with the pages above it.
     fn reconcile_leads(&mut self, cx: &mut Context<Self>) {
-        let Some(attachment) = &self.attachment else {
+        let Some(column) = &self.column else {
             return;
         };
-        let store = attachment.link.store.read(cx);
-        if let Some(closed) = attachment
+        let Some(link) = self.column_link() else {
+            return;
+        };
+        let store = link.store.read(cx);
+        if let Some(closed) = column
             .leads
             .iter()
             .position(|lead| !store.is_thread_open(&lead.session_id))
@@ -4027,15 +4129,13 @@ impl AppShell {
     /// as an agent archived falls back to its lead; anywhere else leaves
     /// them all.
     fn unwind_leads(&mut self, session_id: &str, cx: &mut Context<Self>) {
-        let Some(attachment) = &self.attachment else {
+        let Some(column) = &self.column else {
             return;
         };
-        if attachment.leads.is_empty()
-            || attachment.page().read(cx).session_id() == Some(session_id)
-        {
+        if column.leads.is_empty() || column.page().read(cx).session_id() == Some(session_id) {
             return;
         }
-        match attachment
+        match column
             .leads
             .iter()
             .rposition(|lead| lead.session_id == session_id)
@@ -4050,11 +4150,13 @@ impl AppShell {
 
     /// Let go of the agents that have left.
     fn release_leaving(&mut self, cx: &mut Context<Self>) {
-        let Some(attachment) = &mut self.attachment else {
+        let Some(store) = self.store() else {
             return;
         };
-        let store = attachment.link.store.clone();
-        for left in attachment.leaving.drain(..) {
+        let Some(column) = &mut self.column else {
+            return;
+        };
+        for left in column.leaving.drain(..) {
             store.update(cx, |store, cx| store.release_timeline(&left.session_id, cx));
         }
     }
@@ -4077,7 +4179,7 @@ impl AppShell {
                 .into_any_element();
         }
         let pending = self.pending_navigation_restore.is_some();
-        let Some(attachment) = &mut self.attachment else {
+        let Some(column) = &mut self.column else {
             return div().into_any_element();
         };
         let wanted = if pending {
@@ -4087,19 +4189,19 @@ impl AppShell {
         };
         // A chat comes in over what the page shows once it appears; until
         // then it readies itself unseen beneath, and the page holds still.
-        let chat = attachment.chat(cx);
-        let chat_frame = attachment.page().read(cx).frame();
-        let holding = attachment
+        let chat = column.chat(cx);
+        let chat_frame = column.page().read(cx).frame();
+        let holding = column
             .thread_body_shown
             .filter(|shown| *shown != wanted && wanted != ThreadBody::Skeleton)
             .filter(|_| !chat.read(cx).appears(cx));
         let current = holding.unwrap_or(wanted);
-        attachment.thread_body_shown = Some(current);
+        column.thread_body_shown = Some(current);
         ChatView::set_held(&chat, holding.is_some(), cx);
         if holding.is_some() {
             window.request_animation_frame();
         }
-        let frame = attachment
+        let frame = column
             .thread_body
             .sample("compact-thread-body", current, window, cx);
         let layers: Vec<AnyElement> = frame
@@ -4126,8 +4228,8 @@ impl AppShell {
 
     /// The lead thread of the open agent, when one is open.
     fn agent_lead(&self, cx: &App) -> Option<(Entity<WorkspaceStore>, String)> {
-        let store = self.attachment.as_ref()?.link.store.clone();
-        let active = self.page_thread(cx)?;
+        let store = self.store()?;
+        let active = self.page_thread(cx)?.session_id;
         let parent = {
             let store = store.read(cx);
             let sessions = store.sidebar_sessions();
@@ -4182,7 +4284,7 @@ impl AppShell {
                 back,
                 crate::tr!("hosts.title").into_owned().into(),
                 None,
-                self.attachment
+                self.column
                     .as_ref()
                     .map(|_| self.palette_action(cx))
                     .into_iter()
@@ -4221,11 +4323,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let back = self.back_control(cx);
-        let Some(settings) = self
-            .attachment
-            .as_ref()
-            .map(|attachment| attachment.settings_page.clone())
-        else {
+        let Some(settings) = self.column_link().map(|link| link.settings_page.clone()) else {
             return div().into_any_element();
         };
         let detail = destination != Destination::Settings;
@@ -4267,11 +4365,7 @@ impl AppShell {
     }
 
     fn render_arrange_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(sidebar) = self
-            .attachment
-            .as_ref()
-            .map(|attachment| attachment.sidebar.clone())
-        else {
+        let Some(sidebar) = self.column_link().map(|link| link.sidebar.clone()) else {
             return div().into_any_element();
         };
         use crate::widgets::button::{Button, ButtonVariants as _};
@@ -4297,10 +4391,10 @@ impl AppShell {
 
     fn render_threads_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
-        let Some(attachment) = &self.attachment else {
+        let Some(link) = self.column_link() else {
             return div().into_any_element();
         };
-        let store = attachment.link.store.read(cx);
+        let store = link.store.read(cx);
         // A remote machine's list is headed by the machine, with the link's
         // state where every other page puts its context. The local list is
         // just Threads; the way to the machines is the Back control.
@@ -4312,7 +4406,7 @@ impl AppShell {
             ),
             None => (crate::tr!("mobile.threads").into_owned().into(), None),
         };
-        let sidebar = attachment.sidebar.clone();
+        let sidebar = link.sidebar.clone();
         let actions = vec![
             nav_icon_button(
                 "compact-new-thread",
@@ -4359,10 +4453,10 @@ impl AppShell {
     /// On a phone the palette opens without the keyboard: the projects are
     /// there to tap, and the search pill still raises it on demand.
     fn start_thread(&mut self, cx: &mut Context<Self>) {
-        let Some(attachment) = &self.attachment else {
+        let Some(link) = self.column_link() else {
             return;
         };
-        let projects = attachment.link.store.read(cx).projects();
+        let projects = link.store.read(cx).projects();
         let Some(project) = projects.first().cloned().filter(|_| projects.len() == 1) else {
             let mobile = crate::window_seam::is_mobile(cx);
             self.window_state.update(cx, |state, cx| {
@@ -4374,7 +4468,7 @@ impl AppShell {
             });
             return;
         };
-        attachment.link.store.update(cx, |store, cx| {
+        link.store.update(cx, |store, cx| {
             store.start_draft(project.id.clone(), project.root.clone(), cx)
         });
     }
@@ -4386,9 +4480,9 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let kept = self
-            .attachment
+            .column
             .as_ref()
-            .and_then(|attachment| attachment.thread_page(page))
+            .and_then(|column| column.thread_page(page))
             .cloned();
         // By the page's own place: a lead's page keeps the label it lands
         // with, and one sliding off, which has no place, was over a thread.
@@ -4402,13 +4496,18 @@ impl AppShell {
         let back = self.back_action(beneath.unwrap_or(Destination::Thread).back_label(), cx);
         let body =
             self.compact_thread_body(kept.as_ref().map(|kept| kept.frame.clone()), window, cx);
-        let Some(attachment) = &self.attachment else {
+        let Some(link) = self.column_link() else {
             return div().into_any_element();
         };
-        let store = attachment.link.store.read(cx);
+        let store = link.store.read(cx);
         let active = match &kept {
             Some(kept) => store.chat_active_session_for(Some(&kept.session_id), cx),
-            None => store.chat_active_session_for(self.page_thread(cx).as_deref(), cx),
+            None => store.chat_active_session_for(
+                self.page_thread(cx)
+                    .map(|thread| thread.session_id)
+                    .as_deref(),
+                cx,
+            ),
         };
         let project = active
             .as_ref()
@@ -4482,11 +4581,14 @@ impl AppShell {
     /// room beside the timeline, not less of a product.
     fn render_panel_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
-        let Some(attachment) = &self.attachment else {
+        let Some(column) = &self.column else {
             return div().into_any_element();
         };
-        let store = attachment.link.store.read(cx);
-        let session = self.page_thread(cx);
+        let Some(link) = self.column_link() else {
+            return div().into_any_element();
+        };
+        let store = link.store.read(cx);
+        let session = self.page_thread(cx).map(|thread| thread.session_id);
         let panel = store.panel_state_for(session.as_deref());
         let selected_panel = self
             .pending_navigation_restore
@@ -4499,7 +4601,7 @@ impl AppShell {
                 || selected_panel == Some("agents")
         });
         let show_preview = store.offers_preview();
-        let page_pane = attachment.page().clone();
+        let page_pane = column.page().clone();
         page_pane.update(cx, |pane, cx| {
             pane.select_compact_preview(
                 self.pending_navigation_restore.is_none()
@@ -4587,7 +4689,7 @@ impl AppShell {
             .map(|layer| {
                 let body = match layer {
                     0 => crate::material::loading_skeleton(cx),
-                    1 => attachment
+                    1 => column
                         .chat(cx)
                         .read(cx)
                         .terminal_drawer()
@@ -4606,7 +4708,7 @@ impl AppShell {
         // The drawer sizes its grid from the space it is actually given.
         if terminal {
             let size = window.viewport_size();
-            let drawer = attachment.chat(cx).read(cx).terminal_drawer();
+            let drawer = column.chat(cx).read(cx).terminal_drawer();
             let (width, height) = (f32::from(size.width), f32::from(size.height) - 110.);
             if !drawer.read(cx).is_size(width, height) {
                 drawer.update(cx, |drawer, cx| drawer.resize(width, height, cx));
@@ -4639,14 +4741,13 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let back = self.back_control(cx);
-        let Some(attachment) = &self.attachment else {
+        let Some(column) = &self.column else {
             return div().into_any_element();
         };
-        let view = attachment.chat(cx).read(cx).pull_request_view(cx);
-        let session = self.page_thread(cx);
+        let view = column.chat(cx).read(cx).pull_request_view(cx);
+        let session = self.page_thread(cx).map(|thread| thread.session_id);
         let key = session.as_deref().and_then(|session| {
-            attachment
-                .link
+            self.column_link()?
                 .store
                 .read(cx)
                 .open_pull_request(session)
@@ -4670,13 +4771,9 @@ impl AppShell {
 
     /// Push the panel destination with something actually on it.
     fn open_panels(&mut self, cx: &mut Context<Self>) {
-        let showing = self.attachment.as_ref().is_some_and(|attachment| {
-            let session = self.page_thread(cx);
-            let panel = attachment
-                .link
-                .store
-                .read(cx)
-                .panel_state_for(session.as_deref());
+        let showing = self.column_link().is_some_and(|link| {
+            let session = self.page_thread(cx).map(|thread| thread.session_id);
+            let panel = link.store.read(cx).panel_state_for(session.as_deref());
             if self.panel_shows_terminal {
                 panel.terminal_open
             } else {
@@ -4708,11 +4805,10 @@ impl AppShell {
             };
             pending.panel_open = true;
         }
-        let Some(attachment) = &self.attachment else {
+        let Some(store) = self.store() else {
             return;
         };
-        let store = attachment.link.store.clone();
-        let session = self.page_thread(cx);
+        let session = self.page_thread(cx).map(|thread| thread.session_id);
         let panel = store.read(cx).panel_state_for(session.as_deref());
         self.panel_shows_terminal = id == "terminal";
         store.update(cx, |store, cx| match id {
@@ -5051,13 +5147,7 @@ impl AppShell {
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
             .child(stack)
-            .map(|el| {
-                el.children(
-                    self.attachment
-                        .as_ref()
-                        .map(|attachment| attachment.palette.clone()),
-                )
-            })
+            .map(|el| el.children(self.column_link().map(|link| link.palette.clone())))
             .into_any_element()
     }
 }
@@ -5251,7 +5341,7 @@ impl AppShell {
         let keys: Vec<u64> = frame.scenes().copied().collect();
         self.departed
             .retain(|departed| keys.contains(&departed.key));
-        let hosts_withheld = self.attachment.is_none() || route == Route::Hosts;
+        let hosts_withheld = self.column.is_none() || route == Route::Hosts;
         let mut layers = Vec::with_capacity(keys.len());
         for key in keys {
             if key == self.scene_key {
@@ -5264,28 +5354,30 @@ impl AppShell {
             };
             let mut left = self.departed.remove(ix);
             // Its keys would reach a thread the window has left.
-            if left.attachment.as_ref().is_some_and(|attachment| {
-                attachment
+            if left.column.as_ref().is_some_and(|column| {
+                column
                     .all_panes(cx)
                     .iter()
                     .any(|pane| pane.focus_handle(cx).contains_focused(window, cx))
             }) {
                 window.blur(cx);
             }
-            std::mem::swap(&mut self.attachment, &mut left.attachment);
+            std::mem::swap(&mut self.column, &mut left.column);
+            std::mem::swap(&mut self.links, &mut left.links);
             self.departing = Some(Departing {
                 destination: left.destination,
                 hosts_withheld,
             });
             layers.push(self.render_workspace(left.route, window, cx));
             self.departing = None;
-            std::mem::swap(&mut self.attachment, &mut left.attachment);
+            std::mem::swap(&mut self.column, &mut left.column);
+            std::mem::swap(&mut self.links, &mut left.links);
             self.departed.insert(ix, left);
         }
         frame.render(layers).into_any_element()
     }
 
-    /// The wide window showing `route` of whatever `self.attachment` is.
+    /// The wide window showing `route` of whatever `self.column` is.
     fn render_workspace(
         &mut self,
         route: Route,
@@ -5293,7 +5385,7 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let fullscreen = window.is_fullscreen();
-        if self.attachment.is_none() {
+        if self.column.is_none() {
             // No host: the hosts page is the whole window, and the only page
             // there is. A tablet in landscape lands here before it attaches
             // and a desktop after it disconnects; neither has a sidebar to
@@ -5316,30 +5408,30 @@ impl AppShell {
                 .child(v_flex().id("hosts").size_full().child(page))
                 .into_any_element();
         }
-        let Some(attachment) = &mut self.attachment else {
+        let Some(column) = &mut self.column else {
             unreachable!("checked above");
         };
         let collapsed = self.window_state.read(cx).sidebar_collapsed;
         // The overlay is workspace-only transient state. Clear it synchronously
         // on route/expanded transitions rather than waiting for pointer input.
         if !collapsed || route != Route::Chat {
-            attachment.sidebar_overlay_visible = false;
+            column.sidebar_overlay_visible = false;
         }
 
         // A native WebView is not composited into GPUI and survives removal of
         // its layout node. Synchronize it before a route change or a
         // right-panel tab/close transition can unmount PreviewPanel.
         if self.departing.is_none() {
-            for pane in attachment.all_panes(cx) {
+            for pane in column.all_panes(cx) {
                 ThreadPanel::sync_preview(&pane, cx);
             }
         }
 
-        let scene = attachment.routes.sample("routes", route, window, cx);
+        let scene = column.routes.sample("routes", route, window, cx);
         let scenes: Vec<Route> = scene.scenes().copied().collect();
         // The workspace comes back as it is, not gliding from how it was.
         if !scenes.contains(&Route::Chat) {
-            attachment.panel_glide.reset();
+            column.panel_glide.reset();
         }
         // The sidebar both workspace routes keep is drawn once, by the lowest
         // of them: that one is opaque, so the sidebar holds still while the
@@ -5375,11 +5467,8 @@ impl AppShell {
         rail: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let attachment = self
-            .attachment
-            .as_ref()
-            .expect("a workspace route has an attachment");
-        SettingsPage::fade_rail(&attachment.settings_page, rail, cx);
+        let link = self.column_link().expect("a workspace route has a column");
+        SettingsPage::fade_rail(&link.settings_page, rail, cx);
         // Settings is a window of its own: opening it switches the whole
         // window, so the settings rail — not the workspace sidebar — is the
         // left column. Root owns the translucent canvas across both routes;
@@ -5406,7 +5495,7 @@ impl AppShell {
                     .min_h_0()
                     .overflow_hidden()
                     .debug_selector(|| "settings-route".into())
-                    .child(attachment.settings_page.clone()),
+                    .child(link.settings_page.clone()),
             )
             .into_any_element()
     }
@@ -5421,16 +5510,17 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let collapsed = self.window_state.read(cx).sidebar_collapsed;
-        let attachment = self
-            .attachment
+        let column = self
+            .column
             .as_ref()
-            .expect("a workspace route has an attachment");
-        let sidebar_width = attachment.sidebar_width.get();
+            .expect("a workspace route has a column");
+        let link = self.column_link().expect("a workspace route has a column");
+        let sidebar_width = column.sidebar_width.get();
         let sidebar = match sidebar {
             Some(opacity) => div()
                 .size_full()
                 .opacity(opacity)
-                .child(self.layout_part("sidebar", attachment.sidebar.clone()))
+                .child(self.layout_part("sidebar", link.sidebar.clone()))
                 .into_any_element(),
             None => div().into_any_element(),
         };
@@ -5509,18 +5599,15 @@ impl AppShell {
         let palette_open = self.window_state.read(cx).palette_mounted() && self.departing.is_none();
         let fullscreen = window.is_fullscreen();
         let collapsed = self.window_state.read(cx).sidebar_collapsed;
-        let Some(attachment) = &mut self.attachment else {
-            unreachable!("a workspace route has an attachment");
+        let Some(column) = &mut self.column else {
+            unreachable!("a workspace route has a column");
         };
-        let split = attachment.split.clone();
+        let split = column.split.clone();
         // The chat and the sidebar, which glides as it collapses and expands.
-        let glide = attachment.panel_glide.sample(
+        let glide = column.panel_glide.sample(
             &[
-                crate::motion::resize_glide::Panel::sized(
-                    attachment.sidebar_width.get(),
-                    !collapsed,
-                )
-                .kept(),
+                crate::motion::resize_glide::Panel::sized(column.sidebar_width.get(), !collapsed)
+                    .kept(),
                 crate::motion::resize_glide::Panel::flex(true),
             ],
             true,
@@ -5536,19 +5623,20 @@ impl AppShell {
                 1,
                 self.layout_part("chat", self.render_chat_column(collapsed, window, cx)),
             ));
-        let attachment = self.attachment.as_ref().expect("attachment checked above");
-        let remembered_sidebar = attachment.sidebar_width.clone();
+        let column = self.column.as_ref().expect("checked above");
+        let link = self.column_link().expect("a workspace route has a column");
+        let remembered_sidebar = column.sidebar_width.clone();
         let sidebar = match draw_sidebar {
             Some(opacity) => div()
                 .size_full()
                 .opacity(opacity)
-                .child(self.layout_part("sidebar", attachment.sidebar.clone()))
+                .child(self.layout_part("sidebar", link.sidebar.clone()))
                 .into_any_element(),
             None => div().into_any_element(),
         };
-        let overlay_width = attachment.sidebar_width.get();
-        let overlay_visible = attachment.sidebar_overlay_visible;
-        let palette = attachment.palette.clone();
+        let overlay_width = column.sidebar_width.get();
+        let overlay_visible = column.sidebar_overlay_visible;
+        let palette = link.palette.clone();
         let group = h_resizable("workspace-panels")
             .with_state(&split)
             .on_resize(move |state, _, cx| {
@@ -5569,8 +5657,8 @@ impl AppShell {
             && !gpui_base::GlobalState::is_in_deferred_context(cx)
             && window.mouse_position().x > overlay_width
         {
-            if let Some(attachment) = &mut self.attachment {
-                attachment.sidebar_overlay_visible = false;
+            if let Some(column) = &mut self.column {
+                column.sidebar_overlay_visible = false;
             }
             false
         } else {
@@ -5708,18 +5796,18 @@ impl AppShell {
             (state.sidebar_collapsed, state.route())
         };
         let popover_open = gpui_base::GlobalState::is_in_deferred_context(cx);
-        let Some(attachment) = &mut self.attachment else {
+        let Some(column) = &mut self.column else {
             return;
         };
         let visible = next_sidebar_overlay_visibility(
-            attachment.sidebar_overlay_visible,
+            column.sidebar_overlay_visible,
             transition,
             collapsed,
             route,
             popover_open,
         );
-        if attachment.sidebar_overlay_visible != visible {
-            attachment.sidebar_overlay_visible = visible;
+        if column.sidebar_overlay_visible != visible {
+            column.sidebar_overlay_visible = visible;
             cx.notify();
         }
     }
@@ -5734,12 +5822,12 @@ impl Render for AppShell {
         self.swap_layout(window, cx);
         self.zoom_panes(window, cx);
         self.sync_panes(window, cx);
-        if let Some(attachment) = &self.attachment {
-            let title = attachment
-                .link
+        if let Some(link) = self.column_link() {
+            let session_id = self.page_thread(cx).map(|thread| thread.session_id);
+            let title = link
                 .store
                 .read(cx)
-                .shell_window_title_for(self.page_thread(cx).as_deref(), cx);
+                .shell_window_title_for(session_id.as_deref(), cx);
             if title != self.window_title {
                 window.set_window_title(&title);
                 self.window_title = title;
@@ -5756,11 +5844,8 @@ impl Render for AppShell {
             )
         };
         if palette_leaving
-            && let Some(attachment) = &self.attachment
-            && attachment
-                .palette
-                .focus_handle(cx)
-                .contains_focused(window, cx)
+            && let Some(link) = self.column_link()
+            && link.palette.focus_handle(cx).contains_focused(window, cx)
         {
             cx.defer_in(window, |this, window, cx| {
                 this.return_keyboard(window, cx);
@@ -5768,10 +5853,9 @@ impl Render for AppShell {
         }
         if palette_open
             && !self.palette_was_open
-            && let Some(attachment) = &self.attachment
+            && let Some(link) = self.column_link()
         {
-            attachment
-                .palette
+            link.palette
                 .update(cx, |p, cx| p.open(focus_query, window, cx));
         }
         self.palette_was_open = palette_open;
@@ -5784,8 +5868,8 @@ impl Render for AppShell {
             // than rising over the route it last drew wide.
             self.departed.clear();
             self.attachments = Default::default();
-            if let Some(attachment) = self.attachment.as_mut() {
-                attachment.routes = Default::default();
+            if let Some(column) = self.column.as_mut() {
+                column.routes = Default::default();
             }
             self.render_compact(window, cx)
         } else {
@@ -5798,9 +5882,8 @@ impl Render for AppShell {
             body
         };
         let dismissal = self
-            .attachment
-            .as_ref()
-            .map(|attachment| attachment.palette.read(cx).outside_dismissal.clone());
+            .column_link()
+            .map(|link| link.palette.read(cx).outside_dismissal.clone());
         div()
             .size_full()
             // gpui-base transfers focus between controls, but leaves it
@@ -5817,9 +5900,8 @@ impl Render for AppShell {
             .children(dismissal.map(|dismissal| dismissal.release_listener().into_any_element()))
             .child(body)
             .children(
-                self.attachment
-                    .as_ref()
-                    .and_then(|attachment| attachment.preview.read(cx).native_fade(cx)),
+                self.column_link()
+                    .and_then(|link| link.preview.read(cx).native_fade(cx)),
             )
     }
 }
@@ -6234,7 +6316,7 @@ pub(crate) mod tests {
                 .expect("the message on its way");
             shell.read_with(cx, |shell, cx| {
                 shell
-                    .attachment
+                    .column
                     .as_ref()
                     .expect("attached")
                     .panes(cx)
@@ -6560,7 +6642,9 @@ pub(crate) mod tests {
             .update(&mut closed_cx, |state, _| state.sidebar_collapsed = true);
         draw(&mut closed_cx);
         assert_eq!(
-            closed.read_with(&closed_cx, |shell, cx| shell.page_thread(cx)),
+            closed.read_with(&closed_cx, |shell, cx| shell
+                .page_thread(cx)
+                .map(|thread| thread.session_id)),
             Some("thread-a".into())
         );
 
@@ -6585,7 +6669,13 @@ pub(crate) mod tests {
         restore_index(&reopened, &reopened_host, true, &mut reopened_cx);
         reopened.read_with(&reopened_cx, |shell, cx| {
             assert!(!shell.store().unwrap().read(cx).is_remote());
-            assert_eq!(shell.page_thread(cx).as_deref(), Some("thread-a"));
+            assert_eq!(
+                shell
+                    .page_thread(cx)
+                    .map(|thread| thread.session_id)
+                    .as_deref(),
+                Some("thread-a")
+            );
             assert!(shell.window_state.read(cx).sidebar_collapsed);
         });
     }
@@ -6610,7 +6700,13 @@ pub(crate) mod tests {
                         Destination::Thread
                     ]
                 );
-                assert_eq!(shell.page_thread(cx).as_deref(), Some("thread-a"));
+                assert_eq!(
+                    shell
+                        .page_thread(cx)
+                        .map(|thread| thread.session_id)
+                        .as_deref(),
+                    Some("thread-a")
+                );
             });
             restore_index(&shell, &host, true, cx);
             restore_index(&shell, &host, true, cx);
@@ -6619,7 +6715,7 @@ pub(crate) mod tests {
             cx.update(|window, cx| {
                 let composer = shell
                     .read(cx)
-                    .attachment
+                    .column
                     .as_ref()
                     .unwrap()
                     .chat(cx)
@@ -6698,7 +6794,7 @@ pub(crate) mod tests {
             });
             let focus = shell.read_with(cx, |shell, cx| {
                 shell
-                    .attachment
+                    .column
                     .as_ref()
                     .unwrap()
                     .chat(cx)
@@ -6765,7 +6861,7 @@ pub(crate) mod tests {
                     shell.window_state.read(cx).history(),
                     [Destination::Hosts, Destination::Threads]
                 );
-                assert_eq!(shell.page_thread(cx), None);
+                assert_eq!(shell.page_thread(cx).map(|thread| thread.session_id), None);
             });
             cx.executor().advance_clock(Duration::from_millis(151));
             draw(cx);
@@ -7020,13 +7116,7 @@ pub(crate) mod tests {
         resize(cx, 393.);
         let store = store_of(&shell, cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
+            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         for width in [1024., 393., 1024.] {
@@ -7143,13 +7233,7 @@ pub(crate) mod tests {
         });
         draw(cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
+            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let card = cx.debug_bounds("composer-card").unwrap();
@@ -7279,13 +7363,7 @@ pub(crate) mod tests {
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
+            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         cx.update(|window, cx| focus.focus(window, cx));
@@ -7335,13 +7413,7 @@ pub(crate) mod tests {
         cx: &VisualTestContext,
     ) -> Entity<crate::composer::Composer> {
         shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
+            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         })
     }
 
@@ -7762,13 +7834,7 @@ pub(crate) mod tests {
         });
         resize(cx, 1200.);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
+            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let text = cx
@@ -7979,13 +8045,7 @@ pub(crate) mod tests {
         let (shell, _host, cx) = mount_panes(cx);
         resize(cx, 1200.);
         let composer = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
+            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         let timeline = gpui::point(px(700.), px(300.));
@@ -8173,7 +8233,7 @@ pub(crate) mod tests {
     fn pane_threads(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<Option<String>> {
         shell.read_with(cx, |shell, cx| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .all_panes(cx)
@@ -8188,7 +8248,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             shell
                 .read(cx)
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .all_panes(cx)
@@ -8204,7 +8264,7 @@ pub(crate) mod tests {
     }
 
     fn widths_of(shell: &AppShell, cx: &App) -> (Pixels, Vec<Pixels>) {
-        let attachment = shell.attachment.as_ref().expect("attached");
+        let attachment = shell.column.as_ref().expect("attached");
         (
             attachment.thread_panes.read(cx).bounds().size.width,
             attachment
@@ -8218,7 +8278,7 @@ pub(crate) mod tests {
     /// Where each pane on screen was painted, in the layout's order.
     fn pane_bounds(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<gpui::Bounds<Pixels>> {
         shell.read_with(cx, |shell, cx| {
-            let attachment = shell.attachment.as_ref().expect("attached");
+            let attachment = shell.column.as_ref().expect("attached");
             attachment
                 .all_panes(cx)
                 .iter()
@@ -8314,7 +8374,7 @@ pub(crate) mod tests {
     /// Where the column's only pane was painted.
     fn only_pane(shell: &Entity<AppShell>, cx: &VisualTestContext) -> gpui::Bounds<Pixels> {
         shell.read_with(cx, |shell, cx| {
-            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            let panes = shell.column.as_ref().expect("attached").all_panes(cx);
             assert_eq!(panes.len(), 1);
             panes[0].read(cx).bounds()
         })
@@ -8384,7 +8444,7 @@ pub(crate) mod tests {
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let attachment = shell.attachment.as_ref().expect("attached");
+            let attachment = shell.column.as_ref().expect("attached");
             attachment
                 .all_panes(cx)
                 .iter()
@@ -8574,7 +8634,7 @@ pub(crate) mod tests {
             cx.update(|window, cx| {
                 shell
                     .read(cx)
-                    .attachment
+                    .column
                     .as_ref()
                     .expect("attached")
                     .all_panes(cx)[0]
@@ -8693,7 +8753,7 @@ pub(crate) mod tests {
     fn pane_sides(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Vec<Option<String>> {
         shell.read_with(cx, |shell, cx| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .all_panes(cx)
@@ -9163,7 +9223,7 @@ pub(crate) mod tests {
     /// The first pane's timeline on screen.
     fn lead_viewport(shell: &Entity<AppShell>, cx: &VisualTestContext) -> gpui::Bounds<Pixels> {
         shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+            shell.column.as_ref().expect("attached").all_panes(cx)[0]
                 .read(cx)
                 .chat()
                 .read(cx)
@@ -9247,7 +9307,7 @@ pub(crate) mod tests {
             crate::agents_panel::open_agent(
                 &store,
                 "agent-1".into(),
-                crate::shell::side_host_for("thread-1", cx),
+                crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
                 None,
                 window,
                 cx,
@@ -9838,7 +9898,7 @@ pub(crate) mod tests {
             crate::agents_panel::open_agent(
                 &store,
                 "agent-1".into(),
-                crate::shell::side_host_for("thread-1", cx),
+                crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
                 Some("rail-agent-agent-1".into()),
                 window,
                 cx,
@@ -9942,7 +10002,7 @@ pub(crate) mod tests {
             crate::agents_panel::open_agent(
                 &store,
                 "agent-1".into(),
-                crate::shell::side_host_for("thread-1", cx),
+                crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
                 None,
                 window,
                 cx,
@@ -10141,7 +10201,7 @@ pub(crate) mod tests {
             crate::agents_panel::open_agent(
                 &store,
                 "agent-1".into(),
-                crate::shell::side_host_for("thread-1", cx),
+                crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
                 None,
                 window,
                 cx,
@@ -10240,7 +10300,7 @@ pub(crate) mod tests {
             assert_eq!(keyboard_pane(&shell, cx), Some(1), "{command}");
         }
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)[1]
+            shell.column.as_ref().expect("attached").all_panes(cx)[1]
                 .read(cx)
                 .chat()
                 .read(cx)
@@ -10281,7 +10341,7 @@ pub(crate) mod tests {
         cx.simulate_click(zoom.center(), gpui::Modifiers::default());
         draw(cx);
         let (zoomed, composer) = shell.read_with(cx, |shell, cx| {
-            let attachment = shell.attachment.as_ref().expect("attached");
+            let attachment = shell.column.as_ref().expect("attached");
             let composer = attachment.all_panes(cx)[pane]
                 .read(cx)
                 .chat()
@@ -10341,7 +10401,7 @@ pub(crate) mod tests {
     /// how many panes it draws, in the frame drawn now.
     fn column_scene(shell: &Entity<AppShell>, cx: &mut VisualTestContext) -> (f32, usize) {
         frame(cx, |window, cx| {
-            let attachment = shell.read(cx).attachment.as_ref().expect("attached");
+            let attachment = shell.read(cx).column.as_ref().expect("attached");
             let column = attachment
                 .thread_panes
                 .read(cx)
@@ -10398,7 +10458,7 @@ pub(crate) mod tests {
         // The keyboard stayed in the left pane, so two columns again leave
         // every pane where it is.
         let before = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)
+            shell.column.as_ref().expect("attached").all_panes(cx)
         });
         cx.simulate_keystrokes("secondary-alt-2");
         draw(cx);
@@ -10409,7 +10469,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             shell.read_with(cx, |shell, cx| {
-                shell.attachment.as_ref().expect("attached").all_panes(cx)
+                shell.column.as_ref().expect("attached").all_panes(cx)
             }),
             before
         );
@@ -10450,7 +10510,7 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         let painted = |cx: &mut VisualTestContext| {
             frame(cx, |_, cx| {
-                let attachment = shell.read(cx).attachment.as_ref().expect("attached");
+                let attachment = shell.read(cx).column.as_ref().expect("attached");
                 let panes: Vec<_> = attachment
                     .all_panes(cx)
                     .iter()
@@ -10574,7 +10634,7 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_panes(cx);
         open_beside_from_list(&shell, &host, "sidebar-thread-thread-2", "thread-2", cx);
         let slots: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            let panes = shell.column.as_ref().expect("attached").all_panes(cx);
             panes.iter().map(|pane| pane.read(cx).bounds()).collect()
         });
         let settle = crate::edge_back::SETTLE;
@@ -10607,7 +10667,7 @@ pub(crate) mod tests {
         draw(cx);
         assert!(cx.debug_bounds("zoomed-pane").is_none());
         let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            let panes = shell.column.as_ref().expect("attached").all_panes(cx);
             panes.iter().map(|pane| pane.read(cx).bounds()).collect()
         });
         assert_eq!(panes, slots, "back in its slot");
@@ -10672,7 +10732,9 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
         assert_eq!(
-            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
+            shell.read_with(cx, |shell, cx| shell
+                .page_thread(cx)
+                .map(|thread| thread.session_id)),
             Some("thread-1".into())
         );
     }
@@ -10727,7 +10789,7 @@ pub(crate) mod tests {
         cx.executor().advance_clock(crate::edge_back::SETTLE);
         draw(cx);
         let draft = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+            shell.column.as_ref().expect("attached").all_panes(cx)[0]
                 .read(cx)
                 .bounds()
         });
@@ -10888,7 +10950,9 @@ pub(crate) mod tests {
         click(right.center(), Default::default(), cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert_eq!(
-            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
+            shell.read_with(cx, |shell, cx| shell
+                .page_thread(cx)
+                .map(|thread| thread.session_id)),
             Some("thread-1".into())
         );
 
@@ -10901,7 +10965,7 @@ pub(crate) mod tests {
         draw(cx);
         let drafts: Vec<_> = shell.read_with(cx, |shell, cx| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .all_panes(cx)
@@ -10946,7 +11010,9 @@ pub(crate) mod tests {
         settle_panes(cx);
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         assert_eq!(
-            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
+            shell.read_with(cx, |shell, cx| shell
+                .page_thread(cx)
+                .map(|thread| thread.session_id)),
             Some("thread-2".into())
         );
 
@@ -10959,7 +11025,7 @@ pub(crate) mod tests {
         draw(cx);
         let drafts: Vec<_> = shell.read_with(cx, |shell, cx| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .all_panes(cx)
@@ -11254,7 +11320,7 @@ pub(crate) mod tests {
         draw_until(&shell, cx, &host, "diff-line-new-left.rs-1", None);
         let conversations = |cx: &mut VisualTestContext| {
             shell.read_with(cx, |shell, cx| {
-                let attachment = shell.attachment.as_ref().expect("attached");
+                let attachment = shell.column.as_ref().expect("attached");
                 attachment
                     .all_panes(cx)
                     .iter()
@@ -11397,7 +11463,7 @@ pub(crate) mod tests {
         assert_eq!(drawer.right(), zoomed.right());
         assert!(zoomed.left() < drawer.left());
         let conversation = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+            shell.column.as_ref().expect("attached").all_panes(cx)[0]
                 .read(cx)
                 .chat_drawn(cx)
         });
@@ -11568,7 +11634,7 @@ pub(crate) mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1), "the keyboard stays");
         let composer = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+            shell.column.as_ref().expect("attached").all_panes(cx)[0]
                 .read(cx)
                 .chat()
                 .read(cx)
@@ -11700,7 +11766,7 @@ pub(crate) mod tests {
         draw(cx);
         let terminal = shell.read_with(cx, |shell, cx| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .chat(cx)
@@ -11798,7 +11864,7 @@ pub(crate) mod tests {
             [Some("thread-1".into()), Some("draft-1".into())]
         );
         let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            let panes = shell.column.as_ref().expect("attached").all_panes(cx);
             panes.iter().map(|pane| pane.read(cx).bounds()).collect()
         });
         for pane in &panes {
@@ -11980,11 +12046,11 @@ pub(crate) mod tests {
         draw(cx);
         assert!(holds_thread_2(&shell, cx));
         let panes = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)
+            shell.column.as_ref().expect("attached").all_panes(cx)
         });
         let area = shell.read_with(cx, |shell, _| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .thread_panes
@@ -12106,7 +12172,7 @@ pub(crate) mod tests {
             "still gliding: {widths:?}"
         );
         let left = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+            shell.column.as_ref().expect("attached").all_panes(cx)[0]
                 .read(cx)
                 .bounds()
         });
@@ -12154,7 +12220,7 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(2));
         let bounds = |cx: &mut VisualTestContext| -> Vec<gpui::Bounds<Pixels>> {
             shell.read_with(cx, |shell, cx| {
-                let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+                let panes = shell.column.as_ref().expect("attached").all_panes(cx);
                 panes.iter().map(|pane| pane.read(cx).bounds()).collect()
             })
         };
@@ -12316,7 +12382,7 @@ pub(crate) mod tests {
         assert_eq!(keyboard_pane(&shell, cx), Some(0));
 
         let (column, halves) = shell.read_with(cx, |shell, cx| {
-            let attachment = shell.attachment.as_ref().expect("attached");
+            let attachment = shell.column.as_ref().expect("attached");
             let panes = attachment.all_panes(cx);
             (
                 attachment.thread_panes.read(cx).bounds(),
@@ -12338,13 +12404,13 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("secondary-alt-2");
         assert_eq!(column_scene(&shell, cx), (rest, 2), "two columns");
         let panes: Vec<_> = shell.read_with(cx, |shell, cx| {
-            let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+            let panes = shell.column.as_ref().expect("attached").all_panes(cx);
             panes.iter().map(|pane| pane.read(cx).bounds()).collect()
         });
         assert_eq!(panes, halves);
 
         let closing = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)[0].clone()
+            shell.column.as_ref().expect("attached").all_panes(cx)[0].clone()
         });
         let half = closing.read_with(cx, |pane, _| pane.bounds());
         cx.simulate_keystrokes("secondary-shift-w");
@@ -12383,7 +12449,7 @@ pub(crate) mod tests {
         );
         assert_eq!(keyboard_pane(&shell, cx), Some(1));
         let (closing, composer) = shell.read_with(cx, |shell, cx| {
-            let pane = shell.attachment.as_ref().expect("attached").all_panes(cx)[0].clone();
+            let pane = shell.column.as_ref().expect("attached").all_panes(cx)[0].clone();
             let pane = pane.read(cx);
             let composer = pane.chat().read(cx).composer().read(cx);
             (pane.bounds(), composer.input_focus_handle(cx))
@@ -12404,7 +12470,7 @@ pub(crate) mod tests {
         // instead, gone as it is taken out.
         let floored = |cx: &mut VisualTestContext| {
             let closing = shell.read_with(cx, |shell, cx| {
-                shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                shell.column.as_ref().expect("attached").all_panes(cx)[0]
                     .read(cx)
                     .bounds()
             });
@@ -12439,7 +12505,7 @@ pub(crate) mod tests {
         // The frame the glide lands in no longer draws the pane: no strip at
         // the floor, its neighbour has the whole column.
         let strip = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+            shell.column.as_ref().expect("attached").all_panes(cx)[0]
                 .read(cx)
                 .bounds()
         });
@@ -12515,7 +12581,9 @@ pub(crate) mod tests {
         let current = |left: bool, what: &str, cx: &mut VisualTestContext| {
             draw(cx);
             let thread = if left { "thread-1" } else { "thread-2" };
-            let shown = shell.read_with(cx, |shell, cx| shell.page_thread(cx));
+            let shown = shell.read_with(cx, |shell, cx| {
+                shell.page_thread(cx).map(|thread| thread.session_id)
+            });
             assert_eq!(shown.as_deref(), Some(thread), "{what}");
         };
         current(false, "the pane it opened in", cx);
@@ -12556,9 +12624,7 @@ pub(crate) mod tests {
 
         // The card of an agent beside its lead.
         let chat = shell.read_with(cx, |shell, cx| {
-            shell.attachment.as_ref().unwrap().panes(cx)[0]
-                .read(cx)
-                .chat()
+            shell.column.as_ref().unwrap().panes(cx)[0].read(cx).chat()
         });
         cx.update(|window, cx| {
             crate::agents_panel::open_agent(
@@ -12602,7 +12668,9 @@ pub(crate) mod tests {
         draw(cx);
         press_only(panes[1].center(), cx);
         draw(cx);
-        let shown = shell.read_with(cx, |shell, cx| shell.page_thread(cx));
+        let shown = shell.read_with(cx, |shell, cx| {
+            shell.page_thread(cx).map(|thread| thread.session_id)
+        });
         assert_eq!(shown.as_deref(), Some("thread-3"), "under the shield");
 
         // A zoomed pane is current: here the one holding the keyboard, zoomed
@@ -12614,7 +12682,9 @@ pub(crate) mod tests {
             .debug_bounds("toggle-sidebar")
             .expect("the right header's");
         press_only(toggle.center(), cx);
-        let shown = shell.read_with(cx, |shell, cx| shell.page_thread(cx));
+        let shown = shell.read_with(cx, |shell, cx| {
+            shell.page_thread(cx).map(|thread| thread.session_id)
+        });
         assert_eq!(shown.as_deref(), Some("thread-3"));
         cx.simulate_keystrokes("secondary-shift-enter");
         settle_panes(cx);
@@ -12665,7 +12735,7 @@ pub(crate) mod tests {
         cx.update(|window, cx| {
             shell
                 .read(cx)
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .all_panes(cx)[pane]
@@ -12724,7 +12794,7 @@ pub(crate) mod tests {
         });
         settle_panes(cx);
 
-        let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
+        let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
         cx.update(|window, cx| {
             crate::agents_panel::open_agent(
                 &store,
@@ -13206,7 +13276,7 @@ pub(crate) mod tests {
         state.update(cx, |state, cx| state.open_palette(cx));
         settle_panes(cx);
         let query = shell.read_with(cx, |shell, cx| {
-            let palette = shell.attachment.as_ref().unwrap().palette.read(cx);
+            let palette = shell.column_link().unwrap().palette.read(cx);
             palette.query_focus_handle(cx)
         });
         cx.update(|window, _| assert!(query.is_focused(window)));
@@ -13272,7 +13342,7 @@ pub(crate) mod tests {
         let settle = crate::edge_back::SETTLE;
         let pane_bounds = |cx: &mut VisualTestContext| -> Vec<gpui::Bounds<Pixels>> {
             shell.read_with(cx, |shell, cx| {
-                let panes = shell.attachment.as_ref().expect("attached").all_panes(cx);
+                let panes = shell.column.as_ref().expect("attached").all_panes(cx);
                 panes.iter().map(|pane| pane.read(cx).bounds()).collect()
             })
         };
@@ -13492,7 +13562,7 @@ pub(crate) mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_lead_with_agent(cx);
         let store = store_of(&shell, cx);
-        let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
+        let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
         cx.update(|window, cx| {
             crate::agents_panel::open_agent(
                 &store,
@@ -13630,7 +13700,7 @@ pub(crate) mod tests {
             crate::test_frames::draw_settled(cx);
             if project_count > 1 {
                 cx.update(|window, cx| {
-                    let palette = &shell.read(cx).attachment.as_ref().unwrap().palette;
+                    let palette = &shell.read(cx).column_link().unwrap().palette;
                     assert_eq!(
                         palette.read(cx).query_focus_handle(cx).is_focused(window),
                         !(compact && mobile),
@@ -13666,7 +13736,13 @@ pub(crate) mod tests {
             });
             crate::test_frames::draw_settled(cx);
             shell.read_with(cx, |shell, cx| {
-                assert_eq!(shell.page_thread(cx).as_deref(), Some("draft"));
+                assert_eq!(
+                    shell
+                        .page_thread(cx)
+                        .map(|thread| thread.session_id)
+                        .as_deref(),
+                    Some("draft")
+                );
                 let state = shell.window_state.read(cx);
                 if compact {
                     assert_eq!(
@@ -13681,7 +13757,7 @@ pub(crate) mod tests {
 
             let focus = shell.read_with(cx, |shell, cx| {
                 shell
-                    .attachment
+                    .column
                     .as_ref()
                     .unwrap()
                     .chat(cx)
@@ -14158,7 +14234,7 @@ pub(crate) mod tests {
             draw(cx);
             assert!(state.read_with(cx, |state, _| state.palette_open));
             cx.update(|window, cx| {
-                let palette = &shell.read(cx).attachment.as_ref().unwrap().palette;
+                let palette = &shell.read(cx).column_link().unwrap().palette;
                 assert!(
                     palette
                         .read(cx)
@@ -14569,7 +14645,7 @@ pub(crate) mod tests {
             .collect();
         seed_wide_diff_with(&shell, &host, cx, conversation);
         draw(cx);
-        let chat = shell.read_with(cx, |shell, cx| shell.attachment.as_ref().unwrap().chat(cx));
+        let chat = shell.read_with(cx, |shell, cx| shell.column.as_ref().unwrap().chat(cx));
         let mut reading_position = None;
         for destination in [Destination::Thread, Destination::Panel] {
             shell.update(cx, |shell, cx| shell.go(destination, cx));
@@ -14608,13 +14684,7 @@ pub(crate) mod tests {
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         let history = state.read_with(cx, |state, _| state.history().to_vec());
         let composer = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
+            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
         cx.update(|window, cx| {
             composer.update(cx, |composer, cx| {
@@ -14955,7 +15025,7 @@ pub(crate) mod tests {
             })
         });
         let search = shell.read_with(cx, |shell, cx| {
-            let chat = shell.attachment.as_ref().unwrap().chat(cx).read(cx);
+            let chat = shell.column.as_ref().unwrap().chat(cx).read(cx);
             chat.composer().read(cx).model_search_focus_handle(cx)
         });
 
@@ -15065,7 +15135,9 @@ pub(crate) mod tests {
         draw(cx);
         assert_eq!(
             shell
-                .read_with(cx, |shell, cx| shell.page_thread(cx))
+                .read_with(cx, |shell, cx| shell
+                    .page_thread(cx)
+                    .map(|thread| thread.session_id))
                 .as_deref(),
             Some("first"),
             "model picker must keep number keys"
@@ -15091,7 +15163,9 @@ pub(crate) mod tests {
             });
             assert_eq!(
                 shell
-                    .read_with(cx, |shell, cx| shell.page_thread(cx))
+                    .read_with(cx, |shell, cx| shell
+                        .page_thread(cx)
+                        .map(|thread| thread.session_id))
                     .as_deref(),
                 Some(expected),
                 "{keys}"
@@ -15102,7 +15176,9 @@ pub(crate) mod tests {
         cx.simulate_keystrokes(second_key);
         assert_eq!(
             shell
-                .read_with(cx, |shell, cx| shell.page_thread(cx))
+                .read_with(cx, |shell, cx| shell
+                    .page_thread(cx)
+                    .map(|thread| thread.session_id))
                 .as_deref(),
             Some("second"),
             "shortcuts work without a focused input"
@@ -15123,7 +15199,9 @@ pub(crate) mod tests {
         cx.simulate_keystrokes("ctrl-tab");
         assert_eq!(
             shell
-                .read_with(cx, |shell, cx| shell.page_thread(cx))
+                .read_with(cx, |shell, cx| shell
+                    .page_thread(cx)
+                    .map(|thread| thread.session_id))
                 .as_deref(),
             Some("second"),
             "compact navigation uses the same shortcuts"
@@ -15154,13 +15232,7 @@ pub(crate) mod tests {
             "ctrl-z"
         };
         let composer = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat(cx)
-                .read(cx)
-                .composer()
+            shell.column.as_ref().unwrap().chat(cx).read(cx).composer()
         });
         let input = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
         cx.update(|window, cx| input.focus(window, cx));
@@ -15263,13 +15335,13 @@ pub(crate) mod tests {
         cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
         draw(cx);
         shell.read_with(cx, |shell, cx| {
-            let attachment = shell.attachment.as_ref().unwrap();
+            let attachment = shell.column.as_ref().unwrap();
             assert_eq!(attachment.split.read(cx).sizes()[0], px(300.));
             assert_eq!(attachment.sidebar_width.get(), px(300.));
         });
         let composer = shell.read_with(cx, |shell, cx| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .chat(cx)
@@ -15302,7 +15374,9 @@ pub(crate) mod tests {
 
         // The thread, the draft and the composer itself all survive.
         assert_eq!(
-            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
+            shell.read_with(cx, |shell, cx| shell
+                .page_thread(cx)
+                .map(|thread| thread.session_id)),
             Some("thread-1".into())
         );
         composer.read_with(cx, |composer, cx| {
@@ -15314,7 +15388,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell
-                .attachment
+                .column
                 .as_ref()
                 .unwrap()
                 .chat(cx)
@@ -15348,7 +15422,7 @@ pub(crate) mod tests {
             assert!(!shell.compact(cx));
             assert_eq!(
                 shell
-                    .attachment
+                    .column
                     .as_ref()
                     .expect("attached")
                     .split
@@ -15380,12 +15454,12 @@ pub(crate) mod tests {
         draw(cx);
         let (preview, state) = shell.read_with(cx, |shell, _| {
             (
-                shell.attachment.as_ref().unwrap().preview.clone(),
+                shell.column_link().unwrap().preview.clone(),
                 shell.window_state(),
             )
         });
         let page_pane = shell.read_with(cx, |shell, _| {
-            shell.attachment.as_ref().unwrap().current_pane.clone()
+            shell.column.as_ref().unwrap().current_pane.clone()
         });
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
         let key = store.read_with(cx, |store, cx| {
@@ -15492,13 +15566,13 @@ pub(crate) mod tests {
         assert!(back(cx));
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.destination(cx), Destination::Threads);
-            assert!(shell.attachment.is_some(), "still attached");
+            assert!(shell.column.is_some(), "still attached");
         });
         assert!(back(cx));
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.destination(cx), Destination::Hosts);
             assert!(
-                shell.attachment.is_some(),
+                shell.column.is_some(),
                 "walking back to the hosts list is not a decision to leave the host"
             );
         });
@@ -15804,7 +15878,7 @@ pub(crate) mod tests {
 
         let left = shell.read_with(cx, |shell, _| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .current_pane
@@ -16308,7 +16382,7 @@ pub(crate) mod tests {
         resize(cx, 393.);
         let chat = shell.read_with(cx, |shell, cx| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .expect("attached")
                 .chat(cx)
@@ -16321,7 +16395,7 @@ pub(crate) mod tests {
         draw(cx);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.destination(cx), Destination::Hosts);
-            assert!(shell.attachment.is_some(), "the visit keeps the attachment");
+            assert!(shell.column.is_some(), "the visit keeps the attachment");
         });
         for payload in sent(&host) {
             assert!(
@@ -16343,7 +16417,7 @@ pub(crate) mod tests {
             assert_eq!(shell.destination(cx), Destination::Thread);
             assert_eq!(
                 shell
-                    .attachment
+                    .column
                     .as_ref()
                     .expect("attached")
                     .chat(cx)
@@ -16353,7 +16427,9 @@ pub(crate) mod tests {
             );
         });
         assert_eq!(
-            shell.read_with(cx, |shell, cx| shell.page_thread(cx)),
+            shell.read_with(cx, |shell, cx| shell
+                .page_thread(cx)
+                .map(|thread| thread.session_id)),
             Some("thread-1".into())
         );
     }
@@ -16895,7 +16971,7 @@ pub(crate) mod tests {
                 draw_until(&shell, cx, &host, "diff-body", None);
                 crate::test_frames::draw_settled(cx);
                 let sidebar = shell.read_with(cx, |shell, cx| {
-                    let attachment = shell.attachment.as_ref().expect("attached");
+                    let attachment = shell.column.as_ref().expect("attached");
                     if shell.window_state.read(cx).sidebar_collapsed {
                         px(0.)
                     } else {
@@ -16961,12 +17037,7 @@ pub(crate) mod tests {
         drag(cx, gpui::point(px(SIDEBAR_WIDTH), px(400.)), px(40.));
         assert!(
             shell.read_with(cx, |shell, _| {
-                shell
-                    .attachment
-                    .as_ref()
-                    .expect("attached")
-                    .sidebar_width
-                    .get()
+                shell.column.as_ref().expect("attached").sidebar_width.get()
             }) > px(SIDEBAR_WIDTH),
             "the drag moved the sidebar"
         );
@@ -16982,12 +17053,7 @@ pub(crate) mod tests {
             draw_until(&shell, cx, &host, "diff-body", None);
             crate::test_frames::draw_settled(cx);
             let sidebar = shell.read_with(cx, |shell, _| {
-                shell
-                    .attachment
-                    .as_ref()
-                    .expect("attached")
-                    .sidebar_width
-                    .get()
+                shell.column.as_ref().expect("attached").sidebar_width.get()
             });
             let panel = cx.debug_bounds("right-panel").expect("the expanded panel");
             assert_eq!(
@@ -17034,7 +17100,7 @@ pub(crate) mod tests {
         resize(cx, 1600.);
         let input = shell.read_with(cx, |shell, cx| {
             shell
-                .attachment
+                .column
                 .as_ref()
                 .unwrap()
                 .chat(cx)
@@ -17203,9 +17269,7 @@ pub(crate) mod tests {
         let (shell, host, cx) = mount_thread_with(cx, Vec::new());
         let store = store_of(&shell, cx);
         resize(cx, 1600.);
-        let preview = shell.read_with(cx, |shell, _| {
-            shell.attachment.as_ref().unwrap().preview.clone()
-        });
+        let preview = shell.read_with(cx, |shell, _| shell.column_link().unwrap().preview.clone());
         let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
         let key = store.read_with(cx, |store, cx| {
             store.preview_key_for("thread-1", cx).unwrap()
@@ -18679,7 +18743,7 @@ pub(crate) mod tests {
         let _ = sent(&host);
         let focus_composer = |cx: &mut VisualTestContext| {
             let composer = shell.read_with(cx, |shell, cx| {
-                shell.attachment.as_ref().expect("attached").all_panes(cx)[0]
+                shell.column.as_ref().expect("attached").all_panes(cx)[0]
                     .read(cx)
                     .chat()
                     .read(cx)

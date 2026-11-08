@@ -696,7 +696,8 @@ pub(crate) fn open_agent(
             store.unarchive_session(id.clone());
         }
     });
-    let host = host.filter(|_| !crate::shell::shown_in_pane(&id, cx));
+    let thread = store.read(cx).thread_key(&id);
+    let host = host.filter(|_| !crate::shell::shown_in_pane(&thread, cx));
     match host {
         Some(host) => {
             // A right panel covering the host's pane lies over the chat,
@@ -867,10 +868,9 @@ impl AgentsPanel {
         if let Some(sheet) = self.sheet.as_ref().and_then(WeakEntity::upgrade) {
             sheet.update(cx, |sheet, cx| sheet.dismiss(window, cx));
         }
-        let host = self
-            .session_id
-            .as_deref()
-            .and_then(|lead| crate::shell::side_host_for(lead, cx));
+        let host = self.session_id.as_deref().and_then(|lead| {
+            crate::shell::side_host_for(&self.store.read(cx).thread_key(lead), cx)
+        });
         open_agent(
             &self.store,
             action.0.clone(),
@@ -1413,7 +1413,7 @@ impl Entries {
         let origins = self
             .session_id
             .as_deref()
-            .and_then(|lead| crate::shell::side_host_for(lead, cx))
+            .and_then(|lead| crate::shell::side_host_for(&self.store.read(cx).thread_key(lead), cx))
             .map(|chat| chat.read(cx).side_origins().clone());
         let origin = open.clone().map(panel_origin);
         let row_el = base

@@ -1269,7 +1269,7 @@ fn a_lead_switched_to_shows_the_agent_beside_it_at_rest(cx: &mut TestAppContext)
         crate::agents_panel::open_agent(
             &store,
             "agent-1".into(),
-            crate::shell::side_host_for("thread-1", cx),
+            crate::shell::side_host_for(&store.read(cx).thread_key("thread-1"), cx),
             None,
             window,
             cx,

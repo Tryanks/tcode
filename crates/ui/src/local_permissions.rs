@@ -87,7 +87,9 @@ impl LocalPermissions {
         match self.grant_flow.advance(kind) {
             PermissionGrantAction::Request => {
                 if kind == PermissionKind::ScreenRecording {
-                    let session_id = crate::shell::current_thread(cx).unwrap_or_default();
+                    let session_id = crate::shell::current_thread(cx)
+                        .and_then(|thread| self.store.read(cx).session_of(thread))
+                        .unwrap_or_default();
                     self.store.update(cx, |store, _cx| {
                         store.write_relaunch_marker_for(session_id, "computer_use".into());
                     });
@@ -124,7 +126,9 @@ impl LocalPermissions {
     }
 
     fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let session_id = crate::shell::current_thread(cx).unwrap_or_default();
+        let session_id = crate::shell::current_thread(cx)
+            .and_then(|thread| self.store.read(cx).session_of(thread))
+            .unwrap_or_default();
         self.store.update(cx, |store, _cx| {
             store.write_relaunch_marker_for(session_id, "computer_use".into());
         });

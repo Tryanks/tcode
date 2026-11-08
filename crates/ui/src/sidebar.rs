@@ -1549,7 +1549,7 @@ impl SessionsSidebar {
     ) {
         let reopen = match commands.first() {
             Some(Command::ArchiveSession { session_id })
-                if crate::shell::pane_shows(session_id, cx) =>
+                if crate::shell::pane_shows(&self.store.read(cx).thread_key(session_id), cx) =>
             {
                 Some(session_id.clone())
             }
@@ -3015,8 +3015,9 @@ impl SessionsSidebar {
 
     /// The row of the current pane's thread.
     fn current_row(&self, cx: &App) -> Option<String> {
-        let thread = crate::shell::current_thread(cx)?;
-        Some(self.store.read(cx).roster_row(&thread))
+        let store = self.store.read(cx);
+        let thread = store.session_of(crate::shell::current_thread(cx)?)?;
+        Some(store.roster_row(&thread))
     }
 
     /// `base` carries the row's selectable surface, selected when `light` is
@@ -3392,6 +3393,7 @@ impl SessionsSidebar {
         let scope = self.store.read(cx).scope().clone();
         let sidebar = cx.entity().downgrade();
         let session_id = state.session_id.clone();
+        let thread = self.store.read(cx).thread_key(&session_id);
         let can_fork = state.menu_can_fork;
         let is_worktree = state.is_worktree;
         let title_generating = state.title_generating;
@@ -3412,7 +3414,7 @@ impl SessionsSidebar {
                     .filter(|_| !settled && scope.is_full())
                     .and_then(|sidebar| sidebar.read(cx).move_bounds(&id, cx));
                 let open_beside = crate::shell::pane_controls(window, cx)
-                    .map(|panes| panes.split_right || crate::shell::shown_in_pane(&id, cx));
+                    .map(|panes| panes.split_right || crate::shell::shown_in_pane(&thread, cx));
                 let menu =
                     menu.when_some(grant.clone(), |menu, grant| menu.label(grant).separator());
                 menu.when_some(open_beside, |menu, enabled| {
