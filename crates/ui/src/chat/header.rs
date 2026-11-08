@@ -388,10 +388,18 @@ impl ChatView {
             .outline()
             .chip()
             .text_body(false, cx)
-            .child(crate::widgets::breathing::BreathingDot::new(
-                cx.theme().muted_foreground,
-            ))
-            .label(label);
+            .aria_label(label.clone())
+            // The dot leads, as the status of a call running in the
+            // background does.
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(crate::widgets::breathing::BreathingDot::new(
+                        cx.theme().muted_foreground,
+                    ))
+                    .child(label),
+            );
         let popover = crate::widgets::Popover::new("background-sheet")
             .anchor(gpui::Anchor::BottomLeft)
             .open(self.background_open)
@@ -412,6 +420,7 @@ impl ChatView {
                 };
                 let header = h_flex()
                     .w_full()
+                    .px_1()
                     .gap_2()
                     .items_center()
                     .when(!place.touch, |header| {

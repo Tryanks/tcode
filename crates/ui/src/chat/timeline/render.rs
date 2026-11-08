@@ -1807,8 +1807,10 @@ impl TimelineView {
             .text_secondary(false, cx)
             .text_color(cx.theme().muted_foreground)
             .hover(|link| link.text_color(cx.theme().foreground))
+            // The background card's glyph: a chevron would read as the
+            // window's own, which opens its body.
+            .child(Icon::new(IconName::Layers).xsmall())
             .child(crate::tr!("background.in_list"))
-            .child(Icon::new(IconName::ChevronRight).xsmall())
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 let item = item.clone();
